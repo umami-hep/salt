@@ -27,7 +27,7 @@ def _deadcode(cfg, mode):
     return deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
 
 
-# validate (design §4.1)
+# validate
 
 
 class TestValidate:
@@ -45,7 +45,7 @@ class TestValidate:
         assert "cannot be checked statically" not in captured.err
 
 
-# plan compilation (design §3.1): the loss path is fit/val-only
+# plan compilation: the loss path is fit/val-only
 
 
 class TestPlans:
@@ -84,7 +84,7 @@ class TestPlans:
         assert _plan(first, Mode.FIT).plan_hash != _plan(first, Mode.TEST).plan_hash
 
 
-# execution (design §3.2) — debug read tracking on
+# execution — debug read tracking on
 
 
 class TestExecution:
@@ -93,7 +93,7 @@ class TestExecution:
         plan = _plan(cfg, Mode.FIT)
         bundle = Bundle({"raw": {"x": torch.randn(5, 8)}})
         out = Executor(plan).run(bundle, debug=True)
-        assert out is bundle  # design §3.2: run returns the same bundle
+        assert out is bundle  # run returns the same bundle
         assert set(out.keys()) == {
             "raw.x",
             "inputs.x",
@@ -128,7 +128,7 @@ class TestExecution:
             Executor(plan).run(Bundle())
 
 
-# deadcode (design §4.2) and the all-modes-dead error (design §3.1 principle 10)
+# deadcode and the all-modes-dead error
 
 
 class TestDeadcode:
@@ -157,12 +157,12 @@ class TestDeadcode:
         modules = {**cfg.modules, "deadend": dead}
         with pytest.raises(AllModesDeadError, match="deadend"):
             compile_plan(modules, Mode.FIT, cfg.sources, schema=cfg.schema, sinks=cfg.sinks)
-        # deadcode reports instead of raising (design §4.2)
+        # deadcode reports instead of raising
         findings = deadcode(modules, Mode.FIT, cfg.sources, cfg.schema, cfg.sinks)
         assert ("deadend", "*") in [(f.module, f.key) for f in findings]
 
 
-# plot (design §4.3)
+# plot
 
 
 class TestPlot:
@@ -198,7 +198,7 @@ class TestPlot:
         assert '"writer"' not in dot
 
 
-# why (design §3.1 debugging story)
+# why (the debugging story)
 
 
 class TestWhy:

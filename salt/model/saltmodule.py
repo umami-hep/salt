@@ -132,7 +132,7 @@ _is_test_persistence_sink = is_test_persistence_sink
 
 
 def _resolve_lr_scheduler_class(class_path: str) -> type:
-    """Import a stage `lr_scheduler.class_path` to its class (plan 15 W8). Reuses the
+    """Import a stage `lr_scheduler.class_path` to its class. Reuses the
     CLI's `salt.core.*`-aware resolver (local import avoids a load-time cycle).
 
     Raises
@@ -194,9 +194,9 @@ class SaltModule(lightning.LightningModule):
           ``salt mup-shapes`` / ``setup_mup``, applied at bind time so
           `MuReadout.width_mult()` resolves against real base widths.
     training_schedule : dict, optional
-        Optional staged-training schedule ``{"stages": {name: {...}}}`` (plan D1).
+        Optional staged-training schedule ``{"stages": {name: {...}}}``.
         Its config home is the TOP-LEVEL ``training_schedule:`` key (peer of
-        ``trainer:``/``data:``/``model:``, plan 03); the CLI
+        ``trainer:``/``data:``/``model:``); the CLI
         (`salt.main._relocate_training_schedule`) injects the resolved value
         into this constructor arg before instantiation, and rejects a nested
         ``model.init_args.training_schedule`` fail-loud. Passed directly when
@@ -231,7 +231,7 @@ class SaltModule(lightning.LightningModule):
         # BARE `dict` (not Mapping[str, Any]): a subscripted mapping value type makes
         # jsonargparse recurse and EAGERLY instantiate nested {class_path, init_args}
         # specs (stage `callbacks:`/`lr_scheduler:`), which corrupts them before
-        # `TrainingSchedule.from_config` validates the raw specs (W8.0) and is
+        # `TrainingSchedule.from_config` validates the raw specs and is
         # impossible for an LR scheduler (no optimizer yet). A bare `dict` has no
         # `__args__`, so jsonargparse keeps the schedule opaque and the specs raw.
         training_schedule: dict | None = None,
@@ -272,7 +272,7 @@ class SaltModule(lightning.LightningModule):
         # validates apply_to against the module dict and warns on a mup-on module
         # left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
-        # staged-training schedule (plan D1/D2): parsed + validated against the
+        # staged-training schedule: parsed + validated against the
         # model-module names NOW (before the outputs: writers are folded into the
         # graph dict). It is the single canonical home for optimizer/LR config —
         # a plain config (no training_schedule) desugars to one `fit` stage that
@@ -291,7 +291,7 @@ class SaltModule(lightning.LightningModule):
         # `_apply_stage_freeze` at fit setup / each boundary, re-asserted every
         # epoch via `train`.
         self._frozen_module_names: set[str] = set()
-        # per-stage early-stop runtime state (plan 12 W7). All inert unless the
+        # per-stage early-stop runtime state. All inert unless the
         # schedule declares `early_stop` on some stage (`has_early_stop` master
         # switch) — the legacy path never touches them, so no new checkpoint state
         # is written and behaviour is bitwise-identical. `_stage_start_epoch` is the
@@ -304,7 +304,7 @@ class SaltModule(lightning.LightningModule):
         self._early_stop_tracker: EarlyStopTracker | None = None
         self._boundary_records: list[dict[str, Any]] = []
         self._pending_early_advance = False
-        # reducer-safe freeze mode (plan 06/W6): decided at fit `setup` from the
+        # reducer-safe freeze mode: decided at fit `setup` from the
         # attached strategy + schedule. When True, schedule-managed params keep
         # `requires_grad=True` at DDP wrap (so a later unfreeze stays rank-synced);
         # "frozen" is enforced by optimizer-exclusion + eval + per-step grad
@@ -866,7 +866,7 @@ class SaltModule(lightning.LightningModule):
         """Validate the schedule against the attached trainer and apply stage 0's
         freeze mask at fit setup (Gotcha #2 — before the initial optimizer build).
         When any stage declares `early_stop`, also runs the early-stop preflight
-        and seeds stage 0's live counters (plan 12 W7).
+        and seeds stage 0's live counters.
 
         A `ConfigError` propagates from the validators on an over-allocated epoch
         budget, a multi-stage schedule with no finite `trainer.max_epochs` (see
@@ -880,7 +880,7 @@ class SaltModule(lightning.LightningModule):
         # Decide the freeze mode BEFORE applying the stage-0 mask: under a DDP
         # strategy with a freeze set that changes across stages, keep every managed
         # param requires_grad=True at wrap so the reducer manages them across flips
-        # (W6 fix for the init-frozen-unfreeze desync). Off DDP / static freeze,
+        # (fixes the init-frozen-unfreeze desync). Off DDP / static freeze,
         # stays False → the requires_grad-based freeze (bitwise-parity path).
         self._reducer_safe_freeze = reducer_safe_freeze_required(
             getattr(self._trainer, "strategy", None), self._schedule
@@ -913,7 +913,7 @@ class SaltModule(lightning.LightningModule):
             )
 
     def _preflight_lr_scheduler(self) -> None:
-        """Fail fast at fit setup for every stage's `lr_scheduler` (plan 15 W8):
+        """Fail fast at fit setup for every stage's `lr_scheduler`:
         import its `class_path` (unimportable → ConfigError) and enforce the
         metric-driven-⇒-`monitor` rule (a `ReduceLROnPlateau`-family scheduler needs
         a monitored metric). Inert unless the schedule declares an `lr_scheduler`
@@ -946,15 +946,15 @@ class SaltModule(lightning.LightningModule):
         return EarlyStopTracker(stage.early_stop) if stage.early_stop is not None else None
 
     def _apply_stage_freeze(self, stage: StageConfig) -> None:
-        """Apply `stage`'s freeze mask as a DELTA against the currently-frozen set
-        (plan D1 semantics): modules entering the frozen set get ``eval()`` (stops
+        """Apply `stage`'s freeze mask as a DELTA against the currently-frozen
+        set: modules entering the frozen set get ``eval()`` (stops
         dropout + running-stat updates during training); modules leaving it are
         restored to ``train()``. Modules outside both sets are left untouched, so
         the desugared no-freeze path never mutates a param (bitwise parity).
 
         The requires_grad handling depends on the freeze mode (see
         `apply_stage_freeze`): the default mode toggles ``requires_grad`` so the
-        optimizer excludes frozen params by it; reducer-safe mode (W6, under DDP
+        optimizer excludes frozen params by it; reducer-safe mode (under DDP
         with a freeze-flipping schedule) leaves ``requires_grad=True`` on every
         managed param so the reducer keeps managing it across the flip, excluding
         frozen params from the optimizer by membership instead. Records the frozen
@@ -979,7 +979,8 @@ class SaltModule(lightning.LightningModule):
         new stage's start epoch (so the per-stage epoch-cap count is measured from
         here). The optimizer/LR rebuild is done by the caller
         (`TrainingScheduleCallback`) via ``strategy.setup_optimizers`` right after.
-        `reason` is ``"epochs"`` or ``"early_stop"`` (recorded only under W7).
+        `reason` is ``"epochs"`` or ``"early_stop"`` (recorded only under the
+        `early_stop` switch).
         """
         self._current_stage_index = new_index
         stage = self._schedule.stages[new_index]
@@ -1399,11 +1400,11 @@ class SaltModule(lightning.LightningModule):
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
         """Build the active stage's optimizer (over TRAINABLE params only — frozen
-        modules are excluded entirely, plan D1) + its LR scheduler. Re-invoked by the
+        modules are excluded entirely) + its LR scheduler. Re-invoked by the
         `TrainingScheduleCallback` at each stage boundary via
         ``trainer.strategy.setup_optimizers``. The scheduler is the default
         step-interval OneCycleLR over the stage's step allocation, unless the stage
-        declares an `lr_scheduler` (plan 15 W8) — then that class is instantiated over
+        declares an `lr_scheduler` — then that class is instantiated over
         the freshly-built optimizer instead.
         """
         lrs, optimizer_name = self._active_optim_config()
@@ -1446,7 +1447,7 @@ class SaltModule(lightning.LightningModule):
 
     def _build_stage_lr_scheduler(self, opt: Optimizer, cfg: LRSchedulerConfig) -> dict[str, Any]:
         """Instantiate the stage's chosen LR-scheduler class over the freshly-rebuilt
-        `opt` (plan 15 W8) and wrap it in the Lightning scheduler-config dict. The
+        `opt` and wrap it in the Lightning scheduler-config dict. The
         optimizer is injected as the first positional argument; a user-supplied
         `init_args.optimizer` was already rejected at parse. A metric-driven scheduler
         (`ReduceLROnPlateau`) is wired through Lightning's monitor mechanics
@@ -1478,7 +1479,7 @@ class SaltModule(lightning.LightningModule):
         scheduler state this checkpoint carries* (the currently-active stage). On
         resume, `on_load_checkpoint` sets `_current_stage_index` back to it BEFORE
         the optimizer is rebuilt, so `configure_optimizers` constructs an optimizer
-        whose `state_dict` shape matches the saved optimizer state (W4). This is
+        whose `state_dict` shape matches the saved optimizer state. This is
         epoch-boundary granular: stage transitions are keyed off the epoch (see
         `TrainingScheduleCallback`), so a checkpoint saved at an epoch boundary
         (Lightning's default val-loss `ModelCheckpoint`) resumes exactly; a
@@ -1504,10 +1505,10 @@ class SaltModule(lightning.LightningModule):
     def _schedule_checkpoint_state(self) -> dict[str, Any]:
         """The `schedule` sub-payload for the checkpoint. Legacy/no-early-stop
         configs get exactly ``{stage_index, stage_name}`` (byte-identical to the
-        pre-W7 tip — the G7a parity guard). Under the `early_stop` master switch it
+        legacy payload — a parity guard). Under the `early_stop` master switch it
         additionally carries the active stage's start epoch, the completed-boundary
         records, and the live early-stop counters, so a data-dependent resume
-        reconstructs the exact stage position + patience state (plan 12 W7).
+        reconstructs the exact stage position + patience state.
         """
         state: dict[str, Any] = {
             "stage_index": self._current_stage_index,
@@ -1527,7 +1528,7 @@ class SaltModule(lightning.LightningModule):
         ``_orig_mod.`` state_dict prefix, rejects the v1 (``ModelWrapper``)
         state-dict layout with `ConfigError`, and (on a fit resume of a multi-stage
         schedule) restores the saved stage index + freeze mask BEFORE the optimizer
-        is rebuilt (W4 — see `_restore_schedule_stage`). Marks the instance
+        is rebuilt (see `_restore_schedule_stage`). Marks the instance
         checkpoint-loaded (disables `materialise`).
         """
         state_dict = checkpoint.get("state_dict")
@@ -1555,10 +1556,10 @@ class SaltModule(lightning.LightningModule):
                     fields={key: tuple(val) for key, val in stored.get("fields", {}).items()},
                 )
             )
-        # W4 resume: re-establish the saved schedule stage + freeze mask now, while
+        # On resume: re-establish the saved schedule stage + freeze mask now, while
         # the model is bound but the optimizer has NOT yet been built (Lightning
         # restore order: setup("fit") -> on_load_checkpoint -> configure_optimizers
-        # -> restore_optimizers_and_schedulers, empirically confirmed by the W4
+        # -> restore_optimizers_and_schedulers, empirically confirmed by a
         # restore-order probe). setup("fit") already applied stage 0; this promotes
         # it to the checkpoint's stage k so `configure_optimizers` builds a stage-k
         # optimizer whose state_dict shape matches the saved (stage-k) optimizer
@@ -1569,7 +1570,7 @@ class SaltModule(lightning.LightningModule):
 
     def _restore_schedule_stage(self, schedule_state: Mapping[str, Any] | None) -> None:
         """On a fit resume, set `_current_stage_index` + apply the saved stage's
-        freeze mask (multi-stage only), then restore the W7 early-stop counters
+        freeze mask (multi-stage only), then restore the early-stop counters
         (any-stage, when declared).
 
         No-op unless the trainer is fitting: `salt test --ckpt_path` never mutates
@@ -1618,9 +1619,9 @@ class SaltModule(lightning.LightningModule):
             self._restore_early_stop_state(index, schedule_state)
 
     def _restore_early_stop_state(self, index: int, schedule_state: Mapping[str, Any]) -> None:
-        """Restore the W7 early-stop resume state: the active stage's start epoch,
+        """Restore the early-stop resume state: the active stage's start epoch,
         the completed-boundary records, and the live counters (so a mid-stage resume
-        continues patience exactly). A checkpoint that predates W7 (no
+        continues patience exactly). A checkpoint carrying no
         `early_stop_state`) resets the counters fresh for the restored stage. When
         the persisted criterion fingerprint no longer matches the current stage's
         `early_stop`, resume is undefined and raises (same policy as the stage-name

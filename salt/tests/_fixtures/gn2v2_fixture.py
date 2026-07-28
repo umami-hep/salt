@@ -160,7 +160,7 @@ def build_gn2v2_modules(
     num_heads: int = 2,
     class_dict: Path | str | None = None,
 ) -> dict[str, GraphModule]:
-    """Build the GN2v2 module dict from plain config kwargs (design §5.1 shape)."""
+    """Build the GN2v2 module dict from plain config kwargs."""
     dense = {"hidden_layers": [embed_dim], "activation": "ReLU"}
     head_dense = {"hidden_layers": [out_dim], "activation": "ReLU"}
     modules: dict[str, GraphModule] = {

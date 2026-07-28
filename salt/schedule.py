@@ -42,9 +42,9 @@ _STAGE_FIELDS = frozenset({
     "callbacks",
     "lr_scheduler",
 })
-# recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary; plan 12 W7).
+# recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary).
 _EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
-# recognised `lr_scheduler` sub-keys (plan 15 W8): a class spec + Lightning
+# recognised `lr_scheduler` sub-keys: a class spec + Lightning
 # scheduler-config keys.
 _LR_SCHEDULER_FIELDS = frozenset({"class_path", "init_args", "interval", "frequency", "monitor"})
 # OneCycle-only `lrs:` keys — meaningless (and rejected in a stage's OWN override)
@@ -55,7 +55,7 @@ _ONECYCLE_ONLY_LRS = frozenset({"max", "end", "pct_start", "last_epoch"})
 
 @dataclass(frozen=True)
 class EarlyStopConfig:
-    """A stage's early-stopping criterion (plan 12 W7 / D-ES). Mirrors Lightning
+    """A stage's early-stopping criterion. Mirrors Lightning
     `EarlyStopping` vocabulary: end the stage — advance to the next, or end the fit
     on the final stage — when `monitor` fails to improve by at least `min_delta`
     for `patience` consecutive validation checks. The stage's `epochs` remains the
@@ -89,7 +89,7 @@ class EarlyStopConfig:
 
 @dataclass(frozen=True)
 class LRSchedulerConfig:
-    """A stage's LR-scheduler class choice (plan 15 W8). `class_path`/`init_args`
+    """A stage's LR-scheduler class choice. `class_path`/`init_args`
     name a `torch.optim.lr_scheduler` class instantiated at the stage boundary over
     the freshly-rebuilt stage optimizer (never a user-supplied `optimizer`). The
     remaining fields are Lightning scheduler-config keys: `interval` (epoch|step),
@@ -112,7 +112,7 @@ class StageConfig:
     (default `frozen=()` — everything trainable). `epochs=None` means "take the
     remaining epochs" (only the final stage may omit it). `order` pins execution
     position; otherwise declaration order is used. `early_stop` optionally ends the
-    stage before its epoch cap when a monitored metric stops improving (plan 12 W7).
+    stage before its epoch cap when a monitored metric stops improving.
     """
 
     name: str
@@ -162,7 +162,7 @@ class TrainingSchedule:
     @property
     def has_early_stop(self) -> bool:
         """Whether any stage declares an `early_stop` criterion — the master switch
-        that gates every W7 early-stop code path. When ``False``, boundaries are
+        that gates every early-stop code path. When ``False``, boundaries are
         pure epoch arithmetic and no early-stop checkpoint state is written, so
         behaviour is bitwise-identical to the pre-W7 tip (the G7a parity guard).
         """
@@ -171,14 +171,14 @@ class TrainingSchedule:
     @property
     def has_stage_callbacks(self) -> bool:
         """Whether any stage declares scoped `callbacks` — the switch that injects
-        the `StageScopedCallbacks` coordinator (plan 12 W7). When ``False`` no
+        the `StageScopedCallbacks` coordinator. When ``False`` no
         coordinator is added and callback handling is unchanged from the pre-W7 tip.
         """
         return any(stage.callbacks is not None for stage in self.stages)
 
     @property
     def has_lr_scheduler(self) -> bool:
-        """Whether any stage overrides the LR-scheduler class (plan 15 W8) — the
+        """Whether any stage overrides the LR-scheduler class — the
         master switch for the per-stage `lr_scheduler`. When ``False`` every stage
         uses the default per-stage OneCycleLR, bitwise-identical to the pre-W8 tip.
         """
@@ -632,12 +632,12 @@ def _order_stages(stages: list[StageConfig]) -> list[StageConfig]:
 
 
 # ---------------------------------------------------------------------------
-# Reducer-safe freeze semantics (plan 06 / W6).
+# Reducer-safe freeze semantics.
 #
 # A module frozen in the INITIAL stage via ``requires_grad=False`` applied BEFORE
 # DDP wraps is permanently excluded from the reducer's fixed managed-parameter
 # set; a later unfreeze never registers a reducer hook, so its grads stay
-# rank-local and ranks silently desync (W5 exp-06 G5d defect). The reducer-safe
+# rank-local and ranks silently desync. The reducer-safe
 # freeze mode fixes this by NEVER dropping ``requires_grad`` on a schedule-managed
 # param that the schedule may later unfreeze under a distributed strategy — every
 # managed param stays in the reducer at wrap. "Frozen" is then enforced by
@@ -740,7 +740,7 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-stage early stopping (plan 12 / W7).
+# Per-stage early stopping.
 #
 # The tracker below owns the monitor/patience/min_delta arithmetic for the ACTIVE
 # stage so it is unit-testable in isolation and the `TrainingScheduleCallback`
@@ -752,7 +752,7 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 
 
 class EarlyStopTracker:
-    """Live early-stop counters for the ACTIVE stage (plan 12 W7). Mutable runtime
+    """Live early-stop counters for the ACTIVE stage. Mutable runtime
     state, checkpointed for exact mid-stage resume and reset at each stage entry.
     Held on the `SaltModule`; the callback drives it but stays stateless.
     """
@@ -840,7 +840,7 @@ def boundary_record(
     stage_name: str, stage_index: int, global_step: int, epoch: int, reason: str
 ) -> dict[str, Any]:
     """A completed stage-transition record appended to the checkpoint at each
-    boundary (plan 12 W7). `reason` is ``"epochs"`` (the stage hit its epoch cap)
+    boundary. `reason` is ``"epochs"`` (the stage hit its epoch cap)
     or ``"early_stop"`` (its criterion triggered); the records let a resume
     reconstruct the data-dependent stage position rather than epoch arithmetic.
 

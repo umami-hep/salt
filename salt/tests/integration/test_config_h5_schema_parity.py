@@ -1,11 +1,11 @@
 """Per-config gate — the ``outputs:``-section H5 column schema == the committed schema goldens.
 
-Closure evidence (plan 50 Phase E, 2026-07-14): this gate previously compared the
+Closure evidence: this gate previously compared the
 section schema against the tasks' legacy ``output_names`` rendering (the G1
 oracle, retired with ``get_h5``/``onnx_outputs``). The contract is now the
 committed per-config schema goldens at ``salt/tests/_fixtures/output_goldens/``
-(captured at 96d88d8 via ``generate_goldens.py``, regenerated green through
-Phase C with the per-task target-label columns) — never self-consistency alone.
+(captured at 96d88d8 via ``generate_goldens.py``, regenerated green with
+the per-task target-label columns) — never self-consistency alone.
 """
 
 from __future__ import annotations

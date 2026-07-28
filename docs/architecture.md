@@ -171,7 +171,7 @@ there) while it keeps training. To keep it in eval but out of Athena only,
 list it in a `RunTaskOutput` with `modes: [test]` and check with
 `salt export --manifest`.
 
-## Evaluation: `salt test` + the `outputs:` section (design §8, plan 50)
+## Evaluation: `salt test` + the `outputs:` section
 
 ```bash
 salt test --config <run_dir>/config.yaml \
@@ -196,7 +196,7 @@ Prediction writing is declared in the top-level `outputs:` section (deep-
 mergeable, like `callbacks:`): an ORDERED dict of section writers
 (`salt.outputs.OutputSectionWriter` graph modules). The section says
 WHAT is written, and in which modes; the COMMAND wires the matching
-implicit sink (plan 50 Phase B): `salt test` instantiates the H5 sink
+implicit sink: `salt test` instantiates the H5 sink
 (`salt.outputs.H5OutputSink`) over the section, and the ONNX parse
 folds an `OnnxExportSink` naming the export-mode leaves. Every model
 config defines its own section (`base2.yaml` ships none) — **dict order =
@@ -235,7 +235,7 @@ plans, so the planner prunes the task and the dead-preds error never
 fires. `--model.modules.<task>=null` (delete the task entirely) remains
 the heavier alternative.
 
-Per-writer mode participation is the `modes:` list (plan 50): each
+Per-writer mode participation is the `modes:` list: each
 section writer declares the modes it runs in — `test` (eval H5) and/or
 `export` (ONNX); omitted = both. A `modes: [test]` writer mints no ONNX
 leaves; an export-only writer contributes no eval columns.
@@ -309,7 +309,7 @@ TEST, squeezed per-target scalars in ONNX) are all first-class in both
 modes. The legacy per-task rendering surface (`get_h5` / `output_names` /
 `onnx_outputs`) and the writer module family (`Writer` / `TaskWriter` /
 `ExportOnlyWriter` / `WriterCallback` under the old `salt.core.writers`) were
-retired in plan 50 Phase E; `salt/tests/unit/nn/test_get_output.py`
+retired; `salt/tests/unit/nn/test_get_output.py`
 carries the re-anchored per-family oracles.
 
 ### Add a custom output column (design §8)
@@ -401,7 +401,7 @@ Notes for output authors:
   the shipped `MaskFormer.yaml` via `index_name`, single-source — in both TEST
   and ONNX); see `H5OutputSink(object_groups=[...])`.
 
-## Inference: `salt inference` — the export set, offline (plan 50 Phase D)
+## Inference: `salt inference` — the export set, offline
 
 ```bash
 salt inference --ckpt_path <run_dir>/checkpoints/....ckpt \
@@ -411,8 +411,8 @@ salt inference --ckpt_path <run_dir>/checkpoints/....ckpt \
 ```
 
 **`salt inference` == Athena semantics by construction.** The command's
-TASK columns are STRICTLY the export output set written to H5 (plan 50
-decision 2 — no separate config surface; the only other columns are the
+TASK columns are STRICTLY the export output set written to H5 (no
+separate config surface; the only other columns are the
 export-mode `InputCopyWriter`/`PadMaskWriter` copy/mask columns, which
 Athena never sees — see **Label-free** below): it compiles the SAME
 `Mode.ONNX` plan `salt
@@ -430,8 +430,8 @@ zero-padded to the file length, with the `mask` column marking pads.
 **Label-free.** The dataset demand is derived from `export.inputs` alone
 (feature ports + pad masks + `meta.rows`) — no `labels.*` key is ever
 demanded, so the command runs unchanged on a label-stripped file (the
-`Labels` producer narrows to nothing; Phase C keeps export-mode
-`get_output` label-free on the task side). No `target_{task}` columns are
+`Labels` producer narrows to nothing; export-mode `get_output` is
+label-free on the task side). No `target_{task}` columns are
 written. `InputCopyWriter`/`PadMaskWriter` participate iff their `modes:`
 include `export` (the default) — input copies re-read source columns by
 row, which is file content, not label demand. On a labelled file a
@@ -582,8 +582,7 @@ MaskFormer metrics (see `SaltModule._model_sinks`).
 - The vertexing `get_output` writes the eval column as bare `VertexIndex`
   (i8) by default — the v1 byte-schema; the design §8 run-name prefix is
   opt-in via `VertexingTaskModule`'s `prefix_vertex_column: true` (default
-  polarity to be revisited when v1 byte-parity gating retires — study
-  CLAUDE.md TODO).
+  polarity to be revisited when v1 byte-parity gating retires).
 - Per-task `expose: [fit, val]` (design §4.2, M5 sub-wave D): a train-only
   aux task gates its `preds.*` port to the listed modes — `[fit, val]` prunes
   it from the TEST/ONNX plans (silencing the dead-preds error) while it keeps
@@ -704,7 +703,7 @@ top-level `salt_core` key. On resume, a FIT plan-hash mismatch is fatal
 come from the state dict — the norm/class dicts are NOT re-read.
 Data-less loading: `SaltModule.load_from_checkpoint(path, modules=...)`.
 
-### Class-path compatibility across the de-core rename (Plan 61)
+### Class-path compatibility across the de-core rename
 
 The v2 namespace was flattened from `salt.core.*` to `salt.*` (e.g.
 `salt.core.nn.StreamEmbed` → `salt.model.modules.StreamEmbed`,

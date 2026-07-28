@@ -1,6 +1,6 @@
 """End-to-end gate for the shipped ``regression_gaussian.yaml`` — fit, eval H5, ONNX.
 
-Historical note (plan 47): this file was the gaussian CUTOVER A/B gate, diffing
+Historical note: this file was the gaussian CUTOVER A/B gate, diffing
 the explicit gaussian ``Regression``-producer eval path against the
 ``outputs:``-section path via a ``regression_gaussian-cutover34.yaml`` overlay.
 The shipped ``regression_gaussian.yaml`` has since been migrated onto the
@@ -84,7 +84,7 @@ def ckpt(data, tmp_path_factory) -> Path:
 def eval_h5(data, ckpt) -> Path:
     """Eval H5 from the ``outputs:``-section gaussian get_output path (via the CLI).
 
-    Plan 50 Phase B: the H5 sink is IMPLICIT (wired by the command) — no
+    The H5 sink is IMPLICIT (wired by the command) — no
     ``--callbacks.h5_output`` override; read the default-templated eval H5.
     """
     rc = main([

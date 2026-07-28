@@ -334,7 +334,7 @@ class H5StructuredReader(Reader):
         sample-axis kept-index for the (per-stage) `CutSpec` (idempotent).
 
         With no cuts the kept-index is `None` — the identity sentinel that preserves
-        the byte-identical contiguous read path (Wave-3c gate).
+        the byte-identical contiguous read path.
         """
         if self._resolved is not None:
             return

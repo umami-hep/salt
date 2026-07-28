@@ -91,7 +91,7 @@ class H5OutputSink(OutputSink):
     Parameters
     ----------
     outputs : None
-        RETIRED as a config surface (plan 50 Phase B). The H5 sink is now
+        RETIRED as a config surface. The H5 sink is now
         implicit — the ``salt test`` command wires it and derives its column
         schema from the bound top-level ``outputs:`` section (``RunTaskOutput``
         + ``InputCopyWriter`` + ``PadMaskWriter``). Only ``None``/``[]`` is
@@ -141,7 +141,7 @@ class H5OutputSink(OutputSink):
         object_groups: Sequence[ObjectGroup | Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__()
-        # plan 50 Phase B: the explicit OutputColumn table is RETIRED as a config
+        # The explicit OutputColumn table is RETIRED as a config
         # surface — the H5 sink is now implicit (the command wires it) and derives
         # its column schema from the bound outputs: section (RunTaskOutput +
         # InputCopyWriter + PadMaskWriter). An explicit `outputs:` table is a hard
@@ -180,7 +180,7 @@ class H5OutputSink(OutputSink):
         self._output_section: Mapping[str, Any] | None = None
         # which section selection the columns resolve from: Mode.TEST (the
         # `salt test` eval schema, the default) or Mode.ONNX (`salt inference`
-        # writes STRICTLY the export output set — plan 50 Phase D, via
+        # writes STRICTLY the export output set via
         # `use_export_selection`).
         self._section_mode: Mode = Mode.TEST
         self._section_columns: tuple[tuple[str, OutputColumn], ...] | None = None
@@ -227,7 +227,7 @@ class H5OutputSink(OutputSink):
     def use_export_selection(self) -> None:
         """Switch the section-derived selection to the EXPORT (``Mode.ONNX``) set.
 
-        Plan 50 Phase D — ``salt inference`` writes STRICTLY the export
+        ``salt inference`` writes STRICTLY the export
         output set to H5: columns resolve from ``manifest_fields(Mode.ONNX)``
         (one single-suffix column per ONNX leaf, named by the field's resolved
         ONNX name), and the section's copy/mask writers contribute only when

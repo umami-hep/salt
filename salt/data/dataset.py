@@ -61,7 +61,7 @@ class GraphDataset(Dataset):
         If `sinks` is missing, or not exactly one module is a `Reader`.
     SchemaError
         When a module's declared raw fields are absent from the schema
-        artifact (static validation, design §2.6).
+        artifact (static validation).
     GraphError
         Any plan-compilation error (connectivity, kinds, shapes, cycles).
     """

@@ -3,7 +3,7 @@
 # Stackable: `salt fit --config readers/physlite.yaml --config <model>.yaml`.
 # Provide the source file(s) via --data.train_file / --data.val_file.
 #
-# Schema notes (confirmed on a real mc23 ttbar file, exp 25):
+# Schema notes (confirmed on a real mc23 ttbar file):
 #   - unroll: jets  -> one row per AnalysisJet; `[event][jet]` flattened away.
 #   - Jet-level scalars live under prefix: AnalysisJetsAuxDyn.
 #   - Tracks are reached by ElementLink, NOT direct decorations: the per-jet link

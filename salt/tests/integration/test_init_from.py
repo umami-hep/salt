@@ -1,4 +1,4 @@
-"""W1 gates for the ``--init_from`` weights-only warm-start path (plan 01, D4).
+"""Gates for the ``--init_from`` weights-only warm-start path.
 
 Gates:
 

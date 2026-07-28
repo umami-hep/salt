@@ -1,11 +1,11 @@
-"""W4 gates: checkpoint resume across `training_schedule` stages (plan 02).
+"""Gates: checkpoint resume across `training_schedule` stages.
 
 `salt2 fit --ckpt_path <ckpt>` must resume a multi-stage schedule from any
 epoch — inside stage 0, exactly at a stage boundary, or inside a later stage —
 producing state (weights, optimizer moments, per-step LR trace) identical to the
 uninterrupted run.
 
-Gates (plan 02 W4):
+Gates:
 
 - **probe** — pins the Lightning 2.6.5 restore order these gates rely on:
   ``setup("fit")`` -> ``on_load_checkpoint`` -> ``configure_optimizers`` ->
@@ -355,7 +355,7 @@ class TestRestoreOrderProbe:
         print("W4 RESTORE-ORDER PROBE events:", _ProbeModule.EVENTS)  # noqa: T201
         assert "setup" in names and "on_load_checkpoint" in names
         assert "configure_optimizers" in names
-        # the ordering W4 depends on: stage is restored (on_load) BEFORE the
+        # the ordering these gates depend on: stage is restored (on_load) BEFORE the
         # optimizer is (re)built (configure_optimizers), and both AFTER setup.
         assert names.index("setup") < names.index("on_load_checkpoint")
         assert names.index("on_load_checkpoint") < names.index("configure_optimizers")

@@ -70,7 +70,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     )
     for item in items:
         # `cpu_always` tests are pure-CPU and must run even on a CPU box without
-        # --run-integration (plan 29 W2 B3: the ONNX-trace fold gates are CI-load
+        # --run-integration (the ONNX-trace fold gates are CI-load
         # bearing). They opt OUT of the integration/GPU skip.
         if item.get_closest_marker("cpu_always") is not None:
             continue

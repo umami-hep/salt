@@ -1,4 +1,4 @@
-"""Unit tests for the ast-whitelist cut-expression evaluator (plan 65, W2)."""
+"""Unit tests for the ast-whitelist cut-expression evaluator."""
 
 from __future__ import annotations
 

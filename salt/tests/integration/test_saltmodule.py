@@ -1,4 +1,4 @@
-"""Tests for `SaltModule` (plan 05, stage B) — seeds of gates G2 and G5."""
+"""Tests for `SaltModule` — seeds of gates G2 and G5."""
 
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ class TestConstruction:
             SaltModule(modules, lrs=LRS)
 
     def test_raw_nn_module_in_modules_rejected(self, data):
-        # plan 49 §4: a raw nn.Module (not a SaltModelModule) is rejected at
+        # a raw nn.Module (not a SaltModelModule) is rejected at
         # construction, naming the offending config key.
         modules = build_gn2v2_modules(data["nd"])
         modules["loss"] = LossSum()
@@ -212,7 +212,7 @@ class TestConstruction:
             model.compose_output_section({"bogus_out": nn.Linear(4, 4)})
 
     def test_sink_module_protocol_accepted_in_outputs(self, data):
-        # plan 49 §4 audited defensive branch: a terminal callback-style sink
+        # audited defensive branch: a terminal callback-style sink
         # (SinkModule-protocol, not nn.Module) is ALSO accepted here — real
         # shipped configs never exercise this (terminal sinks are wired via
         # trainer.callbacks:, see salt.model.base.SaltModelModule docstring),
@@ -238,7 +238,7 @@ class TestConstruction:
 
 
 class TestDataModuleConstruction:
-    """Plan 49 §4: GraphDataModule validates its module dict against SaltDatasetModule."""
+    """GraphDataModule validates its module dict against SaltDatasetModule."""
 
     def test_raw_object_in_data_modules_rejected(self, data):
         class _NotADatasetModule:
@@ -323,7 +323,7 @@ class TestTestLoop:
             assert f"preds.{stream}.{task}" in bundle
         assert "meta.rows" in bundle
         assert Mode.TEST in fitted["model"].plans
-        # the migration shim exposes the v1 outputs view (design §3.4)
+        # the migration shim exposes the v1 outputs view
         v1_view = bundle_as_v1_outputs(bundle)
         assert set(v1_view["preds"]) == {"jets", "tracks"}
         assert set(v1_view["pad_masks"]) == {"tracks"}
@@ -343,7 +343,7 @@ class TestCheckpoint:
         hashes = payload["plan_hashes"]
         for mode in (Mode.FIT, Mode.VAL):
             assert hashes[mode.name] == model.plans[mode].plan_hash
-        # the modules dict is NOT pickled into hparams (design §3.4)
+        # the modules dict is NOT pickled into hparams
         assert "modules" not in ckpt.get("hyper_parameters", {})
 
     def test_load_from_checkpoint_roundtrip_bit_identical(self, data, fitted):
@@ -425,7 +425,7 @@ class TestCheckpoint:
             model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
 
     def test_compiled_checkpoint_orig_mod_prefix_stripped(self, fitted):
-        """MFU-1: a ``--compile``-trained checkpoint carries torch.compile's"""
+        """A ``--compile``-trained checkpoint carries torch.compile's"""
         ckpt = torch.load(fitted["ckpt"], weights_only=False)
         prefixed = copy.deepcopy(ckpt)
         clean_keys = set(prefixed["state_dict"])
@@ -444,7 +444,7 @@ class TestCheckpoint:
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
     def test_noncompiled_checkpoint_state_dict_untouched(self, fitted):
-        """MFU-1 no-op: a normally-trained checkpoint has no ``_orig_mod.`` keys,"""
+        """No-op: a normally-trained checkpoint has no ``_orig_mod.`` keys,"""
         ckpt = torch.load(fitted["ckpt"], weights_only=False)
         clean = copy.deepcopy(ckpt)
         keys_before = set(clean["state_dict"])
@@ -491,7 +491,7 @@ class TestBoundaryDemandGuards:
         # feature demand is attributed too (norm is the first requirer)
         assert "model.modules." in origins["inputs.jets"]
 
-    # test_sink_origins_attribute_writer_demand_per_mode removed in W6c:
+    # test_sink_origins_attribute_writer_demand_per_mode removed:
     # WriterCallback/TaskWriter were deleted with callback.py/modules.py.
 
     def test_deleted_producer_raises_named_error(self, data):
@@ -540,7 +540,7 @@ class _ProbeMetrics:
 
 
 class TestCallbackSinks:
-    """FIT/VAL callback-declared sinks (M5 D-prereq; design §3.1 454-456, §3.4 667-671)."""
+    """FIT/VAL callback-declared sinks."""
 
     def _model_with_aux(self, data) -> SaltModule:
         modules = build_gn2v2_modules(data["nd"])
@@ -642,7 +642,7 @@ class TestCallbackSinks:
         assert "_ProbeMetrics" in message
 
     def test_wildcard_callback_key_rejected(self, data):
-        # callback requires are concrete keys (design §2.2); a wildcard fails
+        # callback requires are concrete keys; a wildcard fails
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics("labels.jets.*"))
         with pytest.raises(ConfigError, match="wildcard"):
@@ -699,12 +699,12 @@ class TestClassNamesCheck:
             make_trainer().fit(model, build_datamodule(data))
 
 
-# TestExposeSilencesDeadPreds removed in W6c:
+# TestExposeSilencesDeadPreds removed:
 # WriterCallback/TaskWriter were deleted with callback.py/modules.py.
 
 
 class TestOriginWeightingResolvedAtSetup:
-    """Name-based origin_weighting resolves at fit/test setup (design §5.1, §2.6)."""
+    """Name-based origin_weighting resolves at fit/test setup."""
 
     @staticmethod
     def _schema_with_origin_attr(data):

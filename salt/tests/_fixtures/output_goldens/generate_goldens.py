@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Plan 50 Phase A — golden H5/ONNX output-schema capture.
+"""Golden H5/ONNX output-schema capture.
 
 For every shipped config that declares an ``outputs:`` section (or wires an
 explicit-sink table, the 4 ``gn2v2-dummy*`` configs), statically compiles the
 TEST-mode and ONNX-mode plans through the real ``salt`` surface (run-free,
 no data touched) and dumps the literal H5 column table + ONNX output tuple to
-one JSON file. These literals become the Phase E re-anchoring oracle — do
+one JSON file. These literals are the schema re-anchoring oracle — do
 NOT regenerate against a later HEAD without updating the provenance sha.
 
 Usage (inside the salt-py314 container, from the worktree root)::

@@ -1,4 +1,4 @@
-"""W7 gates: per-stage early stopping (plan 12).
+"""Gates: per-stage early stopping.
 
 A stage may declare `early_stop`; the stage ends at whichever comes first — its
 epoch cap or the early-stop trigger. A non-final trigger advances to the next
@@ -6,13 +6,14 @@ stage (freeze flip + optimizer/LR rebuild, the same path as an epoch-cap
 boundary); a final-stage trigger ends the fit. Boundaries become data-dependent,
 so completed transitions + the live patience counters are checkpointed and a
 resume reconstructs them (not epoch arithmetic). A config with no `early_stop`
-anywhere behaves — and checkpoints — bitwise-identically to the pre-W7 tip.
+anywhere behaves — and checkpoints — bitwise-identically to a build without the
+early-stop machinery.
 
-Gates (plan 12 W7):
+Gates:
 
 - **G7a** legacy parity — a no-early-stop config's checkpoint `schedule` payload is
-  exactly ``{stage_index, stage_name}`` (no new keys); the full W1–W6 + resume
-  suites cover the bitwise-state parity.
+  exactly ``{stage_index, stage_name}`` (no new keys); the freeze, schedule and
+  resume suites cover the bitwise-state parity.
 - **G7b** two-stage: stage-0 `early_stop` triggers at epoch k < its epoch cap →
   the transition fires at k, the stage-1 optimizer owns the (now-unfrozen) stage-1
   trainable set, stage-1's OneCycle envelope is sized from its own budget, and the
@@ -188,7 +189,7 @@ class TestG7aLegacyPayloadParity:
 
     def test_multi_stage_no_early_stop_payload_has_only_index_and_name(self, data, tmp_path):
         # a freezing multi-stage schedule WITHOUT early_stop must not gain any new
-        # W7 checkpoint keys (the has_early_stop master switch is off). epoch 0 is in
+        # early-stop checkpoint keys (the has_early_stop master switch is off). epoch 0 is in
         # stage a (owns [0,1)); saved at end of epoch 0 → stage_index 0.
         schedule = {"stages": {"a": {"epochs": 1, "frozen": [FROZEN]}, "b": {"frozen": []}}}
         payload = self._saved_schedule_payload(data, tmp_path, schedule, max_epochs=2)

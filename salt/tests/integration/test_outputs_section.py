@@ -1,6 +1,6 @@
 """The outputs:-section + dumb-sink eval H5 — v2 self-consistency gate.
 
-Historical note (DEL-1, plan 45): this file was the FULL-PAYLOAD H5 PARITY GATE
+Historical note: this file was the FULL-PAYLOAD H5 PARITY GATE
 diffing the outputs:-section eval H5 against the legacy ``WriterCallback``
 oracle. The legacy writers path is deleted; the byte-for-byte parity was proven
 and CLOSED at git tag/hash 29c67a1 (parity-closure doctrine, docs/architecture.md).
@@ -53,8 +53,8 @@ def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str
 
     Exact columns = input-copy source columns FIRST (in source-file order; an
     empty golden ``copy_inputs`` means the v1 copy-ALL default, so every
-    source field is copied), then task columns in golden order — which, since
-    plan 50 Phase C, includes each task's trailing ``target_{task}`` label
+    source field is copied), then task columns in golden order — which
+    includes each task's trailing ``target_{task}`` label
     column — then the trailing pad-mask column. Asserting H5 dtype.names EQUAL
     this (not merely contain it) enforces "no ADDED columns" beyond the
     committed golden.
@@ -130,7 +130,7 @@ def ckpt(data, tmp_path_factory) -> Path:
 def section_h5(data, ckpt) -> Path:
     """Eval H5 from the outputs:-section + IMPLICIT sinks (via the real CLI).
 
-    Plan 50 Phase B: no ``--callbacks.h5_output`` — the H5 sink is wired by the
+    No ``--callbacks.h5_output`` — the H5 sink is wired by the
     command over the section and writes the default-templated eval H5.
     """
     rc = main([
@@ -224,7 +224,7 @@ class TestSectionH5SelfConsistency:
         assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
 
     def test_padded_vertex_index_is_int32_min_sentinel(self, section_h5):
-        """Padded positions carry the design §8 VertexIndex sentinel VALUE.
+        """Padded positions carry the VertexIndex sentinel VALUE.
 
         The union-find -inf padding int-casts to int32 min (-2147483648) —
         asserted at value level (re-anchored from the retired
@@ -317,7 +317,7 @@ class TestColumnOrderDrivenBySection:
 class TestSectionOverlayConfigContent:
     """The gn2v2-dummy-cutover34.yaml overlay wires the full-family outputs: section.
 
-    Plan 50 Phase B: the overlay replaces the base's mode-split jets_out/origin_out
+    The overlay replaces the base's mode-split jets_out/origin_out
     writers with ONE all-modes RunTaskOutput, and declares NO callbacks: sinks —
     the command wires the implicit H5 + ONNX sinks.
     """
@@ -376,7 +376,7 @@ class TestSectionWriterUnits:
         # the seq head (track_origin) AND the vertexing head declare masks.tracks
         # via output_time_requires
         assert "masks.tracks" in req
-        # Phase C: each task demands EXACTLY its target-label key in TEST
+        # each task demands EXACTLY its target-label key in TEST
         assert "labels.jets.flavour_label" in req
         assert "labels.tracks.ftagTruthOriginLabel" in req
         assert "labels.tracks.ftagTruthVertexIndex" in req
@@ -395,7 +395,7 @@ class TestSectionWriterUnits:
             assert f"outputs.tracks.track_origin.{s}" in prod
         # vertexing head -> one i8 VertexIndex per-token leaf (H5)
         assert "outputs.tracks.track_vertexing.VertexIndex" in prod
-        # Phase C: one target-label leaf per task
+        # one target-label leaf per task
         assert "outputs.jets.jets_classification.target_jets_classification" in prod
         assert "outputs.tracks.track_origin.target_track_origin" in prod
         assert "outputs.tracks.track_vertexing.target_track_vertexing" in prod
@@ -415,7 +415,7 @@ class TestSectionWriterUnits:
         assert "outputs.tracks.track_origin.pPrimary" not in prod
         # vertexing head ONNX -> a single VertexIndex union-find leaf
         assert "outputs.tracks.track_vertexing.VertexIndex" in prod
-        # Phase C: ONNX/export mode is LABEL-FREE — no target leaf, no label demand
+        # ONNX/export mode is LABEL-FREE — no target leaf, no label demand
         assert all("target_" not in k for k in prod)
         req = flatten_spec(self._bound_run_task().declare_io(Mode.ONNX).requires)
         assert all(not k.startswith("labels.") for k in req)
@@ -423,7 +423,7 @@ class TestSectionWriterUnits:
     def test_manifest_fields_order_is_task_then_field(self):
         """manifest_fields orders fields task-then-field (the column-order authority).
 
-        Since plan 50 Phase C each task's field list ends with its
+        Each task's field list ends with its
         ``target_{task}`` label column (preds first, then the target).
         """
         rt = self._bound_run_task()

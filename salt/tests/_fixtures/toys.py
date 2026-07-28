@@ -1,4 +1,4 @@
-"""Toy GraphModules for the M1 kernel integration tests (plan 03, stage F)."""
+"""Toy GraphModules for the M1 kernel integration tests."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ __all__ = [
     "ToyWriter",
 ]
 
-_UNNAMED = "unnamed"  # overwritten by the CLI loader (or the test) per design §2.2
+_UNNAMED = "unnamed"  # overwritten by the CLI loader (or the test)
 
 
 class ToySource:
@@ -31,7 +31,7 @@ class ToySource:
         self.n_features = n_features
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare raw.x -> inputs.x + masks.x with symbolic batch dim (design §2.2)."""
+        """Declare raw.x -> inputs.x + masks.x with symbolic batch dim."""
         del mode
         return IO(
             requires=unflatten_spec({
@@ -54,7 +54,7 @@ class ToySource:
 
 
 class ToyEmbed(nn.Module):
-    """nn.Module embedder: the executor call lands in ``forward(b, mode)`` (design §2.5)."""
+    """nn.Module embedder: the executor call lands in ``forward(b, mode)``."""
 
     def __init__(self, in_dim: int = 8, out_dim: int = 16) -> None:
         super().__init__()
@@ -64,7 +64,7 @@ class ToyEmbed(nn.Module):
         self.linear = nn.Linear(in_dim, out_dim)
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare inputs.x (+ optional masks.x) -> embed.x (design §2.2)."""
+        """Declare inputs.x (+ optional masks.x) -> embed.x."""
         del mode
         return IO(
             requires=unflatten_spec({
@@ -82,15 +82,15 @@ class ToyEmbed(nn.Module):
         """Embed inputs.x, zeroing padded rows when the optional mask is present."""
         del mode
         x = b.get("inputs.x")
-        if "masks.x" in b:  # optional-port probe idiom (design §2.2)
+        if "masks.x" in b:  # optional-port probe idiom
             x = x * (~b.get("masks.x")).unsqueeze(-1).to(x.dtype)
         return {"embed.x": torch.relu(self.linear(x))}
 
 
 class ToyWildcardLabels:
-    """Framework-style wildcard label provider (design §2.2 rules (a)-(d))."""
+    """Framework-style wildcard label provider."""
 
-    allow_wildcards: ClassVar[bool] = True  # framework wildcard capability (design §2.2)
+    allow_wildcards: ClassVar[bool] = True  # framework wildcard capability
 
     def __init__(self, fields: tuple[str, ...] = ("x",), n_classes: int = 3) -> None:
         self.name = _UNNAMED
@@ -98,7 +98,7 @@ class ToyWildcardLabels:
         self.n_classes = n_classes
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare raw.x -> labels.* (kind=label, fit/val only) (design §2.2)."""
+        """Declare raw.x -> labels.* (kind=label, fit/val only)."""
         del mode
         return IO(
             requires=unflatten_spec({
@@ -134,7 +134,7 @@ class ToyHead:
         self.embed_key = embed_key
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare embed (+ fit/val labels) -> preds (+ fit/val loss) (design §2.2)."""
+        """Declare embed (+ fit/val labels) -> preds (+ fit/val loss)."""
         del mode
         return IO(
             requires=unflatten_spec({
@@ -161,7 +161,7 @@ class ToyHead:
 
 
 class ToyWriter:
-    """Test-only sink: a terminal consumer (requires, no produces) (design §3.1)."""
+    """Test-only sink: a terminal consumer (requires, no produces)."""
 
     def __init__(self, key: str = "preds.x") -> None:
         self.name = _UNNAMED
@@ -181,7 +181,7 @@ class ToyWriter:
 
 
 class ToyDead:
-    """Produces a key nothing consumes in any mode (design §3.1 principle 10)."""
+    """Produces a key nothing consumes in any mode."""
 
     def __init__(self) -> None:
         self.name = _UNNAMED

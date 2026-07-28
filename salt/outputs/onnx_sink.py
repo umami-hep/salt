@@ -190,7 +190,7 @@ class OnnxExportSink(OutputSink):
             for leaf in outputs or []
         ]
         # The export tuple comes from EITHER the explicit `outputs:` leaf list (the
-        # W4 export configs / the MaskFormer escape hatch) OR a bound dumb `outputs:`
+        # export configs / the MaskFormer escape hatch) OR a bound dumb `outputs:`
         # section. With explicit leaves the tuple is resolved up front; with a
         # section it resolves lazily on first access. One MUST resolve.
         self._leaves_resolved = bool(leaves)

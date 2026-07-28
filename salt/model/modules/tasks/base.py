@@ -142,7 +142,7 @@ class _TaskModuleBase(SaltModelModule):
         NOT pack a structured numpy array, prefix the run/model name, or
         downcast precision (the sink does all three).
 
-        Target-label emission (plan 50 Phase C): in TEST mode, and unless the
+        Target-label emission: in TEST mode, and unless the
         task's ``write_targets`` flag is off, the prediction fields are
         followed by the task's TARGET-LABEL field(s) — the labels the model
         targeted, as columns named ``target_{task}`` (classification /

@@ -262,8 +262,7 @@ def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: Resol
     terminal sink folded in (mirroring `SaltModule.compile_mode`'s own fold,
     e.g. an `OnnxExportSink` under `salt.tests.unit.onnx.test_adapter`), so
     this stays an explicit `SaltModelModule`-partitioned direct call, not an
-    unconditional one — a sink has no `bind`, exactly as the pre-plan-49
-    getattr-discovery silently skipped it. `SaltModelModule.bind` is a
+    unconditional one — a sink has no `bind`. `SaltModelModule.bind` is a
     documented no-op default, so no further discovery is needed for the
     modules the partition DOES call. Bind is config-only — building the
     schema from compiled plans (which are config-derived) keeps that

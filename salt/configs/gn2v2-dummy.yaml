@@ -111,7 +111,7 @@ model:
       loss:
         class_path: salt.model.modules.LossSum
 
-# plan 50 Phase B: the eval outputs are declared as an outputs: section (WHAT);
+# The eval outputs are declared as an outputs: section (WHAT);
 # the command wires the implicit per-command sink (salt test -> H5, the run-free
 # ONNX parses -> the ONNX tuple). Two RunTaskOutput writers with different modes:
 # reproduce the historical explicit-table split — jets_classification is written

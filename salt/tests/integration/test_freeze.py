@@ -1,4 +1,4 @@
-"""W2 gates for the module-freeze machinery (plan D1 freeze semantics).
+"""Gates for the module-freeze machinery.
 
 Gates:
 
@@ -178,7 +178,7 @@ class TestG2dNoScheduleNoChange:
 
 
 class TestMultiStageBindsAtFit:
-    """A >1-stage schedule is now EXECUTED (W3 removed W2's fit-time rejection):
+    """A >1-stage schedule is now EXECUTED (the old fit-time rejection is gone):
     it binds and applies stage 0's freeze mask at setup.
     """
 
@@ -199,7 +199,7 @@ class TestMultiStageBindsAtFit:
 class TestG2eInitFromComposesWithFreeze:
     @staticmethod
     def _surgery_modules(nd) -> dict:
-        # drop track_vertexing, add a new head — mirrors the W1 G1b surgery
+        # drop track_vertexing, add a new head — mirrors the G1b swap-one-head surgery
         modules = build_gn2v2_modules(nd)
         del modules["track_vertexing"]
         extra = ClassificationTaskModule(

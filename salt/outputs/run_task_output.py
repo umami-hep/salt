@@ -20,8 +20,8 @@ _OUTPUT_MODE_NAMES = {"test": Mode.TEST, "export": Mode.ONNX}
 def parse_output_modes(modes: Any, who: str) -> Mode:
     """Map a YAML ``modes:`` list onto the Mode flag the section writer runs in.
 
-    ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the pre-plan-50
-    default). A non-empty list of ``test``/``export`` names ORs into the flag.
+    ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the default). A
+    non-empty list of ``test``/``export`` names ORs into the flag.
     Raises `ConfigError` on an empty list or an unknown mode name (naming the key).
     """
     if modes is None:
@@ -50,7 +50,7 @@ class OutputSectionWriter(SaltModelModule):
     Named (not just `SaltModelModule` directly) so the top-level ``outputs:``
     CLI namespace can be typed ``dict[str, OutputSectionWriter | None]`` and
     jsonargparse builds each writer from its ``class_path``. Beyond the
-    `SaltModelModule` contract it owns the ``modes:`` surface (plan 50): each
+    `SaltModelModule` contract it owns the ``modes:`` surface: each
     section writer declares the modes it runs in (``test``/``export``), which
     the command uses to pick the implicit per-command sink and which gates the
     writer's own `declare_io` / manifest so an ``export``-omitted writer mints
@@ -60,7 +60,7 @@ class OutputSectionWriter(SaltModelModule):
     ----------
     modes : Sequence[str] | None, optional
         The modes this writer participates in — a subset of ``["test",
-        "export"]``. ``None`` (default) = both (the pre-plan-50 behaviour).
+        "export"]``. ``None`` (default) = both.
     """
 
     def __init__(self, modes: Sequence[str] | None = None) -> None:
@@ -277,7 +277,7 @@ def _dep_spec(dep: str) -> TensorSpec:
     A task's ``output_time_requires`` mixes namespaces: the stream pad mask
     (``masks.<stream>`` -> ``kind=pad_mask`` bool), a label (``labels.<stream>.
     <var>`` -> ``kind=label``, the TEST source for ratio denominators AND the
-    Phase-C target-label columns — dtype unconstrained since label dtypes vary
+    target-label columns — dtype unconstrained since label dtypes vary
     per label: int64 class/vertex labels vs float32 regression targets), and
     the raw input feature (``inputs.<stream>`` -> ``kind=data`` float, the
     ONNX source). The require kind must match the dataset-source kind or the

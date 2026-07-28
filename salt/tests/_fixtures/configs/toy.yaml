@@ -1,4 +1,4 @@
-# Toy M1 graph config (format: salt/cli.py module docstring; plan 03 stage F).
+# Toy M1 graph config (format: salt/cli.py module docstring).
 # Five-module toy graph exercising the full kernel: symbolic dims, kind typing,
 # mode-gated ports, optional ports, wildcard narrowing, and a test-only terminal
 # writer. No physics (M1 scope).
@@ -19,16 +19,16 @@ modules:
     class_path: salt.tests._fixtures.toys.ToyWriter
     init_args: {key: preds.x}
 
-# framework-provided dataset boundary (design §3.1)
+# framework-provided dataset boundary
 sources:
   raw.x: {shape: [B, 8], dtype: float32}
 
-# per-mode demand anchors (design §3.1): losses drive fit/val, preds drive test/onnx
+# per-mode demand anchors: losses drive fit/val, preds drive test/onnx
 sinks:
   fit: [losses.total]
   val: [losses.total]
   test: [preds.x]
   onnx: [preds.x]
 
-# flat key universe for wildcard narrowing (design §2.2 rule (d))
+# flat key universe for wildcard narrowing
 schema: [raw.x, labels.x]

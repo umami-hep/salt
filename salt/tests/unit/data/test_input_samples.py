@@ -1,4 +1,4 @@
-"""Tests for `InputSamples` + the datamodule data-sourcing setup pass (W3.A)."""
+"""Tests for `InputSamples` + the datamodule data-sourcing setup pass."""
 
 from __future__ import annotations
 
@@ -188,7 +188,7 @@ class TestSetupPassResolution:
         assert source_num(ctx, "reader", "val") == -1  # whole-dict default
 
     def test_deepest_path_picks_pattern_in_w3a(self, data):
-        # W3.A: only `pattern` exists in the registry, so deepest == pattern.
+        # only `pattern` exists in the registry, so deepest == pattern.
         inp = InputSamples(files={"train": data["h5"]})
         inp.name = "input_samples"
         inp._reader = "reader"

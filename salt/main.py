@@ -147,7 +147,7 @@ def _remap_class_path(name: str) -> str:
     """Remap a pre-de-core ``salt.core.*`` dotted path to its ``salt.*`` home.
 
     No-op for any non-``salt.core`` path (longest matching prefix wins). Lets
-    checkpoints/configs authored before the Plan-61 rename load unmodified.
+    checkpoints/configs authored before the rename load unmodified.
     """
     if not isinstance(name, str) or not name.startswith("salt.core"):
         return name
@@ -716,8 +716,8 @@ class SaltCLI(LightningCLI):
             # subscripted mapping's values and, under the `Any` value type, EAGERLY
             # instantiates any nested {class_path, init_args} spec (its subclass
             # shorthand) — which would turn a stage's raw `callbacks:`/`lr_scheduler:`
-            # specs into live objects before salt's own validator sees them (W8.0
-            # bug) and is impossible for an LR scheduler (needs the stage optimizer,
+            # specs into live objects before salt's own validator sees them, and
+            # is impossible for an LR scheduler (needs the stage optimizer,
             # not built yet). A bare `dict` has no `__args__`, so jsonargparse treats
             # the whole schedule as an opaque mapping and leaves the nested specs raw
             # for `TrainingSchedule.from_config` to parse.
@@ -781,8 +781,8 @@ class SaltCLI(LightningCLI):
         return super().instantiate_trainer(**kwargs)
 
     def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
-        """Auto-inject the schedule driver callbacks on ``fit`` (plan 01 W3 / plan
-        12 W7); the user never registers them manually. The `TrainingScheduleCallback`
+        """Auto-inject the schedule driver callbacks on ``fit``; the user never
+        registers them manually. The `TrainingScheduleCallback`
         (stage-transition driver) is added when the schedule is multi-stage, freezes
         anything, or declares `early_stop` (a single-stage early-stop still needs it
         to end the fit); the `StageScopedCallbacks` coordinator is added when any
@@ -852,7 +852,7 @@ class SaltCLI(LightningCLI):
         section = self._get(self.config_init, "outputs")
         model = getattr(self, "model", None)
         # hand the --init_from path to the instantiated model — its setup("fit")
-        # runs the weights-only warm-start load after bind (plan 01 W1, design D4).
+        # runs the weights-only warm-start load after bind.
         init_from = self._get(self.config_init, _INIT_FROM_ARG)
         if init_from and model is not None and getattr(self.config, "subcommand", None) == "fit":
             model._init_from = str(init_from)  # noqa: SLF001 - same-package wiring

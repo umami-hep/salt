@@ -5,7 +5,7 @@ stage) it applies the new stage's freeze mask and rebuilds the optimizer + LR
 scheduler via ``trainer.strategy.setup_optimizers`` (S1-spike-validated recipe);
 stage 0 is built by Lightning's initial `configure_optimizers`, so the callback
 only rebuilds for stages >= 1 (Gotcha #2). Boundaries are epoch-arithmetic by
-default; when any stage declares `early_stop` (plan 12 W7) they become
+default; when any stage declares `early_stop` they become
 data-dependent — `on_validation_end` folds the monitored metric into the active
 stage's tracker (rank-synced) and either flags a pending advance (non-final) or
 stops the fit (final). Auto-injected by `SaltCLI` when the model's schedule is
@@ -34,7 +34,7 @@ class TrainingScheduleCallback(Callback):
     """Applies stage-boundary freeze flips + optimizer/scheduler rebuilds for a
     multi-stage `training_schedule`, and drives per-stage early stopping when
     declared. Stateless — all schedule state lives on the `SaltModule`
-    (`_schedule`, `_current_stage_index`, `_frozen_module_names`, and the W7
+    (`_schedule`, `_current_stage_index`, `_frozen_module_names`, and the
     early-stop counters).
     """
 
@@ -76,7 +76,7 @@ class TrainingScheduleCallback(Callback):
         `early_stop` — the data-dependent `next_stage_index_early_stop` (advance by
         one on a pending early-stop trigger or the active stage's epoch cap).
 
-        This is also the resume boundary handler (W4): after a checkpoint restore,
+        This is also the resume boundary handler: after a checkpoint restore,
         `pl_module._current_stage_index` holds the *saved* stage (set by
         `SaltModule.on_load_checkpoint` before the optimizer was rebuilt). If the
         resume epoch's implied stage is later (resume exactly at a boundary), this
@@ -104,14 +104,14 @@ class TrainingScheduleCallback(Callback):
         trainer.strategy.setup_optimizers(trainer)
 
     def on_validation_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Per-stage early-stop check (plan 12 W7). On the real validation pass
+        """Per-stage early-stop check. On the real validation pass
         (skips Lightning's sanity check), read the active stage's `monitor` from the
         rank-reduced `trainer.callback_metrics`, fold it into the stage's tracker,
         and rank-sync the decision via ``strategy.reduce_boolean_decision`` so every
-        rank agrees on the boundary (no reducer/optimizer-rebuild desync — the
-        W5/W6 bug class). A trigger on a non-final stage flags a pending advance
-        (executed at the next `on_train_epoch_start`); on the final stage it sets
-        ``trainer.should_stop``. No-op unless the active stage declares `early_stop`.
+        rank agrees on the boundary (no reducer/optimizer-rebuild desync). A trigger
+        on a non-final stage flags a pending advance (executed at the next
+        `on_train_epoch_start`); on the final stage it sets ``trainer.should_stop``.
+        No-op unless the active stage declares `early_stop`.
         """
         schedule = getattr(pl_module, "_schedule", None)
         if schedule is None or not schedule.has_early_stop or trainer.sanity_checking:
@@ -135,7 +135,7 @@ def _read_monitor(trainer: Trainer, monitor: str) -> float | None:
     """The `monitor` metric from `trainer.callback_metrics` as a float, or ``None``
     when absent (a fail-fast misconfiguration surfaced by `evaluate_early_stop`).
     The value is already rank-reduced when logged with ``sync_dist`` — the synced
-    monitor half of the W7 rank-consistency contract.
+    monitor half of the rank-consistency contract.
     """
     value = trainer.callback_metrics.get(monitor)
     if value is None:
@@ -167,12 +167,12 @@ _STAGE_SCOPED_HOOKS = (
 
 
 class StageScopedCallbacks(Callback):
-    """Coordinator for per-stage scoped `callbacks` (plan 12 W7, D-CB). Registered
+    """Coordinator for per-stage scoped `callbacks`. Registered
     ONCE by `SaltCLI` when the schedule declares any stage `callbacks` — Lightning
     fixes ``trainer.callbacks`` at fit start, so the always-propagated top-level
     (global) callbacks persist for the whole fit while THIS coordinator hosts the
     stage-scoped ones: at each stage entry it instantiates the entering stage's
-    callbacks FRESH (fresh state — D-CB), forwards Lightning's per-stage hooks to
+    callbacks FRESH (fresh state), forwards Lightning's per-stage hooks to
     them ONLY while their stage is active, and tears them down at stage exit. The
     user's "combined set" per stage is therefore the persistent globals plus these
     freshly-instantiated stage-scoped delegates.

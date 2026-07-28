@@ -129,7 +129,7 @@ class DeepMergeParser(LightningArgumentParser):
         validation/``--print_config``, so resolved values freeze into the saved
         run config.
         """
-        # W45.2c import-placement fix: _fan_out_artifacts stays in salt.main
+        # Import placement: _fan_out_artifacts stays in salt.main
         # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
         from salt.main import (

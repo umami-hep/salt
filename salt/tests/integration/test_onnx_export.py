@@ -1,4 +1,4 @@
-"""End-to-end M4 export tests: trace, ORT agreement, metadata, CLI (plan 07 stage A)."""
+"""End-to-end M4 export tests: trace, ORT agreement, metadata, CLI."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ SWEEP = [{"tracks": length} for length in (0, 1, 2, 7, 21, 39)]
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
     """Deterministically-weighted GN2 fixture exported through the FOLDED
-    conversion-node path (W4)."""
+    conversion-node path."""
     tmp = tmp_path_factory.mktemp("onnx_export")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
@@ -78,7 +78,7 @@ def exported(tmp_path_factory):
 
 class TestExportedModel:
     def test_subset_sweep_at_1e6(self, exported):
-        # gate O1 at unit scale: v2-torch vs v2-ONNX, incl. L=0 (plan 07)
+        # gate O1 at unit scale: v2-torch vs v2-ONNX, incl. L=0
         result = check_onnx(
             exported.result.adapter,
             exported.result.onnx_path,
@@ -196,7 +196,7 @@ class TestExportedModel:
         assert again.plan.plan_hash == exported.result.plan.plan_hash
 
 
-# the two-dynamic-axes Split grid (design §7 / risk 7 — the in-tree de-risk;
+# the two-dynamic-axes Split grid (the in-tree de-risk;
 # the release-blocker version on bigger widths is gate O3)
 
 
@@ -275,7 +275,7 @@ def two_stream(tmp_path_factory):
             ),
         ],
     )
-    # W4 folded path: conversion nodes + OnnxExportSink (the off-graph manifest
+    # folded path: conversion nodes + OnnxExportSink (the off-graph manifest
     # is retired). The jets head's softmax + the two argmax aux leaves fold into
     # ClassProbs/SeqClassIndex nodes named by the sink.
     from salt.outputs import ClassProbs
@@ -462,7 +462,7 @@ class TestSaltSurface:
         # checker table used to confirm float outputs only)
         assert "GN2v2dummy_VertexIndex" in out
         assert "int8 exact over" in out
-        # the traced plan table is written next to the .onnx (design §4.4)
+        # the traced plan table is written next to the .onnx
         plan_txt = cli_run.run_dir / "plan_onnx.txt"
         assert plan_txt.is_file()
         assert "[mode=ONNX]" in plan_txt.read_text()
@@ -533,7 +533,7 @@ class TestSaltSurface:
 
     def test_manifest_flag_prints_without_checkpoint(self, cli_run, capsys):
         # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
-        # needed (W4: the off-graph writer manifest is retired — the sink names the
+        # needed (the off-graph writer manifest is retired — the sink names the
         # folded conversion outputs.* leaves)
         from salt.onnx.export import main as export_main
 
