@@ -1,4 +1,4 @@
-"""Toy GraphModules for the M1 kernel integration tests."""
+"""Toy GraphModules for the kernel integration tests."""
 
 from __future__ import annotations
 

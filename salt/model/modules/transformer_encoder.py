@@ -169,8 +169,7 @@ class TransformerEncoder(SaltModelModule):
             raise ConfigError(
                 "TransformerEncoder: 'edges' and 'edge_embed_dim' must be set together — "
                 f"got edges={edges!r}, edge_embed_dim={edge_embed_dim}. Set both for an edge "
-                "encoder (v1 GN2XE.yaml:79 edge_embed_dim with an edge_init_net), or neither "
-                "(FD §6.7 1422-1424)"
+                "encoder (v1 GN2XE.yaml:79 edge_embed_dim with an edge_init_net), or neither"
             )
         if update_edges and edges is None:
             raise ConfigError(
@@ -316,7 +315,7 @@ class TransformerEncoder(SaltModelModule):
                 f"TransformerEncoder {self.name!r}: edge_embed_dim={self.edge_embed_dim} but the "
                 f"resolved {self.edges_key!r} width is {resolved} — set edge_embed_dim to the "
                 "EdgeEmbed out_dim (the encoder's EdgeAttention projections were sized from "
-                "edge_embed_dim at construction, attention.py:535; FD §6.7 1422-1424)"
+                "edge_embed_dim at construction, attention.py:535)"
             )
 
     def set_export_mode(self) -> None:

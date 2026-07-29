@@ -352,7 +352,7 @@ class TestRestoreOrderProbe:
         )
 
         names = [e[0] for e in _ProbeModule.EVENTS]
-        print("W4 RESTORE-ORDER PROBE events:", _ProbeModule.EVENTS)  # noqa: T201
+        print("RESTORE-ORDER PROBE events:", _ProbeModule.EVENTS)  # noqa: T201
         assert "setup" in names and "on_load_checkpoint" in names
         assert "configure_optimizers" in names
         # the ordering these gates depend on: stage is restored (on_load) BEFORE the

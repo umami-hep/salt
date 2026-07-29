@@ -21,7 +21,7 @@ from salt.graph.executor import (
 from salt.graph.planner import compile_plan
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# toy fixtures (no physics — M1 scope)
+# toy fixtures (no physics)
 
 
 def ts(**kwargs):

@@ -96,7 +96,7 @@ _HAS_DOT = shutil.which("dot") is not None
 
 
 class TestPlotCli:
-    """`salt graph plot` renders the §4.3 DOT to PNG+PDF via the dot binary."""
+    """`salt graph plot` renders the DOT to PNG+PDF via the dot binary."""
 
     def test_dot_sidecar_written_even_without_image(self, tmp_path):
         # a .dot target short-circuits before any dot invocation: the DOT

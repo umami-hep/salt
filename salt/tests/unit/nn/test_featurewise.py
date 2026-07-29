@@ -24,7 +24,7 @@ from salt.model.modules import (
 
 
 class TestFeaturewiseAndPosenc:
-    """M7 W-FILM: v2-native FiLM + positional encoding wiring on StreamEmbed/encoder."""
+    """v2-native FiLM + positional encoding wiring on StreamEmbed/encoder."""
 
     _DC = {"hidden_layers": [8], "activation": "ReLU"}
 

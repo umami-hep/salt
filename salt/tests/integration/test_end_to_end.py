@@ -53,7 +53,7 @@ class TestPlans:
         cfg = load_config(TOY_CFG)
         plan = _plan(cfg, Mode.FIT)
         # deterministic topo order: Kahn, ties broken by config declaration
-        # order (§3.1) — toy.yaml declares source, embed, labels, head
+        # order — toy.yaml declares source, embed, labels, head
         assert plan.module_names == ("source", "embed", "labels", "head")
         assert "losses.total" in plan.step("head").produces
         assert "labels.x" in plan.step("labels").produces  # narrowed from labels.*
@@ -227,7 +227,7 @@ class TestWhy:
         assert "head" in out  # consumer
 
 
-# broken config: §4.1-quality error
+# broken config: quality error
 
 
 class TestBrokenConfig:
@@ -239,6 +239,6 @@ class TestBrokenConfig:
         assert "'embed.y'" in err  # names the missing key
         assert "did you mean" in err
         assert "embed.x" in err  # nearest-key suggestion
-        # §4.1 quality bar: suggestion AND availability AND a concrete fix
+        # quality bar: suggestion AND availability AND a concrete fix
         assert "available keys:" in err
         assert "fix: correct the require in module 'head'" in err

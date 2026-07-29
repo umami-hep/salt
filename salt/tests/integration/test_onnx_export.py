@@ -1,4 +1,4 @@
-"""End-to-end M4 export tests: trace, ORT agreement, metadata, CLI."""
+"""End-to-end export tests: trace, ORT agreement, metadata, CLI."""
 
 from __future__ import annotations
 
@@ -315,7 +315,7 @@ def two_stream(tmp_path_factory):
 
 class TestTwoDynamicAxes:
     def test_split_grid_including_zeros(self, two_stream):
-        # design risk 7: the eager Split slicing is provably WRONG under
+        # known risk: the eager Split slicing is provably WRONG under
         # traced export with two dynamic axes (recipe spike: 15/15 grid
         # points mismatched); the index_select export branch must agree
         # with eager v2 on the full grid INCLUDING zero-length streams
@@ -428,7 +428,7 @@ class TestSaltSurface:
         assert [entry.port for entry in export_cfg.inputs] == ["inputs.jets", "inputs.tracks"]
         assert export_cfg.inputs[1].sequence is True
         assert export_cfg.inputs[1].dyn_axis == "n_tracks"
-        # M4.5: the shipped configs carry NO export.outputs — the manifest
+        # the shipped configs carry NO export.outputs — the manifest
         # derives from the writers (rename/combine empty by default)
         assert export_cfg.outputs == []
         assert export_cfg.rename == {}
@@ -458,7 +458,7 @@ class TestSaltSurface:
         onnx_path = cli_run.run_dir / "network.onnx"
         assert onnx_path.is_file()
         out = capsys.readouterr().out
-        # int8 outputs get a POSITIVE verdict row (M4-review fix: the
+        # int8 outputs get a POSITIVE verdict row (review fix: the
         # checker table used to confirm float outputs only)
         assert "GN2v2dummy_VertexIndex" in out
         assert "int8 exact over" in out
@@ -474,7 +474,7 @@ class TestSaltSurface:
         assert info["ckpt_path"] == str(Path(cli_run.ckpt).resolve())
         assert info["config.yaml"]["name"] == "GN2v2_dummy"
         # without --overwrite a second export must refuse (to_onnx.py:710-711)
-        # with ONE actionable line, not a traceback (M4-review fix)
+        # with ONE actionable line, not a traceback (review fix)
         rc2 = export_main(["--ckpt_path", str(cli_run.ckpt), "--no-check"])
         assert rc2 == 1
         err = capsys.readouterr().err
@@ -483,7 +483,7 @@ class TestSaltSurface:
 
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
         # a run config trained WITHOUT an export: block must fail with the
-        # exact working stacking command in the message (M4-review fix: the
+        # exact working stacking command in the message (review fix: the
         # old 'stack an override config' hint was not actionable)
         from salt.onnx.export import main as export_main
 
@@ -546,8 +546,8 @@ class TestSaltSurface:
         assert "folded conversion node (outputs.* leaf)" in out
 
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
-        # the M4.5 migration error must fire on the CLI path with the
-        # writers: pointer (§4.1 bar)
+        # the migration error must fire on the CLI path with the
+        # writers: pointer (quality bar)
         from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
@@ -560,5 +560,5 @@ class TestSaltSurface:
         rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(legacy_cfg)])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "REMOVED by the M4.5" in err
+        assert "export.outputs was REMOVED" in err
         assert "writers" in err

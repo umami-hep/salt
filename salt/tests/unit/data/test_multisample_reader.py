@@ -607,7 +607,7 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
 
 
 # --------------------------------------------------------------------------- #
-# 7. M8 reader-owned staging — sources() = union over sub-readers; restage()
+# 7. reader-owned staging — sources() = union over sub-readers; restage()
 #    delegates to each sub-reader recursively (the multi-SAMPLE multi-FILE case).
 # --------------------------------------------------------------------------- #
 

@@ -17,7 +17,7 @@ from salt.schema import (
     save_schema,
 )
 
-# toy fixtures (no physics — M1 scope)
+# toy fixtures (no physics)
 
 
 @pytest.fixture
@@ -240,7 +240,7 @@ class TestValidateKeys:
             schema.keys()
 
 
-# integration: schema.keys() feeds planner wildcard narrowing (§2.2 rule (d))
+# integration: schema.keys() feeds planner wildcard narrowing (rule (d))
 
 
 class Wild:

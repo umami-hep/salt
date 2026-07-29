@@ -36,7 +36,7 @@ git fetch upstream
 git checkout 6570e85   # the validated upstream MaskFormer reference
 ```
 
-### Closure evidence (plan 47 sweep, 2026-07-13)
+### Closure evidence
 
 The remaining in-tree frozen comparison artifacts were retired at this commit.
 In each case the frozen artifact IS the reference output, so the final green

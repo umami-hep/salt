@@ -1,7 +1,7 @@
-# Toy M1 graph config (format: salt/cli.py module docstring).
+# Toy graph config (format: salt/cli.py module docstring).
 # Five-module toy graph exercising the full kernel: symbolic dims, kind typing,
 # mode-gated ports, optional ports, wildcard narrowing, and a test-only terminal
-# writer. No physics (M1 scope).
+# writer. No physics.
 modules:
   source:
     class_path: salt.tests._fixtures.toys.ToySource

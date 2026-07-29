@@ -157,7 +157,7 @@ def _resolve_lr_scheduler_class(class_path: str) -> type:
 
 def _is_metric_driven_scheduler(cls: type) -> bool:
     """Whether `cls` is a metric-driven LR scheduler — i.e. a `ReduceLROnPlateau`
-    (sub)class whose ``step(metrics)`` needs a monitored value (design §3). This is
+    (sub)class whose ``step(metrics)`` needs a monitored value. This is
     the deterministic detection rule for the `monitor`-required check.
     """
     return issubclass(cls, torch.optim.lr_scheduler.ReduceLROnPlateau)
@@ -243,13 +243,12 @@ class SaltModule(lightning.LightningModule):
         # a null entry — from a config-file or CLI override — deletes the module.
         modules = {key: module for key, module in modules.items() if module is not None}
         if not modules:
-            raise ConfigError("SaltModule needs a non-empty module dict (design §3.4)")
+            raise ConfigError("SaltModule needs a non-empty module dict")
         for key, module in modules.items():
             if not isinstance(module, SaltModelModule):
                 raise ConfigError(
                     f"module {key!r} ({type(module).__name__}) is not a SaltModelModule — "
-                    "model-graph entries must subclass SaltModelModule; wrap or extend it "
-                    "(design §2.5)"
+                    "model-graph entries must subclass SaltModelModule; wrap or extend it"
                 )
             # instance names come from the config dict key, before any declare_io/compile
             module.name = key
@@ -263,7 +262,7 @@ class SaltModule(lightning.LightningModule):
         if missing := [k for k in _LRS_REQUIRED if k not in lrs]:
             raise ConfigError(
                 f"lrs is missing required keys {missing} — the OneCycleLR schema is "
-                f"{list(_LRS_REQUIRED)} (+ optional weight_decay, last_epoch; design §3.4)"
+                f"{list(_LRS_REQUIRED)} (+ optional weight_decay, last_epoch)"
             )
         if optimizer not in _OPTIMIZERS:
             raise ConfigError(
@@ -384,7 +383,7 @@ class SaltModule(lightning.LightningModule):
         if not section:
             return
         for key, w in section.items():
-            # accepted shapes (design §2.5): a graph-folded section writer
+            # accepted shapes: a graph-folded section writer
             # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter
             # today) or a terminal callback-style sink
             # (SinkModule) — see salt.model.base.SaltModelModule for the
@@ -395,12 +394,12 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"outputs: section writer {key!r} ({type(w).__name__}) is neither a "
                     "SaltModelModule nor a SinkModule — model-graph outputs: entries must "
-                    "subclass SaltModelModule; wrap or extend it (design §2.5)"
+                    "subclass SaltModelModule; wrap or extend it"
                 )
             if key in self._graph_modules:
                 raise ConfigError(
                     f"outputs: section writer {key!r} collides with a model module — instance "
-                    "names are unique across the pipeline graph (plan 34 W34.2)"
+                    "names are unique across the pipeline graph"
                 )
             w.name = key
         # the model-side modules before the section folds in — RunTaskOutput
@@ -492,7 +491,7 @@ class SaltModule(lightning.LightningModule):
                 if _has_wildcard(key):
                     raise ConfigError(
                         f"boundary demand key {key!r} (mode {mode.name}) contains a wildcard — "
-                        "narrow it before compile (design §2.2 rule (d), §3.3)"
+                        "narrow it before compile"
                     )
                 if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
                     consumers = ", ".join(
@@ -502,7 +501,7 @@ class SaltModule(lightning.LightningModule):
                         f"[mode={mode.name}] key {key!r} is required by module(s) {consumers} "
                         "but no model module produces it, and it cannot come from the dataset "
                         f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                        f"keys only, design §6.1).\n  fix: add or restore a module producing "
+                        f"keys only).\n  fix: add or restore a module producing "
                         f"{key!r}, or correct the requiring module's config"
                     )
             origins = {
@@ -516,14 +515,14 @@ class SaltModule(lightning.LightningModule):
                     if _has_wildcard(key):
                         raise ConfigError(
                             f"writer demand key {key!r} ({who}) contains a wildcard — "
-                            "writer requires are concrete keys (design §2.2, §8)"
+                            "writer requires are concrete keys"
                         )
                     if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
                         raise ConfigError(
                             f"[mode=TEST] key {key!r} is required by {who} but no model "
                             "module produces it, and it cannot come from the dataset (the "
                             f"dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                            "keys only, design §6.1, §8).\n  fix: correct the writer's "
+                            "keys only).\n  fix: correct the writer's "
                             "requires, or add a module producing the key"
                         )
                     demand.append(key)
@@ -541,14 +540,14 @@ class SaltModule(lightning.LightningModule):
                     if _has_wildcard(key):
                         raise ConfigError(
                             f"callback demand key {key!r} ({who}) contains a wildcard — "
-                            "callback requires are concrete keys (design §2.2, §3.1)"
+                            "callback requires are concrete keys"
                         )
                     if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
                         raise ConfigError(
                             f"[mode={mode.name}] key {key!r} is required by {who} but no "
                             "model module produces it, and it cannot come from the dataset "
                             f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                            "keys only, design §6.1, §3.1).\n  fix: correct the callback's "
+                            "keys only).\n  fix: correct the callback's "
                             "requires, or add a module producing the key"
                         )
                     demand.append(key)
@@ -624,7 +623,7 @@ class SaltModule(lightning.LightningModule):
         if name in modules:
             raise ConfigError(
                 f"sink node name {name!r} collides with a model module — instance names must be "
-                "unique across the pipeline graph (design §2.2); rename the callback key"
+                "unique across the pipeline graph; rename the callback key"
             )
         folded = dict(modules)
         folded[name] = sink_node
@@ -709,7 +708,7 @@ class SaltModule(lightning.LightningModule):
             if "loss.total" not in produced:
                 raise ConfigError(
                     f"no module produces 'loss.total' in mode {mode.name} — training plans "
-                    "anchor on it; add a LossSum module (design §3.3)"
+                    "anchor on it; add a LossSum module"
                 )
             sinks = ["loss.total"]
             for key in self._callback_demand(mode, callbacks):
@@ -728,7 +727,7 @@ class SaltModule(lightning.LightningModule):
                 if not consumed:
                     raise ConfigError(
                         "[mode=TEST] the configured writers consume nothing the model "
-                        "produces — check writers.modules (design §8)"
+                        "produces — check writers.modules"
                     )
                 return consumed
         # the ONNX output manifest is not writer-derived — the folded OnnxExportSink
@@ -737,7 +736,7 @@ class SaltModule(lightning.LightningModule):
         if not preds:
             raise ConfigError(
                 f"no module produces a 'preds.*' key in mode {mode.name} — evaluation plans "
-                "anchor on predictions (design §3.1, §3.3)"
+                "anchor on predictions"
             )
         return preds
 
@@ -808,7 +807,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"recompiled {mode.name} plan hash changed within one run "
                 f"({previous.plan_hash[:16]}… -> {plan.plan_hash[:16]}…) — the dataset "
-                "boundary or module config drifted (design §3.1 determinism)"
+                "boundary or module config drifted"
             )
         self.plans[mode] = plan
         self._executors[mode] = Executor(plan)
@@ -822,8 +821,8 @@ class SaltModule(lightning.LightningModule):
         """
         if stage not in {"fit", "test"}:
             raise ConfigError(
-                f"stage {stage!r} is not supported by SaltModule in M2 — use trainer.fit or "
-                "trainer.test (validate/predict entry points are M5+, design §9.5)"
+                f"stage {stage!r} is not supported by SaltModule — use trainer.fit or "
+                "trainer.test (validate/predict entry points are not supported)"
             )
         # bind the outputs: section to the attached sink BEFORE any boundary/demand
         # resolution — the sink's declare_io/writer_demand resolves its columns
@@ -909,7 +908,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 "training_schedule declares an 'early_stop' stage but the trainer has validation "
                 "disabled (limit_val_batches=0) — early stopping is evaluated on validation-epoch "
-                "end and could never fire. Enable validation or remove early_stop (plan 12 W7)."
+                "end and could never fire. Enable validation or remove early_stop."
             )
 
     def _preflight_lr_scheduler(self) -> None:
@@ -936,7 +935,7 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"training_schedule stage {stage.name!r} lr_scheduler {cfg.class_path} is "
                     "metric-driven (a ReduceLROnPlateau subclass) and requires a 'monitor' "
-                    "(a trainer.callback_metrics key, e.g. 'val/loss') — plan 15 W8."
+                    "(a trainer.callback_metrics key, e.g. 'val/loss')."
                 )
 
     def _make_early_stop_tracker(self, stage: StageConfig) -> EarlyStopTracker | None:
@@ -1037,7 +1036,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"training_schedule stage {stage.name!r} early_stop monitors "
                 f"{stage.early_stop.monitor!r} but it is absent from trainer.callback_metrics — "
-                "check the metric name (e.g. 'val/loss') or that validation logs it (plan 12 W7)."
+                "check the metric name (e.g. 'val/loss') or that validation logs it."
             )
         assert self._early_stop_tracker is not None
         return self._early_stop_tracker.check(monitored)
@@ -1134,8 +1133,8 @@ class SaltModule(lightning.LightningModule):
         if fit_hash != val_hash:
             raise ConfigError(
                 f"the VAL plan ({val_hash[:16]}…) differs structurally from the FIT plan "
-                f"({fit_hash[:16]}…) — VAL is contractually the identical plan in M2 "
-                "(design §3.4; VAL-divergent module ports need the M6 exemption mechanism)"
+                f"({fit_hash[:16]}…) — VAL is contractually the identical plan "
+                "(VAL-divergent module ports would need an exemption mechanism)"
             )
 
     def _graph_datamodule(self) -> GraphDataModule:
@@ -1147,7 +1146,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 "SaltModule compiles its plans against a GraphDataModule's dataset boundary — "
                 f"pass one to trainer.fit/test (got {type(dm).__name__}; raw dataloaders are "
-                "not supported, design §3.4/§6.1)"
+                "not supported)"
             )
         return dm
 
@@ -1159,7 +1158,7 @@ class SaltModule(lightning.LightningModule):
         if dset is None:
             raise ConfigError(
                 f"the datamodule has no {stage} dataset — its setup did not run or the "
-                f"{stage}_file is unset (design §6.1)"
+                f"{stage}_file is unset"
             )
         return dset.boundary_specs()
 
@@ -1180,7 +1179,7 @@ class SaltModule(lightning.LightningModule):
         if self._bound:
             raise ConfigError(
                 "SaltModule modules are already bound — bind happens exactly once, before any "
-                "state-dict load (design §2.3)"
+                "state-dict load"
             )
         bind_all(self._graph_modules, schema)
         self._apply_mup_shapes()
@@ -1204,7 +1203,7 @@ class SaltModule(lightning.LightningModule):
         if not shape_path.is_file():
             raise ConfigError(
                 f"model.init_args.mup.shape_path {str(shape_path)!r} does not exist — generate it "
-                "with `salt mup-shapes` (setup_mup) before fit (design §3.4, §9.2)"
+                "with `salt mup-shapes` (setup_mup) before fit"
             )
         # the file carries infshapes for the whole net (generated from net) — apply
         # it ONCE over self.net so the apply_to MuReadout/linears get their
@@ -1273,7 +1272,7 @@ class SaltModule(lightning.LightningModule):
         if executor is None:
             raise ConfigError(
                 f"no compiled plan for mode {mode.name} — run under trainer.fit/test or call "
-                "compile_mode() first (design §3.4)"
+                "compile_mode() first"
             )
         bundle = batch if isinstance(batch, Bundle) else Bundle(dict(batch))
         return executor.run(bundle, debug=self.debug)
@@ -1452,7 +1451,7 @@ class SaltModule(lightning.LightningModule):
         `init_args.optimizer` was already rejected at parse. A metric-driven scheduler
         (`ReduceLROnPlateau`) is wired through Lightning's monitor mechanics
         (`reduce_on_plateau`/`monitor`); its rank-consistency rides on the synced
-        monitor (design §7).
+        monitor.
         """
         cls = _resolve_lr_scheduler_class(cfg.class_path)
         scheduler = cls(opt, **(dict(cfg.init_args) if cfg.init_args else {}))
@@ -1601,7 +1600,7 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"checkpoint records training_schedule stage index {index}, out of range for "
                     f"the current {len(self._schedule.stages)}-stage schedule — the schedule "
-                    "changed since the checkpoint was written; resume is not defined (plan 02 W4)."
+                    "changed since the checkpoint was written; resume is not defined."
                 )
             saved_name = schedule_state.get("stage_name")
             current_name = self._schedule.stages[index].name
@@ -1609,7 +1608,7 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"checkpoint records training_schedule stage {index} as {saved_name!r} but the "
                     f"current schedule names it {current_name!r} — the schedule changed since the "
-                    "checkpoint was written; resume is not defined (plan 02 W4)."
+                    "checkpoint was written; resume is not defined."
                 )
             self._current_stage_index = index
             self._apply_stage_freeze(self._schedule.stages[index])
@@ -1647,7 +1646,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"checkpoint records an early_stop criterion {saved_fp} for stage "
                 f"{stage.name!r} but the current config declares {current_fp} — the criterion "
-                "changed since the checkpoint; patience resume is not defined (plan 12 W7)."
+                "changed since the checkpoint; patience resume is not defined."
             )
         self._early_stop_tracker = EarlyStopTracker.from_state_dict(stage.early_stop, es_state)
 
@@ -1661,7 +1660,7 @@ class SaltModule(lightning.LightningModule):
         msg = (
             f"plan-hash mismatch for mode {mode.name}: checkpoint has {stored[:16]}…, the "
             f"current config compiles {plan.plan_hash[:16]}… — the module graph or dataset "
-            "boundary changed since the checkpoint was written (design §2.3, risk 9)"
+            "boundary changed since the checkpoint was written"
         )
         if mode is Mode.FIT:
             raise ConfigError(msg)
@@ -1872,7 +1871,7 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         lines.append(f"  - {key!r}{where}")
     lines.append(
         "an unconsumed preds.* port in TEST means a computed prediction is never "
-        "persisted (design §4.2, §8)."
+        "persisted."
     )
     dead_tasks = {
         parts[2]
@@ -1983,19 +1982,19 @@ def validate_mup_routing(
     if not isinstance(mup, Mapping):
         raise ConfigError(
             f"model.init_args.mup must be a mapping with 'apply_to' (and optional 'shape_path'), "
-            f"got {type(mup).__name__} (design §3.4 line 685)"
+            f"got {type(mup).__name__}"
         )
     if unknown := set(mup) - _MUP_KEYS:
         raise ConfigError(
             f"model.init_args.mup has unknown key(s) {sorted(unknown)} — expected "
-            f"{sorted(_MUP_KEYS)} (design §3.4 line 685)"
+            f"{sorted(_MUP_KEYS)}"
         )
     apply_to = mup.get("apply_to")
     if not isinstance(apply_to, (list, tuple)) or not apply_to:
         raise ConfigError(
             "model.init_args.mup needs a non-empty 'apply_to' list of module instance names "
             "(EXPLICIT names, NOT a regex — the v2 design break from v1's apply_to/parameter_name "
-            "zip, configuration_muP.py:98; design §3.4 line 685)"
+            "zip, configuration_muP.py:98)"
         )
     for raw in apply_to:
         if not isinstance(raw, str):
@@ -2006,15 +2005,14 @@ def validate_mup_routing(
         if raw not in modules:
             raise ConfigError(
                 f"model.init_args.mup.apply_to names {raw!r}, which is not a configured module — "
-                f"known modules: {sorted(modules)} (design §3.4: apply_to is an explicit "
+                f"known modules: {sorted(modules)} (apply_to is an explicit "
                 "instance-name list)"
             )
         if not module_supports_mup(modules[raw]):
             raise ConfigError(
                 f"model.init_args.mup.apply_to names {raw!r} "
                 f"({type(modules[raw]).__name__}), which has no 'mup' init_arg — only modules "
-                "that accept mup (StreamEmbed, TransformerEncoder) can be muP-routed "
-                "(design §3.4 line 695 validator rule 1)"
+                "that accept mup (StreamEmbed, TransformerEncoder) can be muP-routed"
             )
     applied = set(apply_to)
     for name, module in modules.items():
@@ -2022,8 +2020,8 @@ def validate_mup_routing(
             warnings.warn(
                 f"module {name!r} has mup: true but is NOT in model.init_args.mup.apply_to — its "
                 "base shapes / MuAdamW grouping are skipped by the routing stage, so its training "
-                "dynamics silently diverge from the muP intent (design §3.4 line 695 validator "
-                "rule 2). Add it to apply_to or set its mup: false.",
+                "dynamics silently diverge from the muP intent. Add it to apply_to or "
+                "set its mup: false.",
                 stacklevel=2,
             )
     return {"apply_to": list(apply_to), "shape_path": mup.get("shape_path")}
@@ -2119,7 +2117,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 f"encoder {name!r} declares an edge port (edges={module.edges_key!r}) but no "
                 "Concat is configured — the edge tensor's stream must be the FIRST concat stream "
                 "so the [B, T, T, D_e] edge matrix aligns with the leading sequence rows "
-                "(v1 sort-first hack, saltmodel.py:66-73; FD §6.7 1425-1431)"
+                "(v1 sort-first hack, saltmodel.py:66-73)"
             )
         concat_name, first_stream = concat
         if edge_stream != first_stream:
@@ -2130,8 +2128,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 "rows of the concatenated sequence (the encoder zero-pads it to the "
                 "register-augmented length assuming the edge stream is first, "
                 f"transformer.py:689-719). fix: put {edge_stream!r} first in {concat_name!r}'s "
-                "streams (v1 did this silently via the init-net sort, saltmodel.py:66-73; "
-                "FD §6.7 1425-1431 rule a)"
+                "streams (v1 did this silently via the init-net sort, saltmodel.py:66-73)"
             )
         # -- rule (b): no non-edge attention backend alongside an edge port -----
         # EdgeAttention encoders always run raw torch attention, so any other
@@ -2145,7 +2142,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 "edge features were on (transformer.py:599-601) — v2 makes that a named error so "
                 "a flash-varlen edge config fails loudly instead of running unexpectedly-slow raw "
                 "attention. fix: set the encoder's attention.attn_type to 'torch-math' (or drop "
-                "the edge port). FD §6.7 1425-1431 rule b"
+                "the edge port)."
             )
     return len(encoders)
 
@@ -2218,7 +2215,7 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
             raise ConfigError(
                 f"class_names of module {name!r} (config: model.modules.{name}."
                 f"init_args.class_names) do not match the {label!r} attr of the "
-                f"{stream!r} group in the schema artifact ({diagnosis}, design §2.6).\n"
+                f"{stream!r} group in the schema artifact ({diagnosis}).\n"
                 f"  configured: {configured}\n"
                 f"  schema:     {stored}\n"
                 f"  fix: set class_names to the schema order (or re-dump the schema if "

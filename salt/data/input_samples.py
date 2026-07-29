@@ -59,13 +59,13 @@ class InputSamples(SaltDatasetModule):
         if not files:
             raise ValueError(
                 "InputSamples requires a non-empty `files` map "
-                "(e.g. {train: ..., val: ..., test: ...}) (plan-25 §3.3)"
+                "(e.g. {train: ..., val: ..., test: ...})"
             )
         bad = [stage for stage in files if stage not in SETUP_STAGES]
         if bad:
             raise ValueError(
                 f"InputSamples `files` has unknown stage(s) {bad}: must be a subset of "
-                f"{list(SETUP_STAGES)} (plan-25 §3.3)"
+                f"{list(SETUP_STAGES)}"
             )
         self._files: dict[str, str | Path] = dict(files)
         self._num: dict[str, int] = dict(num) if num is not None else {}
@@ -124,8 +124,7 @@ class InputSamples(SaltDatasetModule):
         if self._reader is None:
             raise RuntimeError(
                 f"InputSamples {self.name!r} has no reader name wired — it must be assembled "
-                "by GraphDataModule (which sets `_reader` after the single-Reader guard, "
-                "plan-25 §3.8)"
+                "by GraphDataModule (which sets `_reader` after the single-Reader guard)"
             )
         return self._reader
 

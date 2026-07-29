@@ -40,7 +40,7 @@ user/
 .coverage*
 .cometml-runs
 
-# GraphArtifacts run-dir byproducts (salt fit/test/graph; design §4.4) — never source
+# GraphArtifacts run-dir byproducts (salt fit/test/graph) — never source
 graph_*.dot
 graph_*.svg
 plan_*.txt

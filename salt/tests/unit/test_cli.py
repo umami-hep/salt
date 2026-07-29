@@ -18,7 +18,7 @@ from salt.schema import load_schema
 # static width-resolution plot path needs a real trainer config but no data file
 _DUMMY_CFG = str(Path(__file__).parent.parent.parent / "configs" / "gn2v2-dummy.yaml")
 
-# toy modules (no physics — M1 scope); instance names assigned by the CLI
+# toy modules (no physics); instance names assigned by the CLI
 
 
 def _spec(cfg):
@@ -270,7 +270,7 @@ class TestPlan:
         assert "plan_hash=" in out
         lines = [line for line in out.splitlines() if ". " in line]
         names = [line.split(". ", 1)[1].split()[0] for line in lines]
-        # topo ties broken by config declaration order (§3.1): pred is declared
+        # topo ties broken by config declaration order: pred is declared
         # before labeller in GOOD_CFG, so it runs first
         assert names == ["embed", "pred", "labeller", "loss"]
         pred_line = lines[names.index("pred")]

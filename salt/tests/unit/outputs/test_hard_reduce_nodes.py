@@ -113,7 +113,7 @@ def test_maskformer_object_forward_matches_inlined_reduces():
 
 
 def test_maskformer_object_forward_does_not_mutate_bundle_leaves():
-    """The node clones before ``get_maskformer_outputs``'s in-place mutate (R4 / §2.1)."""
+    """The node clones before ``get_maskformer_outputs``'s in-place mutate."""
     n_reg, n_obj, n_tracks, n_classes = 3, 5, 7, 3
     gen = torch.Generator().manual_seed(17)
     class_probs = torch.randn(1, n_obj, n_classes, generator=gen).softmax(-1)

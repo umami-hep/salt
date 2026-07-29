@@ -322,7 +322,7 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
             result["onnx"] = {"error": str(err)}
 
     # static plan-compile check (Mode.TEST / Mode.ONNX) through the real
-    # planner — "the same machinery as salt graph validate" per plan 50 §A.
+    # planner — "the same machinery as salt graph validate".
     try:
         from salt.cli import load_config  # noqa: PLC0415
         from salt.graph.planner import compile_plan  # noqa: PLC0415

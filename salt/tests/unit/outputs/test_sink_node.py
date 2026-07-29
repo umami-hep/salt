@@ -77,7 +77,7 @@ class _FakeH5:
 
 
 def test_close_if_open_closes_handle_without_full_count_assertion():
-    """`close_if_open` closes a leaked handle on an interrupted test and is idempotent (§5.3)."""
+    """`close_if_open` closes a leaked handle on an interrupted test and is idempotent."""
     sink = H5OutputSink()
     fake = _FakeH5()
     # simulate an open writer mid-test with FEWER rows written than expected

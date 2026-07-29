@@ -283,7 +283,7 @@ class VDS(SaltDatasetModule):
             raise RuntimeError(
                 f"VDS {self.name!r} has no reader name wired — it must be assembled "
                 "by GraphDataModule (which sets `_reader`/`_vds_capable` after the "
-                "single-Reader guard, plan-25 §3.8)"
+                "single-Reader guard)"
             )
         return self._reader
 

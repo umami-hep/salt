@@ -40,7 +40,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "cpu_always: a pure-CPU test that lives under tests/integration/ but does NOT "
-        "need a GPU (e.g. the plan-29 W2 ONNX-trace fold gates). It runs on EVERY "
+        "need a GPU (e.g. the ONNX-trace fold gates). It runs on EVERY "
         "pytest invocation — the integration/GPU skip never applies — so these CI-load "
         "bearing CPU gates are never silently skipped.",
     )

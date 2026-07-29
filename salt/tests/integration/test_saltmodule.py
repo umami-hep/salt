@@ -477,10 +477,10 @@ class TestNormGarbageGuard:
 
 
 class TestBoundaryDemandGuards:
-    """Stage-E fixes: demand provenance + early missing-producer errors (§4.1)."""
+    """Demand provenance + early missing-producer errors."""
 
     def test_sink_origins_name_demanding_modules(self, data):
-        # per-mode since the M3 review (a merged map mis-attributed
+        # per-mode since the review (a merged map mis-attributed
         # writer-demanded TEST keys to their inactive FIT demander)
         origins = build_model(data).sink_origins()[Mode.FIT]
         assert (
@@ -557,7 +557,7 @@ class TestCallbackSinks:
 
     def test_no_callback_fit_val_sinks_are_loss_only(self, data):
         # the unchanged baseline: with no FIT/VAL-sink callback, sinks stay
-        # ['loss.total'] (the M2/M3 behaviour) in BOTH training modes
+        # ['loss.total'] (the previous behaviour) in BOTH training modes
         model = self._model_with_aux(data)
         assert model._model_sinks(Mode.FIT) == ["loss.total"]  # noqa: SLF001
         assert model._model_sinks(Mode.VAL) == ["loss.total"]  # noqa: SLF001
@@ -650,7 +650,7 @@ class TestCallbackSinks:
 
 
 class TestClassNamesCheck:
-    """The §2.6 default-on class_names ↔ schema-attrs cross-check (stage-E HIGH fix)."""
+    """The default-on class_names ↔ schema-attrs cross-check."""
 
     def make_reader(self, data) -> H5StructuredReader:
         return H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"])

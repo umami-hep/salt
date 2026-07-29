@@ -10,7 +10,7 @@ from jsonargparse import ActionConfigFile, ArgumentParser, Namespace
 
 MODULE = __name__
 
-# Toy class hierarchy (stands in for NetModule / Processor / Writer, §5.3)
+# Toy class hierarchy (stands in for NetModule / Processor / Writer)
 
 
 class ToyModule:
@@ -34,7 +34,7 @@ class Decoder(ToyModule):
 
 
 class Model:
-    """Holder with the design's ``dict[str, Base]`` annotation (§5.3)."""
+    """Holder with the ``dict[str, Base]`` annotation."""
 
     def __init__(self, modules: dict[str, ToyModule] | None = None):
         self.modules = modules or {}
@@ -47,7 +47,7 @@ class ModelOptionalValues:
         self.modules = modules or {}
 
 
-# Toy callback hierarchy (capability 7, §5.3 callbacks-dict assembly)
+# Toy callback hierarchy (capability 7, callbacks-dict assembly)
 
 
 class Callback:
@@ -58,7 +58,7 @@ class Callback:
 
 
 class Checkpoint(Callback):
-    """Framework callback with the §5.3 monitor-override use case."""
+    """Framework callback with the monitor-override use case."""
 
     def __init__(self, monitor: str = "val_loss", verbose: bool = False):
         super().__init__(verbose)
@@ -206,11 +206,11 @@ def test_print_config_round_trip(tmp_path, capsys):
     strict=True,
     reason="jsonargparse 4.46.0: None fails dict[str, Base] value validation, and a "
     "second config file replaces the dict wholesale (merge_config -> Namespace.update "
-    "treats dict leaves atomically). Design §5.3 null-deletion needs the DeepMergeParser "
+    "treats dict leaves atomically). Null-deletion needs the DeepMergeParser "
     "shim plus `| None` value types — see the workaround tests and SPIKE_jsonargparse.md.",
 )
 def test_null_deletion_via_second_config_file(tmp_path):
-    """Design §5.3: a second config file setting modules.decoder=null removes it."""
+    """A second config file setting modules.decoder=null removes it."""
     parser = make_parser()
     cfg = parser.parse_args(
         [
@@ -257,7 +257,7 @@ def test_null_deletion_workaround_optional_values_cli(tmp_path):
 
 
 def test_dotted_cli_override_into_dict_value(tmp_path):
-    """Design §5.3: --model.modules.encoder.init_args.dim=128 updates one entry."""
+    """--model.modules.encoder.init_args.dim=128 updates one entry."""
     parser = make_parser()
     config = write_yaml(tmp_path, "base.yaml", YAML_BASE)
 
@@ -303,11 +303,11 @@ def test_env_var_override(tmp_path, monkeypatch):
 @pytest.mark.xfail(
     strict=True,
     reason="jsonargparse 4.46.0: merge_config -> Namespace.update replaces dict leaves "
-    "wholesale, so a second config file drops earlier dict keys. Design §5.3 'module "
-    "dicts merge' needs the DeepMergeParser shim — see SPIKE_jsonargparse.md.",
+    "wholesale, so a second config file drops earlier dict keys. The 'module "
+    "dicts merge' semantics need the DeepMergeParser shim — see SPIKE_jsonargparse.md.",
 )
 def test_deep_merge_across_config_files(tmp_path):
-    """Design §5.3: a later file adds a key, earlier keys survive."""
+    """A later file adds a key, earlier keys survive."""
     parser = make_parser()
     cfg = parser.parse_args(
         [
@@ -321,7 +321,7 @@ def test_deep_merge_across_config_files(tmp_path):
 
 
 def test_deep_merge_workaround_merge_config_override(tmp_path):
-    """DeepMergeParser restores the §5.3 semantics: add a key, keep the others."""
+    """DeepMergeParser restores the intended semantics: add a key, keep the others."""
     parser = make_parser(deep_merge=True)
     cfg = parser.parse_args(
         [
@@ -374,7 +374,7 @@ def test_per_entry_init_args_merge_is_native(tmp_path):
     assert encoder.init_args.heads == 4  # survived from the first file
 
 
-# Capability 7: callbacks-dict assembly (§5.3 trainer.callbacks pattern)
+# Capability 7: callbacks-dict assembly (trainer.callbacks pattern)
 
 
 def test_callbacks_dict_assembly(tmp_path):
@@ -401,7 +401,7 @@ trainer:
 """,
     )
 
-    # the §5.3 one-key override into the callbacks dict
+    # the one-key override into the callbacks dict
     cfg = parser.parse_args(
         ["--config", config, "--callbacks.checkpoint.init_args.monitor=val/other_loss"]
     )

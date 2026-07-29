@@ -1,4 +1,4 @@
-"""W2 schema + instantiation-time validation for `training_schedule` (plan D1).
+"""Schema + instantiation-time validation for `training_schedule`.
 
 Covers gate **G2c** (an unknown module name in a freeze spec → `ConfigError` at
 `SaltModule.__init__`) plus the rest of the fail-loud parse/validate surface:

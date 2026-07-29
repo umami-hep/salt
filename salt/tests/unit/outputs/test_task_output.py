@@ -190,4 +190,4 @@ def test_identity_op_still_clones_p0_contract():
     assert isinstance(producer.op, ConversionOp)
     out = producer.forward(b, Mode.TEST)[f"outputs.{_STREAM_J}.out"]
     torch.testing.assert_close(out, preds, rtol=0, atol=0)
-    assert out is not preds  # cloned, not aliased (write-once §2.1)
+    assert out is not preds  # cloned, not aliased (write-once)
