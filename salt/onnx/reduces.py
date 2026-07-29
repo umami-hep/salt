@@ -293,7 +293,7 @@ def reduce_spec(name: str) -> ReduceSpec:
     except KeyError:
         raise ConfigError(
             f"unknown reduce {name!r} — registry: {registered_reduces()} "
-            "(register it via salt.onnx.reduces.register_reduce; design §7.3)"
+            "(register it via salt.onnx.reduces.register_reduce)"
         ) from None
 
 

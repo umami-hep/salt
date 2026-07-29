@@ -1,4 +1,4 @@
-"""P1 unit gates for the conversion ops (split from test_producers.py along §3.4)."""
+"""P1 unit gates for the conversion ops."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_class_probs_global_softmax_matches_task_run_inference():
 
 def test_class_probs_global_matches_literal_f4_softmax():
     """``ClassProbs`` op values == the literal f4-packed softmax columns
-    (re-anchored from the retired ``task.get_h5`` oracle, plan 50 Phase E).
+    (re-anchored from the retired ``task.get_h5`` oracle).
     """
     torch.manual_seed(1)
     logits = torch.randn(5, 3)
@@ -139,7 +139,7 @@ def test_seq_class_index_no_pad_mask_branch():
     torch.testing.assert_close(got, oracle, rtol=0, atol=0)
 
 
-# GATE 2b (plan-29 W2): SeqClassIndex ONNX branch == reduces._bind_argmax,
+# GATE 2b: SeqClassIndex ONNX branch == reduces._bind_argmax,
 #          and is mode-branched (TEST [B,L] int64 unchanged, ONNX [L] int8).
 
 
@@ -249,7 +249,7 @@ def test_seq_class_probs_matches_masked_softmax():
 def test_seq_class_probs_matches_task_run_inference_and_literal_f4_pack():
     """``SeqClassProbs`` == the bound task's sequence ``run_inference`` AND the
     literal f4-packed masked-softmax columns (re-anchored from the retired
-    ``task.get_h5`` oracle, plan 50 Phase E).
+    ``task.get_h5`` oracle).
     """
     torch.manual_seed(41)
     b, t = 4, 5

@@ -150,8 +150,8 @@ class H5OutputSink(OutputSink):
         if outputs:
             raise ConfigError(
                 "H5OutputSink no longer accepts an explicit `outputs:` OutputColumn table "
-                "(plan 50 Phase B) — the H5 sink is implicit (the `salt test` command wires "
-                "it) and derives its columns from the top-level `outputs:` section "
+                "— the H5 sink is implicit (the `salt test` command wires it) and "
+                "derives its columns from the top-level `outputs:` section "
                 "(RunTaskOutput + InputCopyWriter + PadMaskWriter). Declare the section, per "
                 "`gn2v2-opendata.yaml`; use each RunTaskOutput's `modes:` list to control "
                 "test-vs-export participation. Do NOT wire H5OutputSink in `callbacks:` at all."
@@ -318,8 +318,7 @@ class H5OutputSink(OutputSink):
         raise ConfigError(
             "H5OutputSink has no columns to write — give it an explicit `outputs:` "
             "OutputColumn table, or compose a top-level `outputs:` section "
-            "(RunTaskOutput + InputCopyWriter + PadMaskWriter) that binds to it "
-            "(plan 34 W34.2)"
+            "(RunTaskOutput + InputCopyWriter + PadMaskWriter) that binds to it"
         )
 
     def _column_suffix(self, field: Any) -> str | None:
@@ -370,7 +369,7 @@ class H5OutputSink(OutputSink):
             raise ConfigError(
                 "H5OutputSink (dumb-section) found no RunTaskOutput task with a final "
                 f"{'export-selection' if self._section_mode is Mode.ONNX else 'H5'} column — "
-                "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2; for "
+                "wire a RunTaskOutput([tasks]) in the outputs: section (for "
                 "salt inference the RunTaskOutput's modes: list must include 'export')"
             )
         seen_cols: dict[tuple[str, str], str] = {}
@@ -386,7 +385,7 @@ class H5OutputSink(OutputSink):
                 if (other := seen_cols.get((stream, column_name))) is not None:
                     raise ConfigError(
                         f"H5OutputSink (dumb-section): flat column {column_name!r} in stream "
-                        f"{stream!r} is minted by BOTH {other} AND {output_key!r} (plan 34 W34.2)"
+                        f"{stream!r} is minted by BOTH {other} AND {output_key!r}"
                     )
                 seen_cols[stream, column_name] = output_key
             columns.append(col)
@@ -511,7 +510,7 @@ class H5OutputSink(OutputSink):
         if dset is None:
             raise ConfigError(
                 "H5OutputSink needs a GraphDataModule with a built test dataset — "
-                f"got {type(dm).__name__} (design §5.1)"
+                f"got {type(dm).__name__}"
             )
         reader = dset.reader
         self._run_name = getattr(pl_module, "name", "salt")
@@ -526,7 +525,7 @@ class H5OutputSink(OutputSink):
         # MultiSampleReader wrapping any reader, or a global-only custom reader
         # — takes the no-source path, writing task outputs only. That path is
         # fine when NEITHER pad-mask columns NOR input-copying is demanded;
-        # both genuinely need the source file (design §5.1). Capability-keying
+        # both genuinely need the source file. Capability-keying
         # (no isinstance) makes MultiSampleReader delegation work for free.
         h5_source = getattr(reader, "h5_source", None)
         copy_requested = bool(self.copy_inputs) or self._copy_all_tasked_streams
@@ -543,7 +542,7 @@ class H5OutputSink(OutputSink):
                 raise ConfigError(
                     f"H5OutputSink: {want} need an H5StructuredReader-style reader "
                     f"exposing an h5py-openable source (reader.h5_source) — "
-                    f"{type(reader).__name__} advertises none (design §5.1)"
+                    f"{type(reader).__name__} advertises none"
                 )
             sequence_streams: tuple[str, ...] = ()
             group_datasets: dict[str, str] = {}
@@ -565,7 +564,7 @@ class H5OutputSink(OutputSink):
             if stream not in sequence_streams:
                 raise ConfigError(
                     f"H5OutputSink: pad-mask stream {stream!r} is not a sequence stream — "
-                    f"pad masks exist for {list(sequence_streams)} only (design §6.1)"
+                    f"pad masks exist for {list(sequence_streams)} only"
                 )
         total = self._expected_rows(trainer, len(dset), dm.batch_size)
         # resolve the NON-reader object groups' trailing shapes (object_groups).
@@ -603,7 +602,7 @@ class H5OutputSink(OutputSink):
             raise ConfigError(
                 f"H5OutputSink row alignment broke: batch rows [{start}, {stop}) but "
                 f"{self._rows_written} rows written so far — sharded or uneven-batch test "
-                "loaders are not supported (design §5 row-alignment contract)"
+                "loaders are not supported (row-alignment contract)"
             )
         rows = slice(start, stop)
         n = stop - start
@@ -892,7 +891,7 @@ class H5OutputSink(OutputSink):
                 if (other := owners.get((stream, field_name))) is not None:
                     raise ConfigError(
                         f"column {field_name!r} in group {stream!r} is declared by {other} AND "
-                        f"{who} — rename one output (collision check, design §8)"
+                        f"{who} — rename one output (collision check)"
                     )
                 owners[stream, field_name] = who
                 descrs.setdefault(stream, []).append(descr)
@@ -920,7 +919,7 @@ class H5OutputSink(OutputSink):
                     f"object_groups[{group.name!r}].{field.leaf!r}",
                 )
         if not descrs:
-            raise ConfigError("H5OutputSink declares no output columns at all (design §8)")
+            raise ConfigError("H5OutputSink declares no output columns at all")
         self._group_of = {stream: group_datasets.get(stream, stream) for stream in descrs}
         dtypes = {self._group_of[stream]: np.dtype(descr) for stream, descr in descrs.items()}
         shapes = {

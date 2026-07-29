@@ -110,8 +110,7 @@ class StreamEmbed(SaltModelModule):
         if "mup" in (dense or {}):
             raise ConfigError(
                 "StreamEmbed: set mup on the module (init_args.mup), not inside dense — the flag "
-                "is threaded into the composed v1 Dense at bind (design §3.4 muP architectural "
-                "port)"
+                "is threaded into the composed v1 Dense at bind"
             )
         self.stream = stream
         self.out_dim = out_dim

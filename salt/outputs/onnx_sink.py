@@ -79,19 +79,19 @@ class OnnxExportLeaf:
         parts = self.key.split(KEY_SEP)
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
-                f"OnnxExportLeaf key {self.key!r} contains a wildcard — export output keys are "
-                "concrete (design §2.2)"
+                f"OnnxExportLeaf key {self.key!r} contains a wildcard — export output "
+                "keys are concrete"
             )
         if len(parts) < 2 or parts[0] != _OUTPUTS_NAMESPACE:
             raise ConfigError(
                 f"OnnxExportLeaf key {self.key!r} is not under the {_OUTPUTS_NAMESPACE!r} "
                 "namespace — the ONNX sink names the conversion outputs.* leaves the folded "
-                "nodes mint, not raw predictions (design §6.2)"
+                "nodes mint, not raw predictions"
             )
         if self.name is not None and self.names is not None:
             raise ConfigError(
                 f"OnnxExportLeaf {self.key!r} sets BOTH 'name' (single output) and 'names' "
-                "(per-class split_scalars) — pick one (design §6.2)"
+                "(per-class split_scalars) — pick one"
             )
         if self.name is None and self.names is None:
             # single-source naming: default the ONNX suffix to the leaf key's
@@ -106,8 +106,7 @@ class OnnxExportLeaf:
             if self.per_token:
                 raise ConfigError(
                     f"OnnxExportLeaf {self.key!r}: per-class split_scalars outputs ('names') are "
-                    "GLOBAL float scalars — per_token applies to single-name index leaves only "
-                    "(design §6.2)"
+                    "GLOBAL float scalars — per_token applies to single-name index leaves only"
                 )
         if self.dtype not in {"float32", "int8"}:
             raise ConfigError(
@@ -216,15 +215,15 @@ class OnnxExportSink(OutputSink):
         for leaf in leaves:
             if leaf.key in seen_keys:
                 raise ConfigError(
-                    f"OnnxExportSink: duplicate output key {leaf.key!r} — one OnnxExportLeaf per "
-                    "conversion leaf (design §6.2)"
+                    f"OnnxExportSink: duplicate output key {leaf.key!r} — one OnnxExportLeaf "
+                    "per conversion leaf"
                 )
             seen_keys.add(leaf.key)
             for suffix in leaf.suffixes:
                 if suffix in seen_suffixes:
                     raise ConfigError(
                         f"OnnxExportSink: duplicate flat ONNX output name {suffix!r} — the Athena "
-                        "output namespace is flat (design §6.3 / plan 31 W5.1 dup guard)"
+                        "output namespace is flat"
                     )
                 seen_suffixes.add(suffix)
 
@@ -297,7 +296,7 @@ class OnnxExportSink(OutputSink):
         if not ordered:
             raise ConfigError(
                 "OnnxExportSink (dumb-section) found no RunTaskOutput field with an ONNX leaf — "
-                "wire a RunTaskOutput([tasks]) in the outputs: section (plan 34 W34.2)"
+                "wire a RunTaskOutput([tasks]) in the outputs: section"
             )
         self._validate_leaves(ordered)
         self._leaves = ordered
@@ -316,7 +315,7 @@ class OnnxExportSink(OutputSink):
         raise ConfigError(
             "OnnxExportSink has no export leaves — give it an explicit `outputs:` "
             "OnnxExportLeaf list, or compose a top-level `outputs:` section "
-            "(RunTaskOutput) that binds to it (plan 34 W34.2)"
+            "(RunTaskOutput) that binds to it"
         )
 
     @property
@@ -358,7 +357,7 @@ class OnnxExportSink(OutputSink):
         if self.model_name is None:
             raise ConfigError(
                 "OnnxExportSink has no model_name — set export.model_name (or the sink's "
-                "model_name) before deriving the ONNX output names (design §6.3)"
+                "model_name) before deriving the ONNX output names"
             )
         return self.model_name
 
@@ -421,7 +420,7 @@ class OnnxExportSink(OutputSink):
                     raise ConfigError(
                         f"OnnxExportSink: leaf {leaf.key!r} produces {value.shape[-1]} channels "
                         f"but declares {len(leaf.names)} names {list(leaf.names)} — one scalar "
-                        "per class (design §6.2)"
+                        "per class"
                     )
                 for suffix, part in zip(
                     leaf.names, torch.split(value, 1, -1), strict=True

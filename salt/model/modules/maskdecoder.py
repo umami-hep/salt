@@ -66,7 +66,7 @@ class MaskDecoder(SaltModelModule):
         class_net: Mapping[str, Any],
         md: Mapping[str, Any] | None = None,
         mask_net: Mapping[str, Any] | None = None,
-        input: str = "encoded.seq",  # noqa: A002 - design §5.2 YAML surface name
+        input: str = "encoded.seq",  # noqa: A002 - YAML surface name
         out_stream: str = "objects",
     ) -> None:
         """Capture config and build the width-fixed submodules.
@@ -114,8 +114,7 @@ class MaskDecoder(SaltModelModule):
         class_cfg = dict(class_net)
         if "input_size" in class_cfg:
             raise ConfigError(
-                "MaskDecoder: class_net.input_size is inferred from embed_dim — remove it "
-                "(design §2.3 kills YAML width arithmetic)"
+                "MaskDecoder: class_net.input_size is inferred from embed_dim — remove it"
             )
         n_classes = class_cfg.pop("output_size", None)
         if n_classes is None or n_classes < 1:
@@ -126,8 +125,7 @@ class MaskDecoder(SaltModelModule):
         mask_cfg = dict(mask_net or {})
         if "input_size" in mask_cfg:
             raise ConfigError(
-                "MaskDecoder: mask_net.input_size is inferred from embed_dim — remove it "
-                "(design §2.3)"
+                "MaskDecoder: mask_net.input_size is inferred from embed_dim — remove it"
             )
         md_cfg = dict(md or {})
         if "n_heads" not in md_cfg:

@@ -210,12 +210,12 @@ def validate_model_name(name: str) -> str:
         On an empty name or one containing ``_``/``-``.
     """
     if not name:
-        raise ConfigError("export.model_name must be a non-empty string (design §7)")
+        raise ConfigError("export.model_name must be a non-empty string")
     if "_" in name or "-" in name:
         raise ConfigError(
             f"export.model_name {name!r} must not contain underscores or dashes "
             "(Athena naming restriction, v1 to_onnx.py:169-170) — the run 'name:' is "
-            "unrestricted; only the export name is validated (design §7)"
+            "unrestricted; only the export name is validated"
         )
     return name
 
@@ -235,7 +235,7 @@ def stream_of_input_port(port: str) -> str:
     if len(parts) != 2 or parts[0] != "inputs":
         raise ConfigError(
             f"export input port {port!r} must be a dataset-produced 'inputs.<stream>' key "
-            "(design §7: every export.inputs port is a dataset-produced key)"
+            "(every export.inputs port is a dataset-produced key)"
         )
     return parts[1]
 
@@ -285,7 +285,7 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
             "OnnxExportSink (callbacks.onnx_export) naming the conversion outputs.* leaves.\n"
             "  fix: delete the export.outputs section; declare the conversion nodes + the "
             "OnnxExportSink instead, post-process with export.rename, and inspect the "
-            "assembled manifest with `salt export --manifest` (design §4.2/§6)"
+            "assembled manifest with `salt export --manifest`"
         )
     model_name = validate_model_name(export.model_name or sanitised_model_name(run_name))
     if export.track_selection not in TRACK_SELECTIONS:
@@ -294,7 +294,7 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
             f"selection — choose from {list(TRACK_SELECTIONS)} (v1 to_onnx.py:24-35)"
         )
     if not export.inputs:
-        raise ConfigError("export.inputs must declare at least one input (design §5.1)")
+        raise ConfigError("export.inputs must declare at least one input")
     inputs = [_resolve_input(entry, export.track_selection) for entry in export.inputs]
     _check_input_uniqueness(inputs)
     for old, new in export.rename.items():
@@ -333,12 +333,12 @@ def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
         if entry.name is not None:
             raise ConfigError(
                 f"export input {entry.port!r}: alias entries bind from {entry.alias!r} and "
-                "consume no positional ONNX input — drop 'name' (design §7 alias semantics)"
+                "consume no positional ONNX input — drop 'name'"
             )
         if entry.sequence or entry.dyn_axis is not None:
             raise ConfigError(
-                f"export input {entry.port!r}: sequence alias entries are not supported in M4 "
-                "(the alias mechanism serves the GN3 global [B, F] vector, design §6.6/§7)"
+                f"export input {entry.port!r}: sequence alias entries are not supported "
+                "(the alias mechanism serves the GN3 global [B, F] vector)"
             )
         return replace(entry, athena_name=None)
     if entry.dyn_axis is not None and not entry.sequence:
@@ -373,5 +373,5 @@ def _check_input_uniqueness(inputs: list[ExportInput]) -> None:
         if entry.alias is not None and entry.alias not in seen_ports:
             raise ConfigError(
                 f"export input {entry.port!r}: alias source {entry.alias!r} is not another "
-                "export input port — the alias binds from a declared input's tensor (design §7)"
+                "export input port — the alias binds from a declared input's tensor"
             )

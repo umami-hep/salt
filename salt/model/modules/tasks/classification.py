@@ -98,7 +98,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         if not class_names:
             raise ConfigError(
                 f"ClassificationTaskModule: class_names is required and explicit for label "
-                f"{label!r} (design §3.3 — no CLASS_NAMES fallback)"
+                f"{label!r} (no CLASS_NAMES fallback)"
             )
         if len(set(class_names)) != len(tuple(class_names)):
             raise ConfigError(
@@ -277,7 +277,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         if len(values) != len(self.class_names):
             raise ValueError(
                 f"class dict {path} has {len(values)} weights for {self.stream}.{self.label} "
-                f"but the task declares {len(self.class_names)} class_names (design §3.3)"
+                f"but the task declares {len(self.class_names)} class_names"
             )
         with torch.no_grad():
             self.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))

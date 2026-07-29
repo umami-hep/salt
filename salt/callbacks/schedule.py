@@ -2,9 +2,9 @@
 
 At each stage boundary (`on_train_epoch_start` when the epoch crosses into a new
 stage) it applies the new stage's freeze mask and rebuilds the optimizer + LR
-scheduler via ``trainer.strategy.setup_optimizers`` (S1-spike-validated recipe);
-stage 0 is built by Lightning's initial `configure_optimizers`, so the callback
-only rebuilds for stages >= 1 (Gotcha #2). Boundaries are epoch-arithmetic by
+scheduler via ``trainer.strategy.setup_optimizers``; stage 0 is built by
+Lightning's initial `configure_optimizers`, so the callback only rebuilds for
+stages >= 1. Boundaries are epoch-arithmetic by
 default; when any stage declares `early_stop` they become
 data-dependent — `on_validation_end` folds the monitored metric into the active
 stage's tracker (rank-synced) and either flags a pending advance (non-final) or
@@ -44,7 +44,7 @@ class TrainingScheduleCallback(Callback):
         when the schedule flips the freeze set across stages — the reducer's
         buckets are fixed at wrap time, so a mid-fit freeze/unfreeze otherwise
         errors ("parameters not used in producing the loss") or silently
-        desyncs ranks (S2 spike). A no-op off DDP or for a static freeze set.
+        desyncs ranks. A no-op off DDP or for a static freeze set.
         """
         if stage != "fit":
             return
@@ -63,8 +63,8 @@ class TrainingScheduleCallback(Callback):
             log.warning(
                 "training_schedule changes the frozen module set across stages under a DDP "
                 "strategy — auto-enabling find_unused_parameters=True so the reducer tolerates "
-                "the mid-fit freeze/unfreeze flips (plan 01 W3, S2 spike). This adds a small "
-                "per-step overhead; it is required for staged freezing under DDP."
+                "the mid-fit freeze/unfreeze flips. This adds a small per-step overhead; it "
+                "is required for staged freezing under DDP."
             )
 
     def on_train_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -100,7 +100,7 @@ class TrainingScheduleCallback(Callback):
         # records the boundary + resets the entered stage's counters.
         pl_module.advance_to_stage(new_index, trainer.global_step, trainer.current_epoch, reason)
         # rebuild: re-invokes configure_optimizers and refreshes every
-        # trainer/strategy optimizer + scheduler reference (S1 spike, G3d).
+        # trainer/strategy optimizer + scheduler reference.
         trainer.strategy.setup_optimizers(trainer)
 
     def on_validation_end(self, trainer: Trainer, pl_module: LightningModule) -> None:

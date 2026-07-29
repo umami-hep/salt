@@ -100,7 +100,7 @@ class Schema:
                     raise SchemaError(
                         f"schema group {group!r} field {fld!r} cannot form a dotted bundle "
                         f"key — names containing {KEY_SEP!r} (or empty names) are not "
-                        "addressable (design §2.1); regenerate the artifact with "
+                        "addressable; regenerate the artifact with "
                         "salt schema dump"
                     )
                 out.append(f"{group}{KEY_SEP}{fld}")
@@ -187,25 +187,23 @@ def load_schema(path: str | Path) -> Schema:
     except yaml.YAMLError as err:
         raise SchemaError(f"schema file {path} is not valid YAML: {err}") from err
     if not isinstance(raw, dict):
-        raise SchemaError(
-            f"schema file {path} must contain a mapping, got {type(raw).__name__} (design §2.6)"
-        )
+        raise SchemaError(f"schema file {path} must contain a mapping, got {type(raw).__name__}")
     version = raw.get("schema_version")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise SchemaError(
             f"schema file {path} has missing or invalid 'schema_version' "
-            f"({version!r}) — artifacts are versioned from day one (design §11 risk 12)"
+            f"({version!r}) — artifacts are versioned from day one"
         )
     groups_raw = raw.get("groups")
     if not isinstance(groups_raw, dict):
-        raise SchemaError(f"schema file {path} must declare a 'groups' mapping (design §2.6)")
+        raise SchemaError(f"schema file {path} must declare a 'groups' mapping")
     groups: dict[str, GroupSchema] = {}
     for name, node in groups_raw.items():
         gname = str(name)
         if KEY_SEP in gname:
             raise SchemaError(
                 f"schema file {path}: group {gname!r} contains {KEY_SEP!r} — group names must "
-                "be single dotted-key components (design §2.1); regenerate the artifact with "
+                "be single dotted-key components; regenerate the artifact with "
                 "salt schema dump"
             )
         if not isinstance(node, dict):
@@ -219,7 +217,7 @@ def load_schema(path: str | Path) -> Schema:
             if KEY_SEP in str(fld):
                 raise SchemaError(
                     f"schema file {path}: group {gname!r} field {fld!r} contains {KEY_SEP!r} — "
-                    "field names must be single dotted-key components (design §2.1); "
+                    "field names must be single dotted-key components; "
                     "regenerate the artifact with salt schema dump"
                 )
         attrs = node.get("attrs", {})
@@ -293,7 +291,7 @@ def dump_schema(h5_path: str | Path) -> Schema:
             if KEY_SEP in name:
                 print(
                     f"WARNING: skipping dataset {name!r} in {h5_path}: names containing "
-                    f"{KEY_SEP!r} cannot be addressed as bundle keys (design §2.1)",
+                    f"{KEY_SEP!r} cannot be addressed as bundle keys",
                     file=sys.stderr,
                 )
                 continue
@@ -302,8 +300,7 @@ def dump_schema(h5_path: str | Path) -> Schema:
                 if KEY_SEP in fname:
                     print(
                         f"WARNING: skipping field {name}/{fname!r} in {h5_path}: names "
-                        f"containing {KEY_SEP!r} cannot be addressed as bundle keys "
-                        "(design §2.1)",
+                        f"containing {KEY_SEP!r} cannot be addressed as bundle keys",
                         file=sys.stderr,
                     )
                     continue

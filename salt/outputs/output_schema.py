@@ -153,19 +153,17 @@ class OutputColumn:
         parts = self.key.split(KEY_SEP)
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
-                f"OutputColumn key {self.key!r} contains a wildcard — sink demand keys "
-                "are concrete (design §2.2)"
+                f"OutputColumn key {self.key!r} contains a wildcard — sink demand keys are concrete"
             )
         if parts[0] != _OUTPUTS_NAMESPACE:
             raise ConfigError(
                 f"OutputColumn key {self.key!r} is not under the {_OUTPUTS_NAMESPACE!r} "
-                "namespace — sinks consume producer outputs.* leaves, not raw predictions "
-                "(design §2)"
+                "namespace — sinks consume producer outputs.* leaves, not raw predictions"
             )
         if not list(self.suffixes):
             raise ConfigError(
                 f"OutputColumn {self.key!r} needs a non-empty suffix list — name the "
-                "per-channel columns the leaf expands into (design §1 declarative table)"
+                "per-channel columns the leaf expands into"
             )
 
     @property

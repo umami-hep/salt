@@ -32,8 +32,8 @@ from salt.tests._fixtures.v2_builders import (
 )
 from salt.tests.unit.nn.conftest import B, T
 
-# RegressionTaskModule (M5 sub-wave A: targets/denom/norm_params/scaler,
-# custom_output_names, sequence, multi-output, mode-split de-scaling)
+# RegressionTaskModule (targets/denom/norm_params/scaler, custom_output_names,
+# sequence, multi-output, mode-split de-scaling)
 
 
 def _bind_reg_module(task: RegressionTaskModule, schema_widths: dict[str, int]) -> None:
@@ -584,10 +584,10 @@ class TestRegressionTaskModule:
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_declare_and_bind_are_file_free(self, monkeypatch):
-        """The §2.3 no-I/O guard holds for the regression module too."""
+        """The no-I/O guard holds for the regression module too."""
 
         def _forbid(*args, **kwargs):
-            raise AssertionError("file I/O during declare_io/bind (design §2.3)")
+            raise AssertionError("file I/O during declare_io/bind")
 
         monkeypatch.setattr("builtins.open", _forbid)
         task = RegressionTaskModule(

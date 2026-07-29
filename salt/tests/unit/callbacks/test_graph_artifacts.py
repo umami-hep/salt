@@ -19,7 +19,7 @@ from salt.tests.unit.callbacks.conftest import LRS
 _HAS_DOT = shutil.which("dot") is not None
 
 
-# GraphArtifacts (design §4.4 run-dir artifacts)
+# GraphArtifacts (run-dir artifacts)
 
 
 @pytest.fixture(scope="module")
@@ -64,8 +64,8 @@ class TestGraphArtifacts:
             assert (tmp_path / "graph_test.svg").stat().st_size > 0
 
     def test_test_artifacts_default_next_to_checkpoint(self, fitted_model, tmp_path):
-        # M3-review HIGH fix: with a known ckpt_path, the test-path default
-        # is the checkpoint dir (where the eval H5 goes), not the log dir
+        # with a known ckpt_path, the test-path default is the checkpoint dir
+        # (where the eval H5 goes), not the log dir
         trainer = stub_trainer(tmp_path)
         ckpt_dir = tmp_path / "checkpoints"
         ckpt_dir.mkdir()
@@ -77,12 +77,8 @@ class TestGraphArtifacts:
         GraphArtifacts().on_fit_start(trainer, fitted_model)
         assert (tmp_path / "plan_fit.txt").exists()
 
-    # test_writer_sinks_table_in_plan_test removed in W6c:
-    # WriterCallback/TaskWriter were deleted with callback.py/modules.py.
-
     def test_resolved_io_yaml_written(self, fitted_model, tmp_path):
-        # design §4.4: the machine-readable artifact (M3-review fix — it was
-        # silently missing)
+        # the machine-readable artifact
         import yaml
 
         GraphArtifacts().on_fit_start(stub_trainer(tmp_path), fitted_model)

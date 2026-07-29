@@ -126,7 +126,7 @@ class Labels(Processor):
             if len(parts) != 3 or parts[0] != "labels":
                 raise ConfigError(
                     f"Labels module {self.name!r}: narrowed key {key!r} is not of the form "
-                    "labels.<stream>.<label> (design §3.3)"
+                    "labels.<stream>.<label>"
                 )
             _, stream, label = parts
             if self._streams is not None and stream not in self._streams:

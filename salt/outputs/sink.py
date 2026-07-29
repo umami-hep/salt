@@ -182,8 +182,7 @@ class OutputSink(Callback):
         if stage == "test" and trainer.world_size != 1:
             raise ConfigError(
                 f"{type(self).__name__} requires a single device, got "
-                f"world_size={trainer.world_size} — multi-device test writing is out of scope "
-                "(design §5.3, v1 contract)"
+                f"world_size={trainer.world_size} — multi-device test writing is out of scope"
             )
 
     def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:

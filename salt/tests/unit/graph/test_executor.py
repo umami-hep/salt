@@ -323,7 +323,7 @@ class TestMutationDetection:
         msg = str(exc.value)
         assert "'mut'" in msg
         assert "'embed.x'" in msg
-        assert "clone" in msg  # names the fix (§4.1 quality bar)
+        assert "clone" in msg  # names the fix
 
     def test_same_graph_passes_without_debug(self):
         # documented gap: mutation detection is debug-only (version snapshots)
@@ -464,7 +464,7 @@ class TestExecutorConstruction:
 
 
 class TestRecordSteps:
-    """The profiler step scopes (plan 05: per-module attribution)."""
+    """The profiler step scopes (per-module attribution)."""
 
     @staticmethod
     def _run_under_profiler(enabled):

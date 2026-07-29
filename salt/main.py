@@ -67,7 +67,7 @@ def _patch_jsonargparse_sys_modules_race() -> None:
 _patch_jsonargparse_sys_modules_race()
 
 
-# --- pre-de-core checkpoint/config compatibility (Plan 61) -------------------
+# --- pre-de-core checkpoint/config compatibility ------------------------------
 # v2 checkpoints and their saved ``config.yaml`` written BEFORE the de-core
 # rename carry ``salt.core.*`` class_paths. This remapper resolves them to their
 # flat ``salt.*`` homes at load time so old artifacts stay loadable with no edit.
@@ -279,7 +279,7 @@ _INIT_FROM_ARG = "init_from"
 """Top-level warm-start flag name (``--init_from``)."""
 
 _TRAINING_SCHEDULE_ARG = "training_schedule"
-"""Top-level staged-training-schedule key (``--training_schedule``), plan 03.
+"""Top-level staged-training-schedule key (``--training_schedule``).
 
 Its canonical home is the config top level (peer of ``trainer:``/``data:``/
 ``model:``), NOT ``model.init_args``; `_relocate_training_schedule` injects the
@@ -466,7 +466,7 @@ def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] =
     """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` constructor
     arg (``model.init_args.training_schedule``) before jsonargparse instantiates
     the model — the schedule describes the run, so it is a config-surface peer of
-    ``trainer:``/``data:``/``model:``, not a model-architecture field (plan 03).
+    ``trainer:``/``data:``/``model:``, not a model-architecture field.
 
     Mirrors `_fan_out_artifacts` (parser-time, per model-block scope): reads the
     schedule from the block's scope (top-level on the run-free surface,
@@ -505,9 +505,9 @@ def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] =
                 raise ConfigError(
                     "training_schedule is now a TOP-LEVEL config key (peer of trainer:/"
                     "data:/model:), not a model field — move it out of "
-                    "model.init_args.training_schedule to the config top level (plan 03 / "
-                    "D2). The CLI injects it into the SaltModule constructor for you; a "
-                    "nested model.init_args.training_schedule is no longer accepted."
+                    "model.init_args.training_schedule to the config top level. The CLI "
+                    "injects it into the SaltModule constructor for you; a nested "
+                    "model.init_args.training_schedule is no longer accepted."
                 )
             continue
         if override_tree:
@@ -537,7 +537,7 @@ def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     Gates the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
     leaves (the manifest-only writers — input copies, pad masks — do not), so a
     section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
-    tuple (matching a config that historically wired no OnnxExportSink).
+    tuple.
     """
     from salt.graph.spec import Mode
 
@@ -597,10 +597,9 @@ class SaltCLI(LightningCLI):
             })
         else:
             parser_kwargs["default_config_files"] = default_config
-        # overwrite a stale config.yaml from a previous run: until the M6 run
-        # dirs land, fit writes into trainer.default_root_dir (cwd by
-        # default) and a leftover config.yaml must not abort the retry loop
-        # (stage-E ergonomics finding)
+        # overwrite a stale config.yaml from a previous run: fit writes into
+        # trainer.default_root_dir (cwd by default) and a leftover config.yaml
+        # must not abort the retry loop
         kwargs.setdefault("save_config_kwargs", {"overwrite": True})
         super().__init__(
             model_class=SaltModule,
@@ -641,20 +640,20 @@ class SaltCLI(LightningCLI):
             "--name",
             type=str,
             default="salt",
-            help="run name (unrestricted; the Athena export name lives at export.model_name, §5)",
+            help="run name (unrestricted; the Athena export name lives at export.model_name)",
         )
         parser.add_argument(
             "--callbacks",
             type=dict[str, Callback | None] | None,
             default={},
             help="dict-keyed callbacks, deep-mergeable; assembled into trainer.callbacks "
-            "(design §5.3; an entry set to null is removed)",
+            "(an entry set to null is removed)",
         )
         parser.add_argument(
             "--writers.modules",
             type=dict[str, Any] | None,
             default=None,
-            help="REMOVED in W6c — migrate to an ``outputs:``/``callbacks:`` sink; "
+            help="REMOVED — migrate to an ``outputs:``/``callbacks:`` sink; "
             "a non-null entry here raises ConfigError at instantiate_classes "
             "(see gn2v2-dummy.yaml)",
         )
@@ -662,7 +661,7 @@ class SaltCLI(LightningCLI):
             "--outputs",
             type=dict[str, OutputSectionWriter | None] | None,
             default=None,
-            help="plan-34 W34.2 top-level outputs: section — dict-keyed GraphModule writers "
+            help="top-level outputs: section — dict-keyed GraphModule writers "
             "(RunTaskOutput / InputCopyWriter / PadMaskWriter), deep-mergeable, composed AFTER "
             "the model; the section field order drives the eval-H5 TASK-column order (an entry "
             "set to null is removed). NOT a link_arguments link — the section is composed onto "
@@ -673,9 +672,9 @@ class SaltCLI(LightningCLI):
             "--export",
             type=ExportConfig | None,
             default=None,
-            help="the export-ONLY half of the ONNX contract, consumed by `salt export` "
-            "(design §5.1, §7): model_name (no '_'/'-', validated ONLY at export "
-            "time), inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
+            help="the export-ONLY half of the ONNX contract, consumed by `salt export`: "
+            "model_name (no '_'/'-', validated ONLY at export time), "
+            "inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
             "manifest post-processing. The OUTPUT manifest derives from the outputs: "
             "section's export-mode selection — declaring export.outputs is a hard error "
             "at export time. Inert during fit/test; round-trips through saved run configs.",
@@ -693,17 +692,17 @@ class SaltCLI(LightningCLI):
             f"--{_CLASS_DICT_ARG}",
             type=str | None,
             default=None,
-            help="convenience flag (plan-24 Wave 1): fanned out to weight_source="
+            help="convenience flag: fanned out to weight_source="
             "{from_class_dict: <path>} on EACH ClassificationTaskModule whose weight_source "
             "is unset/null, reproducing the verbose per-task weight_source block from one "
             "flag. Tasks that set weight_source explicitly are left alone; the loss CE-weight "
-            "buffer is bitwise-invariant to how the path arrived (design §5.4, R1.3/R1.6).",
+            "buffer is bitwise-invariant to how the path arrived.",
         )
         parser.add_argument(
             f"--{_INIT_FROM_ARG}",
             type=str | None,
             default=None,
-            help="warm-start a fit from a pretrained checkpoint's weights (plan 01 W1). "
+            help="warm-start a fit from a pretrained checkpoint's weights. "
             "Unlike a resume --ckpt_path, trainer state stays fresh and the state dict is "
             "loaded prefix-filtered per module with strict per-module accounting: retained "
             "modules must be fully covered, config modules absent from the checkpoint are "
@@ -723,7 +722,7 @@ class SaltCLI(LightningCLI):
             # for `TrainingSchedule.from_config` to parse.
             type=dict | None,
             default=None,
-            help="TOP-LEVEL staged-training schedule (plan 03, D1/D2): "
+            help="TOP-LEVEL staged-training schedule: "
             "{stages: {name: {epochs, frozen|trainable, optimizer, lrs, order}}}. A peer of "
             "trainer:/data:/model: — the CLI injects the resolved value into the SaltModule "
             "constructor before instantiation. A user-authored model.init_args."
@@ -832,7 +831,7 @@ class SaltCLI(LightningCLI):
         if live_writer_modules:
             raise ConfigError(
                 "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
-                "sink — see gn2v2-dummy.yaml (W6c removal)"
+                "sink — see gn2v2-dummy.yaml"
             )
         # Defer the fit-stage experiment logger past the racy validation pass.
         # jsonargparse's instantiate_classes pass validates the model: block
@@ -860,7 +859,7 @@ class SaltCLI(LightningCLI):
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
             composer(live_section)
-            # plan 50 Phase B: the command wires the implicit per-command sinks
+            # the command wires the implicit per-command sinks
             # (test -> H5, export/graph -> ONNX) over the composed section, before
             # the bind loop — so a config declaring only WHAT (modules + modes)
             # gets the right sink without ever naming H5OutputSink/OnnxExportSink.
@@ -876,16 +875,15 @@ class SaltCLI(LightningCLI):
     def _inject_command_sinks(self, section: Mapping[str, Any]) -> None:
         """Wire the implicit per-command output sinks over the composed section.
 
-        Plan 50 Phase B — the config declares WHAT (section modules + their
-        ``modes:``); the command picks the sink:
+        The config declares WHAT (section modules + their ``modes:``); the
+        command picks the sink:
 
         - ``salt test`` (subcommand ``test``): the H5 persistence sink, if any
           section writer runs in TEST.
         - The run-free parses (``salt graph``/``schema``/``export`` — all
-          ``subcommand is None``, the caveat from plan 50a): BOTH the H5 sink
-          (TEST section) and the ONNX sink (any RunTaskOutput running in
-          ``export``), so the static tooling and the exporter see the same
-          implicit sinks a real run would.
+          ``subcommand is None``): BOTH the H5 sink (TEST section) and the ONNX
+          sink (any RunTaskOutput running in ``export``), so the static tooling
+          and the exporter see the same implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
 
         A sink already present in ``trainer.callbacks`` (a programmatic build,
@@ -966,8 +964,7 @@ class SaltCLI(LightningCLI):
                     "--init_from and --ckpt_path are mutually exclusive: --ckpt_path RESUMES "
                     "(restores trainer state, strict weight load, plan-hash gate enforced) "
                     "while --init_from WARM-STARTS a fresh run from a possibly surgically-"
-                    "changed architecture (weights-only, per-module accounting). Pick one "
-                    "(plan 01 W1, design D4)."
+                    "changed architecture (weights-only, per-module accounting). Pick one."
                 )
             self._wire_experiment_logger(fit_cfg)
             return
@@ -976,7 +973,7 @@ class SaltCLI(LightningCLI):
         cfg = self.config["test"]
         self.save_config_callback = None  # no config.yaml dump on test
         cfg.trainer.logger = False
-        # plan 50 Phase B: the H5 persistence sink is now IMPLICIT — the command
+        # the H5 persistence sink is now IMPLICIT — the command
         # wires it in instantiate_classes over the top-level outputs: section. So
         # the writer-less guard checks for the section (the WHAT), not a
         # declared callbacks-level sink; a config still MAY declare its own sink
@@ -986,7 +983,7 @@ class SaltCLI(LightningCLI):
         if not has_callback_sink and not has_outputs_section:
             raise ConfigError(
                 "salt test needs an `outputs:` section to persist predictions — the "
-                "command wires the H5 sink over it (plan 50 Phase B). Supply a top-level "
+                "command wires the H5 sink over it. Supply a top-level "
                 "outputs: section (InputCopyWriter -> RunTaskOutput -> PadMaskWriter, in v1 "
                 "H5 column order); use each RunTaskOutput's `modes:` list to control "
                 "test-vs-export participation. See gn2v2-opendata.yaml."
@@ -1007,10 +1004,10 @@ class SaltCLI(LightningCLI):
             except ValueError:
                 n_devices = None  # "auto" — single-device eval contract
             if n_devices is not None and n_devices > 1:
-                print("salt test: forcing --trainer.devices=1 (single-device eval, design §8)")
+                print("salt test: forcing --trainer.devices=1 (single-device eval)")
                 cfg.trainer.devices = "1"
         elif isinstance(devices, list) and len(devices) > 1:
-            raise ConfigError("salt test requires a single device (design §8, v1 cli.py:330)")
+            raise ConfigError("salt test requires a single device (v1 cli.py:330)")
 
     @staticmethod
     def _wire_experiment_logger(cfg: Any) -> None:
@@ -1068,7 +1065,7 @@ class SaltCLI(LightningCLI):
             if ckpt_dir
             else "salt fit artifacts: no checkpoint callback configured"
         )
-        print("(run-directory layout with timestamped names lands in M6 — design §5)")
+        print("(run-directory layout with timestamped names is not yet implemented)")
 
 
 def main(args: Sequence[str] | None = None) -> int:
@@ -1101,7 +1098,7 @@ def main(args: Sequence[str] | None = None) -> int:
         return onnx_export.main(argv[1:])
     if argv and argv[0] == _INFERENCE_COMMAND:
         # trainer-free like export: inference executes the export-mode plan
-        # eagerly per jet (plan 50 Phase D), so it dispatches to its own main
+        # eagerly per jet, so it dispatches to its own main
         # rather than a Lightning Trainer subcommand.
         from salt import inference as inference_cli
 
@@ -1116,7 +1113,7 @@ def main(args: Sequence[str] | None = None) -> int:
     try:
         if argv and argv[0] == _MERGE_CONFIG_COMMAND:
             # trainer-free like export: merge the fit config stack + render the
-            # per-stage freeze graphs (plan 10), no data/checkpoints touched. Kept
+            # per-stage freeze graphs, no data/checkpoints touched. Kept
             # inside this try so a GraphError reuses the one-block handler below.
             from salt import merge_config as merge_config_cli
 
@@ -1130,13 +1127,13 @@ def main(args: Sequence[str] | None = None) -> int:
         if help_requested:
             print(
                 "\nsee also: 'salt graph --help' (static graph tooling: validate/plan/plot/"
-                "why/deadcode/resolve, design §4), 'salt schema --help' (schema artifacts, "
-                "§2.6), 'salt mup-shapes --help' / 'salt mup-coord-check --help' (muP base/"
-                "delta infshapes + coord-check, design §3.4), 'salt export --help' (ONNX "
-                "export, §7; --manifest prints the writer-derived output manifest), "
+                "why/deadcode/resolve), 'salt schema --help' (schema artifacts), "
+                "'salt mup-shapes --help' / 'salt mup-coord-check --help' (muP base/"
+                "delta infshapes + coord-check), 'salt export --help' (ONNX "
+                "export; --manifest prints the writer-derived output manifest), "
                 "'salt inference --help' (label-free eager inference: the export output "
-                "set written to H5, plan 50), 'salt merge-config --help' (emit the merged "
-                "config + one per-stage freeze graph for a fit config stack, plan 10), "
+                "set written to H5), 'salt merge-config --help' (emit the merged "
+                "config + one per-stage freeze graph for a fit config stack), "
                 "'salt profile --help' ('dataset': line_profiler over the read path, "
                 "'model': torch.profiler over a short capped fit — both take --steps, "
                 "docs/profiling.md)"

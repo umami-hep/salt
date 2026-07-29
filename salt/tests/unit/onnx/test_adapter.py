@@ -1,4 +1,4 @@
-"""Unit tests for the M4 export surface: config resolution, reduces, adapter (plan 07 stage A)."""
+"""Unit tests for the export surface: config resolution, reduces, adapter."""
 
 from __future__ import annotations
 
@@ -298,7 +298,7 @@ class TestRetiredReduces:
         )
 
 
-# the LIVE register_reduce surface (M5 D-prereq; AM 555-567)
+# the LIVE register_reduce surface
 
 
 def _bind_passthrough_int8(out_cfg, ctx):
@@ -458,10 +458,9 @@ class TestOnnxPlan:
             derive_onnx_sources(resolved, {"jets": JET_VARIABLES})
 
     def test_misflagged_sequence_error_names_export_inputs(self, gn2_modules):
-        # M4-review fix (§4.1 quality bar): 'sequence: false' on a
-        # variable-length stream used to fail with a fix-less planner
-        # ShapeError ("producer '<sources>' ...") that never pointed at the
-        # export block — the error must attribute the source to
+        # 'sequence: false' on a variable-length stream must not fail with a
+        # fix-less planner ShapeError ("producer '<sources>' ...") that never
+        # points at the export block — the error must attribute the source to
         # export.inputs and state the concrete fix
         modules, _, _ = gn2_modules
         cfg = gn2_export_cfg()
@@ -563,7 +562,7 @@ class TestAliasGather:
 
 
 # the export-mode protocol: torch-math forcing + construction-time guards
-# (design §7.2; v1 modelwrapper.py:331-335, to_onnx.py:670,700)
+# (v1 modelwrapper.py:331-335, to_onnx.py:670,700)
 
 
 def build_flash_gn2_modules(tmp_path) -> dict:
@@ -650,7 +649,7 @@ class TestExportModeProtocol:
         # Normaliser.forward skips its eager guard under tracing
         # (TracerWarning hygiene) — the adapter must therefore refuse to
         # build on unmaterialised buffers, or the trace would silently bake
-        # un-materialised values (M4-review fix)
+        # un-materialised values
         modules, resolved, plan, fields = self._compiled(tmp_path, materialise=False)
         with pytest.raises(ConfigError, match="materialised=False"):
             OnnxAdapter(plan, resolved, fields)

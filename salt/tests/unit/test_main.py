@@ -113,7 +113,7 @@ def write_yaml(tmp_path: Path, name: str, text: str) -> str:
     return str(path)
 
 
-# parse + instantiate (gn2v2-dummy.yaml is the shipped worked config, §5.1)
+# parse + instantiate (gn2v2-dummy.yaml is the shipped worked config)
 
 
 class TestParseAndInstantiate:
@@ -184,8 +184,8 @@ class TestDeepMerge:
     def test_override_file_adds_fourth_task(self, data, tmp_path):
         override = write_yaml(tmp_path, "add_task.yaml", FOURTH_TASK_YAML)
         cli = make_cli(data, extra=["--config", override])
-        # the new entry merged in; ALL siblings survive (the §5.3 semantics
-        # that native jsonargparse loses — dict leaves replace wholesale)
+        # the new entry merged in; ALL siblings survive (the semantics that
+        # native jsonargparse loses — dict leaves replace wholesale)
         assert set(cli.model.net.keys()) == GN2V2_MODULES | {"track_type"}
         task = cli.model.net["track_type"]
         assert isinstance(task, ClassificationTaskModule)
@@ -263,7 +263,7 @@ class TestDottedOverrides:
 class TestCallbacksDict:
     def test_base2_defaults_assembled(self, data):
         # base2.yaml ships the salt.callbacks.Checkpoint port (a
-        # ModelCheckpoint subclass) + ProgressBar + ModelSummary (D2)
+        # ModelCheckpoint subclass) + ProgressBar + ModelSummary
         cli = make_cli(data)
         assert any(isinstance(cb, Checkpoint) for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ProgressBar) for cb in cli.trainer.callbacks)
@@ -273,7 +273,7 @@ class TestCallbacksDict:
         assert ckpt.save_top_k == -1  # the v1 Checkpoint keeps every epoch
 
     def test_one_key_override(self, data):
-        # monitor_loss is the new D2 Checkpoint arg (it sets BOTH the monitor
+        # monitor_loss is the new Checkpoint arg (it sets BOTH the monitor
         # and the filename loss tag)
         cli = make_cli(data, extra=["--callbacks.checkpoint.init_args.monitor_loss=train/loss"])
         ckpt = next(cb for cb in cli.trainer.callbacks if isinstance(cb, ModelCheckpoint))
@@ -376,23 +376,23 @@ class TestFitSmoke:
             "--trainer.num_sanity_val_steps=0",
             "--trainer.log_every_n_steps=1",
             # null-delete the base2 ProgressBar (can't combine with the stock
-            # enable_progress_bar=false; the D2 ProgressBar is default-on now)
+            # enable_progress_bar=false; the ProgressBar is default-on now)
             "--callbacks.progress=null",
         ])
         assert rc == 0
-        # base2's Checkpoint (D2) wrote a checkpoint under the run dir's ckpts/,
-        # with the 'loss=' stem the salt-test fallback globs (M3-review fix)
+        # base2's Checkpoint wrote a checkpoint under the run dir's ckpts/,
+        # with the 'loss=' stem the salt-test fallback globs
         ckpts = list(tmp_path.rglob("*.ckpt"))
         assert ckpts, f"no checkpoint written under {tmp_path}"
         assert all("loss=" in ckpt.name for ckpt in ckpts), [c.name for c in ckpts]
-        # the D2 Checkpoint forces the v1 'ckpts/' run-dir layout
+        # the Checkpoint forces the v1 'ckpts/' run-dir layout
         assert any(ckpt.parent.name == "ckpts" for ckpt in ckpts), [str(c) for c in ckpts]
         # the resolved config was persisted (SaveConfigCallback)
         configs = list(tmp_path.rglob("config.yaml"))
         assert configs, f"no config.yaml written under {tmp_path}"
         assert "class_path: salt.model.SaltModule" in configs[0].read_text()
-        # M3-review fix: the SAVED run config (which carries ckpt_path: null)
-        # round-trips into the salt graph tooling
+        # the SAVED run config (which carries ckpt_path: null) round-trips
+        # into the salt graph tooling
         assert "ckpt_path" in configs[0].read_text()
         assert main(["graph", "validate", "-c", str(configs[0]), "--mode", "fit"]) == 0
         assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
@@ -537,7 +537,7 @@ class TestBestCheckpointFallback:
             _best_checkpoint(self._config(tmp_path))
 
 
-# graph/schema dispatch (the M1 tooling keeps working through salt)
+# graph/schema dispatch (the tooling keeps working through salt)
 
 
 class TestGraphDispatch:
@@ -553,7 +553,7 @@ class TestGraphDispatch:
 
 class TestFitRetryLoop:
     def test_second_fit_overwrites_stale_config(self, data, tmp_path, capsys):
-        # stage-E ergonomics fix: a leftover config.yaml from a previous run
+        # a leftover config.yaml from a previous run
         # must not abort the retry loop (SaveConfigCallback overwrite=True),
         # and the artifact locations are announced at end of fit
         args = [
@@ -577,7 +577,7 @@ class TestFitRetryLoop:
 
 
 class TestGraphFitConfigAdapter:
-    """``salt graph`` over the REAL §5.1 trainer configs (stage-E HIGH fix)."""
+    """``salt graph`` over the REAL trainer configs."""
 
     @staticmethod
     def set_flags(data) -> list[str]:
@@ -594,7 +594,7 @@ class TestGraphFitConfigAdapter:
         assert rc == 0
         for mode in ("FIT", "VAL", "TEST", "ONNX"):
             assert f"OK [mode={mode}]" in out
-        # the §2.6 class-names cross-check ran (jets flavour_label attr)
+        # the class-names cross-check ran (jets flavour_label attr)
         assert "class_names" in out
 
     def test_validate_is_data_free(self, capsys):
@@ -611,7 +611,7 @@ class TestGraphFitConfigAdapter:
             "model.modules.norm.init_args.norm_dict=unused.yaml",
         ])
         assert rc == 0
-        # without a schema artifact the §2.6 opt-out warning is emitted
+        # without a schema artifact the opt-out warning is emitted
         assert "field spellings" in capsys.readouterr().err
 
     def test_plan_shows_full_pipeline(self, data, capsys):
@@ -685,10 +685,10 @@ class TestGraphFitConfigAdapter:
         assert "trainer configs only" in capsys.readouterr().err
 
     def test_validate_onnx_legacy_outputs_fail_with_the_migration_error(self, tmp_path, capsys):
-        # M4.5: export.outputs was removed — a pre-amendment config carrying
-        # the section must fail `validate --mode onnx` with the §4.1-bar
-        # migration error pointing at the writers (NOT silently validate
-        # green against a stale hand-typed manifest)
+        # export.outputs was removed — a config carrying the section must fail
+        # `validate --mode onnx` with the migration error pointing at the
+        # writers (NOT silently validate green against a stale hand-typed
+        # manifest)
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
@@ -764,8 +764,7 @@ class TestGraphFitConfigAdapter:
         assert "OK [mode=ONNX]" in out
 
     def test_validate_onnx_underscore_model_name_fails(self, tmp_path, capsys):
-        # the §4.1 'export.model_name contains no _/-' validate check —
-        # used to pass even with --strict (M4-review HIGH fix)
+        # the 'export.model_name contains no _/-' validate check
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
@@ -789,8 +788,8 @@ class TestGraphFitConfigAdapter:
 
     def test_validate_onnx_export_less_config_warns(self, tmp_path, capsys):
         # a trainer config without an export: block keeps the all-preds
-        # fallback but says so — and --strict promotes it (the §9.3
-        # converted-config CI gate expects the block to exist)
+        # fallback but says so — and --strict promotes it (the converted-config
+        # CI gate expects the block to exist)
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
@@ -816,8 +815,8 @@ class TestGraphFitConfigAdapter:
         # the traced graph's rendering is the export-time plan_onnx.txt
         assert "dataset-fed STATIC view" in out
         assert "plan_onnx.txt" in out
-        # the no-op narrowed-to-nothing labels step is annotated (M4-review
-        # fix: it used to look like live label loading in the ONNX plan)
+        # the no-op narrowed-to-nothing labels step is annotated, so it does
+        # not look like live label loading in the ONNX plan
         assert "labels" in out
         assert "[narrowed to 0 keys — no-op]" in out
 
@@ -838,7 +837,7 @@ class TestGraphFitConfigAdapter:
 
 
 # ===========================================================================
-# Wave-1 class_dict fan-out (formerly test_wave1_fanout.py)
+# class_dict fan-out
 #
 # These exercise the --class_dict convenience flag on salt.main
 # (SaltCLI._fan_out_artifacts). Helpers/fixtures are wave1_*-prefixed to avoid
@@ -906,7 +905,7 @@ def wave1_verbose_block(wave1_data) -> list[str]:
 
 
 def wave1_class_dict_flag(wave1_data) -> list[str]:
-    """The Wave-1 one-flag form (``--class_dict``)."""
+    """The one-flag form (``--class_dict``)."""
     return [f"--class_dict={wave1_data['cd']}"]
 
 
@@ -1008,7 +1007,7 @@ class TestFanOutInstantiated:
 
 
 # ===========================================================================
-# Plan 03: TOP-LEVEL `training_schedule:` config home
+# TOP-LEVEL `training_schedule:` config home
 #
 # The staged-training schedule is a config-surface peer of trainer:/data:/model:,
 # NOT nested under model.init_args. salt.main._relocate_training_schedule
@@ -1096,7 +1095,7 @@ class _StubTrainer:
 class TestTopLevelTrainingSchedule:
     def test_top_level_schedule_parses_into_model(self, data, tmp_path):
         # the example-config twin parses on the real CLI surface and builds the
-        # 2-stage schedule on the instantiated SaltModule (schema move, plan 03).
+        # 2-stage schedule on the instantiated SaltModule.
         override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         cli = make_cli(data, extra=["--config", override])
         sched = cli.model._schedule  # noqa: SLF001
@@ -1118,7 +1117,7 @@ class TestTopLevelTrainingSchedule:
 
     def test_deep_cli_override_updates_one_stage_field(self, data, tmp_path):
         # a deep CLI override reaches into the schedule and updates one leaf,
-        # leaving sibling stage fields intact (plan 03 done-criterion).
+        # leaving sibling stage fields intact.
         override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         cli = make_cli(
             data,
@@ -1132,7 +1131,7 @@ class TestTopLevelTrainingSchedule:
     def test_stacked_config_merges_per_stage_by_name(self, data, tmp_path):
         # a second --config overrides ONE field of ONE stage; the untouched stage
         # (full_finetune) and the untouched field (head_warmup.trainable) survive
-        # — DeepMergeParser deep-merges the schedule per-stage-by-name (plan D1).
+        # — DeepMergeParser deep-merges the schedule per-stage-by-name.
         base = write_yaml(tmp_path, "base_sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         over = write_yaml(tmp_path, "over_sched.yaml", SCHEDULE_OVERRIDE_YAML)
         cli = make_cli(data, extra=["--config", base, "--config", over])
@@ -1144,7 +1143,7 @@ class TestTopLevelTrainingSchedule:
 
     def test_stacked_config_stage_null_deletes(self, data, tmp_path):
         # a `stage: null` override deletes that stage (the deep-merge deletion
-        # idiom, plan D1) — full_finetune is dropped, head_warmup remains.
+        # idiom) — full_finetune is dropped, head_warmup remains.
         base = write_yaml(tmp_path, "base_sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         over = write_yaml(tmp_path, "del_sched.yaml", DELETE_STAGE_YAML)
         cli = make_cli(data, extra=["--config", base, "--config", over])
@@ -1170,7 +1169,7 @@ class TestTopLevelTrainingSchedule:
 
     def test_no_schedule_is_a_noop_desugars(self, data):
         # no top-level schedule (and no nested) => the desugared single `fit` stage
-        # (legacy parity path, plan D2); nothing injected, no reject.
+        # (legacy parity path); nothing injected, no reject.
         cli = make_cli(data)
         sched = cli.model._schedule  # noqa: SLF001
         assert not sched.is_multi_stage
@@ -1178,9 +1177,9 @@ class TestTopLevelTrainingSchedule:
         assert getattr(cli.config.model.init_args, "training_schedule", None) is None
 
 
-# main.py callback auto-injection gate (plan 03: long-standing follow-up, folded
-# in since main.py is being touched). The TrainingScheduleCallback is auto-added
-# on `fit` iff the schedule is multi-stage or freezes anything; never otherwise.
+# main.py callback auto-injection gate. The TrainingScheduleCallback is
+# auto-added on `fit` iff the schedule is multi-stage or freezes anything;
+# never otherwise.
 class TestScheduleCallbackAutoInjection:
     def test_callback_injected_for_multistage_fit(self, data, tmp_path):
         from salt.callbacks.schedule import TrainingScheduleCallback

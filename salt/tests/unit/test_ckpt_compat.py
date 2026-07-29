@@ -1,4 +1,4 @@
-"""Pre-de-core checkpoint/config class_path compatibility (Plan 61 W5).
+"""Pre-de-core checkpoint/config class_path compatibility.
 
 Checkpoints and their saved ``config.yaml`` written before the de-core rename
 carry ``salt.core.*`` class_paths; the load-time remapper resolves them to the

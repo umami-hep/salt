@@ -548,9 +548,9 @@ class TestDeterminism:
     # Golden plan_hash for the fixed chain_ab/SRC_X graph. Guards the canonical
     # serialisation: a regression that lets set/dict iteration order (or
     # PYTHONHASHSEED) leak into the payload, or that changes the payload
-    # structure, breaks checkpoint/repro hashes across machines (§3.1) and
-    # must be a conscious, reviewed change.
-    # (verified byte-identical across processes with PYTHONHASHSEED=0/1/42)
+    # structure, breaks checkpoint/repro hashes across machines and
+    # must be a conscious, reviewed change. The hash must stay byte-identical
+    # across processes regardless of PYTHONHASHSEED.
     GOLDEN_CHAIN_HASH = "2fc174f6a6870b4cd914816a0ca06b2d01ade488a28afc54c212dffa7f972e32"
 
     @staticmethod

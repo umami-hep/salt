@@ -1,8 +1,8 @@
-"""Behavioural tests for the unified `salt.data.UprootReader` (plan 02).
+"""Behavioural tests for the unified `salt.data.UprootReader`.
 
 Format is config, not class: the same reader serves tree entries (``unroll=None``)
 or the elements of one jagged group (``unroll=<group>``). Format-parity vs the
-legacy presets lives in `test_uproot_equivalence.py`; here we exercise the new
+legacy presets lives in `test_uproot_equivalence.py`; here we exercise the
 capabilities (easyjet jet-rows, cuts on either axis, config aliases) and the
 config-validation error surface.
 """

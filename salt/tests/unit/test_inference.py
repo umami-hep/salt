@@ -1,4 +1,4 @@
-"""Unit tests for ``salt inference`` (plan 50 Phase D): parsing/dispatch, the
+"""Unit tests for ``salt inference``: parsing/dispatch, the
 export-selection sink, label-demand-free ONNX plan compilation, and the
 unlabelled-file dataset path.
 """
@@ -374,7 +374,7 @@ class TestLabelFreePlanCompile:
         assert not labelled_edges, f"{config}: ONNX plan consumes labels {labelled_edges}"
         # the Labels wildcard narrowed against the ONNX demand: the collected step
         # produces NO label key and reads NO field (no label dataset is ever
-        # touched — the 50a Task 2 contract).
+        # touched).
         for step in plan.steps:
             if step.name != "labels":
                 continue

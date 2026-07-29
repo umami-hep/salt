@@ -1,4 +1,4 @@
-"""Tests for salt.profiling (plan 05: the dataset line profiler + model torch.profiler)."""
+"""Tests for salt.profiling (the dataset line profiler + model torch.profiler)."""
 
 import json
 from types import SimpleNamespace

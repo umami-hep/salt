@@ -114,7 +114,7 @@ class TestTransformerEncoder:
 
 
 class TestTransformerEncoderMup:
-    """The ``mup:`` flag on `TransformerEncoder` (M6 sub-wave B, plan 12 muP arch port)."""
+    """The ``mup:`` flag on `TransformerEncoder`."""
 
     def test_default_is_not_mup(self):
         enc = TransformerEncoder(dim=16, num_layers=1, out_dim=8, attention={"num_heads": 2})
@@ -152,9 +152,6 @@ class TestTransformerEncoderMup:
         b.set("seq.mask", torch.zeros(B, T, dtype=torch.bool))
         out = enc(b, Mode.FIT)
         assert out["encoded.seq"].shape == (B, T + 1, 8)
-
-    # DEL-1: test_mup_forward_bitwise_vs_independent_v1 retired with the v1 tree
-    # (parity-closure doctrine: v1 comparisons = git checkout 29c67a1).
 
     def test_set_export_mode_folds_mu_readout_to_plain_linear(self):
         """set_export_mode swaps the MuReadout for a plain Linear, forward unchanged."""

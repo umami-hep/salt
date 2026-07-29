@@ -1,7 +1,7 @@
 """Training-schedule schema: named stages with per-stage freeze + optimizer/LR.
 
 Parsed and validated fail-loud at `SaltModule.__init__`. It is the single
-canonical home for optimizer/LR config (plan D1/D2): a plain (no
+canonical home for optimizer/LR config: a plain (no
 `training_schedule`) config desugars to a single `fit` stage (see
 `desugar_legacy`), so `SaltModule.configure_optimizers` has exactly one code
 path. This module also owns the per-stage epoch→step allocation math and the
@@ -94,8 +94,7 @@ class LRSchedulerConfig:
     the freshly-rebuilt stage optimizer (never a user-supplied `optimizer`). The
     remaining fields are Lightning scheduler-config keys: `interval` (epoch|step),
     `frequency`, and `monitor` (REQUIRED for a metric-driven scheduler, e.g.
-    `ReduceLROnPlateau`). Absent on a stage → the default per-stage OneCycleLR
-    (byte-parity with the pre-W8 behaviour).
+    `ReduceLROnPlateau`). Absent on a stage → the default per-stage OneCycleLR.
     """
 
     class_path: str
@@ -163,8 +162,7 @@ class TrainingSchedule:
     def has_early_stop(self) -> bool:
         """Whether any stage declares an `early_stop` criterion — the master switch
         that gates every early-stop code path. When ``False``, boundaries are
-        pure epoch arithmetic and no early-stop checkpoint state is written, so
-        behaviour is bitwise-identical to the pre-W7 tip (the G7a parity guard).
+        pure epoch arithmetic and no early-stop checkpoint state is written.
         """
         return any(stage.early_stop is not None for stage in self.stages)
 
@@ -172,7 +170,7 @@ class TrainingSchedule:
     def has_stage_callbacks(self) -> bool:
         """Whether any stage declares scoped `callbacks` — the switch that injects
         the `StageScopedCallbacks` coordinator. When ``False`` no
-        coordinator is added and callback handling is unchanged from the pre-W7 tip.
+        coordinator is added and callback handling is left untouched.
         """
         return any(stage.callbacks is not None for stage in self.stages)
 
@@ -180,7 +178,7 @@ class TrainingSchedule:
     def has_lr_scheduler(self) -> bool:
         """Whether any stage overrides the LR-scheduler class — the
         master switch for the per-stage `lr_scheduler`. When ``False`` every stage
-        uses the default per-stage OneCycleLR, bitwise-identical to the pre-W8 tip.
+        uses the default per-stage OneCycleLR.
         """
         return any(stage.lr_scheduler is not None for stage in self.stages)
 
@@ -266,7 +264,7 @@ class TrainingSchedule:
                 raise ConfigError(
                     "training_schedule declares multiple epoch-delimited stages but "
                     f"trainer.max_epochs is {max_epochs} — staged training needs a finite "
-                    "positive max_epochs to allocate per-stage epochs/steps (plan D1)."
+                    "positive max_epochs to allocate per-stage epochs/steps."
                 )
             return
         *non_final, final = self.stages
@@ -275,7 +273,7 @@ class TrainingSchedule:
                 raise ConfigError(
                     f"training_schedule stage {stage.name!r} omits 'epochs' — only the final "
                     "stage may omit it (to take the remaining epochs); every earlier stage needs "
-                    "an explicit positive 'epochs' (plan D1)."
+                    "an explicit positive 'epochs'."
                 )
         explicit_sum = sum(s.epochs for s in self.stages if s.epochs is not None)
         if final.epochs is None:
@@ -285,12 +283,12 @@ class TrainingSchedule:
                     f"training_schedule over-allocates epochs: the explicit stages sum to "
                     f"{explicit_sum} but trainer.max_epochs is {max_epochs}, leaving no epochs "
                     f"for the final stage {final.name!r} (needs >= 1). Reduce stage epochs or "
-                    "raise trainer.max_epochs (plan D1)."
+                    "raise trainer.max_epochs."
                 )
         elif explicit_sum > max_epochs:
             raise ConfigError(
                 f"training_schedule over-allocates epochs: the stages sum to {explicit_sum} "
-                f"but trainer.max_epochs is {max_epochs} (plan D1)."
+                f"but trainer.max_epochs is {max_epochs}."
             )
 
     @classmethod
@@ -317,12 +315,12 @@ class TrainingSchedule:
         if not isinstance(raw, Mapping) or "stages" not in raw:
             raise ConfigError(
                 "training_schedule must be a mapping with a 'stages' key "
-                "(a dict of stage-name -> stage config; plan D1)."
+                "(a dict of stage-name -> stage config)."
             )
         if extra := set(raw) - {"stages"}:
             raise ConfigError(
                 f"training_schedule has unknown top-level key(s) {sorted(extra)} — only "
-                "'stages' is supported (plan D1)."
+                "'stages' is supported."
             )
         raw_stages = raw["stages"]
         if not isinstance(raw_stages, Mapping):
@@ -343,9 +341,9 @@ class TrainingSchedule:
     @classmethod
     def desugar_legacy(cls, module_names: Sequence[str]) -> TrainingSchedule:
         """The single-`fit`-stage schedule a plain (no `training_schedule`) config
-        desugars to (plan D2): one stage, no freeze, no per-stage optimizer/LR
-        override — so `configure_optimizers` falls back to the top-level
-        ``lrs:``/``optimizer:`` and training is bitwise-identical to legacy code.
+        desugars to: one stage, no freeze, no per-stage optimizer/LR override —
+        so `configure_optimizers` falls back to the top-level
+        ``lrs:``/``optimizer:``.
         """
         return cls([StageConfig(name="fit")], module_names)
 
@@ -360,13 +358,13 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
     if unknown := set(cfg) - _STAGE_FIELDS:
         raise ConfigError(
             f"training_schedule stage {name!r} has unknown key(s) {sorted(unknown)} — "
-            f"valid keys are {sorted(_STAGE_FIELDS)} (plan D1)."
+            f"valid keys are {sorted(_STAGE_FIELDS)}."
         )
     frozen, trainable = cfg.get("frozen"), cfg.get("trainable")
     if frozen is not None and trainable is not None:
         raise ConfigError(
             f"training_schedule stage {name!r} sets BOTH 'frozen' and 'trainable' — give at "
-            "most one (the other is its complement over model.modules; plan D1)."
+            "most one (the other is its complement over model.modules)."
         )
     frozen_t = _validate_names(name, "frozen", frozen, module_names)
     trainable_t = _validate_names(name, "trainable", trainable, module_names)
@@ -382,7 +380,7 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
             raise ConfigError(
                 f"training_schedule stage {name!r} sets both 'lr_scheduler' and OneCycle-only "
                 f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
-                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs' (W8)."
+                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs'."
             )
     return StageConfig(
         name=name,
@@ -417,7 +415,7 @@ def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig
     if unknown := set(raw) - _LR_SCHEDULER_FIELDS:
         raise ConfigError(
             f"training_schedule stage {stage!r} 'lr_scheduler' has unknown key(s) "
-            f"{sorted(unknown)} — valid keys are {sorted(_LR_SCHEDULER_FIELDS)} (plan 15 W8)."
+            f"{sorted(unknown)} — valid keys are {sorted(_LR_SCHEDULER_FIELDS)}."
         )
     class_path = raw.get("class_path")
     if not isinstance(class_path, str) or not class_path.strip():
@@ -434,7 +432,7 @@ def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig
     if isinstance(init_args, Mapping) and "optimizer" in init_args:
         raise ConfigError(
             f"training_schedule stage {stage!r} 'lr_scheduler.init_args' must not set 'optimizer' "
-            "— the freshly-rebuilt stage optimizer is injected automatically (plan 15 W8)."
+            "— the freshly-rebuilt stage optimizer is injected automatically."
         )
     interval = raw.get("interval", "epoch")
     if interval not in {"epoch", "step"}:
@@ -525,7 +523,7 @@ def _parse_early_stop(stage: str, cfg: Mapping[str, Any]) -> EarlyStopConfig | N
     if unknown := set(raw) - _EARLY_STOP_FIELDS:
         raise ConfigError(
             f"training_schedule stage {stage!r} 'early_stop' has unknown key(s) {sorted(unknown)} "
-            f"— valid keys are {sorted(_EARLY_STOP_FIELDS)} (plan 12 W7)."
+            f"— valid keys are {sorted(_EARLY_STOP_FIELDS)}."
         )
     monitor = raw.get("monitor")
     if not isinstance(monitor, str) or not monitor.strip():
@@ -583,7 +581,7 @@ def _validate_names(
     if unknown := [n for n in names if n not in module_names]:
         raise ConfigError(
             f"training_schedule stage {stage!r} '{field}' names unknown module(s) {unknown} — "
-            f"they must be keys of model.modules ({sorted(module_names)}; plan D1)."
+            f"they must be keys of model.modules ({sorted(module_names)})."
         )
     return names
 
@@ -616,7 +614,7 @@ def _check_orders(stages: list[StageConfig]) -> None:
     if len(set(explicit)) != len(explicit):
         raise ConfigError(
             "training_schedule has duplicate explicit 'order' values — each pinned stage order "
-            f"must be unique (got {sorted(explicit)}; plan D1)."
+            f"must be unique (got {sorted(explicit)})."
         )
 
 

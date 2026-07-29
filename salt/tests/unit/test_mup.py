@@ -1,4 +1,4 @@
-"""Tests for the muP routing surface + tooling (`salt.model.mup`, plan 12 sub-wave B)."""
+"""Tests for the muP routing surface + tooling (`salt.model.mup`)."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def mup_override(tmp_path) -> Path:
     return path
 
 
-# GN2_muP.yaml scaled-down dims (inlined from the retired gates_m6._mu1_modules)
+# GN2_muP.yaml scaled-down dims
 _MUP_TRACK_VARIABLES: tuple[str, ...] = ("d0", "z0SinTheta", "dphi", "deta", "qOverP")
 _MUP_JET_VARIABLES: tuple[str, ...] = ("pt_btagJes", "eta_btagJes")
 _MUP_CLASS_NAMES: tuple[str, ...] = ("bjets", "cjets", "ujets")

@@ -105,8 +105,7 @@ class DeepMergeParser(LightningArgumentParser):
 
         The top-level ``training_schedule`` leaf is RECURSIVELY deep-merged instead
         (its stage names live one level down under ``stages:``), so stacked configs
-        override per-stage-by-name rather than replacing the whole schedule (plan 03
-        / D1).
+        override per-stage-by-name rather than replacing the whole schedule.
         """
         for key, val_from in list(cfg_from.items()):
             if not isinstance(val_from, dict):

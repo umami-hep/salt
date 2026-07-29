@@ -3,10 +3,7 @@
 The modular salt v2 stack: graph-of-modules models, a demand-driven dataset
 pipeline, and a jsonargparse YAML surface. Everything here is config-first:
 modules declare their inputs/outputs (`declare_io`), plans are compiled
-statically, and no data file is touched before the run starts (design §2.3).
-
-> Design doc references (`§…`) point at the v2 design document
-> (`plans/02_design-doc.md` in the modularise-salt study).
+statically, and no data file is touched before the run starts.
 
 ## Parity-closure doctrine (v1 vs v2 comparisons)
 
@@ -111,22 +108,21 @@ salt fit --config salt/configs/gn2v2-dummy.yaml \
 ```
 
 Recommended extra: a **schema artifact** (`salt schema dump /tmp/v2/train.h5
--o /tmp/v2/schema.yaml`, design §2.6) passed as
+-o /tmp/v2/schema.yaml`) passed as
 `--data.modules.reader.init_args.schema /tmp/v2/schema.yaml`. With it, field
 typos fail statically before any data is read, and the configured
 `class_names` lists are cross-checked (set AND order) against the file's
 label attrs.
 
-**Where outputs land**: until the M6 run-dir layout, `config.yaml`,
-`checkpoints/` and the fit plan/graph artifacts are written into the trainer
-log dir — **your cwd unless you pass `--trainer.default_root_dir <dir>`**,
-which is why the quickstart command above sets it (without it, a fit run
-from the repo root drops ~8 files into the checkout). The end-of-fit message
-prints the exact paths. A leftover `config.yaml` from a previous run is
-overwritten. `salt test` artifacts land next to the checkpoint, with the
-eval H5 (see below).
+**Where outputs land**: `config.yaml`, `checkpoints/` and the fit plan/graph
+artifacts are written into the trainer log dir — **your cwd unless you pass
+`--trainer.default_root_dir <dir>`**, which is why the quickstart command
+above sets it (without it, a fit run from the repo root drops ~8 files into
+the checkout). The end-of-fit message prints the exact paths. A leftover
+`config.yaml` from a previous run is overwritten. `salt test` artifacts land
+next to the checkpoint, with the eval H5 (see below).
 
-## Config model (design §5)
+## Config model
 
 - `base2.yaml` is auto-loaded; your config stacks on top.
 - `model.init_args.modules` and `data.modules` are **dicts of named
@@ -159,13 +155,13 @@ model:
 
 All existing modules survive the merge; the new task's label is demanded
 from the dataset automatically and its loss joins `loss.total` via the
-`losses.**` collection (design §3.3). To persist its predictions in eval
-and declare its ONNX output, add the task name to a `RunTaskOutput`
+`losses.**` collection. To persist its predictions in eval and declare its
+ONNX output, add the task name to a `RunTaskOutput`
 `tasks:` list in the top-level `outputs:` section (one line — see the
 evaluation section below); the per-mode rendering (prob columns in TEST,
 `{model_name}_TrackType` argmax int8 in ONNX) comes from the task's own
 `get_output`. If the aux head is a training-time regulariser that must NOT
-reach eval OR Athena, set `expose: [fit, val]` on the task (design §4.2):
+reach eval OR Athena, set `expose: [fit, val]` on the task:
 its prediction is gated out of the TEST/ONNX plans (the task is pruned
 there) while it keeps training. To keep it in eval but out of Athena only,
 list it in a `RunTaskOutput` with `modes: [test]` and check with
@@ -222,14 +218,13 @@ requires each listed task's raw `preds.*` leaf (plus the task's
 `outputs.<stream>.<task>.<col>` leaf per returned `OutputField`; the
 sinks consume ONLY `outputs.*` leaves. Demand-gating keeps exactly the
 demanded producers alive, and a produced `preds.*` key consumed by **no**
-sink is a hard error (design §4.2) — narrowing a `RunTaskOutput` `tasks:`
-list and forgetting a task fails loudly instead of silently dropping
-columns. The same error fires statically from
+sink is a hard error — narrowing a `RunTaskOutput` `tasks:` list and
+forgetting a task fails loudly instead of silently dropping columns. The same error fires statically from
 `salt graph validate`/`deadcode`. A `salt test` config without an
 `outputs:` section is refused, and a config still carrying the retired
 top-level `writers:` block fails with a clean migration `ConfigError`. A
 train-only aux task opts out of eval with the per-task
-`expose: [fit, val]` config (design §4.2): it stays trained (the loss is
+`expose: [fit, val]` config: it stays trained (the loss is
 FIT/VAL anyway) while its `preds.*` port is gated out of the TEST/ONNX
 plans, so the planner prunes the task and the dead-preds error never
 fires. `--model.modules.<task>=null` (delete the task entirely) remains
@@ -312,7 +307,7 @@ modes. The legacy per-task rendering surface (`get_h5` / `output_names` /
 retired; `salt/tests/unit/nn/test_get_output.py`
 carries the re-anchored per-family oracles.
 
-### Add a custom output column (design §8)
+### Add a custom output column
 
 Two extension seams, by scope:
 
@@ -451,10 +446,10 @@ loop runs per jet (the ONNX-mode graph branches assume the Athena calling
 convention) — for bulk labelled evaluation use `salt test`; this command
 is the offline twin of the deployed network.
 
-## Static graph tooling (design §4)
+## Static graph tooling
 
 All `salt graph` subcommands accept BOTH the trainer configs above and the
-small M1 toy-graph format, and never touch data. Saved run `config.yaml`
+small toy-graph format, and never touch data. Saved run `config.yaml`
 files round-trip directly (`salt graph plot -c <run_dir>/config.yaml ...`
 — the run-surface `ckpt_path` key is accepted and ignored). `-c` is
 **repeatable** for trainer configs with the fit/export deep-merge semantics
@@ -479,18 +474,17 @@ salt graph deadcode -c <cfg>
 `--set KEY=VALUE` (repeatable) supplies required init_args **data-free** —
 e.g. the `norm_dict` path that the shipped configs leave as a required
 override is never read by static tooling, so any value works. `validate`
-also runs the §2.6 class-names ↔ schema-attrs cross-check when the reader
+also runs the class-names ↔ schema-attrs cross-check when the reader
 has a schema artifact, and reports module **preflights** (e.g. a missing
 norm dict) as warnings — promotable with `--strict`; an actual
 `salt fit` fails hard on the same check at fit start (fresh fits only —
 resumes never re-read the norm/class dicts), with one `ConfigError`
 covering every module before any value is materialised. Unconsumed
 `preds.*` in FIT/VAL are **info**-level (the normal no-metric-callback
-case, design §3.3) and never promoted, so `--strict` passes on a standard
-tagger config.
+case) and never promoted, so `--strict` passes on a standard tagger config.
 
-**ONNX mode checks the unified manifest** (design §3.1/§4.1): the static
-ONNX sinks come from the implicit `OnnxExportSink` folded over the
+**ONNX mode checks the unified manifest**: the static ONNX sinks come from
+the implicit `OnnxExportSink` folded over the
 section's export-mode leaves — exactly what `salt export` will trace —
 with errors attributed to the declaring section writer (`outputs.<name>`).
 The export-only half of the `export:` block is validated as `salt export`
@@ -500,10 +494,10 @@ does: an invalid `export.model_name` (`_`/`-`) is an error-level
 legacy config still carrying `export.outputs` fails with the migration
 error. A trainer config without an `export:` block keeps the
 section-derived sinks but WARNS that inputs/model_name were unchecked
-(promoted under `--strict` — the §9.3 converter CI gate expects converted
+(promoted under `--strict` — the converter CI gate expects converted
 configs to carry the block). Predictions narrowed out of the manifest (a
 `modes: [test]` writer, or a task listed in no export-mode
-`RunTaskOutput`) show up as info-level ONNX deadcode findings (the §4.2
+`RunTaskOutput`) show up as info-level ONNX deadcode findings (the
 export-pruning story). Note the static ONNX plan/plot remain the
 **dataset-fed approximation** (reader/features included); the
 authoritative rendering of the traced graph is the `plan_onnx.txt` that
@@ -517,13 +511,13 @@ read the `outputs:` section directly, run
 `salt export --manifest -c <cfg>` (no checkpoint needed), or consult the
 manifest table in the export-time `plan_onnx.txt`.
 
-`salt graph plot` writes the §4.3 Graphviz `.dot` (port-card signature
+`salt graph plot` writes the Graphviz `.dot` (port-card signature
 layout, namespace-coloured modules) and rasterises it to a PNG + sibling PDF
 by shelling out to the **`dot`** binary baked into the salt container. There
 is no matplotlib path; a missing `dot` is a clear actionable error (the `.dot`
 is still written for manual re-rendering).
 
-### Run-dir artifacts (design §4.4)
+### Run-dir artifacts
 
 Every `salt fit`/`salt test` writes, at stage start (rank zero):
 `plan_fit.txt`+`plan_val.txt` / `plan_test.txt` (dataset + model plan
@@ -536,8 +530,8 @@ artifacts go into the trainer log dir; test artifacts go NEXT TO THE
 CHECKPOINT, with the eval H5. Default-on via the `artifacts:` entry in
 `base2.yaml` (`salt.callbacks.GraphArtifacts`); delete with
 `--callbacks.artifacts=null`, retarget with
-`--callbacks.artifacts.init_args.output_dir=...`. (Writer nodes in the
-`graph plot` rendering itself are an M5 item — the plan-table writer-sinks
+`--callbacks.artifacts.init_args.output_dir=...`. (Writer nodes are not
+rendered in the `graph plot` output itself — the plan-table writer-sinks
 section is the current source of that answer.)
 
 ## Metrics callbacks
@@ -557,38 +551,36 @@ callbacks:
       task_name: jets_classification
 ```
 
-M5 deferral note (design §3.1/§3.4): callback-declared `requires` are NOT
-yet FIT/VAL plan sinks — `ConfusionMatrix` works because tasks publish
-`preds.*` in all modes and stay alive via their losses (its VAL labels are
-demanded by the task itself). A callback demanding a key no task keeps
-alive would currently find its producer demand-pruned; the sink wiring
-mirrors the TEST writer-demand mechanism and lands in M5 with the
-MaskFormer metrics (see `SaltModule._model_sinks`).
+Deferral note: callback-declared `requires` are NOT yet FIT/VAL plan sinks
+— `ConfusionMatrix` works because tasks publish `preds.*` in all modes and
+stay alive via their losses (its VAL labels are demanded by the task
+itself). A callback demanding a key no task keeps alive would currently
+find its producer demand-pruned; the sink wiring mirrors the TEST
+writer-demand mechanism (see `SaltModule._model_sinks`).
 
-## Notable M2 surface notes
+## Notable surface notes
 
-- `lrs:` is the design §5.1 OneCycleLR block (renamed from the v1 ModelWrapper
-  `lrs_config:` kwarg — M3 cleanup, landed in M5 sub-wave D). Schema:
+- `lrs:` is the OneCycleLR block (renamed from the v1 ModelWrapper
+  `lrs_config:` kwarg). Schema:
   `{initial, max, end, pct_start[, weight_decay, last_epoch]}` driving
   AdamW/lion/HybridMuonAdamW + OneCycleLR.
 - `VertexingTaskModule.origin_weighting` takes integer origin ids OR class
   NAMES (defaults reproduce v1's `heavy: [3,4,5], fake: [1]`); names (the
-  design §5.1 / GN3 origin surface) are resolved to ids at fit/test setup
-  against the origin label's class-name attr in the schema artifact (M5
-  sub-wave D). A name-based config without a schema artifact is a loud bind
-  error.
-- Loggers (Comet) and run dirs are M6; losses show on the stock progress
-  bar meanwhile (`train/loss`, `train/<task>_loss`).
+  GN3 origin surface) are resolved to ids at fit/test setup against the
+  origin label's class-name attr in the schema artifact. A name-based
+  config without a schema artifact is a loud bind error.
+- Loggers (Comet) and run dirs are not wired yet; losses show on the stock
+  progress bar meanwhile (`train/loss`, `train/<task>_loss`).
 - The vertexing `get_output` writes the eval column as bare `VertexIndex`
-  (i8) by default — the v1 byte-schema; the design §8 run-name prefix is
-  opt-in via `VertexingTaskModule`'s `prefix_vertex_column: true` (default
-  polarity to be revisited when v1 byte-parity gating retires).
-- Per-task `expose: [fit, val]` (design §4.2, M5 sub-wave D): a train-only
-  aux task gates its `preds.*` port to the listed modes — `[fit, val]` prunes
-  it from the TEST/ONNX plans (silencing the dead-preds error) while it keeps
-  training. `--model.modules.<task>=null` (full deletion) is the alternative.
+  (i8) by default — the v1 byte-schema; the run-name prefix is opt-in via
+  `VertexingTaskModule`'s `prefix_vertex_column: true` (default polarity to
+  be revisited when v1 byte-parity gating retires).
+- Per-task `expose: [fit, val]`: a train-only aux task gates its `preds.*`
+  port to the listed modes — `[fit, val]` prunes it from the TEST/ONNX plans
+  (silencing the dead-preds error) while it keeps training.
+  `--model.modules.<task>=null` (full deletion) is the alternative.
 
-## ONNX export: `salt export` (design §7)
+## ONNX export: `salt export`
 
 ```bash
 salt export --ckpt_path <run_dir>/checkpoints/epoch=...-loss=....ckpt
@@ -596,11 +588,8 @@ salt export --ckpt_path <run_dir>/checkpoints/epoch=...-loss=....ckpt
 # defaults to <run_dir>/network.onnx (--output / -o/--overwrite to control)
 ```
 
-The design §7 `--run-dir` spelling lands with the M6 run-dir layout; until
-then `--ckpt_path` + the inferred sibling config reproduces the v1 contract
-(`to_onnx.py:629-631`). `-c` is **repeatable** with the fit deep-merge
-semantics — the supported way to export a run trained before the export
-block existed (every v1 migrator until the M7 converter):
+`-c` is **repeatable** with the fit deep-merge semantics — the supported
+way to export a run trained before the export block existed:
 
 ```bash
 salt export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
@@ -650,7 +639,7 @@ How it works (no data file is touched — config + checkpoint only):
   `get_output`; the folded sink does no math — it only NAMES the resulting
   `outputs.*` leaves (with their dtypes and dynamic axes) into the flat
   Athena tuple. Union-find runs on the raw edge scores the vertexing task
-  publishes in ONNX mode (design §3.3 per-family exception).
+  publishes in ONNX mode (per-family exception).
 - **`rename:`/`combine:`** post-process the manifest with v1 semantics:
   renames apply first (existence-checked), combined outputs are linear
   combinations of the (renamed) GLOBAL float outputs computed inside the
@@ -659,8 +648,8 @@ How it works (no data file is touched — config + checkpoint only):
   `OnnxExportSink` tuple assembly (globals → combines → per-token aux).
   Both are recorded in `gnn_config` byte-compatibly with v1
   (`combine_outputs`/`rename_outputs`).
-- **Multi-stream trace-safety** (design risk 7, adjudicated): eager `Split`
-  slicing is wrong under tracing with ≥2 dynamic sequence axes; in ONNX
+- **Multi-stream trace-safety**: eager `Split` slicing is wrong under
+  tracing with ≥2 dynamic sequence axes; in ONNX
   mode `Concat` publishes a `seq.offsets` boundary tensor and `Split`
   slices via `index_select` — proven on a two-axis (tracks, electrons)
   grid including zero-length streams (see the `Split` docstring).
@@ -674,10 +663,9 @@ How it works (no data file is touched — config + checkpoint only):
   + no-exact-zero; int8 exact). `--float-atol 1e-6` for the gate bar.
 - Aliases: `{port: inputs.global, alias: inputs.jets}` binds a port from
   another input's tensor (the GN3 global stream; clone when the `Features`
-  declarations match, name-resolved `index_select` gather otherwise);
-  exercised on a real GN3 model in M5.
+  declarations match, name-resolved `index_select` gather otherwise).
 - **Artifacts**: alongside `network.onnx` the exporter writes
-  `plan_onnx.txt` — the §4.4 plan table of the graph Athena will actually
+  `plan_onnx.txt` — the plan table of the graph Athena will actually
   run (union-find placement, `Split` `index_select` mechanism) PLUS the
   output-manifest table. This is the authoritative ONNX plan;
   `salt graph plan --mode onnx` shows the dataset-fed static
@@ -695,7 +683,7 @@ output set derives from the folded `OnnxExportSink` in `modules`; passing
 a legacy reduce-manifest `outputs=` list is a hard `ConfigError` — plus
 `salt.onnx.check_onnx(adapter, path, ...)`.
 
-## Checkpoints and resume (design §2.3)
+## Checkpoints and resume
 
 Checkpoints carry the resolved schema + per-mode plan hashes under the
 top-level `salt_core` key. On resume, a FIT plan-hash mismatch is fatal
@@ -727,11 +715,11 @@ The v2 namespace was flattened from `salt.core.*` to `salt.*` (e.g.
   (`map_v1_state_dict` / the `scripts/convert_v1_model.py` pattern) or use them
   at the frozen pin `29c67a1` (see [Parity-closure doctrine](#parity-closure-doctrine-v1-vs-v2-comparisons)).
 
-## Parity and gate harnesses (design §9.5) — RETIRED
+## Parity and gate harnesses — RETIRED
 
 The standalone v1-vs-v2 migration harnesses (`parity_gn2`, `gates_m2`,
 `gates_m3`, `gates_m4`, `gates_m6` + their pytest wrappers) served the
-migration waves and are retired per the parity-closure doctrine above —
+v1→v2 migration and are retired per the parity-closure doctrine above —
 they ran green at the frozen pin and live in git history (the m2/m3/m6
 sweep closed at `1190d7f`; `git checkout 29c67a1` for the full v1-vs-v2
 set). Live coverage of the same surfaces is the ordinary test suite:

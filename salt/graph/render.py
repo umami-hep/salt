@@ -79,7 +79,7 @@ def plan_table(plan: Plan) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Graphviz DOT (design §4.3) — emitted alongside every image render
+# Graphviz DOT — emitted alongside every image render
 # ---------------------------------------------------------------------------
 
 

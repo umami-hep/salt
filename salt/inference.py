@@ -56,7 +56,7 @@ def inference_demand(export: ExportConfig) -> list[str]:
     mask) + the ``meta.rows`` row anchor. Alias pseudo-inputs are synthesised
     by the adapter from their source port and consume nothing. Label-free by
     construction: no ``labels.*`` key can appear here, so `Labels` narrows to
-    nothing and a label-stripped file reads fine (plan 50 §D / 50a Task 2).
+    nothing and a label-stripped file reads fine.
     """
     demand: list[str] = []
     for entry in export.inputs:
@@ -85,7 +85,7 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
         raise ConfigError(
             "salt inference needs a top-level `outputs:` section with at least one "
             "export-mode RunTaskOutput — the export selection IS the inference output "
-            "set (plan 50 decision 2). Add `modes: [test, export]` (or omit `modes:`) "
+            "set. Add `modes: [test, export]` (or omit `modes:`) "
             "on the RunTaskOutput to export"
         )
     sink = H5OutputSink(output=str(output) if output is not None else INFERENCE_OUTPUT)
@@ -147,8 +147,8 @@ def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
         if leaf is None or len(col.suffixes) != 1:
             raise ConfigError(
                 f"inference H5 column {col.key!r} has no 1:1 ONNX tuple counterpart — "
-                f"export leaves are {sorted(leaves)} (plan 50 Phase D invariant: the H5 "
-                "selection IS the export selection)"
+                f"export leaves are {sorted(leaves)} (the H5 selection IS the export "
+                "selection)"
             )
         plan.append((col, f"{prefix}_{leaf.suffixes[0]}", bool(leaf.per_token)))
     return plan
@@ -215,7 +215,7 @@ def run_inference(
     """The programmatic core of ``salt inference``.
 
     Parses the run config through the real salt surface (run-free — the
-    Phase B implicit-sink wiring runs, so the export-mode `OnnxExportSink` is
+    implicit-sink wiring runs, so the export-mode `OnnxExportSink` is
     discovered exactly as ``salt export`` finds it), loads the checkpoint,
     compiles the ``Mode.ONNX`` plan through `compile_onnx_plan`, and executes
     the `OnnxAdapter` eagerly per jet over the test file, writing the named
@@ -268,14 +268,14 @@ def run_inference(
     if export_sink is None:
         raise ConfigError(
             "config assembles no ONNX export selection — salt inference's task columns "
-            "ARE the export output set (plan 50 decision 2). Give at least one outputs: "
+            "ARE the export output set. Give at least one outputs: "
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
     if export_sink._explicit_leaves:  # noqa: SLF001 - same-package scope guard
         raise ConfigError(
             "salt inference supports the outputs:-section export selection only — this "
             "config declares explicit OnnxExportLeaf entries (the MaskFormer object-reduce "
-            "escape hatch), which have no H5 counterpart here (plan 50 Phase D scope)"
+            "escape hatch), which have no H5 counterpart here"
         )
     variables = _features_variables(cli)
     resolved = resolve_export_config(export_cfg, run_name)
@@ -292,7 +292,7 @@ def run_inference(
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the callbacks key (design §2.2)"
+            "the callbacks key"
         )
     modules[export_sink.name] = export_sink
     plan = compile_onnx_plan(modules, resolved, variables)
@@ -304,7 +304,7 @@ def run_inference(
     adapter.float()  # the export_graph precision contract
     # the dataset: the CLI datamodule with the INFERENCE demand — export input
     # ports + pad masks + meta.rows, never labels (Labels narrows to nothing,
-    # so a label-stripped file binds and reads green; 50a Task 2).
+    # so a label-stripped file binds and reads green).
     dm = cli.datamodule
     dm.set_sinks({Mode.TEST: inference_demand(resolved)})
     dm.setup("test")
@@ -342,8 +342,8 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         description=(
             "Label-free inference (labels are never demanded, so label-stripped files "
             "run green; export-mode InputCopyWriter columns still pass source fields "
-            "through verbatim, labels included): write the EXPORT output set to H5 "
-            "(plan 50). Compiles the same Mode.ONNX selection as salt export and "
+            "through verbatim, labels included): write the EXPORT output set to H5. "
+            "Compiles the same Mode.ONNX selection as salt export and "
             "executes it eagerly per jet — offline inference == Athena semantics by "
             "construction."
         ),

@@ -67,7 +67,7 @@ class ConfusionMatrix(Callback):
         if not isinstance(modules, dict):
             raise ConfigError(
                 f"ConfusionMatrix needs a SaltModule-style LightningModule with a graph-module "
-                f"dict, got {type(modules).__name__} (design §3.4)"
+                f"dict, got {type(modules).__name__}"
             )
         module = modules.get(self.task_name)
         stream = getattr(module, "stream", None)
@@ -82,7 +82,7 @@ class ConfusionMatrix(Callback):
             )
             raise ConfigError(
                 f"ConfusionMatrix: task_name {self.task_name!r} does not name a classification "
-                f"task module (needs stream/label/class_names — design §3.3). "
+                f"task module (needs stream/label/class_names). "
                 f"Configured candidates: {candidates or '<none>'}"
             )
         return stream, label, list(class_names)

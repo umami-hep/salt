@@ -128,7 +128,7 @@ class TestNormaliser:
 
 
 class TestMaskedInputNormaliser:
-    """Self-normalising MaskedInputNormaliser: online masked running stats (plan 01)."""
+    """Self-normalising MaskedInputNormaliser: online masked running stats."""
 
     @staticmethod
     def _bound_norm(streams, global_object=None, **kw):
