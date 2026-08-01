@@ -111,6 +111,11 @@ See `compare_models.py -h` for more information.
 
 Please see [this page](https://ftag.docs.cern.ch/reco_algs/taggers/deploy/) in the central FTAG documentation.
 
+For a step-by-step walkthrough of running an exported model inside the
+training-dataset-dumper — the Athena `FlavorTagInference` path, including every
+naming rule Athena enforces — see
+[Deploy your tagger in the TDD](tutorials/tdd_deployment.md).
+
 
 ### Viewing ONNX Model Metadata
 

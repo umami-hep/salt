@@ -47,6 +47,7 @@ nav:
       - GN2 jet tagging on open data: tutorials/gn2_opendata.md
       - Boosted Xbb tagging: tutorials/xbb.md
       - Fine-tuning a pretrained tagger: tutorials/finetuning.md
+      - Deploy your tagger in the TDD: tutorials/tdd_deployment.md
 
 plugins:
   - search
