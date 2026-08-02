@@ -44,6 +44,14 @@ def pytest_configure(config: pytest.Config) -> None:
         "pytest invocation — the integration/GPU skip never applies — so these CI-load "
         "bearing CPU gates are never silently skipped.",
     )
+    config.addinivalue_line(
+        "markers",
+        "gpu_arch: asserts the installed torch actually serves the GPU it is running "
+        "on (compiled arch coverage + a real kernel launch), rather than trusting "
+        "torch.cuda.is_available(). Adaptive: the generation-specific cases skip with "
+        "a stated reason on other cards, so coverage accumulates across CI (A100), "
+        "lxplus (V100/T4) and dev boxes (Blackwell).",
+    )
 
 
 def _is_integration(item: pytest.Item) -> bool:
