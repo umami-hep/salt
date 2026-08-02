@@ -4,7 +4,6 @@ mirroring the planner's connectivity/duplicate/cycle/terminal checks.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +20,8 @@ def _group_of(key: str) -> str:
 
 
 class Pipeline:
+    """Run generator modules in order under one seeded RNG, then the writers."""
+
     def __init__(
         self,
         modules: list[GenModule],
@@ -64,8 +65,10 @@ class Pipeline:
             # module require a specific field and have it fail if absent.
             for key in requires:
                 is_field_key = "." in key
-                satisfied = key in available if is_field_key else (
-                    key in available or _group_of(key) in available
+                satisfied = (
+                    key in available
+                    if is_field_key
+                    else (key in available or _group_of(key) in available)
                 )
                 if not satisfied:
                     raise RecipeError(
@@ -82,9 +85,7 @@ class Pipeline:
             # Rule 2: duplicate producers.
             for key in produces:
                 if key in producer_of:
-                    raise RecipeError(
-                        f"{key!r} produced by both {producer_of[key]!r} and {cls!r}"
-                    )
+                    raise RecipeError(f"{key!r} produced by both {producer_of[key]!r} and {cls!r}")
                 producer_of[key] = cls
                 available.add(key)
 
@@ -136,7 +137,7 @@ class Pipeline:
         output_dir = Path(output_dir)
         for m in self.modules:
             if getattr(m, "path", None) is not None:
-                m.path = str(output_dir / os.path.basename(m.path))
+                m.path = str(output_dir / Path(m.path).name)
 
 
 def load_pipeline(path: str) -> Pipeline:

@@ -57,7 +57,7 @@ def inference_demand(export: ExportConfig) -> list[str]:
     by the adapter from their source port and consume nothing. Label-free by
     construction: no ``labels.*`` key can appear here, so `Labels` narrows to
     nothing and a label-stripped file reads fine (plan 50 §D / 50a Task 2).
-    """  # noqa: DOC201 - list of dotted keys, per docstring policy
+    """
     demand: list[str] = []
     for entry in export.inputs:
         if entry.alias is not None:
@@ -78,8 +78,8 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
     and the section's `InputCopyWriter`/`PadMaskWriter` contribute their
     copy/mask columns only when their ``modes:`` include ``export``.
     Raises `ConfigError` on an empty/missing section (no WHAT to write).
-    """  # noqa: DOC201, DOC501 - constructor-shaped helper, per docstring policy
-    from salt.outputs import H5OutputSink  # noqa: PLC0415 - heavy/circular
+    """
+    from salt.outputs import H5OutputSink
 
     if not section:
         raise ConfigError(
@@ -101,7 +101,7 @@ def _jet_args(adapter: OnnxAdapter, bundle: Bundle, i: int) -> tuple[torch.Tenso
     via the batch pad mask (Athena feeds valid tokens only; valid tokens are
     the leading rows, the reader's pad layout — enforced per batch by
     `_check_leading_valid`).
-    """  # noqa: DOC201 - private helper, per docstring policy
+    """
     args: list[torch.Tensor] = []
     for entry in adapter._positional:  # noqa: SLF001 - same-package (check.py precedent)
         x = bundle.get(entry.port)
@@ -121,7 +121,7 @@ def _check_leading_valid(mask: Any, stream: str) -> None:
     the two agree only when every valid token precedes every padded one (the
     dumper/reader pad layout). A file with interior padded tokens would
     otherwise yield silently value/mask-misaligned per-token columns.
-    """  # noqa: DOC501 - private helper, per docstring policy
+    """
     if bool((mask[..., :-1] & ~mask[..., 1:]).any()):
         raise ConfigError(
             f"masks.{stream}: valid tokens are not the leading rows (a padded token "
@@ -138,7 +138,7 @@ def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
     Both the export-selection sink columns and the `OnnxExportSink` leaves
     derive from the SAME section ``manifest_fields(Mode.ONNX)`` walk, so they
     are 1:1 by leaf key; a mismatch raises `ConfigError` (never a silent drop).
-    """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+    """
     prefix = export_sink.resolved_model_name()
     leaves = {leaf.key: leaf for leaf in export_sink.leaves}
     plan: list[tuple[Any, str, bool]] = []
@@ -251,8 +251,8 @@ def run_inference(
         On a missing export block / export-mode selection, an explicit-leaf
         (MaskFormer escape hatch) config, or any sink schema error.
     """
-    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
-    from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink
+    from salt.model.saltmodule import SaltModule
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     cli = _run_free_cli(config_paths, overrides)
@@ -336,7 +336,7 @@ def run_inference(
 
 
 def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the ``salt inference`` CLI arguments."""  # noqa: DOC201 - argparse boilerplate
+    """Parse the ``salt inference`` CLI arguments."""
     parser = argparse.ArgumentParser(
         prog="salt inference",
         description=(
@@ -394,7 +394,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
     """The run-config stack: explicit ``-c`` files, or the ``salt export`` sibling
     inference (``<ckpt>/../../config.yaml``); raises `ConfigError` when neither
     resolves.
-    """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+    """
     if parsed.config:
         return list(parsed.config)
     inferred = parsed.ckpt_path.parents[1] / "config.yaml"

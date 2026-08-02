@@ -149,7 +149,9 @@ class StreamEmbed(SaltModelModule):
             requires[key] = TensorSpec(shape=None, dtype="float32")
         if self.featurewise_cfg is not None:
             # the per-event conditioning parameters: a rank-2 [B, n_params] global stream
-            requires[self.params_key] = TensorSpec(shape=("B", sym_dim("P", self.name)), dtype="float32")
+            requires[self.params_key] = TensorSpec(
+                shape=("B", sym_dim("P", self.name)), dtype="float32"
+            )
         return IO(
             requires=unflatten_spec(requires),
             produces=unflatten_spec({

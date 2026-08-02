@@ -121,7 +121,7 @@ class MaskformerMetrics(Callback):
 
     def _compute(self, bundle: Bundle) -> dict[str, Tensor]:
         """Compute ``{metric name: scalar tensor}`` from the matched object bundle keys."""
-        from salt.utils.mask_utils import mask_from_logits, reco_metrics  # noqa: PLC0415
+        from salt.utils.mask_utils import mask_from_logits, reco_metrics
 
         class_logits = bundle.get(self._matched_key("class_logits")).detach()
         object_class = bundle.get(self._matched_key("object_class")).detach()

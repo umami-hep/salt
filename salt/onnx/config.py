@@ -37,15 +37,17 @@ TRACK_SELECTIONS = (
 
 
 def _live_known_reduces() -> tuple[str, ...]:
-    """Registered reduce names, from the live registry (deferred import keeps this module torch-free)."""
-    from salt.onnx.reduces import registered_reduces  # noqa: PLC0415 - deferred torch seam
+    """Registered reduce names, from the live registry (the deferred import keeps this
+    module torch-free).
+    """
+    from salt.onnx.reduces import registered_reduces
 
     return registered_reduces()
 
 
 def _live_per_token_reduces() -> tuple[str, ...]:
     """Registered per-token reduce names, from the live registry (deferred import)."""
-    from salt.onnx.reduces import per_token_reduces  # noqa: PLC0415 - deferred torch seam
+    from salt.onnx.reduces import per_token_reduces
 
     return per_token_reduces()
 

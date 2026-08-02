@@ -77,8 +77,7 @@ class PadMaskWriter(OutputSectionWriter):
         """Pass each stream's bool pad mask through to ``outputs.<stream>.mask`` (fresh clone)."""
         del mode
         return {
-            self.output_key(stream): b.get(f"masks.{stream}").clone()
-            for stream in self.streams
+            self.output_key(stream): b.get(f"masks.{stream}").clone() for stream in self.streams
         }
 
     def mask_streams(self) -> tuple[str, ...]:

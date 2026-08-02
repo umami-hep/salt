@@ -135,7 +135,7 @@ class OutputSink(Callback):
     """The graph-node instance name (overridable by the ``callbacks:`` dict key)."""
 
     def is_sink(self) -> bool:
-        """Mark this module a terminal sink, excluded from the executor forward loop."""  # noqa: DOC201 - one-line predicate
+        """Mark this module a terminal sink, excluded from the executor forward loop."""
         return True
 
     def is_test_sink(self) -> bool:
@@ -145,11 +145,11 @@ class OutputSink(Callback):
         ``declare_io(Mode.TEST).requires`` is non-empty (e.g. `H5OutputSink`);
         an ONNX-only sink (`OnnxExportSink`) returns False regardless of
         ``callbacks:`` list order.
-        """  # noqa: DOC201 - predicate, no Returns block per docstring policy
+        """
         return bool(flatten_spec(self.declare_io(Mode.TEST).requires))
 
     def declare_io(self, mode: Mode) -> IO:  # pragma: no cover - overridden by subclasses
-        """Declare the sink's requires/produces for `mode` (subclass override)."""  # noqa: DOC201 - contract documented on the class
+        """Declare the sink's requires/produces for `mode` (subclass override)."""
         del mode
         return IO(requires={}, produces={})
 
@@ -168,7 +168,7 @@ class OutputSink(Callback):
     def writer_demand(
         self, model_modules: Mapping[str, Any], reader: Any
     ) -> dict[str, str]:  # pragma: no cover - overridden
-        """The TEST demand this sink anchors, GENERATED from `declare_io` (subclass override)."""  # noqa: DOC201 - contract documented on the class
+        """The TEST demand this sink anchors, GENERATED from `declare_io` (subclass override)."""
         del model_modules, reader
         return {}
 
@@ -177,7 +177,7 @@ class OutputSink(Callback):
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         """Enforce single-device TEST; raises `ConfigError` otherwise (multi-device
         out of scope).
-        """  # noqa: DOC501 - the raise is named in the summary line
+        """
         del pl_module
         if stage == "test" and trainer.world_size != 1:
             raise ConfigError(

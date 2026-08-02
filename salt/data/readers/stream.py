@@ -70,7 +70,7 @@ class StreamConfig:
     jagged: bool = True
 
     def __post_init__(self) -> None:
-        from salt.data.readers.cuts import (  # noqa: PLC0415 - lazy: avoid base<-stream<-cuts cycle
+        from salt.data.readers.cuts import (
             ConstituentCuts,
         )
 
@@ -153,7 +153,7 @@ def _cut_sort_truncate_pad(
 
     Returns ``(structured (B, T) array, valid (B, T) bool)``.
     """
-    import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+    import awkward as ak
 
     t_dim = stream_cfg.pad_max
     work = dict(cols)
@@ -200,7 +200,7 @@ def _apply_cut_and_sort(
     BOTH applied to every entry of ``work`` and ``aligned`` so features and labels
     never desynchronise.
     """
-    import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+    import awkward as ak
 
     all_cols = {**work, **aligned}
 

@@ -12,6 +12,14 @@ repos:
       - id: mypy
         args: [--ignore-missing-imports]
         additional_dependencies: ["types-requests", "types-PyYAML"]
+        # pyproject.toml has carried `[tool.mypy] exclude = '^salt/tests/.*\.py$'`
+        # for a long time, but it has never been in force here: mypy applies
+        # `exclude` when it crawls directories, NOT to files handed to it on the
+        # command line -- which is exactly how pre-commit invokes it. The result
+        # was ~105 of 164 reported errors coming from the test tree the config
+        # says to skip. The exclusion has to live on the hook, where file
+        # selection actually happens.
+        exclude: ^salt/tests/
 
   - repo: https://github.com/adrienverge/yamllint.git
     rev: v1.32.0
@@ -19,8 +27,27 @@ repos:
       - id: yamllint
         args: ["-d", "{extends: relaxed, rules: {line-length: disable}}"]
 
-  - repo: https://github.com/jsh9/pydoclint
-    rev: 0.7.3
-    hooks:
-      - id: pydoclint
-        args: [--style=numpy, --check-return-types=False]
+  # pydoclint was here and has been removed. Reasoning, so this is not
+  # relitigated from memory:
+  #
+  # 238 of its 385 findings on this tree are the DOC1xx family (DOC101 x119,
+  # DOC103 x119). DOC1xx requires a COMPLETE `Parameters` block on any docstring
+  # that carries any section at all. The docstring policy this repo follows
+  # (CLAUDE.md, restated in the pyproject.toml ruff comment block) says the
+  # opposite for most of the tree: private helpers and concrete overrides keep
+  # the semantics -- including a `Raises` note where it matters -- and drop the
+  # Parameters/Returns ceremony, because the signature and type hints carry it.
+  # salt/data/base.py::_require_root_deps is the canonical example: its
+  # docstring is exactly what the policy prescribes, and pydoclint fails it.
+  #
+  # pydoclint 0.7.3 has no switch for this. Its option surface can turn off
+  # class-attribute checks (--check-class-attributes), raises checks
+  # (--skip-checking-raises) and the __init__ rule (--allow-init-docstring), but
+  # nothing selects or ignores individual DOC codes -- so keeping the hook means
+  # keeping DOC1xx, and keeping DOC1xx means fighting the policy on every new
+  # private helper for as long as the hook is installed.
+  #
+  # What is lost is covered elsewhere: ruff implements the same pydoclint family
+  # natively (preview + select = ALL), and the correctness half of it -- DOC202,
+  # DOC403, DOC502 -- stays enabled and green. Only the "you did not write this
+  # section" half is dropped, which is the half the policy rejects.

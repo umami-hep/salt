@@ -236,9 +236,7 @@ class MultiSampleReader(Reader):
                 # no schema artifact — compare on (jagged, field-name set) only
                 fields: tuple[tuple[str, str], ...] = ()
             else:
-                fields = tuple(
-                    sorted((f, str(np.dtype(dt))) for f, dt in gschema.fields.items())
-                )
+                fields = tuple(sorted((f, str(np.dtype(dt))) for f, dt in gschema.fields.items()))
             sig[stream] = (jagged, fields)
         return sig
 
@@ -575,15 +573,13 @@ class MultiSampleReader(Reader):
     def __getstate__(self) -> dict[str, Any]:
         """Drop transient index/probe state so the reader pickles under spawn."""
         state = self.__dict__.copy()
-        state.update(
-            {
-                "_lens": None,
-                "_num_rows": None,
-                "_sample_of": None,
-                "_local_of": None,
-                "_streams": None,
-                "_jagged": None,
-                "schema": None,
-            }
-        )
+        state.update({
+            "_lens": None,
+            "_num_rows": None,
+            "_sample_of": None,
+            "_local_of": None,
+            "_streams": None,
+            "_jagged": None,
+            "schema": None,
+        })
         return state

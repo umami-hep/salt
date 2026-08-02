@@ -42,10 +42,10 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
     returning the constructed (un-setup) `SaltCLI` (``cli.model`` +
     ``cli.datamodule``). Raises `ConfigError` on a parse failure.
     """
-    import warnings  # noqa: PLC0415 - local, parse-time only
+    import warnings
 
-    from salt.config_utils import disable_logger_in_config  # noqa: PLC0415
-    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular
+    from salt.config_utils import disable_logger_in_config
+    from salt.main import SaltCLI
 
     args: list[str] = []
     for cfg in configs:
@@ -187,8 +187,8 @@ def _model_boundary_sources(cli: Any) -> Any:
     reader's ``global_object`` flag, and the model's FIT label demand.
     Raises `ConfigError` when no `Features` module is configured.
     """
-    from salt.data.processors.features import Features  # noqa: PLC0415 - heavy/circular
-    from salt.graph.spec import TensorSpec, sym_dim, unflatten_spec  # noqa: PLC0415
+    from salt.data.processors.features import Features
+    from salt.graph.spec import TensorSpec, sym_dim, unflatten_spec
 
     model, dm = cli.model, cli.datamodule
     reader = dm.reader
@@ -229,7 +229,7 @@ def _combined_graph(cli: Any) -> dict[str, Any]:
     """The combined data + model module dict; binds the dataset `Labels`
     processors to the reader streams so their label-key universe resolves.
     """
-    from salt.data.processors.labels import Labels  # noqa: PLC0415 - heavy/circular
+    from salt.data.processors.labels import Labels
 
     model, dm = cli.model, cli.datamodule
     data_modules = dm.modules
@@ -288,7 +288,7 @@ def generate_shapes(
     ConfigError
         On a missing mup block, equal base/delta widths, or no save path.
     """
-    from mup import make_base_shapes  # noqa: PLC0415 - mup is optional
+    from mup import make_base_shapes
 
     probe = _parse_model(configs, set_overrides)
     cfg = _require_mup_cfg(probe)
@@ -405,9 +405,9 @@ def coord_check(
     pandas.DataFrame
         Columns ``width, module, t, l1`` — the coord-check data.
     """
-    import pandas as pd  # noqa: PLC0415 - heavy, tooling-only
-    from mup import set_base_shapes  # noqa: PLC0415 - mup is optional
-    from mup.optim import MuAdamW  # noqa: PLC0415 - mup is optional
+    import pandas as pd
+    from mup import set_base_shapes
+    from mup.optim import MuAdamW
 
     shared_shapes = _resolve_coord_shape_file(configs, widths, shape_file, set_overrides)
     records: list[dict[str, Any]] = []
@@ -470,7 +470,7 @@ def _resolve_coord_shape_file(
         raise ConfigError("mup-coord-check needs at least one width to sweep")
     base_w = min(widths)
     delta_w = max(widths) if max(widths) != base_w else base_w * 2
-    import tempfile  # noqa: PLC0415 - tooling-only, generated-shape path
+    import tempfile
 
     out = Path(tempfile.mkdtemp(prefix="salt_coord_shapes_")) / "coord_check.bsh"
     generate_shapes(
@@ -559,10 +559,10 @@ def plot_coord_data(df: pd.DataFrame, save_to: str | Path, *, title: str | None 
     matplotlib.figure.Figure
         The figure (also saved to `save_to`).
     """
-    import matplotlib as mpl  # noqa: PLC0415 - heavy, tooling-only
+    import matplotlib as mpl
 
     mpl.use("Agg")
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import matplotlib.pyplot as plt
 
     steps = sorted(df["t"].unique()) if not df.empty else [1]
     fig, axes = plt.subplots(1, len(steps), figsize=(5 * len(steps), 4), squeeze=False)
@@ -611,7 +611,7 @@ def setup_mup(args: Sequence[str] | None = None) -> int:
     int
         Process exit code.
     """
-    from salt.cli import main as graph_main  # noqa: PLC0415 - heavy/circular
+    from salt.cli import main as graph_main
 
     argv = list(sys.argv[1:] if args is None else args)
     return graph_main(["mup-shapes", *argv])

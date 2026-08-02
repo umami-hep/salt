@@ -12,9 +12,9 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
+from salt.model.nn.dense import Dense
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField
 from salt.utils.union_find import get_node_assignment_jit, mask_fill_flattened
 
@@ -464,7 +464,7 @@ class VertexingTaskModule(_TaskModuleBase):
     def _target_field(self, value: Tensor | None = None) -> OutputField:
         """The target-label field: the per-token vertex-index label as an
         unprefixed ``target_{task}`` i4 column (labels are model-independent).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         return OutputField(
             h5_name=f"target_{self.name}",
             onnx_name=None,

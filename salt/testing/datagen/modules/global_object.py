@@ -4,8 +4,6 @@ dict-form spec via ``schema.parse_schema``; never hand-builds specs).
 
 from __future__ import annotations
 
-import numpy as np
-
 from ..engine import _build_group_array
 from ..schema import parse_schema
 from ._fields import resolve_fields
@@ -14,6 +12,8 @@ from .base import GenModule
 
 
 class GlobalObject(GenModule):
+    """Generate a one-per-sample group (jets, events) with no item axis."""
+
     def __init__(
         self,
         name: str,
@@ -41,13 +41,11 @@ class GlobalObject(GenModule):
         self._group_spec = None
 
     def _schema(self, data):
-        sch = parse_schema(
-            {
-                "n_samples": infer_n(data, self.n_samples),
-                "groups": [self._group_dict],
-                **self._fill,
-            }
-        )
+        sch = parse_schema({
+            "n_samples": infer_n(data, self.n_samples),
+            "groups": [self._group_dict],
+            **self._fill,
+        })
         self._group_spec = sch.group(self.name)
         return sch
 

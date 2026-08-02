@@ -24,8 +24,8 @@ from salt.graph.spec import (
 )
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense, _reject_width_keys
 from salt.model.modules.stream_embed import _stream_len
+from salt.model.nn.dense import Dense, _reject_width_keys
 
 _EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")
 """Recognised edge-feature names. EdgeFeatures rejects anything outside this

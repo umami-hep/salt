@@ -108,7 +108,7 @@ def _materialize_schedule(text: str) -> str:
     that stage (with a marker comment) so the merged YAML shows the schedule the
     run will actually use. A config that DOES declare a schedule is returned
     unchanged (byte-identical).
-    """  # noqa: DOC201
+    """
     merged = yaml.safe_load(text)
     if not isinstance(merged, dict) or merged.get("training_schedule") is not None:
         return text
@@ -121,7 +121,7 @@ def _split_merged_args(argv: list[str]) -> tuple[Path, bool, list[str]]:
 
     Both the ``--flag=value`` and ``--flag value`` forms are accepted; the
     remaining args are forwarded verbatim to the salt fit parser.
-    """  # noqa: DOC201, DOC501
+    """
     output: str | None = None
     plots = True
     fit_args: list[str] = []
@@ -144,12 +144,10 @@ def _split_merged_args(argv: list[str]) -> tuple[Path, bool, list[str]]:
     return Path(output), plots, fit_args
 
 
-def _consume_value(
-    argv: list[str], i: int, inline: str | None, flag: str
-) -> tuple[str, int]:
+def _consume_value(argv: list[str], i: int, inline: str | None, flag: str) -> tuple[str, int]:
     """Resolve `flag`'s value from the inline ``=value`` or the next token,
     returning ``(value, next_index)``.
-    """  # noqa: DOC201, DOC501
+    """
     if inline is not None:
         return inline, i + 1
     if i + 1 >= len(argv):
@@ -158,7 +156,7 @@ def _consume_value(
 
 
 def _as_bool(raw: str) -> bool:
-    """Parse a ``--merged.plots`` boolean (true/false, 1/0, yes/no)."""  # noqa: DOC201, DOC501
+    """Parse a ``--merged.plots`` boolean (true/false, 1/0, yes/no)."""
     lowered = raw.strip().lower()
     if lowered in {"true", "1", "yes"}:
         return True
@@ -171,10 +169,10 @@ def _dump_merged_config(fit_args: list[str]) -> str:
     """The fully-merged config YAML — the ``salt fit --print_config`` dump for
     `fit_args`, produced through the real `SaltCLI` parser (run-free, trainer- and
     data-free: ``--print_config`` dumps and exits before any instantiation).
-    """  # noqa: DOC201, DOC501
-    import warnings  # noqa: PLC0415
+    """
+    import warnings
 
-    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (module docstring)
+    from salt.main import SaltCLI
 
     buffer = io.StringIO()
     try:
@@ -205,8 +203,8 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     modules + sinks); the FIT-mode plan is compiled once and re-styled per stage
     with the stage's frozen mask. A ``.dot`` is always written; each is
     rasterised to ``.png``/``.pdf`` only when `do_plots` is set.
-    """  # noqa: DOC501
-    from salt.cli import _resolve_widths, load_config  # noqa: PLC0415 - heavy/circular
+    """
+    from salt.cli import _resolve_widths, load_config
 
     merged = yaml.safe_load(merged_text)
     schedule = _schedule_from_merged(merged)
@@ -236,7 +234,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
         dot_path.write_text(dot_text)
         print(f"wrote DOT to {dot_path}")
         if do_plots:
-            from salt.cli import _render_with_dot  # noqa: PLC0415 - heavy/circular
+            from salt.cli import _render_with_dot
 
             _render_with_dot(dot_path, dot_path.with_suffix(".png"))
 
@@ -247,7 +245,7 @@ def _schedule_from_merged(merged: Any) -> TrainingSchedule:
     Freeze specs range over the model's ``modules`` names (in declaration order,
     the exact set `SaltModule` validates against); a config with no top-level
     ``training_schedule`` desugars to the single ``fit`` stage.
-    """  # noqa: DOC201, DOC501
+    """
     try:
         module_names = list(merged["model"]["init_args"]["modules"].keys())
     except (TypeError, KeyError, AttributeError) as err:
@@ -266,7 +264,7 @@ def _stage_title(
     """The caption for a stage graph: position, name, its frozen module set, and —
     when declared — the stage's early-stop criterion, scoped-callback count (plan 12
     W7), and LR-scheduler class override (plan 15 W8).
-    """  # noqa: DOC201
+    """
     frozen_str = ", ".join(sorted(frozen)) if frozen else "(none)"
     title = f"stage {index + 1}/{total}: {name} — frozen: {frozen_str}"
     if stage.early_stop is not None:

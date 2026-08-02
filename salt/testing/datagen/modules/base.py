@@ -47,4 +47,4 @@ class GenModule:
         spec and hand a reconstructed thin ``Schema`` to the writers. Writers
         return ``None``.
         """
-        return None
+        return

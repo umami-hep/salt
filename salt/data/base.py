@@ -298,7 +298,7 @@ class Reader(SaltDatasetModule):
         ConfigError
             On an unknown stream name or a value that is not a cut container.
         """
-        from salt.data.readers.cuts import ConstituentCuts  # noqa: PLC0415 - avoid import cycle
+        from salt.data.readers.cuts import ConstituentCuts
 
         out: dict[str, ConstituentCuts] = {}
         for stream, cfg in (spec or {}).items():
@@ -447,7 +447,7 @@ class Reader(SaltDatasetModule):
             default only knows how to re-point a single-source reader via
             `with_source`).
         """
-        from salt.data.readers.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
+        from salt.data.readers.vds import stage_file
 
         root = Path(root)
         srcs = self.sources()

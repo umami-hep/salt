@@ -241,7 +241,7 @@ class OnnxAdapter(nn.Module):
         authority); returns it, or None when no sink is wired (which the
         adapter rejects).
         """
-        from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+        from salt.outputs import OnnxExportSink
 
         for step in plan.steps:
             if isinstance(step.module, OnnxExportSink):

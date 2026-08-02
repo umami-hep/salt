@@ -76,5 +76,7 @@ class InputCopyWriter(OutputSectionWriter):
         <list|None>, "variables": {stream: [vars]}}``; the sink resolves the
         file read.
         """
-        return {"streams": list(self.streams) if self.streams is not None else None,
-                "variables": {k: list(v) for k, v in self.variables.items()}}
+        return {
+            "streams": list(self.streams) if self.streams is not None else None,
+            "variables": {k: list(v) for k, v in self.variables.items()},
+        }
