@@ -48,6 +48,7 @@ nav:
       - Boosted Xbb tagging: tutorials/xbb.md
       - Fine-tuning a pretrained tagger: tutorials/finetuning.md
       - Deploy your tagger in the TDD: tutorials/tdd_deployment.md
+      - Deploy an event-level tagger: tutorials/event_deployment.md
 
 plugins:
   - search

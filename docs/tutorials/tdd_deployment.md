@@ -378,3 +378,11 @@ you additionally need to:
 Those steps live with the FTAG group rather than with salt — consult the FTAG
 documentation and coordinate with the group before assuming a model is
 deployable.
+
+## See also
+
+This page covers **jet-level** taggers, where Athena's `FlavorTagInference`
+dictates the names and the metadata is parsed strictly. For an **event-level**
+model consumed by your own code — where naming is free-form and you deploy the
+file yourself — see
+[Deploy an event-level tagger](event_deployment.md).
