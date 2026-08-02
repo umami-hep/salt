@@ -81,8 +81,26 @@ Salt requires Python 3.10 to 3.14.
 
     ### Which image do I need?
 
-    Salt ships **two** images. They differ only in which GPU architectures the bundled
-    PyTorch was compiled for — pick the one that covers your card.
+    Salt ships **two** images, differing only in which GPU architectures the bundled
+    PyTorch was compiled for. Rather than work it out from a table, ask the machine:
+
+    ```bash
+    ./setup/valid-container-versions
+    ```
+
+    It needs only `nvidia-smi` — no python, no torch, no container — so you can run it
+    before pulling anything. It reports your GPU, its compute capability, which images
+    will work, whether flash-attention is available, and the exact pull command:
+
+    ```
+    GPU: NVIDIA GeForce RTX 5060 Ti
+      compute capability : 12.0  (sm_120)
+      usable images      : T2B only
+                           (V2H tops out at sm_90 — no Blackwell support)
+      flash-attention    : supported
+    ```
+
+    For reference, the coverage it encodes:
 
     | Your GPU | Image |
     |---|---|
