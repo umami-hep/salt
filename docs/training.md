@@ -252,7 +252,7 @@ Other things you can always do:
 - Use the flash attention backend for the [`Transformer` class](https://gitlab.cern.ch/svanstro/hepformer/-/blob/main/hepformer/models/transformer.py)
 - Use the maximum possible [batch size](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.callbacks.BatchSizeFinder.html)
 - Increase your effective batch size by [accumulating gradients](https://lightning.ai/docs/pytorch/stable/advanced/training_tricks.html#accumulate-gradients)
-- Ensure you have enough [workers for dataloading](worker-counts)
+- Ensure you have enough [workers for dataloading](#worker-counts)
 - Use newer GPUs if possible
 - Use [multiple GPUs][choosing-gpus]
 - Reduce the size of the model (in particular the number of layers)
