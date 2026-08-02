@@ -13,6 +13,7 @@ from torch import nn
 
 from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
 from salt.graph import IO, Bundle, ConfigError, Mode
+from salt.model.base import SaltModelModule
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.outputs import RunTaskOutput
 from salt.model.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
@@ -509,7 +510,7 @@ class TestBoundaryDemandGuards:
         assert "add or restore a module" in message
 
 
-class _AuxProbe(nn.Module):
+class _AuxProbe(SaltModelModule):
     """An aux head producing a preds key NO loss consumes — pruned in FIT/VAL"""
 
     def __init__(self) -> None:
