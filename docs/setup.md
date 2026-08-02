@@ -79,7 +79,45 @@ Salt requires Python 3.10 to 3.14.
     Prebuilt docker images are an easy way to use salt, but can also be a bit less flexible than other approaches.
     You can run the prebuilt docker images using [apptainer](https://apptainer.org/docs/user/latest/).
 
-    The first step is to decide which image you want to use.
+    ### Which image do I need?
+
+    Salt ships **two** images. They differ only in which GPU architectures the bundled
+    PyTorch was compiled for — pick the one that covers your card.
+
+    | Your GPU | Image |
+    |---|---|
+    | Tesla V100 / V100S | `V2H` **only** |
+    | Tesla T4 | either |
+    | A100 | either |
+    | H100 / H200 / GH200 | either |
+    | RTX 40xx / 50xx, B100 / B200 | `T2B` **only** |
+
+    `V2H` covers **V**olta→**H**opper, `T2B` covers **T**uring→**B**lackwell. Most GPUs are
+    served by both; only V100 and the newest consumer/datacenter cards are restricted to
+    one. There is no single image covering both ends, because upstream PyTorch dropped
+    Volta from the same wheels that added Blackwell.
+
+    !!! warning "Using the wrong image fails silently at first"
+
+        If the image does not cover your GPU, `torch.cuda.is_available()` still returns
+        `True` — and then **every** kernel launch fails with
+        `no kernel image is available for execution on the device`. The error appears at
+        your first real operation, not at import, so it can look like a salt bug.
+
+        Check before you train:
+
+        ```bash
+        python -c "import torch; print(torch.cuda.get_device_capability(0), torch.cuda.get_arch_list())"
+        ```
+
+        Your device's capability must appear in the arch list. `(12, 0)` against a list
+        ending at `sm_90` means you want the `T2B` image.
+
+    A note on flash-attention: it requires Ampere (sm_80) or newer, so on V100 and T4 salt
+    automatically uses its standard attention path in both images. This is expected and not
+    an error.
+
+    Next, decide how to obtain the image.
     You can either pull an image locally, or use the unpacked images hosted on CVMFS.
     The latter is faster, but requires a CVMFS connection.
 
@@ -92,12 +130,19 @@ Salt requires Python 3.10 to 3.14.
         The images are located in
         `/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/`
 
-        You can run the latest image using
+        You can run an image using
 
         ```bash
+        # V100 ... H100/H200
         apptainer shell -e --nv --bind $PWD \
-            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest/
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:V2H/
+
+        # T4 ... Blackwell (RTX 40xx/50xx, B100/B200)
+        apptainer shell -e --nv --bind $PWD \
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:T2B/
         ```
+
+        See [the table above](#which-image-do-i-need) if you are unsure which one you want.
 
         The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
 
@@ -113,20 +158,26 @@ Salt requires Python 3.10 to 3.14.
         export APPTAINER_CACHEDIR=<some path>/.apptainer/
         ```
 
-        Next, pull the image:
+        Next, pull the image for your GPU — `V2H` or `T2B`, see
+        [the table above](#which-image-do-i-need):
 
         ```bash
+        TAG=V2H   # or T2B for RTX 40xx/50xx and B100/B200
+
         apptainer pull --docker-login \
-            $APPTAINER_CACHEDIR/salt.simg \
-            docker://gitlab-registry.cern.ch/aft/algorithms/salt:latest
+            $APPTAINER_CACHEDIR/salt-${TAG}.simg \
+            docker://gitlab-registry.cern.ch/aft/algorithms/salt:${TAG}
         ```
 
         You can then run the image
 
         ```bash
         apptainer shell -e --nv --bind $PWD \
-            $APPTAINER_CACHEDIR/salt.simg
+            $APPTAINER_CACHEDIR/salt-${TAG}.simg
         ```
+
+        Keeping the tag in the filename matters if you ever pull both — a bare `salt.simg`
+        gives no way to tell which architectures it covers once it is on disk.
 
         The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
 
