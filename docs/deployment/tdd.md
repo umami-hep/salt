@@ -1,4 +1,4 @@
-# Deploy your tagger: from checkpoint to the training-dataset-dumper
+# Deploy in the TDD
 
 You have trained a tagger and you want to see it produce scores on real
 derivations. This tutorial takes you the whole way: `salt export` to ONNX, then
@@ -8,6 +8,9 @@ running that ONNX inside the
 inference code that runs in production reconstruction and derivations.
 
 No TDD or Athena source changes are needed. Everything here is configuration.
+
+It assumes you have read [Export to ONNX](export.md); the export mechanics are
+covered there, and this page only restates the parts Athena constrains.
 
 !!! info "What this gets you, and what it does not"
 
@@ -383,6 +386,7 @@ deployable.
 
 This page covers **jet-level** taggers, where Athena's `FlavorTagInference`
 dictates the names and the metadata is parsed strictly. For an **event-level**
-model consumed by your own code — where naming is free-form and you deploy the
-file yourself — see
-[Deploy an event-level tagger](event_deployment.md).
+model consumed by code you write yourself — where naming is free-form and
+nothing validates your wiring — see [Deploy in easyjet](easyjet.md), and
+[Run it in Python](python.md) for the framework-free route both are validated
+against.
