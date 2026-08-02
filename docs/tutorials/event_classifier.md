@@ -439,4 +439,4 @@ against the cheapest thing that could have explained the same score.
 This config trains and evaluates, but ships no ONNX surface. To export the
 model and run it outside salt — with a worked post-hoc inference script and the
 semantics you have to match to keep the scores correct — see
-[Deploy an event-level tagger](event_deployment.md).
+[Deploy in easyjet](../deployment/easyjet.md).

@@ -306,7 +306,7 @@ salt export --manifest -c path/to/config.yaml
 ```
 
 The same table is appended to `plan_onnx.txt` at export time. See
-[ONNX Export](export.md) for the full export workflow and the Athena
+[Export to ONNX](deployment/export.md) for the full export workflow and the Athena
 validation steps.
 
 ## Extending: a new column
