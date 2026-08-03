@@ -260,11 +260,16 @@ list is NOT inert: it decides whether they add copy/mask columns to the
 eval-only). The explicit H5 sink config surface is
 RETIRED: wiring `H5OutputSink` with an explicit `OutputColumn` table is a
 hard error pointing back at the section mechanism. A config MAY still
-declare its own composable sink (the MaskFormer object sink, or an
-`OnnxExportSink` with explicit `OnnxExportLeaf` entries for outputs the
-section cannot mint — the MaskFormer object-reduce escape hatch); the
-command leaves declared sinks alone and only injects a sink type that is
-not already present.
+declare a sink instance explicitly when it needs a capability the
+injected default cannot mint from the section: an `H5OutputSink`
+carrying `object_groups` (a generic per-object H5 group on a different row axis,
+used by MaskFormer to write `[B, n_objects]`-shaped outputs alongside the standard
+per-jet columns), or an `OnnxExportSink` with explicit `OnnxExportLeaf` entries
+(per-token or reduced outputs the section cannot produce). The object math itself
+(`MaskFormerObjects` reconstructing matched objects from mask logits) lives in a
+graph module and writes `outputs.*` leaves like any other; the sink has no MaskFormer
+knowledge. `MaskFormer.yaml` shows both patterns in use. The command leaves
+declared sinks alone and only injects a sink type that is not already present.
 
 ### The `outputs:` section is the SINGLE output manifest
 
