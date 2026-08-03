@@ -29,7 +29,20 @@ __all__ = [
 ALL_MODES: frozenset[Mode] = frozenset({Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX})
 """The permissive `Node.allowed_modes` default; concrete sinks narrow it."""
 
-_MODE_BY_NAME: dict[str, Mode] = {mode.name.lower(): mode for mode in PRIMARY_MODES}
+
+def _mode_key(mode: Mode) -> str:
+    """The config spelling of an ATOMIC `Mode` — its member name, lowercased.
+
+    `Mode` is a `Flag`, so ``.name`` is None for a composite (``TRAINING``,
+    ``ALL``); those have no config spelling and are refused rather than
+    rendered as a misleading ``mode.training``.
+    """
+    if mode.name is None:
+        raise ValueError(f"{mode!r} is a composite Mode and has no config spelling")
+    return mode.name.lower()
+
+
+_MODE_BY_NAME: dict[str, Mode] = {_mode_key(mode): mode for mode in PRIMARY_MODES}
 """The config vocabulary for ``modes:`` — the planner's own `Mode` names, lowercased."""
 
 _MODE_BY_NAME["export"] = Mode.ONNX
@@ -40,7 +53,7 @@ and writers and sinks share one section — one spelling per mode across the sur
 
 def _fmt_modes(modes: frozenset[Mode]) -> str:
     """The canonical rendering of a mode set in an error message."""
-    return "[" + ", ".join(m.name.lower() for m in PRIMARY_MODES if m in modes) + "]"
+    return "[" + ", ".join(_mode_key(m) for m in PRIMARY_MODES if m in modes) + "]"
 
 
 def parse_modes(modes: Sequence[str | Mode], owner: str) -> frozenset[Mode]:
@@ -399,22 +412,32 @@ class Node:
     def _invalidate_manifest(self) -> None:
         """Drop any cached manifest resolution (subclass hook, no-op here)."""
 
-    def _manifest_sources(self) -> list[Any]:
-        """The bound producers, section entries first then model modules, deduplicated.
+    def _manifest_source_groups(self) -> list[list[Any]]:
+        """The bound producers as one list per BINDING, section group then model group.
 
-        Section declaration order then model declaration order. A section
-        writer folded into the model graph appears in both dicts and is taken
-        once, at its section position; this node itself is never a source.
+        The group boundary is what keeps a sink's serialisation order stable: a
+        consumer that orders leaves within a group (`OnnxExportSink` sorts
+        globals ahead of per-token) must not let the model group's leaves
+        migrate into the section group's block, so the two are never flattened
+        before ordering. Within a group, declaration order. A section writer
+        folded into the model graph appears in both dicts and is taken once, at
+        its section position; this node itself is never a source.
         """
-        sources: list[Any] = []
+        groups: list[list[Any]] = []
         seen: set[int] = {id(self)}
         for bound in (self._output_section, self._manifest_modules):
+            group: list[Any] = []
             for entry in (bound or {}).values():
                 if id(entry) in seen:
                     continue
                 seen.add(id(entry))
-                sources.append(entry)
-        return sources
+                group.append(entry)
+            groups.append(group)
+        return groups
+
+    def _manifest_sources(self) -> list[Any]:
+        """Every bound producer, section entries first then model modules, deduplicated."""
+        return [entry for group in self._manifest_source_groups() for entry in group]
 
     def _manifest_source_names(self) -> list[str]:
         """The instance names of the bound manifest sources, for error messages."""

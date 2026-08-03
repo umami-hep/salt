@@ -159,10 +159,12 @@ class OnnxExportSink(Node):
     The tuple is AUTO-COLLECTED: every bound manifest source declaring
     ``manifest_fields(Mode.ONNX)`` contributes its own names and dtypes
     (`collect_manifest_fields`), so a module minting ``outputs.*`` leaves is
-    the single place those leaves are named. The flat tuple ORDER is the
-    source order — the ``outputs:`` section's writers, then the model's graph
-    modules, each in declaration order — and is not a contract: Athena
-    consumes the outputs by name.
+    the single place those leaves are named. The flat tuple ORDER is GLOBAL
+    float scalars before PER-TOKEN aux outputs, applied within each manifest
+    group — the ``outputs:`` section's writers, then the model's graph modules
+    — with declaration order inside each block. It is pinned by the committed
+    per-config goldens (``salt/tests/_fixtures/output_goldens/``), so a
+    reordering is a visible schema change rather than a silent one.
 
     It is the folded-path counterpart to the legacy `salt.outputs.sinks.onnx.reduces`
     path: `compile_onnx_plan` sources its ONNX sinks from
@@ -300,17 +302,16 @@ class OnnxExportSink(Node):
         """Drop the cached leaf tuple after a manifest source rebinds."""
         self._leaves_resolved = False
 
-    def _resolve_leaves(self) -> tuple[OnnxExportLeaf, ...]:
-        """Resolve the export leaves from the bound manifest sources.
+    def _leaves_from_fields(
+        self, fields: Sequence[tuple[str, OutputField]]
+    ) -> list[OnnxExportLeaf]:
+        """Mint one leaf per ``outputs.*`` key, grouping the key's fields.
 
-        Collects every FINAL ``Mode.ONNX`` field the sources declare, narrows
-        it by ``consumes:``, and groups by leaf key in first-appearance order:
-        one field -> a single-``name`` leaf (per-token when the field is), N
-        fields -> a ``names`` split leaf. Raises `ConfigError` when nothing is
-        declared, when a split leaf mixes in a per-token field, or when two
-        fields mint the same key/suffix.
+        Keys in first-appearance order: one field -> a single-``name`` leaf
+        (per-token when the field is), N fields -> a ``names`` split leaf.
+        A split leaf is a set of GLOBAL float scalars, so a per-token field
+        mixed into one is a `ConfigError`.
         """
-        fields = self._filter_consumed(collect_manifest_fields(self._manifest_sources(), Mode.ONNX))
         by_key: dict[str, list[OutputField]] = {}
         key_order: list[str] = []
         for leaf_key, field in fields:
@@ -347,6 +348,38 @@ class OnnxExportSink(Node):
                     dtype=group[0].onnx_dtype,
                 )
             )
+        return leaves
+
+    def _resolve_leaves(self) -> tuple[OnnxExportLeaf, ...]:
+        """Resolve the export leaves from the bound manifest sources.
+
+        The Athena tuple order is GLOBAL float scalars before PER-TOKEN aux
+        outputs, applied WITHIN each manifest-source group (the ``outputs:``
+        section, then the model's graph modules) and the groups concatenated
+        in that order. Ordering per group rather than once over everything is
+        what keeps a model-graph producer's globals (e.g. the MaskFormer
+        ``leading_objects_*`` reduces) behind the section's own per-token
+        leaves (e.g. ``TrackOrigin``) instead of hoisting them to the front.
+        Within a block, declaration order.
+
+        ``consumes:`` narrows the collected manifest first, validated against
+        every declared leaf so a pattern matching nothing anywhere is loud.
+        Raises `ConfigError` when nothing is declared, when a split leaf mixes
+        in a per-token field, or when two fields mint the same key/suffix.
+        """
+        per_group = [
+            collect_manifest_fields(group, Mode.ONNX) for group in self._manifest_source_groups()
+        ]
+        # validate + narrow ONCE over the flat manifest: a `consumes:` pattern is
+        # checked against every declared leaf, not just one group's. The filter is
+        # a pure function of the leaf key, so replaying it per group by key
+        # membership is the same narrowing.
+        kept = {key for key, _ in self._filter_consumed([f for g in per_group for f in g])}
+        leaves: list[OnnxExportLeaf] = []
+        for group_fields in per_group:
+            group_leaves = self._leaves_from_fields([f for f in group_fields if f[0] in kept])
+            leaves.extend(leaf for leaf in group_leaves if not leaf.per_token)
+            leaves.extend(leaf for leaf in group_leaves if leaf.per_token)
         if not leaves:
             raise ConfigError(
                 "OnnxExportSink collected no ONNX output — no bound producer declared a final "
