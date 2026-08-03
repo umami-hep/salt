@@ -38,7 +38,11 @@ nav:
   - Architecture: architecture.md
   - Evaluation: evaluation.md
   - Outputs: outputs.md
-  - ONNX Export: export.md
+  - Deployment:
+      - Export to ONNX: deployment/export.md
+      - Run it in Python: deployment/python.md
+      - Deploy in the TDD: deployment/tdd.md
+      - Deploy in easyjet: deployment/easyjet.md
   - Contributing: contributing.md
   - Tutorials:
       - MNIST with salt: tutorials/mnist.md

@@ -615,7 +615,7 @@ output names, the model name, and the plan hash.
     against Athena-produced scores is a manual diff of the two H5 files.
 
 Finally, validate the exported model inside Athena itself: see
-[Athena Validation](../export.md#athena-validation).
+[Validate the exported model](../deployment/export.md#validate-the-exported-model).
 
 ## What changed since the v1 tutorial
 

@@ -605,5 +605,5 @@ Four figures: `disc_Hbb.png`, `disc_Hcc.png`, `roc_Hbb.png`, `roc_Hcc.png`.
   tagger with only 100k jets.
 - **Understand the eval file.** [Outputs](../outputs.md) explains where every
   column name comes from and how to add or remove them.
-- **Ship the model to Athena.** [ONNX Export](../export.md), and part 4's
+- **Ship the model to Athena.** [Export to ONNX](../deployment/export.md), and part 4's
   [export section](gn2_opendata.md#6-export-to-onnx).

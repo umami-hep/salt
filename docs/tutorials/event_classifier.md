@@ -433,3 +433,10 @@ against the cheapest thing that could have explained the same score.
   learning. Reporting it alongside the network's AUC is what turns "0.9x
   AUC" into a *meaningful* claim rather than a plausible-looking number —
   the same discipline applies at any scale, not just tutorial fixtures.
+
+## Next: deploy it
+
+This config trains and evaluates, but ships no ONNX surface. To export the
+model and run it outside salt — with a worked post-hoc inference script and the
+semantics you have to match to keep the scores correct — see
+[Deploy in easyjet](../deployment/easyjet.md).
