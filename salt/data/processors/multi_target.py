@@ -78,9 +78,7 @@ class MultiTarget(Processor):
     def __init__(self, replacements: Sequence[Mapping[str, Any]]) -> None:
         super().__init__()
         if not replacements:
-            raise ConfigError(
-                "MultiTarget needs at least one entry in 'replacements' (design §6.2)"
-            )
+            raise ConfigError("MultiTarget needs at least one entry in 'replacements'")
         self.rules: list[dict[str, Any]] = [self._checked_rule(dict(rule)) for rule in replacements]
         # group by output, preserving first-seen order (the per-output base is
         # established once, then each rule layers in declaration order)

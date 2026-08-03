@@ -122,7 +122,7 @@ class MaskFormerObjects(SaltModelModule):
         self.masks_key = f"{stream}.masks"
         self.reg_key = f"preds.{stream}.{regression_task}"
         # the constituent pad mask the TEST index reconstruction reads (padded
-        # constituents -> -1), the same demand the deleted sink used to fold.
+        # constituents -> -1).
         self.pad_key = f"masks.{constituent_stream}"
         # the GLOBAL leading-regression leaf is written under the OBJECT stream; the
         # PER-TOKEN index leaf under the CONSTITUENT stream (its dynamic axis source)
@@ -272,8 +272,8 @@ class MFLeadVertexDecorator(SaltModelModule):
     vertex's ``vertices_regression[..., reg_index]``.
 
     NOTE: this selection differs from the legacy ``leading_object`` reduce
-    (pT-only, no PV/null exclusion on the decorator side) — it is a NEW
-    output, not a relocation; both stay untouched (additive).
+    (pT-only, no PV/null exclusion on the decorator side) — it is a NEW,
+    additive output; the reduce itself is untouched.
 
     When no vertex qualifies (all-null jet, all-PV jet, or empty inputs), the
     jet-level scalars are filled with NaN deterministically via a
@@ -334,14 +334,14 @@ class MFLeadVertexDecorator(SaltModelModule):
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
                 f"MFLeadVertexDecorator source {source!r} contains a wildcard — conversion "
-                "sources are concrete (design §2.2)"
+                "sources are concrete"
             )
         if len(parts) < 2 or parts[0] != "outputs":
             raise ConfigError(
                 f"MFLeadVertexDecorator source {source!r} must be a "
                 "'outputs.<object_stream>.<vertices_class_probs>' leaf the MaskFormerObjects "
                 "node exposes (the per-vertex class probs) — it reads a bundle leaf, not a raw "
-                "prediction (USER DESIGN 2026-06-22)"
+                "prediction"
             )
         if not outputs:
             raise ConfigError(

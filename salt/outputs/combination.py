@@ -56,13 +56,13 @@ class Combination(SaltModelModule):
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
                 f"Combination source {source!r} contains a wildcard — conversion sources are "
-                "concrete (design §2.2)"
+                "concrete"
             )
         if len(parts) < 2 or parts[0] != "outputs":
             raise ConfigError(
                 f"Combination source {source!r} must be an 'outputs.<stream>.<name>' producer "
                 "leaf — a combination reads a bundle prob/pred leaf, not a raw prediction or a "
-                "renamed Athena output (design §6.2 / Q2)"
+                "renamed Athena output"
             )
         if not terms:
             raise ConfigError(

@@ -1,4 +1,4 @@
-"""Tests for salt.graph.executor (design §3.2, §4.1)."""
+"""Tests for salt.graph.executor."""
 
 import pytest
 import torch
@@ -21,7 +21,7 @@ from salt.graph.executor import (
 from salt.graph.planner import compile_plan
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# toy fixtures (no physics — M1 scope)
+# toy fixtures (no physics)
 
 
 def ts(**kwargs):
@@ -45,7 +45,7 @@ class ToyModule:
 
 
 class LinearToy(nn.Module):
-    """nn.Module GraphModule: the call lands in forward(b, mode) (design §2.5)."""
+    """nn.Module GraphModule: the call lands in forward(b, mode)."""
 
     def __init__(self, name, in_key, out_key, dim=4):
         super().__init__()
@@ -128,7 +128,7 @@ class TestHappyPathDiamond:
         x = torch.ones(2, 4)
         b = input_bundle(x)
         out = Executor(plan).run(b)
-        assert out is b  # design §3.2: run returns the bundle
+        assert out is b  # run returns the bundle
         assert set(out.keys()) == {
             "inputs.x",
             "embed.x",
@@ -165,7 +165,7 @@ class TestHappyPathDiamond:
             Executor(plan).run(Bundle())
 
 
-# declaration enforcement on merge (always on, design §3.2)
+# declaration enforcement on merge (always on)
 
 
 class TestDeclarationEnforcement:
@@ -221,7 +221,7 @@ class TestDeclarationEnforcement:
             Executor(plan).run(b)
 
 
-# debug mode: read tracking (design §4.1 quality bar)
+# debug mode: read tracking
 
 
 class TestDebugReadTracking:
@@ -295,7 +295,7 @@ class TestDebugReadTracking:
             Executor(plan).run(input_bundle(), debug=True)
 
 
-# debug mode: in-place mutation detection (design §2.1)
+# debug mode: in-place mutation detection
 
 
 class TestMutationDetection:
@@ -323,7 +323,7 @@ class TestMutationDetection:
         msg = str(exc.value)
         assert "'mut'" in msg
         assert "'embed.x'" in msg
-        assert "clone" in msg  # names the fix (§4.1 quality bar)
+        assert "clone" in msg  # names the fix
 
     def test_same_graph_passes_without_debug(self):
         # documented gap: mutation detection is debug-only (version snapshots)
@@ -339,7 +339,7 @@ class TestMutationDetection:
         assert torch.allclose(out.get("preds.x"), out.get("embed.x") + 1.0)
 
 
-# optional ports (design §2.2: consumed if present, absent = omitted)
+# optional ports (consumed if present, absent = omitted)
 
 
 class TestOptionalPorts:
@@ -379,7 +379,7 @@ class TestOptionalPorts:
         assert torch.equal(out.get("preds.x"), x + 1.0)
 
 
-# per-mode execution (design §3.1/§3.3: losses only in TRAINING plans)
+# per-mode execution (losses only in TRAINING plans)
 
 
 class TestPerModeExecution:
@@ -400,7 +400,7 @@ class TestPerModeExecution:
         assert "loss.total" not in test_out
 
 
-# determinism (design §3.1: frozen plan + seeded torch -> identical outputs)
+# determinism (frozen plan + seeded torch -> identical outputs)
 
 
 class TestDeterminism:
@@ -424,7 +424,7 @@ class TestDeterminism:
         assert not torch.equal(out_a, out_b)
 
 
-# constructor validation (design §3.2)
+# constructor validation
 
 
 class TestExecutorConstruction:
@@ -464,7 +464,7 @@ class TestExecutorConstruction:
 
 
 class TestRecordSteps:
-    """The profiler step scopes (plan 05: per-module attribution)."""
+    """The profiler step scopes (per-module attribution)."""
 
     @staticmethod
     def _run_under_profiler(enabled):

@@ -29,7 +29,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
 
 class TestResolvedSchema:
     def test_widths_resolve_through_the_graph(self, gn2v2):
-        """Symbolic widths bind from source/config declarations (design §2.3)."""
+        """Symbolic widths bind from source/config declarations."""
         _, _, schema = gn2v2
         assert schema.width("inputs.jets") == len(JET_VARIABLES)
         assert schema.width("inputs.tracks") == len(TRACK_VARIABLES)
@@ -103,15 +103,15 @@ class TestMaterialisedTrainability:
             assert grads, f"no gradients reached module {name!r}"
 
 
-# bind_all / materialise_all de-duck-typing (plan 49 §5): the PRODUCTION caller argument
+# bind_all / materialise_all de-duck-typing: the PRODUCTION caller argument
 # (SaltModule._graph_modules, saltmodule.py) is model-only by construction (never a terminal
 # sink — see salt.model.bind.bind_all's docstring for the audit). But at least one TEST call
 # site (salt.tests.unit.onnx.test_adapter's gn2_folded_modules fixture) calls bind_all directly
 # on a per-mode LOCAL module dict with a terminal OnnxExportSink folded in, mirroring
 # SaltModule.compile_mode's own fold — so bind_all/materialise_all keep an explicit
 # isinstance(module, SaltModelModule) partition (not getattr/callable duck-typing) rather than
-# calling .bind()/.materialise() unconditionally; a sink is silently skipped, exactly as the
-# pre-plan-49 getattr discovery silently skipped it (sinks never had a bind/materialise method).
+# calling .bind()/.materialise() unconditionally; a sink is silently skipped (sinks have no
+# bind/materialise method).
 
 
 class TestBindAllDirectCalls:
@@ -142,9 +142,9 @@ class TestBindAllDirectCalls:
         materialise_all(modules)
 
     def test_bind_all_and_materialise_all_skip_a_folded_sink(self, tmp_path):
-        """Regression (plan 49 §5): a mixed dict with a non-SaltModelModule 'sink' double is
-        handled — bind_all/materialise_all call the real module and silently skip the sink,
-        matching the pre-plan-49 getattr-discovery behaviour (a sink has no bind/materialise).
+        """Regression: a mixed dict with a non-SaltModelModule 'sink' double is handled —
+        bind_all/materialise_all call the real module and silently skip the sink (a sink
+        has no bind/materialise).
         """
 
         class _FakeSink:

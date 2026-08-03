@@ -1,4 +1,4 @@
-"""Unit gates for the `OnnxExportSink` declare-only terminal node (design §4.2)."""
+"""Unit gates for the `OnnxExportSink` declare-only terminal node."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def test_declare_io_empty_outside_onnx(mode):
     assert flatten_spec(io.produces) == {}
 
 
-# generated metadata: output_names / dtypes / dynamic_axes (design §6.3)
+# generated metadata: output_names / dtypes / dynamic_axes
 
 
 def test_output_names_are_in_declared_tuple_order():
@@ -111,7 +111,7 @@ def test_model_name_required_for_names():
     assert sink.output_names() == ["Late_pb", "Late_pc", "Late_pu"]
 
 
-# named_outputs: the split realisation (no math), pass-through (design §6.2)
+# named_outputs: the split realisation (no math), pass-through
 
 
 def test_named_outputs_splits_probs_and_passes_through_singles():

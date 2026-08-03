@@ -51,7 +51,7 @@ class ResolvedSchema:
             raise BindError(
                 f"no statically resolved width for bundle key {key!r} — the key is either "
                 f"absent from the compiled plans or its last dim never binds to a concrete "
-                f"size (design §2.3){hint}"
+                f"size{hint}"
             ) from None
 
     def fields_of(self, key: str) -> tuple[str, ...]:
@@ -67,8 +67,8 @@ class ResolvedSchema:
         except KeyError:
             raise BindError(
                 f"no declared fields for bundle key {key!r} — column names come from the "
-                f"producing declaration (e.g. the dataset-side Features variables, "
-                f"design §2.4/§6.2); known field-carrying keys: {sorted(self.fields)}"
+                f"producing declaration (e.g. the dataset-side Features variables); "
+                f"known field-carrying keys: {sorted(self.fields)}"
             ) from None
 
 
@@ -226,7 +226,7 @@ def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None
                     raise BindError(
                         f"module {getattr(module, 'name', '?')!r} derives width {size} for "
                         f"{key!r} but the resolved schema already has {previous} — conflicting "
-                        "widths (design §2.2/§6.6)"
+                        "widths"
                     )
                 if previous is None:
                     widths[key] = size
@@ -262,8 +262,7 @@ def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: Resol
     terminal sink folded in (mirroring `SaltModule.compile_mode`'s own fold,
     e.g. an `OnnxExportSink` under `salt.tests.unit.onnx.test_adapter`), so
     this stays an explicit `SaltModelModule`-partitioned direct call, not an
-    unconditional one — a sink has no `bind`, exactly as the pre-plan-49
-    getattr-discovery silently skipped it. `SaltModelModule.bind` is a
+    unconditional one — a sink has no `bind`. `SaltModelModule.bind` is a
     documented no-op default, so no further discovery is needed for the
     modules the partition DOES call. Bind is config-only — building the
     schema from compiled plans (which are config-derived) keeps that
@@ -310,7 +309,7 @@ class _DimBindings:
         if previous is not None and previous[0] != size:
             raise BindError(
                 f"symbolic dim {dim!r} resolves to {previous[0]} at {previous[1]} but "
-                f"{size} at {where} — conflicting widths (design §2.2)"
+                f"{size} at {where} — conflicting widths"
             )
         if previous is None:
             self._size[root] = (size, where)
@@ -325,7 +324,7 @@ class _DimBindings:
             raise BindError(
                 f"unifying {a!r} with {b!r} at {where}: {a!r} is {size_a[0]} "
                 f"(from {size_a[1]}) but {b!r} is {size_b[0]} (from {size_b[1]}) — "
-                "conflicting widths (design §2.2)"
+                "conflicting widths"
             )
         self._parent[root_b] = root_a
         if size_a is None and size_b is not None:

@@ -41,11 +41,11 @@ modular-unit-tests:
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
 
 # --------------- CPU INTEGRATION GATES ---------------
-# The W34/W5 section-path gates live under salt/tests/integration but are
+# The section-path gates live under salt/tests/integration but are
 # `cpu_always` (pure-CPU, data-free static schema + ONNX-trace-fold checks). The
 # conftest marks them CI-load-bearing — they must NEVER be silently skipped — yet
 # `modular-unit-tests` (salt/tests/unit only) doesn't collect them, so without
-# this job they never run in CI. These gate the W34.4d cutover: the migrated
+# this job they never run in CI. These gate the outputs-section cutover: the migrated
 # configs' `outputs:`-section H5/ONNX schema == legacy authority. Run WITHOUT
 # --run-integration so only the cpu_always tests execute (any GPU-only sibling
 # in these files is skipped on the CPU runner).

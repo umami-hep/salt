@@ -50,7 +50,7 @@ class Features(Processor):
     ) -> None:
         super().__init__()
         if not variables:
-            raise ConfigError("Features needs at least one stream in 'variables' (design §6.2)")
+            raise ConfigError("Features needs at least one stream in 'variables'")
         self.variables: dict[str, list[str]] = {}
         for stream, names in variables.items():
             names = list(names)  # noqa: PLW2901

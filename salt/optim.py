@@ -283,7 +283,7 @@ class HybridMuonAdamW(Optimizer):
                     warnings.warn(
                         f"HybridMuonAdamW policy.{label} entry {token!r} matched 0 parameter "
                         f"names — a dead routing entry (typo or renamed module?). Known prefixes: "
-                        f"{sorted({name.split('.')[0] for name in names})} (FD §3.4 696-699).",
+                        f"{sorted({name.split('.')[0] for name in names})} .",
                         stacklevel=3,
                     )
 

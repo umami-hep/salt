@@ -1,4 +1,4 @@
-"""Shared helpers for the callbacks test mirrors (split from test_callbacks.py, W45.2c)."""
+"""Shared helpers for the callbacks test mirrors."""
 
 from __future__ import annotations
 

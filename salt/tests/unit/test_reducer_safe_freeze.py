@@ -1,10 +1,10 @@
-"""W6 reducer-safe freeze helpers (plan 06) — the pure freeze/optimizer-membership
+"""Reducer-safe freeze helpers — the pure freeze/optimizer-membership
 primitives that fix the DDP init-frozen-unfreeze desync.
 
 CPU-safe: no DataLoader, no DDP, no spawn. Exercises `reducer_safe_freeze_required`,
 `apply_stage_freeze`, `trainable_named_params`, and `clear_frozen_grads` directly on
-a toy `ModuleDict` + fake strategy/schedule so the semantics that the exp-07 gate
-proves under a real reducer are also locked at the unit level.
+a toy `ModuleDict` + fake strategy/schedule so the semantics that only a real
+reducer can prove end-to-end are also locked at the unit level.
 """
 
 from __future__ import annotations

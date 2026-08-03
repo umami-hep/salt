@@ -80,7 +80,7 @@ class TestClassificationTaskModule:
             )
 
     def test_weight_source_materialise(self, norm_paths):
-        """Class weights fill the CE buffer at materialise (design §3.3)."""
+        """Class weights fill the CE buffer at materialise."""
         modules = build_gn2v2_modules(norm_paths[0], class_dict=norm_paths[1])
         bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
         head = modules["track_origin"]

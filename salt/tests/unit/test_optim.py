@@ -506,7 +506,7 @@ class TestSafePctStart:
 
 
 # --------------------------------------------------------------------------- #
-# The post-W8 per-stage optimizer/scheduler rebuild
+# The per-stage optimizer/scheduler rebuild
 #
 # `configure_optimizers` was rewritten by the fine-tuning work to rebuild BOTH
 # the optimizer and the scheduler at every stage boundary, off the ACTIVE

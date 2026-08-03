@@ -142,7 +142,7 @@ class _TaskModuleBase(SaltModelModule):
         NOT pack a structured numpy array, prefix the run/model name, or
         downcast precision (the sink does all three).
 
-        Target-label emission (plan 50 Phase C): in TEST mode, and unless the
+        Target-label emission: in TEST mode, and unless the
         task's ``write_targets`` flag is off, the prediction fields are
         followed by the task's TARGET-LABEL field(s) — the labels the model
         targeted, as columns named ``target_{task}`` (classification /
@@ -234,7 +234,7 @@ class _TaskModuleBase(SaltModelModule):
             f"task {self.name!r} ({type(self).__name__}) ships no {what} rendering — "
             "supported families are ClassificationTaskModule, VertexingTaskModule and "
             "RegressionTaskModule; give a custom task module get_output/"
-            "get_output_manifest/output_time_requires methods (design §8)"
+            "get_output_manifest/output_time_requires methods"
         )
 
 
@@ -251,21 +251,19 @@ def _parse_expose(expose: Sequence[str] | None, cls: str) -> Mode:
         return Mode.ALL
     if isinstance(expose, str) or not isinstance(expose, Sequence):
         raise ConfigError(
-            f"{cls}: expose must be a list of mode names (e.g. [fit, val]), got {expose!r} "
-            "(design §4.2)"
+            f"{cls}: expose must be a list of mode names (e.g. [fit, val]), got {expose!r}"
         )
     if not expose:
         raise ConfigError(
             f"{cls}: expose may not be an empty list — a task exposed in no mode is dead; "
-            "omit expose for all modes, or remove the task (design §4.2)"
+            "omit expose for all modes, or remove the task"
         )
     valid = {m.name.lower(): m for m in (Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX)}
     modes = Mode.FIT & Mode.TEST  # empty seed (no mode); accumulate the named ones
     for raw in expose:
         if not isinstance(raw, str) or raw.lower() not in valid:
             raise ConfigError(
-                f"{cls}: unknown expose mode {raw!r} — valid modes are "
-                f"{sorted(valid)} (design §4.2)"
+                f"{cls}: unknown expose mode {raw!r} — valid modes are {sorted(valid)}"
             )
         modes |= valid[raw.lower()]
     return modes
@@ -279,8 +277,7 @@ def _checked_weight_source(weight_source: Mapping[str, str] | None) -> dict[str,
         weight_source["from_class_dict"], (str, Path)
     ):
         raise ConfigError(
-            f"weight_source must be {{'from_class_dict': <path>}}, got {dict(weight_source)!r} "
-            "(design §3.3)"
+            f"weight_source must be {{'from_class_dict': <path>}}, got {dict(weight_source)!r}"
         )
     return {"from_class_dict": str(weight_source["from_class_dict"])}
 

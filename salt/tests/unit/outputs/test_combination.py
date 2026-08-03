@@ -1,4 +1,4 @@
-"""Unit gates for the `Combination` conversion node (design §6.2)."""
+"""Unit gates for the `Combination` conversion node."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def test_combination_declare_io_requires_source_produces_new_leaf():
 
 
 def test_combination_derived_width_collapses_to_one():
-    """The combination collapses the source last dim to a single scalar column (design §6.6)."""
+    """The combination collapses the source last dim to a single scalar column."""
     node = Combination(source=_SRC, name="pbc", terms={0: 1.0, 1: 1.0})
     node.name = "pbc"
     assert node.derived_widths({_SRC: 3}) == {"outputs.jets.pbc": 1}
@@ -123,7 +123,7 @@ def test_combination_rejects_non_outputs_source():
 
 
 def test_combination_rejects_wildcard_source():
-    """A combination source is a concrete key (no wildcard, design §2.2)."""
+    """A combination source is a concrete key (no wildcard)."""
     with pytest.raises(ConfigError, match="wildcard"):
         Combination(source="outputs.jets.*", name="pbc", terms={0: 1.0})
 

@@ -77,7 +77,7 @@ class GraphArtifacts(Callback):
         if not plans:
             warnings.warn(
                 f"GraphArtifacts: {type(pl_module).__name__} has no compiled plans — "
-                "run-dir artifacts skipped (design §4.4 expects a SaltModule)",
+                "run-dir artifacts skipped (expected a SaltModule)",
                 stacklevel=2,
             )
             return
@@ -106,7 +106,7 @@ class GraphArtifacts(Callback):
                 sorted(set(dataset.modules) - set(dataset.plan.module_names)),
                 out_dir / f"graph_{stage}_dataset",
             )
-        print(f"wrote graph/plan artifacts to {out_dir} (design §4.4)")
+        print(f"wrote graph/plan artifacts to {out_dir}")
 
     @staticmethod
     def _default_dir(trainer: Trainer, stage: str) -> Path:
@@ -147,18 +147,16 @@ class GraphArtifacts(Callback):
         """
         sections: list[str] = []
         if dataset is not None:
-            sections.append(f"# dataset plan (design §6.1)\n{plan_table(dataset.plan)}")
+            sections.append(f"# dataset plan\n{plan_table(dataset.plan)}")
             columns = [
                 f"  {stream}: " + ", ".join(f"{field} ({who})" for field, who in fields.items())
                 for stream, fields in dataset.read_fields.items()
             ]
             if columns:
-                sections.append(
-                    "read columns (demand-narrowed, design §6.1):\n" + "\n".join(columns)
-                )
-        sections.append(f"# model plan (design §3.1)\n{plan_table(plan)}")
+                sections.append("read columns (demand-narrowed):\n" + "\n".join(columns))
+        sections.append(f"# model plan\n{plan_table(plan)}")
         if writer_sinks:
-            sections.append("# writer sinks (design §8)\n" + "\n".join(writer_sinks))
+            sections.append("# writer sinks\n" + "\n".join(writer_sinks))
         return "\n\n".join(sections) + "\n"
 
     def _resolved_io(

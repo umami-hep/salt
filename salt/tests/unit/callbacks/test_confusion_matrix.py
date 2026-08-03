@@ -148,7 +148,7 @@ class TestConfusionMatrixSurface:
             callback.setup(None, SimpleNamespace(), stage="fit")
 
     def test_fit_val_demand_static_without_setup(self):
-        # the FIT/VAL-sink declaration (design §3.1, §3.4): resolves from the
+        # the FIT/VAL-sink declaration: resolves from the
         # module dict alone, NO setup needed (the static-tooling path)
         callback = ConfusionMatrix(task_name="jets_classification")
         modules = stub_pl_module()._graph_modules

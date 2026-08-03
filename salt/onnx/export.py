@@ -88,7 +88,7 @@ def derive_onnx_sources(export: ExportConfig, variables: Mapping[str, Sequence[s
             raise ConfigError(
                 f"export input {entry.port!r}: stream {stream!r} has no Features variable "
                 "declaration (config: data.modules.features.init_args.variables) — export "
-                "input widths derive from it (design §7.1)"
+                "input widths derive from it"
             )
         fields = tuple(variables[stream])
         if entry.sequence:
@@ -136,7 +136,7 @@ def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
     if len(found) > 1:
         raise ConfigError(
             "more than one OnnxExportSink is configured — the ONNX output tuple has a single "
-            "ordering authority; declare exactly one export sink (design §6.3)"
+            "ordering authority; declare exactly one export sink"
         )
     return found[0] if found else None
 
@@ -160,7 +160,7 @@ def compile_onnx_plan(
     Raises
     ------
     ConfigError
-        When neither a legacy manifest nor a folded export sink supplies demand.
+        When no folded export sink supplies demand.
     ShapeError
         On a rank/shape mismatch — augmented with the ``export.inputs``
         attribution when the offending key is an export input port.
@@ -168,11 +168,11 @@ def compile_onnx_plan(
     export_sink = _onnx_export_sink(modules)
     if export_sink is None:
         raise ConfigError(
-            "compile_onnx_plan needs a folded OnnxExportSink in model.modules (plan-29 W4) — "
+            "compile_onnx_plan needs a folded OnnxExportSink in model.modules — "
             "the off-graph reduce manifest was retired. "
             "Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
             "conversion nodes (ClassProbs/SeqClassIndex/MaskFormerObjects/"
-            "Combination) own the math inside the traced graph (design §4.2/§6)."
+            "Combination) own the math inside the traced graph."
         )
     # the folded OnnxExportSink anchors its conversion leaves as a terminal node
     # (the planner pulls them in), so no flat `sinks=` are needed.
@@ -201,7 +201,7 @@ def compile_onnx_plan(
                 f"{message}\n  this source comes from export.inputs (config: "
                 f"export.inputs[{i}], port {entry.port!r}) — if {stream!r} is a "
                 f"{'fixed-width global' if entry.sequence else 'variable-length sequence'} "
-                f"stream, {fix} (design §5.1)"
+                f"stream, {fix}"
             ) from err
         raise
 
@@ -266,8 +266,8 @@ def export_graph(
     if outputs:
         raise ConfigError(
             "export_graph no longer accepts a reduce-manifest `outputs=` list — the off-graph "
-            "reduce manifest was retired at plan-29 W4. Wire an OnnxExportSink naming the "
-            "conversion outputs.* leaves instead (design §4.2/§6)."
+            "reduce manifest was retired. Wire an OnnxExportSink naming the "
+            "conversion outputs.* leaves instead."
         )
     resolved = resolve_export_config(export, run_name)
     plan = compile_onnx_plan(modules, resolved, variables)
@@ -337,7 +337,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
     """Parse the ``salt export`` CLI arguments."""
     parser = argparse.ArgumentParser(
         prog="salt export",
-        description="Export a trained salt model to ONNX (design §7).",
+        description="Export a trained salt model to ONNX.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -350,7 +350,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         "--manifest",
         action="store_true",
         help="print the writer-derived output manifest (full ONNX names, dtypes, reduces) "
-        "and exit — no checkpoint needed (M4.5 unified manifest)",
+        "and exit — no checkpoint needed",
     )
     parser.add_argument(
         "-c",
@@ -465,7 +465,7 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
             return dict(module.variables)
     raise ConfigError(
         "the run config declares no salt.data.Features module — export input widths "
-        "derive from its variable lists (design §7.1)"
+        "derive from its variable lists"
     )
 
 
@@ -488,7 +488,7 @@ def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str
             raise ConfigError(
                 f"export input {entry.port!r}: the config declares {configured} variables but "
                 f"the checkpoint schema stores width {stored} — the Features list drifted "
-                "since training (design §7.1 schema cross-check)"
+                "since training"
             )
 
 
@@ -560,7 +560,7 @@ def main(args: Sequence[str] | None = None) -> int:
     print("-" * 100)
     print(f"Done! Saved ONNX model at {result.onnx_path}")
     if result.plan_txt_path is not None:
-        print(f"ONNX plan table (the traced graph, design §4.4): {result.plan_txt_path}")
+        print(f"ONNX plan table (the traced graph): {result.plan_txt_path}")
     print("-" * 100)
     return 0
 
@@ -605,9 +605,9 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
-            "config has no OnnxExportSink — since plan-29 W4 the ONNX output manifest is "
+            "config has no OnnxExportSink — the ONNX output manifest is "
             "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
-            "outputs.* leaves. Add the conversion nodes + the OnnxExportSink (design §4.2/§6)."
+            "outputs.* leaves. Add the conversion nodes + the OnnxExportSink."
         )
     if export_sink.model_name is None:
         export_sink.model_name = validate_model_name(
@@ -639,7 +639,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     if export_cfg is None:
         raise ConfigError(
             f"config {config_path} has no export: block — declare export.inputs (and "
-            "optionally model_name/rename/combine; outputs derive from the writers, M4.5) "
+            "optionally model_name/rename/combine; outputs derive from the writers) "
             "in the run config, or stack an override file carrying only the export: block "
             f"as a second config:\n  salt export --ckpt_path {ckpt_path} "
             f"-c {config_path} -c my_export_block.yaml"
@@ -656,11 +656,11 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
-            "config has no OnnxExportSink — since plan-29 W4 the ONNX output manifest is "
+            "config has no OnnxExportSink — the ONNX output manifest is "
             "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
             "outputs.* leaves the folded nodes mint (ClassProbs/SeqClassIndex/"
             "MaskFormerObjects/Combination). The off-graph reduce manifest was retired; add the "
-            "conversion nodes + the OnnxExportSink to the run config (design §4.2/§6)."
+            "conversion nodes + the OnnxExportSink to the run config."
         )
     # data-less checkpoint load: binds from the stored salt_core schema before the
     # strict state-dict load
@@ -678,7 +678,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the callbacks key (design §2.2)"
+            "the callbacks key"
         )
     modules[export_sink.name] = export_sink
     _cross_check_schema(model, resolved, variables)

@@ -41,7 +41,7 @@ class TestStreamEmbed:
         io = embed.declare_io(Mode.FIT)
         assert set(flatten_spec(io.requires)) == {"normed.tracks", "normed.jets"}
         assert set(flatten_spec(io.produces)) == {"embed.tracks"}
-        # rank-agnostic produce (M7 W1.5 wave R): shape=None, width via derived_widths
+        # rank-agnostic produce: shape=None, width via derived_widths
         assert flatten_spec(io.produces)["embed.tracks"].shape is None
         assert embed.derived_widths({}) == {"embed.tracks": 8}
 
@@ -64,7 +64,7 @@ class TestStreamEmbed:
 
 
 class TestStreamEmbedVector:
-    """Rank INFERRED from the bound input (M7 W1.5 wave R; collapses the M6-6 flag)."""
+    """Rank INFERRED from the bound input."""
 
     def test_declare_io_is_rank_agnostic(self):
         embed = StreamEmbed(stream="jets", out_dim=8)
@@ -112,7 +112,7 @@ class TestStreamEmbedVector:
 
 
 class TestStreamEmbedMup:
-    """The ``mup:`` flag on `StreamEmbed` (M6 sub-wave B, plan 12 muP arch port)."""
+    """The ``mup:`` flag on `StreamEmbed`."""
 
     def test_default_is_not_mup(self):
         embed = StreamEmbed(stream="tracks", out_dim=8)

@@ -1,4 +1,4 @@
-"""End-to-end M4 export tests: trace, ORT agreement, metadata, CLI (plan 07 stage A)."""
+"""End-to-end export tests: trace, ORT agreement, metadata, CLI."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ SWEEP = [{"tracks": length} for length in (0, 1, 2, 7, 21, 39)]
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
     """Deterministically-weighted GN2 fixture exported through the FOLDED
-    conversion-node path (W4)."""
+    conversion-node path."""
     tmp = tmp_path_factory.mktemp("onnx_export")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights (retired v1 transfer stand-in)
@@ -78,7 +78,7 @@ def exported(tmp_path_factory):
 
 class TestExportedModel:
     def test_subset_sweep_at_1e6(self, exported):
-        # gate O1 at unit scale: v2-torch vs v2-ONNX, incl. L=0 (plan 07)
+        # gate O1 at unit scale: v2-torch vs v2-ONNX, incl. L=0
         result = check_onnx(
             exported.result.adapter,
             exported.result.onnx_path,
@@ -196,7 +196,7 @@ class TestExportedModel:
         assert again.plan.plan_hash == exported.result.plan.plan_hash
 
 
-# the two-dynamic-axes Split grid (design §7 / risk 7 — the in-tree de-risk;
+# the two-dynamic-axes Split grid (the in-tree de-risk;
 # the release-blocker version on bigger widths is gate O3)
 
 
@@ -275,7 +275,7 @@ def two_stream(tmp_path_factory):
             ),
         ],
     )
-    # W4 folded path: conversion nodes + OnnxExportSink (the off-graph manifest
+    # folded path: conversion nodes + OnnxExportSink (the off-graph manifest
     # is retired). The jets head's softmax + the two argmax aux leaves fold into
     # ClassProbs/SeqClassIndex nodes named by the sink.
     from salt.outputs import ClassProbs
@@ -315,7 +315,7 @@ def two_stream(tmp_path_factory):
 
 class TestTwoDynamicAxes:
     def test_split_grid_including_zeros(self, two_stream):
-        # design risk 7: the eager Split slicing is provably WRONG under
+        # known risk: the eager Split slicing is provably WRONG under
         # traced export with two dynamic axes (recipe spike: 15/15 grid
         # points mismatched); the index_select export branch must agree
         # with eager v2 on the full grid INCLUDING zero-length streams
@@ -428,7 +428,7 @@ class TestSaltSurface:
         assert [entry.port for entry in export_cfg.inputs] == ["inputs.jets", "inputs.tracks"]
         assert export_cfg.inputs[1].sequence is True
         assert export_cfg.inputs[1].dyn_axis == "n_tracks"
-        # M4.5: the shipped configs carry NO export.outputs — the manifest
+        # the shipped configs carry NO export.outputs — the manifest
         # derives from the writers (rename/combine empty by default)
         assert export_cfg.outputs == []
         assert export_cfg.rename == {}
@@ -458,11 +458,11 @@ class TestSaltSurface:
         onnx_path = cli_run.run_dir / "network.onnx"
         assert onnx_path.is_file()
         out = capsys.readouterr().out
-        # int8 outputs get a POSITIVE verdict row (M4-review fix: the
+        # int8 outputs get a POSITIVE verdict row (review fix: the
         # checker table used to confirm float outputs only)
         assert "GN2v2dummy_VertexIndex" in out
         assert "int8 exact over" in out
-        # the traced plan table is written next to the .onnx (design §4.4)
+        # the traced plan table is written next to the .onnx
         plan_txt = cli_run.run_dir / "plan_onnx.txt"
         assert plan_txt.is_file()
         assert "[mode=ONNX]" in plan_txt.read_text()
@@ -474,7 +474,7 @@ class TestSaltSurface:
         assert info["ckpt_path"] == str(Path(cli_run.ckpt).resolve())
         assert info["config.yaml"]["name"] == "GN2v2_dummy"
         # without --overwrite a second export must refuse (to_onnx.py:710-711)
-        # with ONE actionable line, not a traceback (M4-review fix)
+        # with ONE actionable line, not a traceback (review fix)
         rc2 = export_main(["--ckpt_path", str(cli_run.ckpt), "--no-check"])
         assert rc2 == 1
         err = capsys.readouterr().err
@@ -483,7 +483,7 @@ class TestSaltSurface:
 
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
         # a run config trained WITHOUT an export: block must fail with the
-        # exact working stacking command in the message (M4-review fix: the
+        # exact working stacking command in the message (review fix: the
         # old 'stack an override config' hint was not actionable)
         from salt.onnx.export import main as export_main
 
@@ -533,7 +533,7 @@ class TestSaltSurface:
 
     def test_manifest_flag_prints_without_checkpoint(self, cli_run, capsys):
         # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
-        # needed (W4: the off-graph writer manifest is retired — the sink names the
+        # needed (the off-graph writer manifest is retired — the sink names the
         # folded conversion outputs.* leaves)
         from salt.onnx.export import main as export_main
 
@@ -546,8 +546,8 @@ class TestSaltSurface:
         assert "folded conversion node (outputs.* leaf)" in out
 
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
-        # the M4.5 migration error must fire on the CLI path with the
-        # writers: pointer (§4.1 bar)
+        # the migration error must fire on the CLI path with the
+        # writers: pointer (quality bar)
         from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
@@ -560,5 +560,5 @@ class TestSaltSurface:
         rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(legacy_cfg)])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "REMOVED by the M4.5" in err
+        assert "export.outputs was REMOVED" in err
         assert "writers" in err

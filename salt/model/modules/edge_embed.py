@@ -190,7 +190,7 @@ class EdgeFeatures(SaltModelModule):
         """
         super().__init__()
         if not features:
-            raise ConfigError("EdgeFeatures: features must be a non-empty sequence (design §6.7)")
+            raise ConfigError("EdgeFeatures: features must be a non-empty sequence")
         if len(set(features)) != len(tuple(features)):
             raise ConfigError(f"EdgeFeatures: duplicate features in {tuple(features)}")
         unknown = [f for f in features if f not in _EDGE_FEATURES]

@@ -64,7 +64,7 @@ class Checkpoint(ModelCheckpoint):
             if log_dir is not None and str(log_dir).startswith(("s3://", "s3:/")):
                 raise ConfigError(
                     "salt.callbacks.Checkpoint does not support s3:// log dirs yet "
-                    "(rides with the M6 Comet/run-dir wiring); use a local trainer.log_dir "
+                    "(rides with the Comet/run-dir wiring); use a local trainer.log_dir "
                     "(v1 checkpoint.py:34-43 s3 branch deferred)"
                 )
             self.dirpath = str(Path(log_dir) / self.dirname)

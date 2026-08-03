@@ -20,8 +20,8 @@ _OUTPUT_MODE_NAMES = {"test": Mode.TEST, "export": Mode.ONNX}
 def parse_output_modes(modes: Any, who: str) -> Mode:
     """Map a YAML ``modes:`` list onto the Mode flag the section writer runs in.
 
-    ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the pre-plan-50
-    default). A non-empty list of ``test``/``export`` names ORs into the flag.
+    ``None`` (omitted) -> ``Mode.TEST | Mode.ONNX`` (both, the default). A
+    non-empty list of ``test``/``export`` names ORs into the flag.
     Raises `ConfigError` on an empty list or an unknown mode name (naming the key).
     """
     if modes is None:
@@ -50,7 +50,7 @@ class OutputSectionWriter(SaltModelModule):
     Named (not just `SaltModelModule` directly) so the top-level ``outputs:``
     CLI namespace can be typed ``dict[str, OutputSectionWriter | None]`` and
     jsonargparse builds each writer from its ``class_path``. Beyond the
-    `SaltModelModule` contract it owns the ``modes:`` surface (plan 50): each
+    `SaltModelModule` contract it owns the ``modes:`` surface: each
     section writer declares the modes it runs in (``test``/``export``), which
     the command uses to pick the implicit per-command sink and which gates the
     writer's own `declare_io` / manifest so an ``export``-omitted writer mints
@@ -60,7 +60,7 @@ class OutputSectionWriter(SaltModelModule):
     ----------
     modes : Sequence[str] | None, optional
         The modes this writer participates in — a subset of ``["test",
-        "export"]``. ``None`` (default) = both (the pre-plan-50 behaviour).
+        "export"]``. ``None`` (default) = both.
     """
 
     def __init__(self, modes: Sequence[str] | None = None) -> None:
@@ -133,13 +133,11 @@ class RunTaskOutput(OutputSectionWriter):
         if not names:
             raise ConfigError(
                 "RunTaskOutput needs a non-empty 'tasks' list — name the task instances whose "
-                "get_output() fields this writer serialises (plan 34 W34.2)"
+                "get_output() fields this writer serialises"
             )
         if len(set(names)) != len(names):
             dup = sorted({n for n in names if names.count(n) > 1})
-            raise ConfigError(
-                f"RunTaskOutput: duplicate task name(s) {dup} — one entry per task (plan 34 W34.2)"
-            )
+            raise ConfigError(f"RunTaskOutput: duplicate task name(s) {dup} — one entry per task")
         self.tasks = tuple(names)
         # the model module dict, captured at fold/compile so the writer can resolve
         # the tasks it orchestrates (declare_io needs each task's pred_key + stream
@@ -166,7 +164,7 @@ class RunTaskOutput(OutputSectionWriter):
         if self._model_modules is None:
             raise ConfigError(
                 f"RunTaskOutput {self.name!r} has no model modules bound — it resolves the tasks "
-                "it orchestrates from the model (plan 34 W34.2); ensure the outputs: section is "
+                "it orchestrates from the model; ensure the outputs: section is "
                 "composed after the model (bind_model_modules is called at compile)"
             )
         out: dict[str, Any] = {}
@@ -175,14 +173,14 @@ class RunTaskOutput(OutputSectionWriter):
             if task is None:
                 raise ConfigError(
                     f"RunTaskOutput {self.name!r}: task {task_name!r} is not a model module — "
-                    f"candidates are {sorted(self._model_modules)} (plan 34 W34.2)"
+                    f"candidates are {sorted(self._model_modules)}"
                 )
             for attr in ("get_output", "output_time_requires", "pred_key", "stream"):
                 if not hasattr(task, attr):
                     raise ConfigError(
                         f"RunTaskOutput {self.name!r}: task {task_name!r} "
                         f"({type(task).__name__}) does not expose {attr!r} — RunTaskOutput "
-                        "orchestrates _TaskModuleBase tasks (plan 34 W34.2)"
+                        "orchestrates _TaskModuleBase tasks"
                     )
             out[task_name] = task
         return out
@@ -234,7 +232,7 @@ class RunTaskOutput(OutputSectionWriter):
                 if field.value is None:
                     raise ConfigError(
                         f"task {task.name!r}.get_output field carries no value — RunTaskOutput "
-                        "writes torch values into the graph (plan 34 W34.2)"
+                        "writes torch values into the graph"
                     )
                 produced[self.field_leaf_key(task, field)] = field.value
         return produced
@@ -277,7 +275,7 @@ def _dep_spec(dep: str) -> TensorSpec:
     A task's ``output_time_requires`` mixes namespaces: the stream pad mask
     (``masks.<stream>`` -> ``kind=pad_mask`` bool), a label (``labels.<stream>.
     <var>`` -> ``kind=label``, the TEST source for ratio denominators AND the
-    Phase-C target-label columns — dtype unconstrained since label dtypes vary
+    target-label columns — dtype unconstrained since label dtypes vary
     per label: int64 class/vertex labels vs float32 regression targets), and
     the raw input feature (``inputs.<stream>`` -> ``kind=data`` float, the
     ONNX source). The require kind must match the dataset-source kind or the
@@ -303,6 +301,6 @@ def _task_manifest(task: Any, mode: Mode) -> list[OutputField]:
     if not callable(manifest):
         raise ConfigError(
             f"task {task.name!r} ({type(task).__name__}) ships no get_output_manifest — the dumb "
-            "sinks need the column NAMES/DTYPES/ORDER before any batch runs (plan 34 W34.2)"
+            "sinks need the column NAMES/DTYPES/ORDER before any batch runs"
         )
     return list(manifest(mode, "salt"))

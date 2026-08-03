@@ -105,8 +105,7 @@ class DeepMergeParser(LightningArgumentParser):
 
         The top-level ``training_schedule`` leaf is RECURSIVELY deep-merged instead
         (its stage names live one level down under ``stages:``), so stacked configs
-        override per-stage-by-name rather than replacing the whole schedule (plan 03
-        / D1).
+        override per-stage-by-name rather than replacing the whole schedule.
         """
         for key, val_from in list(cfg_from.items()):
             if not isinstance(val_from, dict):
@@ -129,7 +128,7 @@ class DeepMergeParser(LightningArgumentParser):
         validation/``--print_config``, so resolved values freeze into the saved
         run config.
         """
-        # W45.2c import-placement fix: _fan_out_artifacts stays in salt.main
+        # Import placement: _fan_out_artifacts stays in salt.main
         # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
         from salt.main import (

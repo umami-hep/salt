@@ -389,7 +389,7 @@ class Reader(SaltDatasetModule):
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement with_source(); it cannot be used "
-            "as a GraphDataModule reader prototype (design §6.1)"
+            "as a GraphDataModule reader prototype"
         )
 
     def sources(self) -> list[Path]:

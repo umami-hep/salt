@@ -1,10 +1,10 @@
-"""Plan 50 Phase C gate, RUN level — a label-stripped inference read serves batches.
+"""A label-stripped inference read serves batches (RUN level).
 
 The static half of the gate (`output_time_requires(ONNX)` names no labels) lives in
 ``test_target_labels.py``; here the demand actually DRIVES a `GraphDataset` over a
 real H5 file whose label fields have been physically removed, proving no label
-dataset is demanded or read. The full command-level run moves to Phase D
-(``salt inference`` gate: "on a label-stripped copy ... the command runs green").
+dataset is demanded or read. The full command-level run is covered separately
+by the ``salt inference`` gate on a label-stripped copy.
 """
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ def test_label_stripped_read_serves_batches_under_inference_demand(data):
 
 def test_label_demand_on_stripped_file_fails_loudly(data):
     """Sensitivity control: the same stripped file with the tasks' TEST-mode label
-    demand (Phase C) fails at plan/schema validation — the gate above cannot pass
+    demand fails at plan/schema validation — the gate above cannot pass
     vacuously, and any label demand leaking into inference would be caught.
     """
     test_labels = _label_demand(Mode.TEST)

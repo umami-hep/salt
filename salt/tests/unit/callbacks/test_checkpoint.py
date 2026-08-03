@@ -66,7 +66,7 @@ class TestCheckpoint:
         assert not str(cb.dirpath).endswith("ckpts")
 
     def test_setup_s3_log_dir_raises(self):
-        # the v1 s3 branch (checkpoint.py:34-43) is deferred to M6 — loud error
+        # the v1 s3 branch (checkpoint.py:34-43) is deferred — loud error
         cb = Checkpoint()
         with pytest.raises(ConfigError, match="s3://"):
             cb.setup(_ckpt_trainer("s3://bucket/run"), SimpleNamespace(), stage="fit")

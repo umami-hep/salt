@@ -152,9 +152,7 @@ class RegressionTaskModule(_TaskModuleBase):
         # regression has no single `label` field: one label demanded per target below
         self.targets = _opt_tuple(targets) or ()
         if not self.targets:
-            raise ConfigError(
-                "RegressionTaskModule: targets is required and non-empty (design §3.3)"
-            )
+            raise ConfigError("RegressionTaskModule: targets is required and non-empty")
         self.sequence = sequence if sequence is not None else input is None
         self.target_denominators = _opt_tuple(target_denominators)
         self.norm_params = self._checked_norm_params(norm_params)
@@ -598,7 +596,7 @@ class RegressionTaskModule(_TaskModuleBase):
                     f"ONNX export graph de-scales from the input Feature tensor "
                     f"(to_onnx.py:381-398), so a denominator must be an input variable. Add it "
                     f"to data.modules.features.init_args.variables.{self.stream}, or drop the "
-                    f"ratio target (FD §3.3 mode-split de-scaling)"
+                    "ratio target"
                 )
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:

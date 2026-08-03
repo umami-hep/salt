@@ -92,7 +92,7 @@ def _width_overrides(model: Any, width: int) -> list[str]:
             raise ConfigError(
                 f"module {name!r} ({type(module).__name__}) is in mup.apply_to but declares no "
                 "MUP_WIDTH_ARG — the shape-generation tooling cannot sweep its width "
-                "(design §3.4; add MUP_WIDTH_ARG to the module class)"
+                "(add MUP_WIDTH_ARG to the module class)"
             )
         overrides.append(f"model.modules.{name}.init_args.{width_arg}={width}")
     return overrides
@@ -106,7 +106,7 @@ def _require_mup_cfg(model: Any) -> dict[str, Any]:
     if cfg is None:
         raise ConfigError(
             "config declares no model.init_args.mup block — muP tooling needs "
-            "mup: {apply_to: [...], shape_path: ...} (design §3.4 line 685)"
+            "mup: {apply_to: [...], shape_path: ...}"
         )
     return cfg
 
@@ -195,8 +195,7 @@ def _model_boundary_sources(cli: Any) -> Any:
     features = next((m for m in dm.modules.values() if isinstance(m, Features)), None)
     if features is None:
         raise ConfigError(
-            "coord-check needs a Features module in data.modules to derive input field counts "
-            "(design §6.2)"
+            "coord-check needs a Features module in data.modules to derive input field counts"
         )
     flat: dict[str, TensorSpec] = {}
     for stream, names in features.variables.items():
@@ -299,7 +298,7 @@ def generate_shapes(
     if base_w == delta_w:
         raise ConfigError(
             f"mup base_width and delta_width must differ (both {base_w}) — the two widths fix the "
-            "infinite-width directions (design §3.4; v1 parameter_base != parameter_delta, "
+            "infinite-width directions (v1 parameter_base != parameter_delta, "
             "GN2_muP.yaml:14-15)"
         )
     out = save_path if save_path is not None else cfg.get("shape_path")

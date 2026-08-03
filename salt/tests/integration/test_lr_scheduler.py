@@ -1,11 +1,11 @@
-"""W8 gates: per-stage LR-scheduler class choice (plan 15).
+"""Gates: per-stage LR-scheduler class choice.
 
 A stage may declare `lr_scheduler: {class_path, init_args, interval, frequency,
 monitor}` — the scheduler class is instantiated over the freshly-rebuilt stage
 optimizer at the boundary, replacing the default per-stage OneCycleLR. Absent →
 today's OneCycle behaviour byte-identically (`has_lr_scheduler` master switch).
 
-Gates (plan 15 W8):
+Gates:
 
 - **G8a** legacy parity — a config with no `lr_scheduler:` keeps the OneCycleLR path
   (the scheduler is OneCycleLR, step-interval), unchanged.
@@ -20,7 +20,7 @@ Gates (plan 15 W8):
 All DataLoaders use ``num_workers=0`` (agent memcg gotcha). The CLI-path gate (the
 scheduler spec parses through the real `salt fit`/`merge-config` surface without
 jsonargparse eager-instantiating the nested class spec) lives in
-``test_main.py::TestLRSchedulerCLI`` — the W8.0 protection that made W8 possible.
+``test_main.py::TestLRSchedulerCLI``.
 """
 
 from __future__ import annotations

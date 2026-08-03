@@ -1,4 +1,4 @@
-"""H5OutputSink capability gate for the uproot reader family (plan 56).
+"""H5OutputSink capability gate for the uproot reader family.
 
 The sink keys its structured-H5 path on the reader's advertised CAPABILITY
 (``reader.h5_source``), NOT on reader type or group shape. The uproot/ROOT reader

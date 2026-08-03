@@ -1,4 +1,4 @@
-"""Regression tests for `salt.data.MultiSampleReader` (plan 02, v2 dataloaders)."""
+"""Regression tests for `salt.data.MultiSampleReader` (v2 dataloaders)."""
 
 from __future__ import annotations
 
@@ -607,7 +607,7 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
 
 
 # --------------------------------------------------------------------------- #
-# 7. M8 reader-owned staging — sources() = union over sub-readers; restage()
+# 7. reader-owned staging — sources() = union over sub-readers; restage()
 #    delegates to each sub-reader recursively (the multi-SAMPLE multi-FILE case).
 # --------------------------------------------------------------------------- #
 
@@ -615,7 +615,7 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
 def test_multisample_sources_is_union_over_subreaders(
     two_easyjet_files: tuple[Path, Path],
 ) -> None:
-    """sources() is the de-duplicated union of every sub-reader's sources (plan 02)."""
+    """sources() is the de-duplicated union of every sub-reader's sources."""
     sig_path, bkg_path = two_easyjet_files
     sig = _ej_reader(groups=_ej_groups(), filename=sig_path)
     bkg = _ej_reader(groups=_ej_groups(), filename=bkg_path)

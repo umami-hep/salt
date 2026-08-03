@@ -62,7 +62,7 @@ class TestGn2V2Execution:
         assert not torch.allclose(logits.sum(-1), torch.ones(B))  # not softmaxed
 
     def test_test_plan_classification_preds_are_raw_logits(self, gn2v2):
-        """TEST classification + vertexing preds are RAW since the flips (design §2)."""
+        """TEST classification + vertexing preds are RAW since the flips."""
         modules, _, _ = gn2v2
         plan = compile_gn2v2(modules, Mode.TEST)
         assert "loss" not in plan.module_names  # LossSum inactive outside TRAINING
@@ -83,14 +83,13 @@ class TestGn2V2Execution:
         assert not torch.allclose(
             track_logits[valid].sum(-1), torch.ones(int(valid.sum())), atol=1e-3
         )
-        # vertexing (W34.3 flipped) TEST output: RAW [E, 1] edge scores (the
-        # union-find moved off forward to get_output), NOT the [B, T, 1]
-        # per-node assignments the forward used to publish.
+        # vertexing TEST output: RAW [E, 1] edge scores (union-find runs in
+        # get_output, not forward), NOT [B, T, 1] per-node assignments.
         vtx = b.get("preds.tracks.track_vertexing")
         assert vtx.ndim == 2 and vtx.shape[1] == 1  # [E, 1] raw edge scores
 
     def test_onnx_plan_keeps_raw_vertexing_scores(self, gn2v2):
-        """ONNX vertexing publishes raw edge scores for the export reduce (§3.3)."""
+        """ONNX vertexing publishes raw edge scores for the export reduce."""
         modules, _, _ = gn2v2
         plan = compile_gn2v2(modules, Mode.ONNX)
         b = Bundle()
@@ -105,14 +104,14 @@ class TestGn2V2Execution:
         assert scores.shape[1] == 1  # [E, 1] raw edge scores
 
     def test_all_modules_are_nn_modules(self, gn2v2):
-        """The module dict must be nn.ModuleDict-compatible (SaltModule, design §3.4)."""
+        """The module dict must be nn.ModuleDict-compatible (SaltModule)."""
         modules, _, _ = gn2v2
         assert all(isinstance(m, nn.Module) for m in modules.values())
         nn.ModuleDict(modules)  # must not raise
 
 
 class TestExposeOptOut:
-    """Per-task ``expose: [fit, val]`` opt-out (design §4.2, M5 sub-wave D)."""
+    """Per-task ``expose: [fit, val]`` opt-out."""
 
     def test_parse_default_is_all_modes(self):
         task = ClassificationTaskModule(
@@ -248,12 +247,12 @@ class TestExposeOptOut:
 
 
 class TestNoIOGuard:
-    """Design §2.3 CI guard: declare_io and bind run under a no-I/O trap."""
+    """CI guard: declare_io and bind run under a no-I/O trap."""
 
     def test_declare_and_bind_are_file_free(self, monkeypatch):
         # construction is config capture only — safe to build under the trap
         def _forbid(*args, **kwargs):
-            raise AssertionError(f"file I/O during declare_io/bind (design §2.3): open({args!r})")
+            raise AssertionError(f"file I/O during declare_io/bind: open({args!r})")
 
         monkeypatch.setattr("builtins.open", _forbid)
         monkeypatch.setattr("h5py.File", _forbid)

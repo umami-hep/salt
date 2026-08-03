@@ -2,7 +2,7 @@
 # three heads (jets_classification, track_origin, track_vertexing) serialised to
 # H5 and exported to ONNX via one RunTaskOutput. Replaces the base's mode-split
 # jets_out/origin_out writers with a single all-modes run_tasks. The command
-# wires the implicit H5 + ONNX sinks (plan 50 Phase B — no callbacks: sinks).
+# wires the implicit H5 + ONNX sinks (no callbacks: sinks).
 # Stack as:
 #   salt test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover34.yaml ...
 

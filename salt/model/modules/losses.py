@@ -104,7 +104,7 @@ class LossSum(SaltModelModule):
         if not keys:
             raise ConfigError(
                 f"LossSum {self.name!r}: narrowed to an empty loss-key list — no module "
-                "declares a losses.* produce (design §3.3)"
+                "declares a losses.* produce"
             )
         self._loss_keys = keys
         self._check_weight_keys()
@@ -117,7 +117,7 @@ class LossSum(SaltModelModule):
             raise ConfigError(
                 f"LossSum {self.name!r}: loss keys not fixed — pass losses: in config or let "
                 "the framework narrow via collect_loss_keys()/narrow() before compile "
-                "(losses.** is a framework wildcard, design §3.3)"
+                "(losses.** is a framework wildcard)"
             )
         loss_spec = TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)
         return IO(

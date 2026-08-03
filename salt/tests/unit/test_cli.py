@@ -1,4 +1,4 @@
-"""Tests for the salt CLI (salt.cli — design §4.1-§4.4, §2.6)."""
+"""Tests for the salt CLI (salt.cli)."""
 
 import shutil
 import textwrap
@@ -18,7 +18,7 @@ from salt.schema import load_schema
 # static width-resolution plot path needs a real trainer config but no data file
 _DUMMY_CFG = str(Path(__file__).parent.parent.parent / "configs" / "gn2v2-dummy.yaml")
 
-# toy modules (no physics — M1 scope); instance names assigned by the CLI
+# toy modules (no physics); instance names assigned by the CLI
 
 
 def _spec(cfg):
@@ -49,7 +49,7 @@ class Toy:
 
 
 class WildToy(Toy):
-    """Framework-style wildcard producer (design §2.2)."""
+    """Framework-style wildcard producer."""
 
     allow_wildcards = True
 
@@ -135,7 +135,7 @@ sinks: [preds.x]
 """
 
 # 'pred' survives TEST (aux.keep reaches the sink) but its preds.x port is
-# unconsumed there -> error-level deadcode finding (design §4.2)
+# unconsumed there -> error-level deadcode finding
 DEAD_PREDS_CFG = f"""
 modules:
   pred:
@@ -163,7 +163,7 @@ def cfg(tmp_path):
     return write
 
 
-# graph validate (design §4.1)
+# graph validate
 
 
 class TestValidate:
@@ -218,7 +218,7 @@ class TestValidate:
         assert "cannot import" in capsys.readouterr().err
 
 
-# graph deadcode (design §4.2)
+# graph deadcode
 
 
 class TestDeadcode:
@@ -241,7 +241,7 @@ class TestDeadcode:
             assert f"mode={mode}" in out
 
     def test_unconsumed_preds_in_test_is_error_and_exits_nonzero(self, cfg, capsys):
-        # design §4.2: unconsumed preds.* in TEST is an error by default
+        # unconsumed preds.* in TEST is an error by default
         assert main(["graph", "deadcode", "-c", cfg(DEAD_PREDS_CFG), "--mode", "test"]) == 1
         out = capsys.readouterr().out
         assert "ERROR 'preds.x' (pred)" in out
@@ -259,7 +259,7 @@ class TestDeadcode:
         assert "error-level deadcode" in err
 
 
-# graph plan (design §4.4 table)
+# graph plan
 
 
 class TestPlan:
@@ -270,7 +270,7 @@ class TestPlan:
         assert "plan_hash=" in out
         lines = [line for line in out.splitlines() if ". " in line]
         names = [line.split(". ", 1)[1].split()[0] for line in lines]
-        # topo ties broken by config declaration order (§3.1): pred is declared
+        # topo ties broken by config declaration order: pred is declared
         # before labeller in GOOD_CFG, so it runs first
         assert names == ["embed", "pred", "labeller", "loss"]
         pred_line = lines[names.index("pred")]
@@ -304,7 +304,7 @@ class TestPlan:
         assert "reader: inputs.x" in out
 
 
-# graph plot (design §4.3)
+# graph plot
 
 
 class TestPlot:
@@ -364,7 +364,7 @@ class TestPlot:
         # the plot path resolves the bind schema STATICALLY (no data file, no
         # batch run, no --probe) and annotates each port-card row with its
         # concrete FEATURE width while the data-dependent batch/sequence dims
-        # stay symbolic (design §2.3, §4.3). The placeholder --set only satisfies
+        # stay symbolic. The placeholder --set only satisfies
         # the config parse — no norm_dict values are ever read.
         out_path = tmp_path / "graph.dot"
         rc = main([
@@ -386,7 +386,7 @@ class TestPlot:
         assert "not labelled" not in dot
 
 
-# graph why (design §3.1 debugging story)
+# graph why
 
 
 class TestWhy:
@@ -427,7 +427,7 @@ class TestWhy:
         assert "embed.x" in err  # did-you-mean
 
 
-# schema dump (design §2.6)
+# schema dump
 
 
 class TestSchemaDump:

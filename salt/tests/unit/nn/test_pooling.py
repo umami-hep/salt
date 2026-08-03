@@ -46,7 +46,7 @@ class TestSplitAndPooling:
         assert b.get("pooled.global").shape == (B, 16)
 
 
-# encoder-less pooling (M5; DiPS/DeepSets — stream embeds + pooling, no encoder)
+# encoder-less pooling (DiPS/DeepSets — stream embeds + pooling, no encoder)
 
 
 def _encoderless_modules(norm_dict):

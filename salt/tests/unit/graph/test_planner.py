@@ -1,4 +1,4 @@
-"""Tests for salt.graph.planner (design §3.1, §2.2, §4.1, §4.2, principle 10)."""
+"""Tests for salt.graph.planner."""
 
 import pytest
 
@@ -20,7 +20,7 @@ from salt.graph.planner import (
 )
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# toy fixtures (no physics — M1 scope)
+# toy fixtures (no physics)
 
 
 class Toy:
@@ -38,7 +38,7 @@ class Toy:
 
 
 class WildToy(Toy):
-    """Framework-shipped wildcard producer (design §2.2)."""
+    """Framework-shipped wildcard producer."""
 
     allow_wildcards = True
 
@@ -94,7 +94,7 @@ class TestLinearChain:
 
 class TestDiamond:
     def test_diamond_order_ties_broken_by_config_order(self):
-        # §3.1: tie-break = config declaration order, NOT module name
+        # tie-break = config declaration order, NOT module name
         a = Toy("a", requires={"inputs.x": ts()}, produces={"embed.x": ts()})
         b = Toy("b", requires={"embed.x": ts()}, produces={"left.x": ts()})
         c = Toy("c", requires={"embed.x": ts()}, produces={"right.x": ts()})
@@ -107,7 +107,7 @@ class TestDiamond:
 
 class TestDisconnectedSubgraphs:
     def test_both_subgraphs_planned_in_config_order(self):
-        # ties (independent subgraphs) follow config declaration order (§3.1)
+        # ties (independent subgraphs) follow config declaration order
         a = Toy("a", requires={"inputs.x": ts()}, produces={"embed.x": ts()})
         b = Toy("b", requires={"embed.x": ts()}, produces={"preds.x": ts()})
         c = Toy("c", requires={"inputs.y": ts()}, produces={"embed.y": ts()})
@@ -116,7 +116,7 @@ class TestDisconnectedSubgraphs:
         assert plan.module_names == ("c", "d", "a", "b")
 
 
-# connectivity errors (§4.1 quality bar)
+# connectivity errors (quality bar)
 
 
 class TestMissingProducer:
@@ -129,7 +129,7 @@ class TestMissingProducer:
         assert "'b'" in msg
         assert "embed.trcks" in msg
         assert "embed.tracks" in msg  # did-you-mean suggestion
-        # §4.1 quality bar: availability AND a concrete fix, alongside the suggestion
+        # quality bar: availability AND a concrete fix, alongside the suggestion
         assert "available keys:" in msg
         assert "fix: correct the require in module 'b'" in msg
 
@@ -193,7 +193,7 @@ class TestDuplicateProducers:
         assert "'w2'" in msg
 
 
-# kind typing (§2.2)
+# kind typing
 
 
 class TestKindChecking:
@@ -215,7 +215,7 @@ class TestKindChecking:
         assert plan.module_names == ("lab", "pool")
 
 
-# symbolic-dim unification (§2.2)
+# symbolic-dim unification
 
 
 class TestShapeUnification:
@@ -275,7 +275,7 @@ class TestShapeUnification:
             compile_plan(mods(a, b, c1, c2), Mode.FIT, {})
 
 
-# cycles (§3.1)
+# cycles
 
 
 class TestCycles:
@@ -304,7 +304,7 @@ class TestCycles:
             compile_plan(mods(a, b, c), Mode.FIT, {})
 
 
-# optional ports (consumed-if-present, §2.2)
+# optional ports (consumed-if-present)
 
 
 class TestOptionalPorts:
@@ -343,7 +343,7 @@ class TestOptionalPorts:
         assert set(plan.step("c").requires) == set()
 
 
-# per-mode and demand pruning (§3.1)
+# per-mode and demand pruning
 
 
 class TestModePruning:
@@ -418,7 +418,7 @@ class TestAllModesDead:
             compile_plan(mods(a, b, noop), Mode.FIT, SRC_X)
 
 
-# wildcard narrowing (§2.2 rules (a)-(d))
+# wildcard narrowing (rules (a)-(d))
 
 
 class TestWildcardNarrowing:
@@ -510,7 +510,7 @@ class TestWildcardNarrowing:
 
     def test_narrowing_drops_keys_demanded_only_by_pruned_consumers(self):
         # narrowing runs against pre-prune demand; once t2 is demand-pruned in
-        # FIT, the plan must not force 'w' to materialise labels.b (§2.2 rule (c))
+        # FIT, the plan must not force 'w' to materialise labels.b (rule (c))
         w = WildToy("w", produces={"labels.**": ts(kind="label")})
         t1 = Toy("t1", requires={"labels.a": ts(kind="label")}, produces={"out.a": ts()})
         t2 = Toy("t2", requires={"labels.b": ts(kind="label")}, produces={"out.b": ts()})
@@ -541,16 +541,16 @@ class TestWildcardNarrowing:
         assert set(plan.step("t1").requires) == {"labels.a", "labels.b"}
 
 
-# determinism and plan hashing (§3.1)
+# determinism and plan hashing
 
 
 class TestDeterminism:
     # Golden plan_hash for the fixed chain_ab/SRC_X graph. Guards the canonical
     # serialisation: a regression that lets set/dict iteration order (or
     # PYTHONHASHSEED) leak into the payload, or that changes the payload
-    # structure, breaks checkpoint/repro hashes across machines (§3.1) and
-    # must be a conscious, reviewed change.
-    # (verified byte-identical across processes with PYTHONHASHSEED=0/1/42)
+    # structure, breaks checkpoint/repro hashes across machines and
+    # must be a conscious, reviewed change. The hash must stay byte-identical
+    # across processes regardless of PYTHONHASHSEED.
     GOLDEN_CHAIN_HASH = "2fc174f6a6870b4cd914816a0ca06b2d01ade488a28afc54c212dffa7f972e32"
 
     @staticmethod
@@ -562,7 +562,7 @@ class TestDeterminism:
         return a, b, c, d
 
     def test_reordering_independent_modules_swaps_plan_positions(self):
-        # §3.1 documented loudly: reordering independent modules in YAML is the
+        # documented loudly: reordering independent modules in YAML is the
         # supported way to nudge execution order, and the plan hash detects it
         a, b, c, d = self._modules()
         plan_bc = compile_plan({"a": a, "b": b, "c": c, "d": d}, Mode.FIT, SRC_X)
@@ -613,7 +613,7 @@ class TestHashSensitivity:
         assert hash1 != hash2
 
     def test_structurally_identical_plans_share_hash_across_modes(self):
-        # design §11 risk 5: the hash is purely structural, so the FIT/VAL
+        # the hash is purely structural, so the FIT/VAL
         # plan-identity assertion is a cheap hash comparison (Plan.mode still
         # distinguishes the plans)
         a, b = chain_ab()
@@ -679,7 +679,7 @@ class TestConfigValidation:
             compile_plan(mods(weird, consumer), Mode.FIT, SRC_X)
 
 
-# dead-output analysis (§4.2)
+# dead-output analysis
 
 
 class TestDeadcode:
@@ -726,7 +726,7 @@ class TestDeadcode:
         assert report == []
 
     def test_unconsumed_preds_in_test_is_error_severity(self):
-        # design §4.2: an unconsumed preds.* port in TEST is an error by default
+        # an unconsumed preds.* port in TEST is an error by default
         a, b = chain_ab()
         report = deadcode(mods(a, b), Mode.TEST, SRC_X)
         finding = next(d for d in report if d.key == "preds.x")
@@ -734,8 +734,7 @@ class TestDeadcode:
         assert "never persisted" in finding.reason
 
     def test_unconsumed_preds_outside_test_is_info_severity(self):
-        # design §3.3 (M3-review fix): the normal no-metric-callback case is
-        # INFO, never promoted by --strict — was 'warning' in M1/M2
+        # the normal no-metric-callback case is INFO, never promoted by --strict
         a, b = chain_ab()
         report = deadcode(mods(a, b), Mode.FIT, SRC_X)
         finding = next(d for d in report if d.key == "preds.x")
@@ -750,7 +749,7 @@ class TestDeadcode:
         assert finding.severity == "warning"
 
     def test_pruned_module_in_onnx_is_info_severity(self):
-        # M4.5 unified manifest (fix-stage regression): ONNX sinks are the
+        # unified manifest (fix-stage regression): ONNX sinks are the
         # writer-declared export-manifest ports, so a module narrowed out of
         # the export surface (onnx_streams/onnx_tasks) is LEGITIMATE — info,
         # never promoted, keeping `validate --strict --mode onnx` usable on
@@ -772,7 +771,7 @@ class TestDeadcode:
         assert fit_finding.severity == "warning"
 
 
-# plan immutability (frozen plan, design §3.1)
+# plan immutability (frozen plan)
 
 
 class TestPlanImmutability:
