@@ -430,6 +430,29 @@ class TestSaltSurface:
         assert export_cfg.rename == {}
         assert export_cfg.combine == []
 
+    def test_export_contract_round_trips_onto_the_sink(self):
+        # the contract's NEW config home is the ONNX sink: jsonargparse must
+        # resolve its `inputs:` entries into ExportInput dataclasses
+        from salt.main import CONFIG_DIR, SaltCLI
+
+        cli = SaltCLI(
+            args=[
+                "--config",
+                str(CONFIG_DIR / "MaskFormer.yaml"),
+                "--model.modules.norm.init_args.norm_dict=unused.yaml",
+            ],
+            run=False,
+        )
+        assert cli._get(cli.config_init, "export") is None  # migrated: no block left
+        sink = cli._get(cli.config_init, "outputs")["onnx_export"]
+        assert isinstance(sink, OnnxExportSink)
+        assert sink.model_name == "MFv2"
+        assert [entry.port for entry in sink.inputs] == ["inputs.jets", "inputs.tracks"]
+        assert sink.inputs[1].sequence is True
+        assert sink.inputs[1].dyn_axis == "n_tracks"
+        assert sink.rename == {}
+        assert sink.combine == []
+
     def test_dispatch_wired_into_salt(self):
         from salt.main import main as salt_main
 
@@ -478,9 +501,8 @@ class TestSaltSurface:
         assert "-o/--overwrite" in err
 
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
-        # a run config trained WITHOUT an export: block must fail with the
-        # exact working stacking command in the message (M4-review fix: the
-        # old 'stack an override config' hint was not actionable)
+        # a run config trained without ANY export contract (no top-level block,
+        # nothing on the sink) must fail naming the sink's inputs: as the home
         from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
@@ -490,8 +512,9 @@ class TestSaltSurface:
         rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(no_export_cfg)])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "no export: block" in err
-        assert f"-c {no_export_cfg} -c" in err  # the copy-pasteable fix
+        assert "declares no input" in err
+        assert "OnnxExportSink" in err
+        assert "init_args.inputs" in err  # the config address to fix
 
     def test_export_block_stacked_as_second_config(self, cli_run, tmp_path):
         # the documented escape hatch: -c is repeatable, later files
@@ -542,8 +565,8 @@ class TestSaltSurface:
         assert "folded conversion node (outputs.* leaf)" in out
 
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
-        # the M4.5 migration error must fire on the CLI path with the
-        # writers: pointer (§4.1 bar)
+        # the retired export.outputs carrier must fire on the CLI path, through
+        # the deprecated top-level block (its only remaining spelling)
         from salt.onnx.export import main as export_main
 
         config = dict(cli_run.config)
@@ -556,5 +579,5 @@ class TestSaltSurface:
         rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(legacy_cfg)])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "REMOVED by the M4.5" in err
-        assert "writers" in err
+        assert "export.outputs was REMOVED" in err
+        assert "OnnxExportSink" in err

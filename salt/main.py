@@ -671,12 +671,14 @@ class SaltCLI(LightningCLI):
             "--export",
             type=ExportConfig | None,
             default=None,
-            help="the export-ONLY half of the ONNX contract, consumed by `salt export` "
-            "(design §5.1, §7): model_name (no '_'/'-', validated ONLY at export "
-            "time), inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
-            "manifest post-processing. The OUTPUT manifest derives from the outputs: "
-            "section's export-mode selection — declaring export.outputs is a hard error "
-            "at export time. Inert during fit/test; round-trips through saved run configs.",
+            help="DEPRECATED alias for the ONNX sink's own export keys — model_name, "
+            "inputs (port/name/sequence/dyn_axis/alias), track_selection and the "
+            "rename/combine manifest post-processing now live at "
+            "outputs.<sink>.init_args on the OnnxExportSink (design §5.1, §7). Accepted "
+            "for one deprecation window: `salt export` folds each key it sets onto a "
+            "field the sink LEFT UNSET, and a key carried by both homes is a hard error. "
+            "Declaring export.outputs stays a hard error. Inert during fit/test; "
+            "round-trips through saved run configs.",
         )
         parser.add_argument(
             "--compile",

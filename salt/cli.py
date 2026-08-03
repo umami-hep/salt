@@ -40,7 +40,6 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.model.bind import resolve_bind_schema
-from salt.onnx.config import resolve_export_config
 from salt.graph.render import dot_source, plan_table
 from salt.schema import dump_schema, load_schema, save_schema
 
@@ -259,7 +258,6 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_cb = None  # writers: block removed; WriterCallback no longer assembled
     writer_sink_cb = _static_writer_sink_callback(cli)
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
     # fold every callbacks-level renderable sink NODE into the planning module dict
     # so each renders its own card and anchors demand via its declared requires
@@ -269,11 +267,29 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     # so the planner collects it as inactive (no card, no plan_hash perturbation).
     sink_node = _as_sink_node(writer_sink_cb)
     onnx_sink_node = _static_onnx_export_sink(cli)
-    if onnx_sink_node is not None and onnx_sink_node.model_name is None:
-        # the static render needs a model_name to derive the Athena output names;
-        # default it from the export block / sanitised run name exactly as
-        # `salt export` does
-        onnx_sink_node.model_name = _static_export_model_name(export_cfg, run_name)
+    # the export contract lives on the sink; fold the deprecated top-level
+    # export: block onto it through the SAME seam `salt export` uses, so the
+    # static render and the exporter never disagree about either home.
+    from salt.onnx.export import _merge_export_alias  # noqa: PLC0415 - heavy/circular
+
+    onnx_alias_error: str | None = None
+    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
+    onnx_has_contract = export_cfg is not None
+    if onnx_sink_node is not None:
+        try:
+            _merge_export_alias(cli, onnx_sink_node)
+        except ConfigError as err:
+            onnx_alias_error = str(err)
+        onnx_has_contract = (
+            onnx_has_contract
+            or bool(onnx_sink_node.inputs)
+            or onnx_sink_node.model_name is not None
+        )
+        if onnx_sink_node.model_name is None:
+            # the static render needs a model_name to derive the Athena output
+            # names; default it from the sanitised run name exactly as
+            # `salt export` does
+            onnx_sink_node.model_name = _static_export_model_name(onnx_sink_node, run_name)
     for node in (sink_node, onnx_sink_node):
         if node is None:
             continue
@@ -323,20 +339,22 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             # demand via its declared requires — a terminal consumer the planner
             # keeps alive, pulling the folded conversion nodes into the ONNX plan.
             # No flat manifest ports needed (it renders its own card). The
-            # export-only half (model_name/inputs) is validated below if an
-            # export: block is present.
+            # export-only half (model_name/inputs) is validated below whenever
+            # the config declares any of it.
             keys = []
-            if export_cfg is not None:
+            if onnx_alias_error is not None:
+                mode_errors[mode] = onnx_alias_error
+            elif onnx_has_contract:
                 try:
-                    resolve_export_config(export_cfg, run_name)
+                    onnx_sink_node.export_config(run_name)
                 except ConfigError as err:
                     mode_errors[mode] = str(err)
             else:
                 mode_warnings[mode] = (
-                    "the config has no export: block — the OnnxExportSink names the outputs, "
-                    "but export.inputs/model_name were NOT checked; declare the export-only "
-                    "half (design §5.1, §7) so `salt graph validate --mode onnx` gates "
-                    "everything `salt export` will trace"
+                    "the config declares no export contract — the OnnxExportSink names the "
+                    "outputs, but its inputs:/model_name: were NOT checked; declare the "
+                    "export-only half on the sink (design §5.1, §7) so `salt graph validate "
+                    "--mode onnx` gates everything `salt export` will trace"
                 )
         elif mode & Mode.TRAINING and fitval_callbacks:
             # the static half of the FIT/VAL-sink contract: configured metrics
@@ -471,14 +489,14 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
     return next((sink for sink in sinks if isinstance(sink, OnnxExportSink)), None)
 
 
-def _static_export_model_name(export_cfg: Any, run_name: str) -> str:
-    """The Athena output prefix for the static folded ONNX render: the export
-    block's ``model_name`` if set, else the sanitised run name — matching
-    `salt export`'s own default.
+def _static_export_model_name(export_sink: Any, run_name: str) -> str:
+    """The Athena output prefix for the static folded ONNX render: the sink's
+    ``model_name`` if set, else the sanitised run name — matching `salt export`'s
+    own default.
     """
     from salt.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
 
-    name = getattr(export_cfg, "model_name", None) if export_cfg is not None else None
+    name = getattr(export_sink, "model_name", None) if export_sink is not None else None
     return name or sanitised_model_name(run_name)
 
 

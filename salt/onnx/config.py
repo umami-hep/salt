@@ -4,7 +4,9 @@ module body stays torch-free (reduce-registry lookups are deferred imports).
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from salt.graph.errors import ConfigError
 from salt.graph.spec import split_key
@@ -18,6 +20,7 @@ __all__ = [
     "ExportInput",
     "ExportOutput",
     "default_athena_name",
+    "reject_declared_outputs",
     "resolve_export_config",
     "sanitised_model_name",
     "stream_of_input_port",
@@ -97,6 +100,13 @@ class ExportInput:
     alias: str | None = None
     athena_name: str | None = None
 
+    @classmethod
+    def coerce(cls, obj: ExportInput | Mapping[str, Any]) -> ExportInput:
+        """Build from a dataclass or a plain config mapping."""
+        if isinstance(obj, ExportInput):
+            return obj
+        return cls(**dict(obj))
+
 
 @dataclass
 class ExportOutput:
@@ -153,14 +163,23 @@ class ExportCombine:
     name: str
     inputs: dict[str, float] = field(default_factory=dict)
 
+    @classmethod
+    def coerce(cls, obj: ExportCombine | Mapping[str, Any]) -> ExportCombine:
+        """Build from a dataclass or a plain config mapping."""
+        if isinstance(obj, ExportCombine):
+            return obj
+        return cls(**dict(obj))
+
 
 @dataclass
 class ExportConfig:
-    """The top-level ``export:`` block, consumed by ``salt export``.
+    """The ONNX export contract, consumed by ``salt export``.
 
-    The block carries the EXPORT-ONLY half of the contract: inputs, the Athena model
-    name, and the ``rename:``/``combine:`` manifest post-processing. The output
-    manifest itself derives from the folded `salt.outputs.OnnxExportSink`;
+    Carries the EXPORT-ONLY half: inputs, the Athena model name, and the
+    ``rename:``/``combine:`` manifest post-processing. Its config home is the
+    `salt.outputs.OnnxExportSink` (``OnnxExportSink.export_config`` assembles and
+    resolves one); the deprecated top-level ``export:`` block parses into the same
+    dataclass. The output manifest itself derives from the sink's collected leaves;
     DECLARING ``outputs`` in a config is a hard error.
 
     Parameters
@@ -258,8 +277,23 @@ def default_athena_name(stream: str, sequence: bool, track_selection: str) -> st
     return f"{stream}_var"
 
 
+def reject_declared_outputs(outputs: Sequence[ExportOutput]) -> None:
+    """Refuse a config-declared ``export.outputs`` section; raises `ConfigError`
+    pointing at the `salt.outputs.OnnxExportSink` manifest instead.
+    """
+    if not outputs:
+        return
+    raise ConfigError(
+        "export.outputs was REMOVED — the ONNX output manifest is declared by an "
+        "OnnxExportSink naming the conversion outputs.* leaves.\n"
+        "  fix: delete the export.outputs section; declare the conversion nodes + the "
+        "OnnxExportSink instead, post-process with the sink's rename:, and inspect the "
+        "assembled manifest with `salt export --manifest`"
+    )
+
+
 def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
-    """Validate the EXPORT-ONLY half of the ``export:`` block and fill its defaults.
+    """Validate the EXPORT-ONLY half of the export contract and fill its defaults.
 
     `outputs` is NOT handled here — the manifest derives from the folded
     `OnnxExportSink`; a non-empty parsed value is a hard error. Called
@@ -277,14 +311,7 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
         On a declared ``export.outputs`` section, or any malformed entry (messages
         name the offending entry and the rule it breaks).
     """
-    if export.outputs:
-        raise ConfigError(
-            "export.outputs was REMOVED — the ONNX output manifest is declared by an "
-            "OnnxExportSink (callbacks.onnx_export) naming the conversion outputs.* leaves.\n"
-            "  fix: delete the export.outputs section; declare the conversion nodes + the "
-            "OnnxExportSink instead, post-process with export.rename, and inspect the "
-            "assembled manifest with `salt export --manifest` (design §4.2/§6)"
-        )
+    reject_declared_outputs(export.outputs)
     model_name = validate_model_name(export.model_name or sanitised_model_name(run_name))
     if export.track_selection not in TRACK_SELECTIONS:
         raise ConfigError(
@@ -292,7 +319,14 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
             f"selection — choose from {list(TRACK_SELECTIONS)} (v1 to_onnx.py:24-35)"
         )
     if not export.inputs:
-        raise ConfigError("export.inputs must declare at least one input (design §5.1)")
+        raise ConfigError(
+            "the ONNX export contract declares no input — set `inputs:` on the "
+            "OnnxExportSink (outputs.<sink key>.init_args.inputs), a list of "
+            "{port, name, sequence, dyn_axis} entries naming the Athena input tensors "
+            "in positional order. A sink-only override file stacked as a second `-c` "
+            "completes a run config trained without one; the deprecated top-level "
+            "export.inputs block still fills it for one release window."
+        )
     inputs = [_resolve_input(entry, export.track_selection) for entry in export.inputs]
     _check_input_uniqueness(inputs)
     for old, new in export.rename.items():

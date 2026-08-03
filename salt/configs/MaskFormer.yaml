@@ -239,17 +239,19 @@ outputs:
   # `regression.targets` entry) and the int8 per-token HadronIndex.
   onnx_export:
     class_path: salt.outputs.OnnxExportSink
+    init_args:
+      # the ONNX artifact contract: the Athena model name + the input signature
+      # `salt export` traces against (the output tuple is collected from the
+      # producers' own manifests, above)
+      model_name: MFv2 # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 callbacks:
   # consumes matched.objects.* -> keeps the matched loss alive under pruning
   maskformer_metrics:
     class_path: salt.callbacks.MaskformerMetrics
-
-export:
-  model_name: MFv2 # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 40

@@ -20,12 +20,12 @@ from salt.graph.spec import Mode
 from salt.onnx.adapter import OnnxAdapter
 from salt.onnx.config import (
     ExportConfig,
-    resolve_export_config,
     stream_of_input_port,
 )
 from salt.onnx.export import (
     _cross_check_schema,
     _features_variables,
+    _resolve_export_contract,
     _run_free_cli,
     compile_onnx_plan,
 )
@@ -248,22 +248,14 @@ def run_inference(
     Raises
     ------
     ConfigError
-        On a missing export block / export-mode selection, an explicit-leaf
-        (MaskFormer escape hatch) config, or any sink schema error.
+        On a missing export sink / export-mode selection, an incomplete export
+        contract, or any sink schema error.
     """
     from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
     from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     cli = _run_free_cli(config_paths, overrides)
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - main.py precedent
-    if export_cfg is None:
-        raise ConfigError(
-            f"config {config_paths[0]} has no export: block — salt inference feeds the "
-            "model through the Athena input contract (export.inputs), so declare it (or "
-            "stack an override file carrying only the export: block as a second -c)"
-        )
-    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
@@ -271,14 +263,10 @@ def run_inference(
             "ARE the export output set (plan 50 decision 2). Give at least one outputs: "
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
-    if export_sink._explicit_leaves:  # noqa: SLF001 - same-package scope guard
-        raise ConfigError(
-            "salt inference supports the outputs:-section export selection only — this "
-            "config declares explicit OnnxExportLeaf entries (the MaskFormer object-reduce "
-            "escape hatch), which have no H5 counterpart here (plan 50 Phase D scope)"
-        )
     variables = _features_variables(cli)
-    resolved = resolve_export_config(export_cfg, run_name)
+    # the sink carries the Athena input contract salt inference feeds the model
+    # through, resolved via the same seam `salt export` uses
+    resolved = _resolve_export_contract(cli, export_sink)
     if export_sink.model_name is None:
         export_sink.model_name = resolved.model_name
     model = SaltModule.load_from_checkpoint(
@@ -292,7 +280,7 @@ def run_inference(
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the callbacks key (design §2.2)"
+            "the sink's outputs: section key (design §2.2)"
         )
     modules[export_sink.name] = export_sink
     plan = compile_onnx_plan(modules, resolved, variables)

@@ -12,6 +12,12 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
+
+# salt.outputs already imports salt.onnx at module level (salt.outputs.maskformer
+# -> salt.onnx.reduces), and nothing under salt.onnx imports salt.outputs at
+# module level — so the export dataclasses can be named in the signature, which
+# is what lets jsonargparse resolve `inputs:`/`combine:` config entries.
+from salt.onnx.config import ExportCombine, ExportConfig, ExportInput, resolve_export_config
 from salt.outputs.output_schema import OutputField, _OUTPUTS_NAMESPACE
 from salt.outputs.sink import Node, collect_manifest_fields
 
@@ -168,17 +174,33 @@ class OnnxExportSink(Node):
     never runs a test loop, so there is no lifecycle to have. Its only job is
     naming the leaves at adapter construction, which happens at compile time.
 
+    It is also the CONFIG HOME of the whole ONNX artifact contract: the Athena
+    model name and input signature (`inputs`, `track_selection`) and the
+    manifest post-processing (`rename`, `combine`) live here alongside the
+    output tuple, and `export_config` assembles them into the resolved
+    `salt.onnx.ExportConfig` that ``salt export`` / ``salt inference`` trace
+    against. The top-level ``export:`` block is a deprecated alias for these
+    same keys (`salt.onnx.export` folds it in, and a key set in both homes is
+    a `ConfigError`).
+
     Parameters
     ----------
-    outputs : None
-        RETIRED as a config surface. Only ``None``/``[]`` is accepted; any
-        truthy value raises `ConfigError`. A module minting ``outputs.*``
-        leaves names them by implementing ``manifest_fields(mode)``; use
-        `consumes` to narrow what this sink takes.
     model_name : str | None, optional
-        The Athena output-name prefix (``{model_name}_{suffix}``). When None
-        it is supplied at adapter construction from the resolved export
-        config, by default None.
+        The Athena output-name prefix (``{model_name}_{suffix}``) and
+        ``doc_string``; no ``_``/``-`` allowed. None (the default) defaults it
+        to the run ``name:`` with ``_``/``-`` stripped, at export time.
+    inputs : Sequence[ExportInput | Mapping[str, Any]] | None, optional
+        The ONNX graph inputs in positional order, each an `ExportInput` (or
+        the equivalent mapping) naming the bundle port it feeds. Required to
+        export; None (the default) leaves the signature undeclared.
+    track_selection : str, optional
+        Athena-side track selection used in the default metadata input names,
+        by default ``r22default``.
+    rename : Mapping[str, str] | None, optional
+        Manifest suffix renames ``old -> new``, recorded in the ``gnn_config``
+        metadata, by default None.
+    combine : Sequence[ExportCombine | Mapping[str, Any]] | None, optional
+        Combined outputs (``sum(scale * output(suffix))``), by default None.
     modes : Sequence[str] | None, optional
         Which planner modes to run in. `allowed_modes` is ``[onnx]``, so
         ``[onnx]`` (or its writer-vocabulary spelling ``[export]``) is the
@@ -186,6 +208,11 @@ class OnnxExportSink(Node):
     consumes : Sequence[str] | None, optional
         fnmatch patterns over the ``outputs.*`` leaf key narrowing the
         collected tuple, by default None (every declared final ONNX leaf).
+    outputs : None
+        RETIRED as a config surface. Only ``None``/``[]`` is accepted; any
+        truthy value raises `ConfigError`. A module minting ``outputs.*``
+        leaves names them by implementing ``manifest_fields(mode)``; use
+        `consumes` to narrow what this sink takes.
 
     Raises
     ------
@@ -203,10 +230,14 @@ class OnnxExportSink(Node):
 
     def __init__(
         self,
-        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]] | None = None,
         model_name: str | None = None,
+        inputs: Sequence[ExportInput | Mapping[str, Any]] | None = None,
+        track_selection: str = "r22default",
+        rename: Mapping[str, str] | None = None,
+        combine: Sequence[ExportCombine | Mapping[str, Any]] | None = None,
         modes: Sequence[str] | None = None,
         consumes: Sequence[str] | None = None,
+        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__(modes=modes, consumes=consumes)
         if outputs:
@@ -221,6 +252,12 @@ class OnnxExportSink(Node):
         self._leaves: tuple[OnnxExportLeaf, ...] = ()
         self._leaves_resolved = False
         self.model_name = model_name
+        # the export-only half of the contract, coerced from dataclasses OR plain
+        # config mappings (jsonargparse resolves the union either way)
+        self.inputs: list[ExportInput] = [ExportInput.coerce(e) for e in inputs or ()]
+        self.track_selection = track_selection
+        self.rename: dict[str, str] = dict(rename or {})
+        self.combine: list[ExportCombine] = [ExportCombine.coerce(c) for c in combine or ()]
 
     @staticmethod
     def _validate_leaves(leaves: Sequence[OnnxExportLeaf]) -> None:
@@ -350,6 +387,44 @@ class OnnxExportSink(Node):
         }
         return IO(requires=unflatten_spec(req), produces={})
 
+    # -- the export contract ------------------------------------------------
+
+    def export_config(self, run_name: str = "salt") -> ExportConfig:
+        """The RESOLVED export contract this sink declares.
+
+        Assembles the sink's own fields into an `ExportConfig` and hands it to
+        `salt.onnx.resolve_export_config`, which fills the defaults (input
+        names, dynamic axes, Athena metadata names, the `run_name`-derived
+        model name) and validates them.
+
+        Parameters
+        ----------
+        run_name : str, optional
+            The run ``name:``, the default `model_name` source, by default
+            ``"salt"``.
+
+        Returns
+        -------
+        ExportConfig
+            The resolved export-only half (``outputs == []``).
+
+        Raises
+        ------
+        ConfigError
+            When the contract is incomplete or malformed (no inputs, an
+            invalid model name / track selection, a bad rename or combine).
+        """
+        return resolve_export_config(
+            ExportConfig(
+                model_name=self.model_name,
+                track_selection=self.track_selection,
+                inputs=list(self.inputs),
+                rename=dict(self.rename),
+                combine=list(self.combine),
+            ),
+            run_name,
+        )
+
     # -- generated export metadata --------
 
     def resolved_model_name(self) -> str:
@@ -362,8 +437,9 @@ class OnnxExportSink(Node):
         """
         if self.model_name is None:
             raise ConfigError(
-                "OnnxExportSink has no model_name — set export.model_name (or the sink's "
-                "model_name) before deriving the ONNX output names (design §6.3)"
+                "OnnxExportSink has no model_name — set the sink's `model_name:` (or let "
+                "`salt export` default it from the run name) before deriving the ONNX "
+                "output names (design §6.3)"
             )
         return self.model_name
 
