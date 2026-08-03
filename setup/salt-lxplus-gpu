@@ -44,7 +44,12 @@ SETUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${SALT_REPO_DIR:="$(dirname -- "$SETUP_DIR")"}"
 : "${SALT_LXPLUS_DIR:="$SALT_REPO_DIR"}"
 SUB_TEMPLATE="$SETUP_DIR/lxplus_gpu.sub"
-REGISTRY_IMAGE="docker://gitlab-registry.cern.ch/aft/algorithms/salt:latest"
+# Which of salt's two images to pull. `latest` is an alias for `V2H`
+# (cu126, sm_50..sm_90), which covers the ENTIRE lxplus GPU pool — V100, T4,
+# A100, H100, H200 — so it is the right default here. Override with
+# SALT_LXPLUS_TAG=T2B only if you point this at a Blackwell machine.
+# See docs/setup.md and setup/valid-container-versions.
+REGISTRY_IMAGE="docker://gitlab-registry.cern.ch/aft/algorithms/salt:${SALT_LXPLUS_TAG:-latest}"
 
 _user="${USER:-$(id -un)}"
 DEFAULT_SIF="/eos/user/${_user:0:1}/${_user}/salt-containers/salt.sif"

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# valid-container-versions — which salt image will run on this machine?
+#
+# Salt ships two images that differ only in which GPU architectures the bundled
+# PyTorch was compiled for. Picking the wrong one fails in a particularly
+# unhelpful way: torch.cuda.is_available() still returns True, and then every
+# kernel launch dies with "no kernel image is available for execution" at your
+# first real operation rather than at import.
+#
+# This script answers the question BEFORE you pull anything, so it deliberately
+# depends on nothing but nvidia-smi — no torch, no python, no container.
+#
+#   ./setup/valid-container-versions
+#
+# Exit codes: 0 a usable image exists (or CPU-only), 1 no image covers this GPU,
+# 2 could not determine (nvidia-smi present but gave nothing usable).
+
+set -uo pipefail
+
+# Arch coverage — see docs/setup.md and .gitlab/.ci-build.yaml.
+#   V2H  cu126  sm_50 .. sm_90    Volta  -> Hopper       (MEASURED, probe job 3287)
+#   T2B  cu130  sm_75 .. sm_120   Turing -> Blackwell    (floor INFERRED, see below)
+#
+# T2B_MIN: measured as 7.5 on cu129; the shipped T2B image is cu130 and its
+# floor has not been read off a built image yet. If cu130 actually floors at
+# sm_80, the only effect is that a T4 (7.5) is told "either" when it means
+# "V2H only" — and V2H is what it is recommended anyway, since V2H wins ties.
+# There is no coverage hole either way: V2H starts at sm_50.
+V2H_MIN=5.0 ; V2H_MAX=9.0
+T2B_MIN=7.5 ; T2B_MAX=12.0
+FLASH_MIN=8.0   # flash-attn 2.x requires Ampere or newer
+
+REGISTRY="gitlab-registry.cern.ch/aft/algorithms/salt"
+# `:latest` is an alias for `:V2H` — kept for backward compatibility. Always
+# print the explicit tag: a bare `latest` gives no way to tell what it covers.
+
+# Compare two dotted capabilities without bc/python: 8.6 -> 806, 12.0 -> 1200.
+_cap_num() { awk -F. '{ printf "%d", $1 * 100 + $2 }' <<<"$1"; }
+_ge() { [ "$(_cap_num "$1")" -ge "$(_cap_num "$2")" ]; }
+_le() { [ "$(_cap_num "$1")" -le "$(_cap_num "$2")" ]; }
+
+echo "=== salt container compatibility ==="
+echo
+
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "No nvidia-smi found — treating this as a CPU-only machine."
+    echo
+    echo "Salt runs on CPU (slowly). Either image works; there is no GPU to mismatch."
+    echo "If you expected a GPU, the driver is missing or not on PATH."
+    exit 0
+fi
+
+mapfile -t gpus < <(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null)
+
+if [ "${#gpus[@]}" -eq 0 ]; then
+    echo "nvidia-smi is installed but reported no GPUs."
+    echo "Common causes: no GPU allocated by the batch system, or the driver is not loaded."
+    exit 2
+fi
+
+overall=0
+for entry in "${gpus[@]}"; do
+    name="${entry%%,*}"
+    cap="$(tr -d ' ' <<<"${entry##*,}")"
+
+    echo "GPU: ${name}"
+
+    # MIG slices and some virtualised devices report no usable capability.
+    if [[ ! "${cap}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "  compute capability : ${cap:-<none>} (not reported)"
+        echo "  -> Cannot determine compatibility. This is normal for MIG slices."
+        echo "     Check the parent GPU model, or run the image and verify with:"
+        echo "       python -c 'import torch; print(torch.cuda.get_arch_list())'"
+        echo
+        overall=2
+        continue
+    fi
+
+    echo "  compute capability : ${cap}  (sm_${cap//./})"
+
+    v2h=false ; t2b=false
+    _ge "${cap}" "${V2H_MIN}" && _le "${cap}" "${V2H_MAX}" && v2h=true
+    _ge "${cap}" "${T2B_MIN}" && _le "${cap}" "${T2B_MAX}" && t2b=true
+
+    if $v2h && $t2b; then
+        echo "  usable images      : V2H and T2B (either works)"
+        rec="V2H"
+    elif $v2h; then
+        echo "  usable images      : V2H only"
+        echo "                       (T2B floors at sm_75 — no Volta support)"
+        rec="V2H"
+    elif $t2b; then
+        echo "  usable images      : T2B only"
+        echo "                       (V2H tops out at sm_90 — no Blackwell support)"
+        rec="T2B"
+    else
+        echo "  usable images      : NONE — no shipped image covers sm_${cap//./}"
+        echo "                       Please open an issue with the output of this script."
+        overall=1
+        echo
+        continue
+    fi
+
+    if _ge "${cap}" "${FLASH_MIN}"; then
+        echo "  flash-attention    : supported"
+    else
+        echo "  flash-attention    : not available (requires sm_80+); salt uses its"
+        echo "                       standard attention path. This is expected."
+    fi
+
+    echo
+    echo "  Pull it with:"
+    echo "    apptainer pull \$APPTAINER_CACHEDIR/salt-${rec}.simg docker://${REGISTRY}:${rec}"
+    echo "  Or on CVMFS:"
+    echo "    /cvmfs/unpacked.cern.ch/${REGISTRY}:${rec}/"
+    echo
+done
+
+exit "${overall}"

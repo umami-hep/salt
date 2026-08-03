@@ -1,6 +1,14 @@
 .test-template:
   stage: tests
-  needs: [build_docker_test]
+  # build_docker_test is a parallel:matrix job, so the dependency must name the
+  # cell. Test jobs pull the unsuffixed `-test` tag, which only V2H publishes —
+  # so V2H is the one to wait for. Depending on the bare job name here would
+  # fail pipeline creation.
+  needs:
+    - job: build_docker_test
+      parallel:
+        matrix:
+          - VARIANT: V2H
   image: "$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test"
   artifacts:
     when: always
@@ -64,10 +72,21 @@ gpu-smoke:
   extends: .test-template
   tags:
     - k8s-gpu
-  # The k8s-gpu fleet serves an A100-PCIE-40GB MIG slice with driver 570.x /
-  # CUDA 12.8. The image's torch must be built for CUDA <= 12.8 — see
-  # setup/Dockerfile, pinned to cuda12.6 + flash-attn cu126 for exactly this.
-  # (A cuda13.0 image fails here with "driver too old, found 12080".)
+  # This job runs on the V2H (cu126) image: .test-template pulls the UNSUFFIXED
+  # `temporary_images:<ref>-test` tag, which .ci-build.yaml deliberately keeps
+  # pointing at V2H.
+  #
+  # That is not an accident. The k8s-gpu fleet serves an A100-PCIE-40GB MIG
+  # slice, and its DRIVER VERSION IS UNVERIFIED as of 2026-08-03 — an older note
+  # here asserted 570.x / CUDA 12.8, which was never re-checked. If it is still
+  # 570.x, a CUDA 13 stack fails here with "driver too old, found 12080", so the
+  # T2B image cannot be smoke-tested on this runner. cu126 runs on any 12.8-or-
+  # newer driver via minor-version compatibility, so V2H is safe either way.
+  #
+  # TODO: read the driver off this runner (the `nvidia-smi` line below prints
+  # it) and, if it is 580+/CUDA 13, add a second gpu-smoke cell on the T2B
+  # image. Until then T2B is BUILT by CI but never GPU-smoke-tested.
+  #
   # Blocking (allow_failure removed): if torch can't see the GPU, fail loudly.
   # FAIR USE: keep k8s-gpu jobs <= 5 in parallel.
   script:
