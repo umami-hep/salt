@@ -245,8 +245,14 @@ class H5OutputSink(RuntimeSink):
         self._columns_resolved = False
 
     def _invalidate_manifest(self) -> None:
-        """Drop the cached column table after a manifest source rebinds."""
-        self._columns_resolved = False
+        """Drop the DERIVED column table after a manifest source rebinds.
+
+        A table that did not come from a manifest source (`_explicit_columns`)
+        survives: there is nothing to re-derive it from, so dropping it would
+        leave the sink with no columns at all.
+        """
+        if not self._explicit_columns:
+            self._columns_resolved = False
 
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
         """Capture the ``outputs:`` section so the dumb sink dumps its leaves.
