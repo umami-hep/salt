@@ -14,16 +14,22 @@ def disable_logger_in_config(config_path: str) -> str:
 
     For keyless environments (no COMET_API_KEY), the default-ON CometLogger
     in base2.yaml fails during instantiate_classes with "Comet.ml requires
-    an API key". Cache is per config-file (hash of input path) so parallel
-    runs reuse it.
+    an API key".
+
+    The cache key covers the config's PATH **and its CONTENT**, so parallel
+    runs still share one copy while an edited config always re-derives. Keying
+    on the path alone silently serves a stale copy to every later run in the
+    same ``TMPDIR`` — the config you edited is not the config that is parsed,
+    and the failure surfaces far from its cause.
     """
-    cache_key = hashlib.md5(config_path.encode(), usedforsecurity=False).hexdigest()[:8]
+    raw = Path(config_path).read_bytes()
+    digest = hashlib.md5(config_path.encode() + b"\0" + raw, usedforsecurity=False)
+    cache_key = digest.hexdigest()[:12]
     cached_path = Path(tempfile.gettempdir()) / f"salt_config_no_logger_{cache_key}.yaml"
     if cached_path.exists():
         return str(cached_path)
 
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = yaml.safe_load(raw)
     if cfg is None:
         cfg = {}
     if "trainer" not in cfg:
