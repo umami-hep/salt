@@ -1870,8 +1870,7 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         where = f" (produced by {name!r}, config: model.modules.{name})" if name else ""
         lines.append(f"  - {key!r}{where}")
     lines.append(
-        "an unconsumed preds.* port in TEST means a computed prediction is never "
-        "persisted."
+        "an unconsumed preds.* port in TEST means a computed prediction is never persisted."
     )
     dead_tasks = {
         parts[2]
