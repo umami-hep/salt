@@ -1,4 +1,4 @@
-"""Gates for the public `OutputSink` base + the `JSONLOutputSink` worked example."""
+"""Gates for the public sink bases + the `JSONLOutputSink` worked example."""
 
 from __future__ import annotations
 
@@ -16,8 +16,10 @@ from salt.graph.spec import Mode, flatten_spec
 from salt.outputs import (
     H5OutputSink,
     JSONLOutputSink,
+    Node,
     OnnxExportSink,
     OutputSink,
+    RuntimeSink,
     SinkContext,
     is_test_persistence_sink,
 )
@@ -93,18 +95,37 @@ def _read(path: Path) -> list[dict]:
 
 
 class TestOutputSinkPromotion:
-    def test_output_sink_is_public_and_the_private_alias_still_resolves(self):
-        """`_SinkCallback` is kept as an alias of the promoted public `OutputSink`."""
+    def test_the_private_alias_still_resolves(self):
+        """`_SinkCallback` is kept as an alias of the deprecated public `OutputSink`."""
         assert _SinkCallback is OutputSink
 
     @pytest.mark.parametrize("cls", [H5OutputSink, OnnxExportSink, JSONLOutputSink])
     def test_shipped_sinks_subclass_the_public_base(self, cls):
         """Every shipped sink derives from the documented extension point."""
-        assert issubclass(cls, OutputSink)
+        assert issubclass(cls, Node)
+
+    @pytest.mark.parametrize("cls", [H5OutputSink, JSONLOutputSink])
+    def test_sinks_with_a_lifecycle_subclass_runtime_sink(self, cls):
+        """A sink the test loop drives per batch carries the lifecycle base."""
+        assert issubclass(cls, RuntimeSink)
+
+    def test_the_onnx_manifest_is_declare_only(self):
+        """Export runs no test loop, so its node has no lifecycle to inherit."""
+        assert not issubclass(OnnxExportSink, RuntimeSink)
+
+    def test_output_sink_still_works_but_deprecates_on_subclassing(self):
+        """Third-party `class MySink(OutputSink)` keeps working, loudly."""
+        assert issubclass(OutputSink, RuntimeSink)
+        with pytest.warns(DeprecationWarning, match="deprecated alias"):
+
+            class _ThirdParty(OutputSink):
+                name = "third_party"
+
+        assert issubclass(_ThirdParty, RuntimeSink)
 
     def test_base_marks_terminal_and_defaults_to_empty_io(self):
         """The base is a terminal node declaring nothing until a subclass overrides."""
-        sink = OutputSink()
+        sink = RuntimeSink()
         assert sink.is_sink() is True
         assert flatten_spec(sink.declare_io(Mode.TEST).requires) == {}
         assert sink.is_test_sink() is False  # empty TEST requires

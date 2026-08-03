@@ -14,7 +14,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.sink import OutputSink, SinkContext
+from salt.outputs.sink import RuntimeSink, SinkContext
 
 __all__ = ["JSONLOutputSink"]
 
@@ -44,10 +44,10 @@ def _jsonable(value: Any) -> Any:
     return float(value)
 
 
-class JSONLOutputSink(OutputSink):
+class JSONLOutputSink(RuntimeSink):
     """Write the eval columns as newline-delimited JSON, one object per row.
 
-    A deliberately minimal reference implementation of the `OutputSink`
+    A deliberately minimal reference implementation of the `RuntimeSink`
     contract — the answer to "how do I write salt's outputs in some other
     format?". It is a real, tested sink, not pseudo-code: it resolves its
     column schema from the same bound ``outputs:`` section the H5 sink uses
@@ -229,7 +229,7 @@ class JSONLOutputSink(OutputSink):
         """TEST requires the selected ``outputs.*`` leaves + ``meta.rows``; produces
         nothing (a terminal node). Every other mode declares nothing, so the
         planner prunes the sink outside TEST.
-        """  # noqa: DOC201 - contract documented on `OutputSink`
+        """  # noqa: DOC201 - contract documented on `RuntimeSink`
         if not (mode & Mode.TEST):
             return IO(requires={}, produces={})
         req: dict[str, TensorSpec] = {
@@ -244,7 +244,7 @@ class JSONLOutputSink(OutputSink):
         return False
 
     def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
-        """The sink's TEST ``declare_io`` requires, each mapped to a demander description."""  # noqa: DOC201 - contract documented on `OutputSink`
+        """The sink's TEST ``declare_io`` requires, each mapped to a demander description."""  # noqa: DOC201 - contract documented on `RuntimeSink`
         del model_modules, reader
         who = "sink 'JSONLOutputSink' demanding"
         return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}

@@ -27,7 +27,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
-from salt.outputs.sink import OutputSink, SinkContext
+from salt.outputs.sink import OutputSink, RuntimeSink, SinkContext
 from salt.utils.array_utils import join_structured_arrays
 
 _SinkCallback = OutputSink
@@ -50,7 +50,7 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
-class H5OutputSink(OutputSink):
+class H5OutputSink(RuntimeSink):
     """The H5 sink: a terminal graph node serialising ``outputs.*`` to the eval H5.
 
     A `GraphModule` terminal node whose ``declare_io`` requires the demanded

@@ -30,6 +30,7 @@ from salt.data.datamodule import GraphDataModule
 from salt.graph.errors import ConfigError, GraphError
 from salt.onnx.config import ExportConfig
 from salt.outputs.run_task_output import OutputSectionWriter
+from salt.outputs.sink import Node
 from salt.parser import DeepMergeParser
 from salt.model.saltmodule import SaltModule
 
@@ -639,10 +640,12 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             "--callbacks",
-            type=dict[str, Callback | None] | None,
+            type=dict[str, Callback | Node | None] | None,
             default={},
             help="dict-keyed callbacks, deep-mergeable; assembled into trainer.callbacks "
-            "(design §5.3; an entry set to null is removed)",
+            "(design §5.3; an entry set to null is removed). An output SINK declared here "
+            "is accepted for one deprecation window and wired through the sink registry "
+            "instead — declare sinks in the `outputs:` section.",
         )
         parser.add_argument(
             "--writers.modules",
@@ -759,19 +762,54 @@ class SaltCLI(LightningCLI):
         ahead of the stock ``trainer.callbacks`` list. Drops the default
         ``lr_monitor`` LearningRateMonitor when no experiment logger is
         attached (it hard-raises on a logger-less trainer).
+
+        Output SINKS declared under ``callbacks:`` are PARTITIONED out — a
+        sink is not a Lightning callback any more. They are wired onto the
+        built trainer through the sink registry (and, for a runtime sink, a
+        generated adapter), which is the deprecation window for the old
+        placement; the ``outputs:`` section is where sinks belong.
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         has_logger = bool(self._get(self.config_init, "trainer.logger"))
+        live = [(key, cb) for key, cb in callbacks_dict.items() if cb is not None]
+        aliased_sinks = [(key, cb) for key, cb in live if isinstance(cb, Node)]
         assembled = [
             cb
-            for cb in callbacks_dict.values()
-            if cb is not None and (has_logger or not _needs_logger(cb))
+            for key, cb in live
+            if not isinstance(cb, Node) and (has_logger or not _needs_logger(cb))
         ]
         stock = self._get(self.config_init, "trainer.callbacks") or []
         assembled = self._maybe_add_schedule_callback(assembled, stock)
         if assembled:
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
-        return super().instantiate_trainer(**kwargs)
+        trainer = super().instantiate_trainer(**kwargs)
+        self._attach_aliased_sinks(trainer, aliased_sinks)
+        return trainer
+
+    @staticmethod
+    def _attach_aliased_sinks(trainer: Trainer, aliased: Sequence[tuple[str, Any]]) -> None:
+        """Wire ``callbacks:``-declared sinks onto `trainer` (the alias window).
+
+        Each sink is registered and, if it has a lifecycle, given its adapter.
+        Node names are left exactly as the class defaults them, which is what
+        the callbacks placement always did, so a config left alone keeps its
+        plan hash. Warns once per config: sinks belong in ``outputs:``.
+        """
+        if not aliased:
+            return
+        from salt.callbacks.sink_adapter import attach_runtime_sink  # noqa: PLC0415 - heavy/circular
+
+        warnings.warn(
+            "declaring output sink(s) "
+            + ", ".join(repr(key) for key, _ in aliased)
+            + " under `callbacks:` is deprecated — a sink is no longer a lightning "
+            "Callback. Move them to the top-level `outputs:` section; the callbacks: "
+            "placement is accepted for one release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        for _key, sink in aliased:
+            attach_runtime_sink(trainer, sink)
 
     def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
         """Auto-inject the schedule driver callbacks on ``fit`` (plan 01 W3 / plan
@@ -858,13 +896,14 @@ class SaltCLI(LightningCLI):
             # the bind loop — so a config declaring only WHAT (modules + modes)
             # gets the right sink without ever naming H5OutputSink/OnnxExportSink.
             self._inject_command_sinks(live_section)
-            # bind the section to the sink callbacks NOW: datamodule setup runs
+            # bind the section to the registered sinks NOW: datamodule setup runs
             # BEFORE model setup and resolves the sink's writer_demand, which
             # needs the section already bound.
-            trainer = getattr(self, "trainer", None)
-            for cb in (trainer.callbacks if trainer is not None else []):
-                if callable(getattr(cb, "bind_output_section", None)):
-                    cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
+            from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
+
+            for sink in iter_sinks(getattr(self, "trainer", None)):
+                if callable(getattr(sink, "bind_output_section", None)):
+                    sink.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
 
     def _inject_command_sinks(self, section: Mapping[str, Any]) -> None:
         """Wire the implicit per-command output sinks over the composed section.
@@ -881,31 +920,34 @@ class SaltCLI(LightningCLI):
           implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
 
-        A sink already present in ``trainer.callbacks`` (a programmatic build,
-        or the MaskFormer ONNX escape hatch) is left alone — never double-wired.
+        A sink already registered (a ``callbacks:``-declared one, a
+        programmatic build, or the MaskFormer ONNX escape hatch) is left alone
+        — never double-wired.
         """
+        from salt.callbacks.sink_adapter import attach_runtime_sink  # noqa: PLC0415 - heavy/circular
         from salt.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top
         from salt.outputs import (  # noqa: PLC0415 - avoid import cycle at top
             H5OutputSink,
             OnnxExportSink,
+            iter_sinks,
         )
 
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
             return
         trainer = getattr(self, "trainer", None)
-        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-        if callbacks is None:
+        if trainer is None:
             return
+        registered = iter_sinks(trainer)
 
         def _present(cls: type) -> bool:
-            return any(isinstance(cb, cls) for cb in callbacks)
+            return any(isinstance(sink, cls) for sink in registered)
 
         # H5 sink: any command that persists TEST predictions (test or run-free)
         if _section_runs_mode(section, Mode.TEST) and not _present(H5OutputSink):
             h5 = H5OutputSink()
             h5.name = "h5_output"
-            callbacks.append(h5)
+            attach_runtime_sink(trainer, h5)
         # ONNX sink: only the run-free parses assemble the ONNX tuple, and only
         # when a RunTaskOutput opts into export (a test-only section mints none).
         if (
@@ -915,7 +957,7 @@ class SaltCLI(LightningCLI):
         ):
             onnx = OnnxExportSink()
             onnx.name = "onnx_export"
-            callbacks.append(onnx)
+            attach_runtime_sink(trainer, onnx)
 
     def _detach_fit_logger(self) -> Any:
         """Stash + null the fit-stage ``trainer.logger`` ahead of the parser pass,

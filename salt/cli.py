@@ -437,41 +437,38 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
 
 
 def _static_writer_sink_callback(cli: Any) -> Any | None:
-    """The configured callbacks-level TEST persistence sink (duck-typed on
-    ``writer_demand``, e.g. `H5OutputWriter`), or None — the static mirror of
+    """The configured TEST persistence sink (duck-typed on ``writer_demand``,
+    e.g. `H5OutputWriter`), or None — the static mirror of
     `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
     sinks.
     """
-    from salt.outputs import is_test_persistence_sink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import is_test_persistence_sink, iter_sinks  # noqa: PLC0415 - heavy/circular
 
-    trainer = getattr(cli, "trainer", None)
-    callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-    # the SAME selector the runtime uses (`SaltModule._attached_writer`), so the
-    # static render and the real run resolve the same sink: an ONNX-only sink
-    # (`OnnxExportSink`, empty TEST requires — handled by
-    # `_static_onnx_export_sink`) and an auxiliary sink that opts out
-    # (`JSONLOutputSink`) are both skipped.
+    # the SAME registry and the SAME selector the runtime uses
+    # (`SaltModule._attached_writer`), so the static render and the real run
+    # resolve the same sink: an ONNX-only sink (`OnnxExportSink`, empty TEST
+    # requires — handled by `_static_onnx_export_sink`) and an auxiliary sink
+    # that opts out (`JSONLOutputSink`) are both skipped.
     return next(
         (
-            cb
-            for cb in callbacks or []
-            if callable(getattr(cb, "writer_demand", None)) and is_test_persistence_sink(cb)
+            sink
+            for sink in iter_sinks(getattr(cli, "trainer", None))
+            if callable(getattr(sink, "writer_demand", None)) and is_test_persistence_sink(sink)
         ),
         None,
     )
 
 
 def _static_onnx_export_sink(cli: Any) -> Any | None:
-    """The configured callbacks-level `OnnxExportSink`, or None — the ONNX
-    counterpart to `_static_writer_sink_callback`, folded into the planning
-    module dict so ``salt graph plot --mode onnx`` renders it and keeps the
-    folded conversion nodes alive.
+    """The configured `OnnxExportSink`, or None — the ONNX counterpart to
+    `_static_writer_sink_callback`, folded into the planning module dict so
+    ``salt graph plot --mode onnx`` renders it and keeps the folded conversion
+    nodes alive.
     """
-    from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import OnnxExportSink, iter_sinks  # noqa: PLC0415 - heavy/circular
 
-    trainer = getattr(cli, "trainer", None)
-    callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-    return next((cb for cb in callbacks or [] if isinstance(cb, OnnxExportSink)), None)
+    sinks = iter_sinks(getattr(cli, "trainer", None))
+    return next((sink for sink in sinks if isinstance(sink, OnnxExportSink)), None)
 
 
 def _static_export_model_name(export_cfg: Any, run_name: str) -> str:

@@ -559,19 +559,22 @@ class SaltModule(lightning.LightningModule):
         return out
 
     def _attached_writer(self) -> tuple[Any, Any]:
-        """The attached TEST writer/sink callback + reader, duck-typed on
-        ``writer_demand``. Order-independent: an ONNX-only sink's
+        """The attached TEST writer/sink node + reader, duck-typed on
+        ``writer_demand``. Read from the trainer's sink registry (`iter_sinks`),
+        which every wiring path feeds. Order-independent: an ONNX-only sink's
         ``is_test_sink()`` discriminator skips it so it is never chosen as the
         TEST persistence sink; a plain duck-typed sink without ``is_test_sink``
         counts as one. ``(None, None)`` when none is attached.
         """
+        from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
+
         trainer = self._trainer
-        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
         callback = next(
             (
-                cb
-                for cb in callbacks or []
-                if callable(getattr(cb, "writer_demand", None)) and _is_test_persistence_sink(cb)
+                sink
+                for sink in iter_sinks(trainer)
+                if callable(getattr(sink, "writer_demand", None))
+                and _is_test_persistence_sink(sink)
             ),
             None,
         )
@@ -598,21 +601,21 @@ class SaltModule(lightning.LightningModule):
         return None
 
     def _bind_output_section_to_sink(self) -> None:
-        """Bind the outputs: section to every attached sink callback.
+        """Bind the outputs: section to every attached sink.
 
         Sinks resolve their column schema + copy spec + mask streams from the
         section manifest, so the section must be bound before any
-        declare_io/writer_demand resolution. Binds to every attached callback
+        declare_io/writer_demand resolution. Binds to every registered sink
         exposing ``bind_output_section`` (H5 persistence + ONNX export).
         No-op when no outputs: section is configured.
         """
+        from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
+
         if not self._output_section:
             return
-        trainer = self._trainer
-        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-        for cb in callbacks or []:
-            if callable(getattr(cb, "bind_output_section", None)):
-                cb.bind_output_section(self._output_section)
+        for sink in iter_sinks(self._trainer):
+            if callable(getattr(sink, "bind_output_section", None)):
+                sink.bind_output_section(self._output_section)
 
     @staticmethod
     def _fold_sink_node(

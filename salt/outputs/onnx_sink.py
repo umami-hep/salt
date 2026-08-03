@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch import Tensor
@@ -13,7 +13,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.output_schema import _OUTPUTS_NAMESPACE
-from salt.outputs.sink import OutputSink
+from salt.outputs.sink import Node
 
 
 @dataclass(frozen=True)
@@ -130,7 +130,7 @@ class OnnxExportLeaf:
         return self.dyn_axis or f"n_{self.stream}"
 
 
-class OnnxExportSink(OutputSink):
+class OnnxExportSink(Node):
     """The ONNX sink: a declare-only terminal node naming the conversion leaves.
 
     A pure terminal `SinkModule` for ``Mode.ONNX``: its ONNX-mode
@@ -153,9 +153,9 @@ class OnnxExportSink(OutputSink):
 
     Outside ``Mode.ONNX`` the node declares empty requires AND empty
     produces, so the planner prunes it from FIT/VAL/TEST — the FIT
-    ``plan_hash`` is unchanged. It has no Lightning lifecycle (export never
-    runs ``test_step``): the ``open_schema``/``consume``/``flush`` hooks are
-    inert no-ops; its only job is naming the leaves at adapter construction.
+    ``plan_hash`` is unchanged. It is a `Node`, not a `RuntimeSink`: export
+    never runs a test loop, so there is no lifecycle to have. Its only job is
+    naming the leaves at adapter construction, which happens at compile time.
 
     Parameters
     ----------
@@ -178,6 +178,9 @@ class OnnxExportSink(OutputSink):
 
     name = "onnx_export"
     """The graph-node instance name (overridable by the config dict key)."""
+
+    allowed_modes: ClassVar[frozenset[Mode]] = frozenset({Mode.ONNX})
+    """Export only — a manifest node has nothing to declare in any other mode."""
 
     def __init__(
         self,
