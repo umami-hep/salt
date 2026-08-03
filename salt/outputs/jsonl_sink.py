@@ -14,7 +14,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.sink import RuntimeSink, SinkContext
+from salt.outputs.sink import RuntimeSink, SinkContext, collect_manifest_fields
 
 __all__ = ["JSONLOutputSink"]
 
@@ -88,6 +88,10 @@ class JSONLOutputSink(RuntimeSink):
         the ``outputs:`` section: an auxiliary sink rides alongside the
         primary H5 sink rather than replacing it, so it states when it runs
         rather than inheriting a default. By default None (= ``[test]``).
+    consumes : Sequence[str] | None, optional
+        fnmatch patterns over the ``outputs.*`` leaf key narrowing the columns
+        taken from the section, by default None (every column it mints).
+        Complementary to `columns`, which selects by FLAT COLUMN NAME.
 
     Attributes
     ----------
@@ -130,8 +134,9 @@ class JSONLOutputSink(RuntimeSink):
         output: str = DEFAULT_OUTPUT,
         overwrite: bool = True,
         modes: Sequence[str] | None = None,
+        consumes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__(modes=modes)
+        super().__init__(modes=modes, consumes=consumes)
         self.columns = tuple(columns) if columns is not None else None
         self.output = output
         self.overwrite = overwrite
@@ -152,15 +157,19 @@ class JSONLOutputSink(RuntimeSink):
         this method, before any ``declare_io`` / ``writer_demand`` resolution.
         """
         self._output_section = section
+        self._invalidate_manifest()
+
+    def _invalidate_manifest(self) -> None:
+        """Drop the cached column table after a manifest source rebinds."""
         self._resolved = None
 
     def _section_columns(self) -> tuple[OutputColumn, ...]:
         """Every TEST `OutputColumn` the bound section mints, in section order.
 
         Same walk (and therefore the same names and order) as the H5 sink's
-        section resolution: each `RunTaskOutput`'s ``manifest_fields(Mode.TEST)``
-        contributes one column per ``outputs.*`` leaf, its suffixes in field
-        order.
+        resolution: each writer's ``manifest_fields(Mode.TEST)`` contributes
+        one column per ``outputs.*`` leaf, its suffixes in field order,
+        narrowed by ``consumes:``.
         """  # noqa: DOC201, DOC501 - private helper, no Returns/Raises blocks per docstring policy
         if not self._output_section:
             raise ConfigError(
@@ -169,17 +178,15 @@ class JSONLOutputSink(RuntimeSink):
             )
         by_key: dict[str, list[Any]] = {}
         order: list[str] = []
-        for writer in self._output_section.values():
-            is_rto = getattr(writer, "is_run_task_output", None)
-            if not (callable(is_rto) and is_rto()):
+        for leaf_key, field in self._filter_consumed(
+            collect_manifest_fields(self._output_section.values(), Mode.TEST)
+        ):
+            if field.h5_name is None:
                 continue
-            for leaf_key, field in writer.manifest_fields(Mode.TEST):
-                if field.h5_name is None:
-                    continue
-                if leaf_key not in by_key:
-                    by_key[leaf_key] = []
-                    order.append(leaf_key)
-                by_key[leaf_key].append(field)
+            if leaf_key not in by_key:
+                by_key[leaf_key] = []
+                order.append(leaf_key)
+            by_key[leaf_key].append(field)
         return tuple(
             OutputColumn(
                 key=key,

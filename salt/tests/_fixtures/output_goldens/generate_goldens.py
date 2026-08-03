@@ -311,7 +311,7 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
                 export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001
                 onnx_sink.model_name = _static_export_model_name(export_cfg, run_name)
             result["onnx"] = {
-                "is_dumb_section": onnx_sink._is_dumb_section(),  # noqa: SLF001
+                "is_dumb_section": bool(onnx_sink._output_section),  # noqa: SLF001
                 "model_name": onnx_sink.model_name,
                 "output_names": onnx_sink.output_names(),
                 "output_dtypes": onnx_sink.output_dtypes(),

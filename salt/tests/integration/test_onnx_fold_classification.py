@@ -22,7 +22,6 @@ from salt.onnx import (
 from salt.outputs import (
     ClassProbs,
     Combination,
-    OnnxExportLeaf,
     OnnxExportSink,
     SeqClassIndex,
 )
@@ -63,6 +62,13 @@ def _export_cfg() -> ExportConfig:
 # conversion node), covered by the shipped-config goldens + tests/unit get_output.
 
 
+def _bind_producers(modules) -> None:
+    """Bind the model modules to every producer/sink that resolves names from them."""
+    for module in modules.values():
+        if callable(getattr(module, "bind_model_modules", None)):
+            module.bind_model_modules(modules)
+
+
 def _folded_gn2_export(tmp_path):
     """A deterministically-weighted GN2 export through the folded conversion nodes
     (ClassProbs pb/pc/pu + SeqClassIndex TrackOrigin); no vertexing node.
@@ -70,13 +76,14 @@ def _folded_gn2_export(tmp_path):
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    jp = ClassProbs(task="jets_classification", stream="jets"); jp.name = "jet_probs"
-    ti = SeqClassIndex(task="track_origin", stream="tracks"); ti.name = "track_origin_index"
-    sink = OnnxExportSink(outputs=[
-        OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-        OnnxExportLeaf(key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True),
-    ]); sink.name = "onnx_export"
+    jp = ClassProbs(task="jets_classification", stream="jets")
+    jp.name = "jet_probs"
+    ti = SeqClassIndex(task="track_origin", stream="tracks")
+    ti.name = "track_origin_index"
+    sink = OnnxExportSink()
+    sink.name = "onnx_export"
     modules.update({"jet_probs": jp, "track_origin_index": ti, "onnx_export": sink})
+    _bind_producers(modules)
     resolved = resolve_export_config(_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
@@ -101,15 +108,7 @@ def folded(tmp_path_factory):
     track_index.name = "track_origin_index"
     pbc = Combination(source="outputs.jets.jets_classification", name="pbc", terms={0: 1.0, 1: 1.0})
     pbc.name = "pbc"
-    export_sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-            OnnxExportLeaf(key="outputs.jets.pbc", name="pbc"),
-            OnnxExportLeaf(
-                key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-            ),
-        ]
-    )
+    export_sink = OnnxExportSink()
     export_sink.name = "onnx_export"
     modules.update({
         "jet_probs": jet_probs,
@@ -117,6 +116,7 @@ def folded(tmp_path_factory):
         "pbc": pbc,
         "onnx_export": export_sink,
     })
+    _bind_producers(modules)
     resolved = resolve_export_config(_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))

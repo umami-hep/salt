@@ -890,6 +890,7 @@ class SaltCLI(LightningCLI):
         if init_from and model is not None and getattr(self.config, "subcommand", None) == "fit":
             model._init_from = str(init_from)  # noqa: SLF001 - same-package wiring
         composer = getattr(model, "compose_output_section", None) if model is not None else None
+        writers: Any = None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
             # compose FIRST: this partitions the section into writers (folded
@@ -907,14 +908,18 @@ class SaltCLI(LightningCLI):
             # without ever naming H5OutputSink/OnnxExportSink.
             self._inject_command_sinks(writers)
             self._validate_wired_sinks(model)
-            # bind the section to the registered sinks NOW: datamodule setup runs
-            # BEFORE model setup and resolves the sink's writer_demand, which
-            # needs the section already bound.
-            from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
+        # bind both manifest sources to the registered sinks NOW: datamodule setup
+        # runs BEFORE model setup and resolves the sink's writer_demand, which
+        # needs them already bound. The model modules bind even with no outputs:
+        # section — a conversion producer in model.modules names its own leaves.
+        from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
 
-            for sink in iter_sinks(getattr(self, "trainer", None)):
-                if callable(getattr(sink, "bind_output_section", None)):
-                    sink.bind_output_section(writers)
+        graph_modules = getattr(model, "_graph_modules", None) if model is not None else None
+        for sink in iter_sinks(getattr(self, "trainer", None)):
+            if graph_modules is not None and callable(getattr(sink, "bind_model_modules", None)):
+                sink.bind_model_modules(graph_modules)
+            if writers and callable(getattr(sink, "bind_output_section", None)):
+                sink.bind_output_section(writers)
 
     def _register_section_sinks(self, model: Any) -> None:
         """Wire every ``outputs:``-declared sink onto the trainer.

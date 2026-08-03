@@ -217,18 +217,13 @@ class TestEvalH5ByteParity:
             assert leaf in req, f"{leaf} not demanded (its producer would prune)"
 
 
-# 3. ONNX tuple order: explicit object leaves AFTER the section block (unchanged)
+# 3. ONNX tuple order: the model-graph object node's leaves AFTER the section block
 
+_MF_REG_TARGETS = ("pt", "Lxy", "deta", "dphi", "mass")
 _MF_LEADING_LEAF_KEY = "outputs.objects.leading_object"
-_MF_LEADING_LEAF_NAMES = [
-    "leading_objects_pt",
-    "leading_objects_Lxy",
-    "leading_objects_deta",
-    "leading_objects_dphi",
-    "leading_objects_mass",
-]
-_MF_INDEX_LEAF_KEY = "outputs.tracks.object_index"
+_MF_LEADING_LEAF_NAMES = [f"leading_objects_{t}" for t in _MF_REG_TARGETS]
 _MF_INDEX_LEAF_NAME = "HadronIndex"
+_MF_INDEX_LEAF_KEY = f"outputs.tracks.{_MF_INDEX_LEAF_NAME}"
 
 EXPECTED_MFV2_OUTPUT_NAMES = [
     "MFv2_pb",
@@ -245,12 +240,17 @@ EXPECTED_MFV2_OUTPUT_NAMES = [
 
 
 class TestMaskFormerOnnxTupleOrder:
-    """Explicit MaskFormer object leaves appear AFTER the section block."""
+    """The MaskFormer object node's leaves appear AFTER the section block."""
 
     def _onnx_sink(self, tmp_path):
-        from salt.outputs import OnnxExportLeaf, OnnxExportSink
-        from salt.outputs.run_task_output import RunTaskOutput
-        from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
+        from types import SimpleNamespace  # noqa: PLC0415 - test-local
+
+        from salt.outputs import OnnxExportSink  # noqa: PLC0415 - test-local
+        from salt.outputs.run_task_output import RunTaskOutput  # noqa: PLC0415 - test-local
+        from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC0415 - test-local
+            build_gn2v2_modules,
+            write_parity_norm_dict,
+        )
 
         nd_path = tmp_path / "norm_dict.yaml"
         cd_path = tmp_path / "class_dict.yaml"
@@ -259,15 +259,23 @@ class TestMaskFormerOnnxTupleOrder:
         rt = RunTaskOutput(tasks=["jets_classification", "track_origin"])
         rt.name = "run_tasks"
         rt.bind_model_modules(modules)
-        explicit_leaves = [
-            OnnxExportLeaf(key=_MF_LEADING_LEAF_KEY, names=_MF_LEADING_LEAF_NAMES),
-            OnnxExportLeaf(
-                key=_MF_INDEX_LEAF_KEY, name=_MF_INDEX_LEAF_NAME, dtype="int8", per_token=True
-            ),
-        ]
-        sink = OnnxExportSink(outputs=explicit_leaves, model_name="MFv2")
+        # the object node names its own leaves off the regression task's targets
+        modules["regression"] = SimpleNamespace(targets=_MF_REG_TARGETS)
+        mf = MaskFormerObjects(n_reg=len(_MF_REG_TARGETS), index_name=_MF_INDEX_LEAF_NAME)
+        mf.name = "maskformer_objects_onnx"
+        modules["maskformer_objects_onnx"] = mf
+        sink = OnnxExportSink(model_name="MFv2")
         sink.bind_output_section({"run_tasks": rt})
+        sink.bind_model_modules(modules)
+        mf.bind_model_modules(modules)
         return sink
+
+    def test_leading_names_derive_from_the_regression_targets(self, tmp_path):
+        """The leading-object suffixes are minted per target, not typed in the config."""
+        leaves = {leaf.key: leaf for leaf in self._onnx_sink(tmp_path).leaves}
+        assert list(leaves[_MF_LEADING_LEAF_KEY].names) == _MF_LEADING_LEAF_NAMES
+        assert leaves[_MF_INDEX_LEAF_KEY].dtype == "int8"
+        assert leaves[_MF_INDEX_LEAF_KEY].per_token is True
 
     def test_output_names_full_ordered_list(self, tmp_path):
         assert self._onnx_sink(tmp_path).output_names() == EXPECTED_MFV2_OUTPUT_NAMES

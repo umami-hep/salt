@@ -19,7 +19,6 @@ from salt.outputs import (
     H5OutputSink,
     InputCopyWriter,
     JSONLOutputSink,
-    OnnxExportLeaf,
     OnnxExportSink,
     PadMaskWriter,
 )
@@ -181,11 +180,8 @@ def test_empty_modes_list_points_at_the_delete_syntax():
 
 def test_export_is_accepted_as_the_onnx_spelling():
     """Writers in the SAME section spell `Mode.ONNX` ``export``; a sink accepts both."""
-    leaves = [OnnxExportLeaf(key=_JET_OUT, names=["pb", "pc", "pu"])]
-    assert OnnxExportSink(outputs=leaves, modes=["export"]).effective_modes == frozenset(
-        {Mode.ONNX}
-    )
-    assert OnnxExportSink(outputs=leaves, modes=["onnx"]).effective_modes == frozenset({Mode.ONNX})
+    assert OnnxExportSink(modes=["export"]).effective_modes == frozenset({Mode.ONNX})
+    assert OnnxExportSink(modes=["onnx"]).effective_modes == frozenset({Mode.ONNX})
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +306,7 @@ def test_two_test_persistence_sinks_are_refused():
 
 def test_onnx_sink_does_not_count_as_a_persistence_sink():
     """The ONNX manifest has empty TEST requires, so it never contends for the role."""
-    onnx = OnnxExportSink(outputs=[OnnxExportLeaf(key=_JET_OUT, names=["pb", "pc", "pu"])])
+    onnx = OnnxExportSink()
     cli, model = _wiring([_seeded_h5("h5_output"), onnx])
     SaltCLI._validate_wired_sinks(cli, model)  # noqa: SLF001
 

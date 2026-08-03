@@ -272,8 +272,10 @@ declare a sink instance explicitly when it needs a capability the
 injected default cannot mint from the section: an `H5OutputSink`
 carrying `object_groups` (a generic per-object H5 group on a different row axis,
 used by MaskFormer to write `[B, n_objects]`-shaped outputs alongside the standard
-per-jet columns), or an `OnnxExportSink` with explicit `OnnxExportLeaf` entries
-(per-token or reduced outputs the section cannot produce). The object math itself
+per-jet columns), or an `OnnxExportSink` declared by name when the command would
+not inject one. Its tuple is always collected from the producers' own
+`manifest_fields(mode)` — an explicit leaf list is a hard error; `consumes:`
+(fnmatch patterns over the leaf key) narrows what a sink takes. The object math itself
 (`MaskFormerObjects` reconstructing matched objects from mask logits) lives in a
 graph module and writes `outputs.*` leaves like any other; the sink has no MaskFormer
 knowledge. `MaskFormer.yaml` shows both patterns in use. The command leaves
@@ -453,8 +455,9 @@ What governs participation is the single `modes:` surface: `export` in a
 `RunTaskOutput`'s modes list puts its tasks in the ONNX tuple AND the
 inference H5; `modes: [test]` keeps them eval-only. A config whose section
 mints no export-mode field is refused (there is nothing Athena-visible to
-write). The explicit `OnnxExportLeaf` escape hatch (MaskFormer object
-reduces) has no H5 counterpart here and is out of scope. Note the eager
+write). Model-graph producers (the MaskFormer object reduces, a `Combination`)
+declare ONNX-only fields, so they contribute to the tuple but not to a `salt
+test` column. Note the eager
 loop runs per jet (the ONNX-mode graph branches assume the Athena calling
 convention) — for bulk labelled evaluation use `salt test`; this command
 is the offline twin of the deployed network.
@@ -664,8 +667,9 @@ How it works (no data file is touched — config + checkpoint only):
   renames apply first (existence-checked), combined outputs are linear
   combinations of the (renamed) GLOBAL float outputs computed inside the
   traced graph, and they insert after the global entries but BEFORE the
-  per-token aux entries — the v1 output order, owned by the
-  `OnnxExportSink` tuple assembly (globals → combines → per-token aux).
+  per-token aux entries — the v1 output order. The `OnnxExportSink` tuple
+  itself follows its manifest sources' declaration order, which is not a
+  contract: Athena consumes the outputs by name.
   Both are recorded in `gnn_config` byte-compatibly with v1
   (`combine_outputs`/`rename_outputs`).
 - **Multi-stream trace-safety** (design risk 7, adjudicated): eager `Split`

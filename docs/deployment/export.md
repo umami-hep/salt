@@ -86,36 +86,35 @@ model:
 
 ### 2. An export sink
 
-The sink declares the **output manifest** — which graph values become ONNX
-outputs, and what each one is called. It goes in the top-level `outputs:`
-section, alongside the section writers:
+The sink assembles the **output manifest** — which graph values become ONNX
+outputs, and what each one is called. It NAMES nothing itself: every module
+minting `outputs.*` leaves declares its own names and dtypes through
+`manifest_fields(mode)`, and the sink collects them. `ClassProbs` inherits
+`pb`/`pc`/`pu` from its source task, `Combination` names itself, and
+`MaskFormerObjects` derives `leading_objects_<target>` from the regression
+task's `targets`. Each suffix is prefixed with the model name — `GN2v2_pb`,
+`GN2v2_pc`, `GN2v2_pu`.
+
+Most configs declare no sink at all: `salt export` wires an `OnnxExportSink`
+over the section's export-mode leaves for you. Declare one in the top-level
+`outputs:` section (or, for one deprecation window, under `callbacks:`) only
+when the command would not wire it — e.g. a section that opts out of `export`
+while the model graph mints the tuple:
 
 ```yaml
 outputs:
   run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
-  onnx_export:
-    class_path: salt.outputs.OnnxExportSink
-    init_args:
-      outputs:
-        - {key: outputs.jets.jets_classification, names: [pb, pc, pu]}
+  onnx_export: {class_path: salt.outputs.OnnxExportSink}
 ```
 
-Each entry in `names:` becomes one scalar output, prefixed with the model name
-— `GN2v2_pb`, `GN2v2_pc`, `GN2v2_pu`.
-
-Most configs declare no sink here at all: `salt export` wires an
-`OnnxExportSink` over the section's export-mode leaves for you. Declare one
-explicitly, as above, only when the manifest carries names the command cannot
-derive — `salt/configs/MaskFormer.yaml` is the shipped example.
+An explicit `outputs:` leaf list inside `init_args` is a hard error — add
+`manifest_fields(mode)` to the producer instead. To narrow what one sink takes,
+give it `consumes:` (fnmatch patterns over the `outputs.*` leaf key).
 
 A sink is excluded from the section's column ordering, so where it sits among
-the writers makes no difference. Declaring it under `callbacks:`, its former
-home, still works for one deprecation window.
-
-Note the two different `outputs:` here. The top-level section is the config
-surface; the `outputs:` *inside* the sink's `init_args` is the manifest itself.
-`export:` has no `outputs:` key at all — that block describes the graph's input
-signature and the model identity, and putting a manifest in it is a hard error.
+the writers makes no difference. `export:` has no `outputs:` key at all — that
+block describes the graph's input signature and the model identity, and putting
+a manifest in it is a hard error.
 
 ### 3. The `export:` block
 

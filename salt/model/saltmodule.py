@@ -364,6 +364,13 @@ class SaltModule(lightning.LightningModule):
         # modules: entries above + the non-manifest-only outputs: writers folded
         # in by compose_output_section below — never a terminal sink.
         self._graph_modules: dict[str, SaltModelModule] = dict(modules)
+        # a producer that names its own outputs.* leaves (ClassProbs / SeqClassIndex /
+        # MaskFormerObjects / MFLeadVertexDecorator) resolves the source task from the
+        # model graph. Bind the LIVE dict, so the section writers compose_output_section
+        # folds in below are visible to it too.
+        for module in modules.values():
+            if callable(getattr(module, "bind_model_modules", None)):
+                module.bind_model_modules(self._graph_modules)
         # the top-level outputs: section, composed AFTER the model (empty until
         # compose_output_section runs — either here or from the CLI path).
         self._output_section: dict[str, SaltModelModule | SinkModule] = {}
@@ -661,18 +668,18 @@ class SaltModule(lightning.LightningModule):
         return None
 
     def _bind_output_section_to_sink(self) -> None:
-        """Bind the outputs: section to every attached sink.
+        """Bind both manifest sources to every attached sink.
 
         Sinks resolve their column schema + copy spec + mask streams from the
-        section manifest, so the section must be bound before any
-        declare_io/writer_demand resolution. Binds to every registered sink
-        exposing ``bind_output_section`` (H5 persistence + ONNX export).
-        No-op when no outputs: section is configured.
+        outputs: section AND from the model's graph modules (a producer names
+        its own leaves), so both must be bound before any
+        declare_io/writer_demand resolution. Duck-typed on the two bind
+        methods, so a sink implementing neither is left alone.
         """
-        if not self._output_section:
-            return
         for sink in _reachable_sinks(self):
-            if callable(getattr(sink, "bind_output_section", None)):
+            if callable(getattr(sink, "bind_model_modules", None)):
+                sink.bind_model_modules(self._graph_modules)
+            if self._output_section and callable(getattr(sink, "bind_output_section", None)):
                 sink.bind_output_section(self._output_section)
 
     @staticmethod
@@ -837,14 +844,13 @@ class SaltModule(lightning.LightningModule):
         # plan_hash is unchanged (the trained checkpoint loads unperturbed).
         modules = dict(self._graph_modules)
         sink_node = self._attached_sink_node()
-        # bind the outputs: section to the sink so it dumps the section's
+        # bind both manifest sources to the sink so it names the declared
         # outputs.* leaves in declaration order, not producer discovery.
-        if (
-            self._output_section
-            and sink_node is not None
-            and callable(getattr(sink_node, "bind_output_section", None))
-        ):
-            sink_node.bind_output_section(self._output_section)
+        if sink_node is not None:
+            if callable(getattr(sink_node, "bind_model_modules", None)):
+                sink_node.bind_model_modules(self._graph_modules)
+            if self._output_section and callable(getattr(sink_node, "bind_output_section", None)):
+                sink_node.bind_output_section(self._output_section)
         folded_sink = sink_node is not None and mode is Mode.TEST
         if folded_sink:
             # the sink node anchors ALL its demand via its declared requires —

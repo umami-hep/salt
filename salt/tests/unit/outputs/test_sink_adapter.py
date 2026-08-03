@@ -227,7 +227,7 @@ def test_iter_sinks_is_empty_without_a_trainer():
 def test_attach_generates_an_adapter_for_a_runtime_sink_but_not_a_node():
     """A `RuntimeSink` gets a Lightning bridge; a declare-only `Node` gets none."""
     trainer = _trainer()
-    runtime, manifest = _SpySink(), OnnxExportSink(outputs=[{"key": "outputs.jets.p"}])
+    runtime, manifest = _SpySink(), OnnxExportSink()
     adapter = attach_runtime_sink(trainer, runtime)
     assert isinstance(adapter, SinkAdapter)
     assert attach_runtime_sink(trainer, manifest) is None

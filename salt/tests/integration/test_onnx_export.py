@@ -33,7 +33,7 @@ from salt.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.outputs import OnnxExportLeaf, OnnxExportSink, SeqClassIndex
+from salt.outputs import OnnxExportSink, SeqClassIndex
 from salt.tests._fixtures.gn2v2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
@@ -44,6 +44,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
 )
 from salt.tests.unit.onnx.test_adapter import (
     VARIABLES,
+    bind_producers,
     gn2_export_cfg,
     gn2_folded_modules,
     gn2_resolved,
@@ -292,17 +293,12 @@ def two_stream(tmp_path_factory):
         "electron_origin_index": _n(
             SeqClassIndex(task="electron_origin", stream="electrons"), "electron_origin_index"
         ),
-        "onnx_export": _n(OnnxExportSink(outputs=[
-            OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-            OnnxExportLeaf(
-                key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-            ),
-            OnnxExportLeaf(
-                key="outputs.electrons.electron_origin", name="ElectronOrigin", dtype="int8",
-                per_token=True, dyn_axis="n_electrons",
-            ),
-        ]), "onnx_export"),
+        "onnx_export": _n(OnnxExportSink(), "onnx_export"),
     })
+    # the tuple is collected from the producers above: the jet probs inherit
+    # pb/pc/pu from their task, and each SeqClassIndex inherits its pascal-cased
+    # per-token name (TrackOrigin / ElectronOrigin) and its n_<stream> axis.
+    bind_producers(modules)
     resolved = resolve_export_config(export_cfg, "two_stream")
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))

@@ -27,7 +27,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
-from salt.outputs.sink import OutputSink, RuntimeSink, SinkContext
+from salt.outputs.sink import OutputSink, RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
 
 _SinkCallback = OutputSink
@@ -122,6 +122,9 @@ class H5OutputSink(RuntimeSink):
         Which planner modes to run in. `allowed_modes` is ``[test]``, so
         ``[test]`` is the only accepted list and omitting it (the default)
         means the same thing.
+    consumes : Sequence[str] | None, optional
+        fnmatch patterns over the ``outputs.*`` leaf key narrowing the
+        collected column schema, by default None (every declared final leaf).
 
     Raises
     ------
@@ -143,8 +146,9 @@ class H5OutputSink(RuntimeSink):
         half_precision: bool = False,
         object_groups: Sequence[ObjectGroup | Mapping[str, Any]] | None = None,
         modes: Sequence[str] | None = None,
+        consumes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__(modes=modes)
+        super().__init__(modes=modes, consumes=consumes)
         # plan 50 Phase B: the explicit OutputColumn table is RETIRED as a config
         # surface — the H5 sink is now implicit (the command wires it) and derives
         # its column schema from the bound outputs: section (RunTaskOutput +
@@ -240,6 +244,10 @@ class H5OutputSink(RuntimeSink):
         self._section_mode = Mode.ONNX
         self._columns_resolved = False
 
+    def _invalidate_manifest(self) -> None:
+        """Drop the cached column table after a manifest source rebinds."""
+        self._columns_resolved = False
+
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
         """Capture the ``outputs:`` section so the dumb sink dumps its leaves.
 
@@ -255,6 +263,7 @@ class H5OutputSink(RuntimeSink):
         and a test-only one never adds ``salt inference`` columns).
         """
         self._output_section = section
+        self._invalidate_manifest()
         # the section drives copy_inputs + write_pad_mask too (override the ctor
         # knobs in dumb mode): collect from the InputCopyWriter / PadMaskWriter
         # that RUN in this sink's selection mode.
@@ -289,16 +298,6 @@ class H5OutputSink(RuntimeSink):
     def _is_dumb_section(self) -> bool:
         """Whether an ``outputs:`` section is bound (the dumb-section path is active)."""
         return bool(self._output_section)
-
-    def _run_task_outputs(self) -> list[Any]:
-        """The bound section's `RunTaskOutput` writers, in section declaration order."""
-        if not self._output_section:
-            return []
-        return [
-            w
-            for w in self._output_section.values()
-            if callable(getattr(w, "is_run_task_output", None)) and w.is_run_task_output()
-        ]
 
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
         """Resolve the H5 column table — explicit, or from the bound ``outputs:`` section.
@@ -339,37 +338,40 @@ class H5OutputSink(RuntimeSink):
         return field.resolved_onnx_name
 
     def _resolve_section_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
-        """Resolve H5 columns from the bound ``outputs:`` section manifest.
+        """Resolve H5 columns from the bound manifest sources.
 
-        Walks the section's `RunTaskOutput` writers'
-        ``manifest_fields(<selection mode>)`` (value-free `OutputField`
-        metadata, ``Mode.TEST`` unless `use_export_selection` switched to
-        ``Mode.ONNX``) in SECTION DECLARATION ORDER, keeps the FINAL fields the
+        Collects every FINAL field the bound producers declare for the
+        selection mode (``Mode.TEST`` unless `use_export_selection` switched to
+        ``Mode.ONNX``), narrows it by ``consumes:``, keeps the fields the
         selection names (`_column_suffix`), and assembles ONE `OutputColumn`
         per ``outputs.*`` leaf (suffixes in field order; export-mode leaves are
-        single-suffix by construction). The SECTION field order is the H5
+        single-suffix by construction). The MANIFEST field order is the H5
         column order authority (not executor topo order). Caches the resolved
         table (run-name-stable). The section's InputCopyWriter/PadMaskWriter
         contribute their columns through the copy / mask paths
         (`_merge_columns`), not here.
 
+        The model-graph producers declare ONNX-only fields, so widening the
+        source set beyond the section leaves the TEST column set unchanged.
+
         Raises
         ------
         ConfigError
-            When the section mints no final task column for the selection, or
+            When no producer mints a final task column for the selection, or
             two leaves mint the same flat H5 column.
         """
         by_key: dict[str, list[tuple[str, Any]]] = {}
         key_order: list[str] = []
-        for run_task in self._run_task_outputs():
-            for output_key, field in run_task.manifest_fields(self._section_mode):
-                suffix = self._column_suffix(field)
-                if suffix is None:
-                    continue
-                if output_key not in by_key:
-                    by_key[output_key] = []
-                    key_order.append(output_key)
-                by_key[output_key].append((suffix, field))
+        for output_key, field in self._filter_consumed(
+            collect_manifest_fields(self._manifest_sources(), self._section_mode)
+        ):
+            suffix = self._column_suffix(field)
+            if suffix is None:
+                continue
+            if output_key not in by_key:
+                by_key[output_key] = []
+                key_order.append(output_key)
+            by_key[output_key].append((suffix, field))
         if not key_order:
             raise ConfigError(
                 "H5OutputSink (dumb-section) found no RunTaskOutput task with a final "

@@ -476,6 +476,29 @@ An **auxiliary** sink (one whose `is_test_sink()` is `False`) must state
 persistence sink rather than replacing it, so it says when it runs rather than
 inheriting a default that would read as if it were the primary sink.
 
+### Consumes: what a sink takes
+
+`modes:` picks WHEN a sink runs; `consumes:` picks WHAT it takes. A sink
+collects its outputs from every bound producer declaring `manifest_fields(mode)`
+— the section's writers first, then the model's graph modules. `consumes:` is a
+list of fnmatch patterns over the dotted leaf key that narrows that collection:
+
+```yaml
+outputs:
+  jsonl:
+    class_path: salt.outputs.JSONLOutputSink
+    init_args:
+      modes: [test]
+      consumes: [outputs.jets.*]
+```
+
+Omitting it (the default) takes everything declared. A pattern matching none of
+the available leaves is a `ConfigError` naming the pattern and listing the keys,
+so a typo fails loudly; an empty list is a `ConfigError` too (to switch a sink
+off, delete its entry with `<key>: null`). Narrowing composes with demand-gating
+rather than replacing it — a leaf that no sink consumes is still the existing
+dead-prediction hard error.
+
 ### How sinks get attached
 
 The usual sinks are **implicit**: the command wires them over your section, so

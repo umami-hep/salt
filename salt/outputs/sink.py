@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, PRIMARY_MODES, Mode, flatten_spec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module import-light
+    from salt.outputs.output_schema import OutputField
 
 __all__ = [
     "Node",
     "OutputSink",
     "RuntimeSink",
     "SinkContext",
+    "collect_manifest_fields",
     "is_test_persistence_sink",
     "parse_modes",
 ]
@@ -88,6 +93,42 @@ def parse_modes(modes: Sequence[str | Mode], owner: str) -> frozenset[Mode]:
             )
         parsed.add(_MODE_BY_NAME[key])
     return frozenset(parsed)
+
+
+def collect_manifest_fields(sources: Iterable[Any], mode: Mode) -> list[tuple[str, OutputField]]:
+    """Collect the ``(leaf_key, OutputField)`` manifest a set of producers declares.
+
+    The one place a sink learns WHAT to serialise. Any graph module minting
+    ``outputs.*`` leaves names them by implementing ``manifest_fields(mode)``
+    — the ``outputs:`` section's `RunTaskOutput`, a conversion producer, a
+    reconstruction node. Sources are walked in order and their fields
+    concatenated, so the caller's source order is the column/tuple order.
+
+    A field marked ``final=False`` is an intermediate leaf a downstream node
+    consumes; it is declared (so it is visible) and dropped here (so no sink
+    serialises it).
+
+    Parameters
+    ----------
+    sources : Iterable[Any]
+        The candidate producers. An entry without a callable
+        ``manifest_fields`` is skipped, so a source list may mix producers
+        with plain graph modules.
+    mode : Mode
+        The mode to collect for.
+
+    Returns
+    -------
+    list[tuple[str, OutputField]]
+        The concatenated final fields, each tagged with its ``outputs.*`` leaf key.
+    """
+    out: list[tuple[str, OutputField]] = []
+    for source in sources:
+        manifest = getattr(source, "manifest_fields", None)
+        if not callable(manifest):
+            continue
+        out.extend((key, field) for key, field in manifest(mode) if field.final)
+    return out
 
 
 @dataclass(frozen=True)
@@ -212,6 +253,16 @@ class Node:
         applied to the override automatically, so `modes:` works for a
         third-party sink exactly as it does for the shipped ones.
 
+    What a node consumes is resolved from two MANIFEST SOURCES, bound before
+    any ``declare_io`` resolution: the ``outputs:`` section
+    (`bind_output_section`) and the model's graph modules
+    (`bind_model_modules`). Every entry exposing ``manifest_fields(mode)``
+    contributes its ``outputs.*`` leaves — see `collect_manifest_fields`.
+    ``modes:`` picks WHEN a node runs; ``consumes:`` picks WHAT it takes out
+    of that manifest. Narrowing composes with demand-gating rather than
+    replacing it: a leaf no sink consumes is still the existing dead-prediction
+    hard error.
+
     Two predicates control how the graph machinery treats the node:
 
     - `is_sink` (True here, rarely overridden) marks the node terminal, so
@@ -243,8 +294,21 @@ class Node:
     _configured_modes: frozenset[Mode] | None = None
     """The config's ``modes:`` selection; None means "the class default"."""
 
-    def __init__(self, modes: Sequence[str | Mode] | None = None) -> None:
-        """Select which planner modes this node runs in.
+    _consumes: tuple[str, ...] | None = None
+    """The config's ``consumes:`` patterns; None means "every declared leaf"."""
+
+    _output_section: Mapping[str, Any] | None = None
+    """The bound ``outputs:`` section — the FIRST manifest source."""
+
+    _manifest_modules: Mapping[str, Any] | None = None
+    """The bound model graph modules — the SECOND manifest source."""
+
+    def __init__(
+        self,
+        modes: Sequence[str | Mode] | None = None,
+        consumes: Sequence[str] | None = None,
+    ) -> None:
+        """Select which planner modes this node runs in and what it takes.
 
         Parameters
         ----------
@@ -253,12 +317,27 @@ class Node:
             Omitted (the default) means `allowed_modes` — for every shipped
             sink that is exactly the set its `declare_io` already gates on,
             so an omitted list changes nothing.
+        consumes : Sequence[str] | None, optional
+            fnmatch patterns over the dotted ``outputs.*`` leaf key (e.g.
+            ``outputs.jets.*``, ``outputs.tracks.HadronIndex``) narrowing what
+            this node takes from the collected manifest. Omitted (the default)
+            means everything the manifest declares. A pattern matching no
+            available leaf is a `ConfigError`, so a typo fails loudly.
 
         Raises
         ------
         ConfigError
-            When a requested mode is outside `allowed_modes`.
+            When a requested mode is outside `allowed_modes`, or ``consumes:``
+            is an empty list.
         """
+        if consumes is not None:
+            if not list(consumes):
+                raise ConfigError(
+                    f"{type(self).__name__}: `consumes:` is an empty list — name at least one "
+                    "leaf-key pattern, or omit it entirely to consume every declared leaf "
+                    "(to switch the sink off, delete it from the section with `<key>: null`)."
+                )
+            self._consumes = tuple(str(p) for p in consumes)
         if modes is None:
             return
         selected = parse_modes(modes, type(self).__name__)
@@ -302,6 +381,74 @@ class Node:
     def effective_modes(self) -> frozenset[Mode]:
         """The modes this node actually runs in: `allowed_modes` narrowed by `modes:`."""  # noqa: DOC201 - one-line property
         return self.allowed_modes if self._configured_modes is None else self._configured_modes
+
+    # -- manifest sources ---------------------------------------------------
+
+    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
+        """Capture the model's graph modules — the SECOND manifest source.
+
+        The counterpart of `bind_output_section`: a producer minting
+        ``outputs.*`` leaves from the MODEL graph (a conversion node, a
+        reconstruction node) names them through its own
+        ``manifest_fields(mode)``, which this dict is how the node reaches.
+        Bound before any ``declare_io`` / ``writer_demand`` resolution.
+        """
+        self._manifest_modules = model_modules
+        self._invalidate_manifest()
+
+    def _invalidate_manifest(self) -> None:
+        """Drop any cached manifest resolution (subclass hook, no-op here)."""
+
+    def _manifest_sources(self) -> list[Any]:
+        """The bound producers, section entries first then model modules, deduplicated.
+
+        Section declaration order then model declaration order. A section
+        writer folded into the model graph appears in both dicts and is taken
+        once, at its section position; this node itself is never a source.
+        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        sources: list[Any] = []
+        seen: set[int] = {id(self)}
+        for bound in (self._output_section, self._manifest_modules):
+            for entry in (bound or {}).values():
+                if id(entry) in seen:
+                    continue
+                seen.add(id(entry))
+                sources.append(entry)
+        return sources
+
+    def _manifest_source_names(self) -> list[str]:
+        """The instance names of the bound manifest sources, for error messages."""  # noqa: DOC201 - private helper, one-line
+        return [*(self._output_section or {}), *(self._manifest_modules or {})]
+
+    def _filter_consumed(
+        self, fields: Sequence[tuple[str, OutputField]]
+    ) -> list[tuple[str, OutputField]]:
+        """Narrow a collected manifest to the ``consumes:`` patterns.
+
+        Every pattern is validated (so a typo in ANY of them is loud) before
+        the filter runs; a field survives when at least one pattern matches
+        its leaf key. No ``consumes:`` -> the fields unchanged.
+
+        Raises
+        ------
+        ConfigError
+            When a pattern matches none of the available leaf keys.
+        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        patterns = self._consumes
+        if patterns is None:
+            return list(fields)
+        available = sorted({key for key, _ in fields})
+        for pattern in patterns:
+            if not any(fnmatch.fnmatchcase(key, pattern) for key in available):
+                raise ConfigError(
+                    f"{type(self).__name__}: `consumes:` pattern {pattern!r} matches none of "
+                    f"the declared output leaves — available leaf keys are {available}"
+                )
+        return [
+            (key, field)
+            for key, field in fields
+            if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
+        ]
 
     def is_sink(self) -> bool:
         """Mark this module a terminal sink, excluded from the executor forward loop."""  # noqa: DOC201 - one-line predicate

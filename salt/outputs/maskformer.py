@@ -14,6 +14,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.model.base import SaltModelModule
+from salt.outputs.output_schema import OutputField
 
 # The MaskFormer export math is inlined verbatim in salt.onnx.reduces (the
 # shared math seam); this node reuses that exact copy so the two can never drift.
@@ -131,6 +132,101 @@ class MaskFormerObjects(SaltModelModule):
         # the exposed reordered per-vertex outputs (object stream) the decorator reads
         self.vertices_class_probs_key = f"outputs.{stream}.{vertices_class_probs_name}"
         self.vertices_regression_key = f"outputs.{stream}.{vertices_regression_name}"
+        # the model module dict, bound at compile so the node can read the
+        # regression task's `targets` (the leading-object ONNX name source).
+        self._model_modules: Mapping[str, Any] | None = None
+
+    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
+        """Capture the model module dict so the node can resolve its regression task."""
+        self._model_modules = model_modules
+
+    def manifest_fields(self, mode: Mode) -> list[tuple[str, OutputField]]:
+        """The node's ONNX field manifest — leading-object scalars, index, vertex leaves.
+
+        ONNX-ONLY: the TEST ``object_index`` leaf is serialised through the H5
+        sink's ``object_groups``, so declaring a TEST field here would
+        duplicate that column. The leading-object ONNX suffix is the pluralised
+        leading leaf name joined to each regression target
+        (``{leading_name}s_{target}``), one field per target read off the bound
+        regression task. The two ``vertices_*`` leaves are declared
+        ``final=False``: they feed `MFLeadVertexDecorator`, so they are visible
+        here and excluded from every sink.
+
+        Raises
+        ------
+        ConfigError
+            When the model modules are unbound, the regression task is missing
+            or exposes no `targets`, or its target count disagrees with `n_reg`.
+        """  # noqa: DOC201 - contract stated in the summary
+        if not (mode & Mode.ONNX):
+            return []
+        fields: list[tuple[str, OutputField]] = [
+            (
+                self.leading_key,
+                OutputField(
+                    h5_name=None,
+                    onnx_name=f"{self.leading_name}s_{target}",
+                    dtype="f4",
+                    axis="global",
+                    final=True,
+                ),
+            )
+            for target in self._resolved_targets()
+        ]
+        fields.append((
+            self.index_key,
+            OutputField(
+                h5_name=None,
+                onnx_name=self.index_name,
+                dtype="i1",
+                axis="per_token",
+                final=True,
+            ),
+        ))
+        fields.extend(
+            (
+                key,
+                OutputField(
+                    h5_name=None,
+                    onnx_name=split_key(key)[-1],
+                    dtype="f4",
+                    axis="global",
+                    final=False,
+                ),
+            )
+            for key in (self.vertices_class_probs_key, self.vertices_regression_key)
+        )
+        return fields
+
+    def _resolved_targets(self) -> tuple[str, ...]:
+        """The regression task's targets — one leading-object ONNX name each."""  # noqa: DOC201, DOC501 - private helper, raises documented on manifest_fields
+        who = f"MaskFormerObjects {self.name!r}"
+        if self._model_modules is None:
+            raise ConfigError(
+                f"{who} has no model modules bound — the leading-object ONNX names derive from "
+                f"regression task {self.regression_task!r}'s targets; ensure the node is composed "
+                "with the model (bind_model_modules is called at compile)"
+            )
+        task = self._model_modules.get(self.regression_task)
+        if task is None:
+            raise ConfigError(
+                f"{who}: regression task {self.regression_task!r} is not a model module — "
+                f"candidates are {sorted(self._model_modules)}"
+            )
+        targets = tuple(getattr(task, "targets", ()) or ())
+        if not targets:
+            raise ConfigError(
+                f"{who}: regression task {self.regression_task!r} ({type(task).__name__}) "
+                "exposes no `targets` — the leading-object ONNX names are one per regression "
+                "target, so the task must declare them"
+            )
+        if len(targets) != self.n_reg:
+            raise ConfigError(
+                f"{who}: regression task {self.regression_task!r} declares {len(targets)} "
+                f"targets {list(targets)} but n_reg is {self.n_reg} — the leading leaf is sliced "
+                "to n_reg, so a mismatch would name channels that do not exist"
+            )
+        return targets
 
     def declare_io(self, mode: Mode) -> IO:
         """Mode-branched: TEST -> raw-mask ``object_index``; ONNX -> the reorder leaves; else empty.
@@ -399,6 +495,24 @@ class MFLeadVertexDecorator(SaltModelModule):
             key: TensorSpec(shape=None, dtype="float32", kind="data") for key in self.output_keys
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def manifest_fields(self, mode: Mode) -> list[tuple[str, OutputField]]:
+        """The jet-level scalars' ONNX field manifest — one global float per configured output.
+
+        ONNX-ONLY: the lead-vertex decoration is an export capability with no
+        eval-H5 counterpart, so it declares nothing in any other mode. Each
+        field is named after the configured output name (the node names its own
+        leaf once).
+        """  # noqa: DOC201 - contract stated in the summary
+        if not (mode & Mode.ONNX):
+            return []
+        return [
+            (
+                key,
+                OutputField(h5_name=None, onnx_name=name, dtype="f4", axis="global", final=True),
+            )
+            for key, (name, _index) in zip(self.output_keys, self.outputs_map, strict=True)
+        ]
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Every jet-level output is a single scalar column (width 1)."""

@@ -23,7 +23,6 @@ from salt.outputs import (
     MaskFormerObject,
     MaskFormerObjects,
     MFLeadVertexDecorator,
-    OnnxExportLeaf,
     OnnxExportSink,
 )
 from salt.graph.render import dot_source
@@ -67,6 +66,13 @@ _LEADING_NAMES = [f"leading_objects_{t}" for t in MASKFORMER_WRITER_REG_TARGETS]
 _N_REG = len(MASKFORMER_WRITER_REG_TARGETS)
 
 
+def _bind_producers(modules) -> None:
+    """Bind the model modules to every producer/sink that resolves names from them."""
+    for module in modules.values():
+        if callable(getattr(module, "bind_model_modules", None)):
+            module.bind_model_modules(modules)
+
+
 # MaskFormerObject: ONE node mints BOTH object leaves (leading_object +
 # object_index). Self-consistency (torch == ort) is NaN-aware because the
 # random decoder weights yield a NaN leading_object by design (null-suppression
@@ -78,16 +84,19 @@ def _build_maskformer_folded(tmp_path):
     torch.manual_seed(42)
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
     mf = MaskFormerObject(
-        n_reg=_N_REG, stream="objects", constituent_stream="tracks",
-        leading_name="leading_object", index_name="object_index",
+        n_reg=_N_REG,
+        stream="objects",
+        constituent_stream="tracks",
+        leading_name="leading_object",
+        index_name="HadronIndex",
     )
     mf.name = "mf_obj"
-    sink = OnnxExportSink(outputs=[
-        OnnxExportLeaf(key="outputs.objects.leading_object", names=_LEADING_NAMES),
-        OnnxExportLeaf(key="outputs.tracks.object_index", name="HadronIndex", dtype="int8", per_token=True),
-    ])
+    sink = OnnxExportSink()
     sink.name = "onnx_export"
     modules.update({"mf_obj": mf, "onnx_export": sink})
+    # the node names its own leaves: leading_objects_<target> off the regression
+    # task's targets, and the int8 per-token HadronIndex off `index_name`.
+    _bind_producers(modules)
     resolved = resolve_export_config(_mf_export_cfg(), "MaskFormer")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
@@ -110,10 +119,7 @@ def maskformer(tmp_path_factory):
 def test_maskformer_folded_export_contract(maskformer):
     """ONE node mints BOTH leaves: the leading split + the per-token int8 index axis."""
     adapter = maskformer.folded.adapter
-    assert adapter.output_names == [
-        "MaskFormer_leading_objects_pt",
-        "MaskFormer_leading_objects_Lxy",
-        "MaskFormer_leading_objects_mass",
+    assert adapter.output_names == [f"MaskFormer_{name}" for name in _LEADING_NAMES] + [
         "MaskFormer_HadronIndex",
     ]
     assert adapter.output_dtypes == ["float32", "float32", "float32", "int8"]
@@ -156,7 +162,9 @@ def _build_two_node_mf(tmp_path):
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
-    mf = MaskFormerObjects(n_reg=_N_REG, stream="objects", constituent_stream="tracks")
+    mf = MaskFormerObjects(
+        n_reg=_N_REG, stream="objects", constituent_stream="tracks", index_name="HadronIndex"
+    )
     mf.name = "mf_obj"
     dec = MFLeadVertexDecorator(
         source="outputs.objects.vertices_class_probs",
@@ -166,20 +174,12 @@ def _build_two_node_mf(tmp_path):
         pnull_threshold=0.5,
     )
     dec.name = "lead_vertex"
-    sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(
-                key="outputs.tracks.object_index",
-                name="HadronIndex",
-                dtype="int8",
-                per_token=True,
-            ),
-            OnnxExportLeaf(key="outputs.jet.lead_vertex_pt", name="lead_vertex_pt"),
-            OnnxExportLeaf(key="outputs.jet.lead_vertex_mass", name="lead_vertex_mass"),
-        ]
-    )
+    # narrow the auto-collected tuple to the index + the decorator scalars (the
+    # reconstruction node also declares its leading_objects_* globals)
+    sink = OnnxExportSink(consumes=["outputs.tracks.HadronIndex", "outputs.jet.*"])
     sink.name = "onnx_export"
     modules.update({"mf_obj": mf, "lead_vertex": dec, "onnx_export": sink})
+    _bind_producers(modules)
     resolved = resolve_export_config(_mf_export_cfg(), "MaskFormer")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))
@@ -308,7 +308,9 @@ def test_two_node_mf_render_card_and_node_to_node_edge(tmp_path):
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
-    mf = MaskFormerObjects(n_reg=_N_REG, stream="objects", constituent_stream="tracks")
+    mf = MaskFormerObjects(
+        n_reg=_N_REG, stream="objects", constituent_stream="tracks", index_name="HadronIndex"
+    )
     mf.name = "maskformer_objects"
     dec = MFLeadVertexDecorator(
         source="outputs.objects.vertices_class_probs",
@@ -317,20 +319,10 @@ def test_two_node_mf_render_card_and_node_to_node_edge(tmp_path):
         pv_class_index=0,
     )
     dec.name = "mf_lead_vertex"
-    sink = OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(
-                key="outputs.tracks.object_index",
-                name="HadronIndex",
-                dtype="int8",
-                per_token=True,
-            ),
-            OnnxExportLeaf(key="outputs.jet.lead_vertex_pt", name="lead_vertex_pt"),
-            OnnxExportLeaf(key="outputs.jet.lead_vertex_mass", name="lead_vertex_mass"),
-        ]
-    )
+    sink = OnnxExportSink(consumes=["outputs.tracks.HadronIndex", "outputs.jet.*"])
     sink.name = "onnx_export"
     modules.update({"maskformer_objects": mf, "mf_lead_vertex": dec, "onnx_export": sink})
+    _bind_producers(modules)
     resolved = resolve_export_config(_mf_export_cfg(), "GN3Mask")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
     bind_all(modules, resolve_bind_schema([plan]))

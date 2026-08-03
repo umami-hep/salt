@@ -15,7 +15,6 @@ from salt.main import (
 from salt.model.modules.losses import LossSum
 from salt.outputs import (
     H5OutputSink,
-    OnnxExportLeaf,
     OnnxExportSink,
     OutputColumn,
 )
@@ -73,13 +72,7 @@ def _h5_sink() -> H5OutputSink:
 
 def _onnx_sink() -> OnnxExportSink:
     """An ONNX-only sink: ``declare_io(Mode.TEST)`` is empty -> NOT a test persistence sink."""
-    return OnnxExportSink(
-        outputs=[
-            OnnxExportLeaf(key=_JET_OUT, names=["pb", "pc", "pu"]),
-            OnnxExportLeaf(key=_TRK_OUT, name="TrackOrigin", dtype="int8", per_token=True),
-        ],
-        model_name="GN2v2",
-    )
+    return OnnxExportSink(model_name="GN2v2")
 
 
 # the is_test_sink() discriminator (the clean, declare_io-derived signal)
