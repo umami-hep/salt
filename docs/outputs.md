@@ -108,7 +108,7 @@ nothing else about naming. The prefix is added by whoever is writing:
 | Destination | Column / output name | Prefix source |
 |---|---|---|
 | eval H5 (`salt test`) | `{run_name}_{suffix}` | the `name:` field of your config |
-| ONNX (`salt export`) | `{model_name}_{suffix}` | `export.model_name`, else the sanitised run name |
+| ONNX (`salt export`) | `{model_name}_{suffix}` | the export sink's `model_name` init arg, else the sanitised run name |
 
 So a config with `name: GN2` and a classification task over classes `b, c, u`
 gives eval columns `GN2_pb`, `GN2_pc`, `GN2_pu`. Export the same model as
@@ -329,7 +329,7 @@ columns — and the `OnnxExportSink` names them `{model_name}_{suffix}` and pack
 them into the flat output tuple.
 
 The ONNX namespace is flat: two leaves minting the same suffix is a hard error
-naming both (resolve it with `export.rename:`). Inspect the whole manifest,
+naming both (resolve it with the export sink's `rename:`). Inspect the whole manifest,
 without a checkpoint, with:
 
 ```bash

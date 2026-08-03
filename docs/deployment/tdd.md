@@ -38,11 +38,13 @@ case rather than pattern-matching.
 ## 1. Prerequisites
 
 You need a trained checkpoint and its run config, and the run config needs an
-`export:` block. If yours does not have one, you can stack a second config
-carrying only that block (see step 2).
+export sink — an `OnnxExportSink` entry under the top-level `outputs:`
+section, with `model_name`/`inputs` set in its `init_args`. If yours does not
+have one, you can stack a second config carrying only that sink entry (see
+step 2).
 
-Your `export.model_name` is the **Athena-facing model name**. It becomes the
-prefix of every decorated variable (`GN3EPCLV01_pb`, and so on).
+Your export sink's `model_name` is the **Athena-facing model name**. It
+becomes the prefix of every decorated variable (`GN3EPCLV01_pb`, and so on).
 
 !!! warning "`model_name` may not contain `_` or `-`"
 
@@ -73,10 +75,10 @@ and compares them.
     ```
 
     This prints the full list of ONNX output names and dtypes that the export
-    will produce. It resolves the `export:` block and the output manifest
-    without loading any weights, so a malformed `export:` section fails in
-    seconds instead of after a multi-minute trace. Run it first — you will also
-    need this list in step 4.
+    will produce. It resolves the export sink's `init_args` and the output
+    manifest without loading any weights, so a malformed export sink config
+    fails in seconds instead of after a multi-minute trace. Run it first —
+    you will also need this list in step 4.
 
 ### Choosing an agreement tolerance
 
@@ -105,13 +107,16 @@ the ONNX graph, and anything else is not found.
 The shipped configs already use the correct form. Copy it:
 
 ```yaml
-export:
-  model_name: MyTagger # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
-    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
-    - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons}
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: MyTagger # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
+        - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons}
 ```
 
 Include only the streams your model actually consumes.
@@ -128,12 +133,15 @@ Separately from the graph input names, the `gnn_config` metadata carries a
 **node name per sequence**, and Athena parses those with regexes to decide
 which track selection and which sort order to apply.
 
-You do not write these names by hand. salt derives them from
-`export.track_selection`:
+You do not write these names by hand. salt derives them from the export
+sink's `track_selection`:
 
 ```yaml
-export:
-  track_selection: r22loose # must match the selection used in your training sample
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      track_selection: r22loose # must match the selection used in your training sample
 ```
 
 which produces metadata node names of the form `tracks_r22loose_sd0sort`,

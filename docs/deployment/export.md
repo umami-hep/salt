@@ -95,16 +95,24 @@ minting `outputs.*` leaves declares its own names and dtypes through
 task's `targets`. Each suffix is prefixed with the model name — `GN2v2_pb`,
 `GN2v2_pc`, `GN2v2_pu`.
 
-Most configs declare no sink at all: `salt export` wires an `OnnxExportSink`
-over the section's export-mode leaves for you. Declare one in the top-level
-`outputs:` section (or, for one deprecation window, under `callbacks:`) only
-when the command would not wire it — e.g. a section that opts out of `export`
-while the model graph mints the tuple:
+If a config declares no sink at all, `salt export` wires an `OnnxExportSink`
+over the section's export-mode leaves for you — but that injected sink carries
+no `init_args`, so it has no `inputs:` and no `model_name:`. Those two, plus
+`track_selection`, `rename` and `combine`, are the sink's own init args (see
+the next section) — to set any of them, declare the sink yourself in the
+top-level `outputs:` section (or, for one deprecation window, under
+`callbacks:`):
 
 ```yaml
 outputs:
   run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
-  onnx_export: {class_path: salt.outputs.OnnxExportSink}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN2v2
+      inputs:
+        - {port: inputs.jets}
+        - {port: inputs.tracks, sequence: true}
 ```
 
 An explicit `outputs:` leaf list inside `init_args` is a hard error — add
@@ -112,21 +120,23 @@ An explicit `outputs:` leaf list inside `init_args` is a hard error — add
 give it `consumes:` (fnmatch patterns over the `outputs.*` leaf key).
 
 A sink is excluded from the section's column ordering, so where it sits among
-the writers makes no difference. `export:` has no `outputs:` key at all — that
-block describes the graph's input signature and the model identity, and putting
-a manifest in it is a hard error.
+the writers makes no difference.
 
-### 3. The `export:` block
+### 3. The sink's init args
 
-The block names the graph *inputs* and the model:
+Five of `OnnxExportSink`'s init args name the graph *inputs* and the model —
+this is the config home for the ONNX artifact contract:
 
 ```yaml
-export:
-  model_name: GN2v2
-  track_selection: r22default
-  inputs:
-    - {port: inputs.jets}
-    - {port: inputs.tracks, sequence: true}
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN2v2
+      track_selection: r22default
+      inputs:
+        - {port: inputs.jets}
+        - {port: inputs.tracks, sequence: true}
 ```
 
 | Key | Meaning |
@@ -136,6 +146,16 @@ export:
 | `inputs` | the graph inputs, **in positional order** |
 | `rename` | manifest suffix renames, applied before `combine` |
 | `combine` | new outputs built from existing ones inside the graph |
+
+!!! note "Deprecated: the top-level `export:` block"
+
+    Setting these five keys under a top-level `export:` block (rather than on
+    the sink) is a deprecated alias, kept for one release window: it emits a
+    `DeprecationWarning` pointing at the sink form above. Each key it sets
+    fills a field the sink itself left unset — a key carried by **both**
+    homes (the sink's `init_args` and the top-level block) is a `ConfigError`
+    naming the key and both homes, rather than picking a winner silently. New
+    configs should declare the sink directly.
 
 Each `inputs:` entry describes one tensor:
 
@@ -179,7 +199,7 @@ Beyond that, whether naming is yours to choose depends on the consumer:
 ## Preview the manifest
 
 `--manifest` needs no checkpoint and fails in seconds on a malformed export
-block, so run it first:
+contract, so run it first:
 
 ```bash
 salt export --manifest -c config.yaml
@@ -202,13 +222,15 @@ salt export \
 ```
 
 `-c/--config` is repeatable and the configs deep-merge left to right, exactly
-as `salt fit` stacks them. This is the supported way to add an `export:` block
-to a run that was trained without one — keep the run config untouched and stack
-a small export-only file on top. If you omit `-c` entirely, the config is
-inferred from the checkpoint's run directory.
+as `salt fit` stacks them. This is the supported way to add an export contract
+to a run that was trained without one — keep the run config untouched and
+stack a small config on top carrying just the `outputs.onnx_export` sink
+entry. If you omit `-c` entirely, the config is inferred from the checkpoint's
+run directory.
 
 Other options worth knowing: `-n/--name` overrides `model_name`,
-`--set KEY=VALUE` applies ad-hoc config overrides, and `-o/--overwrite`
+`--set KEY=VALUE` applies ad-hoc config overrides (e.g.
+`--set outputs.onnx_export.init_args.model_name=GN2v2`), and `-o/--overwrite`
 replaces an existing file.
 
 ### The `--check` sweep
@@ -292,11 +314,14 @@ as a weighted sum of existing global float outputs, computed inside the traced
 graph:
 
 ```yaml
-export:
-  rename: {poldnamebjet: pb, poldnamecjet: pc}
-  combine:
-    - {name: plight, inputs: {pquark: 1.0, pgluon: 1.0}}
-    - {name: pquark, inputs: {pud: 0.5, pgluon: 1.5}}
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      rename: {poldnamebjet: pb, poldnamecjet: pc}
+      combine:
+        - {name: plight, inputs: {pquark: 1.0, pgluon: 1.0}}
+        - {name: pquark, inputs: {pud: 0.5, pgluon: 1.5}}
 ```
 
 `rename:` is applied first, so `combine:` refers to the new names.

@@ -296,8 +296,9 @@ All conversions are traceable torch ops running INSIDE the graph — there
 is no off-graph numpy step between the model and either sink.
 
 Naming policy: fields declare logical **suffixes**; the TEST column is
-`{run_name}_{suffix}` and the ONNX output is `{export.model_name}_{suffix}`
-— one declaration, two prefixes. For classification the suffix list is
+`{run_name}_{suffix}` and the ONNX output is `{model_name}_{suffix}` (the
+export sink's `model_name` init arg) — one declaration, two prefixes. For
+classification the suffix list is
 literally the `class_names`-derived list both modes share, so reordering
 classes moves eval columns AND Athena outputs together (the v1
 eval-vs-ONNX vertex-naming drift class is unrepresentable). Cross-mode
@@ -307,7 +308,7 @@ single suffix `HadronIndex` in both the eval-H5 column and the ONNX
 output (the eval column, ours to name, was unified onto the Athena name).
 
 The assembled ONNX manifest is a FLAT namespace: two leaves minting one
-suffix is a hard error naming both (fix via `export.rename:`). Inspect
+suffix is a hard error naming both (fix via the sink's `rename:`). Inspect
 everything with `salt export --manifest` (no checkpoint needed) or the
 manifest table appended to the export-time `plan_onnx.txt`.
 
@@ -437,8 +438,8 @@ ONNX tuple output, named `{run_name}_{suffix}` for tuple output
 int8 `TrackOrigin` column, not per-class probs); per-token columns are
 zero-padded to the file length, with the `mask` column marking pads.
 
-**Label-free.** The dataset demand is derived from `export.inputs` alone
-(feature ports + pad masks + `meta.rows`) — no `labels.*` key is ever
+**Label-free.** The dataset demand is derived from the export sink's `inputs`
+alone (feature ports + pad masks + `meta.rows`) — no `labels.*` key is ever
 demanded, so the command runs unchanged on a label-stripped file (the
 `Labels` producer narrows to nothing; Phase C keeps export-mode
 `get_output` label-free on the task side). No `target_{task}` columns are
@@ -504,15 +505,17 @@ tagger config.
 ONNX sinks come from the implicit `OnnxExportSink` folded over the
 section's export-mode leaves — exactly what `salt export` will trace —
 with errors attributed to the declaring section writer (`outputs.<name>`).
-The export-only half of the `export:` block is validated as `salt export`
-does: an invalid `export.model_name` (`_`/`-`) is an error-level
-`validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
+The export-only half of the contract — now the sink's `init_args` — is
+validated as `salt export` does: an invalid `model_name` (`_`/`-`) is an
+error-level `validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
 `rename:`/`combine:` are checked against the assembled manifest, and a
 legacy config still carrying `export.outputs` fails with the migration
-error. A trainer config without an `export:` block keeps the
-section-derived sinks but WARNS that inputs/model_name were unchecked
-(promoted under `--strict` — the converter CI gate expects converted
-configs to carry the block). Predictions narrowed out of the manifest (a
+error. A trainer config whose sink declares neither `inputs` nor
+`model_name` (and carries no deprecated top-level `export:` block either)
+keeps the section-derived sinks but WARNS that inputs/model_name were
+unchecked (promoted under `--strict` — the converter CI gate expects
+converted configs to declare the sink's `init_args`). Predictions narrowed
+out of the manifest (a
 `modes: [test]` writer, or a task listed in no export-mode
 `RunTaskOutput`) show up as info-level ONNX deadcode findings (the
 export-pruning story). Note the static ONNX plan/plot remain the
@@ -612,11 +615,11 @@ A `--run-dir` spelling is planned alongside the run-dir layout; until
 then `--ckpt_path` + the inferred sibling config reproduces the v1 contract
 (`to_onnx.py:629-631`). `-c` is **repeatable** with the fit deep-merge
 semantics — the supported way to export a run trained before the export
-block existed (every v1 migrator until the M7 converter):
+sink's `init_args` were declared (every v1 migrator until the M7 converter):
 
 ```bash
-salt export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
-# my_export_block.yaml carries ONLY the export: block below
+salt export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_sink.yaml
+# my_export_sink.yaml carries ONLY the outputs.onnx_export sink entry below
 ```
 
 The export contract has two halves ("one manifest and a half"):
@@ -627,24 +630,34 @@ The export contract has two halves ("one manifest and a half"):
    There is NO `export.outputs` section: a config declaring one fails with
    the migration error. Inspect the assembled manifest any time with
    `salt export --manifest -c <config>` (no checkpoint needed).
-2. **The export-only half** lives in the **`export:` block** (top-level,
-   shipped in the gn2v2 configs; parsed by the normal salt surface so it
-   round-trips through saved run configs):
+2. **The export-only half** lives in the **`OnnxExportSink`'s `init_args`**
+   (declared under the top-level `outputs:` section; parsed by the normal
+   salt surface so it round-trips through saved run configs):
 
 ```yaml
-export:
-  model_name: GN2v2 # no '_'/'-' — validated ONLY at export time; the run
-  #                   name stays unrestricted (default: run name stripped)
-  inputs:
-    - { port: inputs.jets, name: jet_features } # [1, F] global
-    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  # optional Athena-presentation post-processing of the output manifest
-  # (the v1 --rename/--combine_outputs features — readers of exotic
-  # configs consult the outputs: section AND these two keys):
-  rename: { pu: plight } # old suffix -> new (existence-checked)
-  combine: # new output = sum(scale * existing GLOBAL output)
-    - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN2v2 # no '_'/'-' — validated ONLY at export time; the run
+      #                   name stays unrestricted (default: run name stripped)
+      inputs:
+        - { port: inputs.jets, name: jet_features } # [1, F] global
+        - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
+      # optional Athena-presentation post-processing of the output manifest
+      # (the v1 --rename/--combine_outputs features — readers of exotic
+      # configs consult the outputs: section AND these two keys):
+      rename: { pu: plight } # old suffix -> new (existence-checked)
+      combine: # new output = sum(scale * existing GLOBAL output)
+        - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
 ```
+
+   A top-level `export:` block setting these same five keys is a deprecated
+   alias, kept for one release window (`DeprecationWarning` on use): each key
+   it sets fills a field the sink itself left unset, and a key carried by
+   both homes is a `ConfigError` naming the key and both homes.
+   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/gn2v2-dummy.yaml`
+   still ships the deprecated block, deliberately, as the alias-window proof.
 
 How it works (no data file is touched — config + checkpoint only):
 

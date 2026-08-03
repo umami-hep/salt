@@ -272,12 +272,13 @@ outputs:
     class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [jets_classification]
-
-export:
-  model_name: XbbTutorial # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: XbbTutorial # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 20
@@ -606,4 +607,4 @@ Four figures: `disc_Hbb.png`, `disc_Hcc.png`, `roc_Hbb.png`, `roc_Hcc.png`.
 - **Understand the eval file.** [Outputs](../outputs.md) explains where every
   column name comes from and how to add or remove them.
 - **Ship the model to Athena.** [Export to ONNX](../deployment/export.md), and part 4's
-  [export section](gn2_opendata.md#6-export-to-onnx).
+  [export section](gn2_opendata.md#7-export-to-onnx).
