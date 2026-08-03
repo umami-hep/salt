@@ -155,6 +155,26 @@ def _resolve_lr_scheduler_class(class_path: str) -> type:
     return cls
 
 
+def _reachable_sinks(model: Any) -> list[Any]:
+    """Every sink `model` can reach: the trainer registry, then its own section sinks.
+
+    `iter_sinks` stays the single discovery path and is authoritative; section
+    sinks are appended (deduplicated by identity) so the PROGRAMMATIC path
+    still resolves — ``SaltModule(outputs=...)`` composes in ``__init__``,
+    where there is no trainer for them to have been registered on.
+
+    Attribute reads are defensive because the white-box tests call the
+    consumers of this helper unbound, against a stand-in model.
+    """  # noqa: DOC201 - private accessor
+    from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
+
+    found = list(iter_sinks(getattr(model, "_trainer", None)))
+    for sink in getattr(model, "_section_sinks", ()) or ():
+        if not any(seen is sink for seen in found):
+            found.append(sink)
+    return found
+
+
 def _is_section_sink(entry: Any) -> bool:
     """Whether an ``outputs:`` section entry is a SINK rather than a writer.
 
@@ -600,22 +620,6 @@ class SaltModule(lightning.LightningModule):
             out[mode] = (demand, origins)
         return out
 
-    def _sinks(self) -> list[Any]:
-        """Every sink this model can reach: the trainer registry, then the section's own.
-
-        `iter_sinks` is the single discovery path and stays authoritative; the
-        section sinks are appended (deduplicated by identity) so the
-        PROGRAMMATIC path still works — ``SaltModule(outputs=...)`` composes in
-        ``__init__``, where there is no trainer to have registered them on.
-        """  # noqa: DOC201 - private accessor
-        from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
-
-        found = list(iter_sinks(self._trainer))
-        for sink in self._section_sinks:
-            if not any(seen is sink for seen in found):
-                found.append(sink)
-        return found
-
     def _attached_writer(self) -> tuple[Any, Any]:
         """The attached TEST writer/sink node + reader, duck-typed on
         ``writer_demand``. Read from `_sinks` — the trainer's registry plus any
@@ -628,7 +632,7 @@ class SaltModule(lightning.LightningModule):
         callback = next(
             (
                 sink
-                for sink in self._sinks()
+                for sink in _reachable_sinks(self)
                 if callable(getattr(sink, "writer_demand", None))
                 and _is_test_persistence_sink(sink)
             ),
@@ -667,7 +671,7 @@ class SaltModule(lightning.LightningModule):
         """
         if not self._output_section:
             return
-        for sink in self._sinks():
+        for sink in _reachable_sinks(self):
             if callable(getattr(sink, "bind_output_section", None)):
                 sink.bind_output_section(self._output_section)
 

@@ -13,7 +13,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan
 from salt.graph.spec import IO, Mode, SinkModule, TensorSpec, unflatten_spec
 from salt.main import SaltCLI
-from salt.model.modules.losses import LossSum
+from salt.model.base import SaltModelModule
 from salt.model.saltmodule import SaltModule, _is_section_sink
 from salt.outputs import (
     H5OutputSink,
@@ -33,9 +33,22 @@ _LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 _JET_OUT = "outputs.jets.jets_classification"
 
 
+class _InertModule(SaltModelModule):
+    """A model module declaring no IO — just enough to build a `SaltModule`."""
+
+    def declare_io(self, mode: Mode) -> IO:
+        del mode
+        return IO(requires={}, produces={})
+
+
 def _model(outputs=None) -> SaltModule:
-    """A minimal `SaltModule` to compose an ``outputs:`` section onto."""
-    return SaltModule({"loss": LossSum()}, lrs=_LRS, outputs=outputs)
+    """A minimal `SaltModule` to compose an ``outputs:`` section onto.
+
+    Deliberately loss-free: a `LossSum` narrows against the other modules'
+    ``losses.*`` produces at construction and refuses an empty list, and none
+    of these tests exercise the training graph.
+    """
+    return SaltModule({"inert": _InertModule()}, lrs=_LRS, outputs=outputs)
 
 
 def _section() -> dict:
