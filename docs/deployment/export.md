@@ -87,10 +87,12 @@ model:
 ### 2. An export sink
 
 The sink declares the **output manifest** — which graph values become ONNX
-outputs, and what each one is called:
+outputs, and what each one is called. It goes in the top-level `outputs:`
+section, alongside the section writers:
 
 ```yaml
-callbacks:
+outputs:
+  run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
   onnx_export:
     class_path: salt.outputs.OnnxExportSink
     init_args:
@@ -101,10 +103,19 @@ callbacks:
 Each entry in `names:` becomes one scalar output, prefixed with the model name
 — `GN2v2_pb`, `GN2v2_pc`, `GN2v2_pu`.
 
-!!! warning "`outputs:` belongs to the sink, not the `export:` block"
+Most configs declare no sink here at all: `salt export` wires an
+`OnnxExportSink` over the section's export-mode leaves for you. Declare one
+explicitly, as above, only when the manifest carries names the command cannot
+derive — `salt/configs/MaskFormer.yaml` is the shipped example.
 
-    Putting an `outputs:` list inside `export:` is a hard error. The manifest
-    has exactly one home, and it is the `OnnxExportSink`.
+A sink is excluded from the section's column ordering, so where it sits among
+the writers makes no difference. Declaring it under `callbacks:`, its former
+home, still works for one deprecation window.
+
+Note the two different `outputs:` here. The top-level section is the config
+surface; the `outputs:` *inside* the sink's `init_args` is the manifest itself.
+`export:` has no `outputs:` key at all — that block describes the graph's input
+signature and the model identity, and putting a manifest in it is a hard error.
 
 ### 3. The `export:` block
 

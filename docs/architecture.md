@@ -192,15 +192,26 @@ to the single `--config` — when stacking a second `--config`, pass
 test-file stem heuristic + `--data.test_suff`); the test plan/graph
 artifacts are written into the same directory.
 
-Prediction writing is declared in the top-level `outputs:` section (deep-
-mergeable, like `callbacks:`): an ORDERED dict of section writers
-(`salt.outputs.OutputSectionWriter` graph modules). The section says
-WHAT is written, and in which modes; the COMMAND wires the matching
-implicit sink (plan 50 Phase B): `salt test` instantiates the H5 sink
-(`salt.outputs.H5OutputSink`) over the section, and the ONNX parse
-folds an `OnnxExportSink` naming the export-mode leaves. Every model
-config defines its own section (`base2.yaml` ships none) — **dict order =
-per-group column order**, the v1 layout being:
+Prediction writing is declared in the top-level `outputs:` section, the
+single deep-mergeable home for everything that leaves the model. It
+carries two kinds of entry, partitioned by type at parse time:
+
+- **writers** (`salt.outputs.OutputSectionWriter` graph modules) — an
+  ORDERED dict saying WHAT is written and in which modes;
+- **sinks** (`salt.outputs.Node` subclasses) — the destinations, held
+  aside on the model rather than folded into the graph, and therefore
+  EXCLUDED from the ordering.
+
+Usually no sink is declared at all: the COMMAND wires the matching
+implicit one over the section — `salt test` instantiates the H5 sink
+(`salt.outputs.H5OutputSink`), and the ONNX parse folds an
+`OnnxExportSink` naming the export-mode leaves. A config declares a sink
+only when it carries a manifest the command cannot guess (`MaskFormer.yaml`)
+or when it is a third-party one; the implicit wiring then leaves it alone.
+A sink declared under `callbacks:` is accepted for one deprecation window.
+
+Every model config defines its own section (`base2.yaml` ships none) —
+**writer dict order = per-group column order**, the v1 layout being:
 
 ```yaml
 outputs:
