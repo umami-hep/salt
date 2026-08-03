@@ -17,14 +17,22 @@
 
 set -uo pipefail
 
-# Measured arch coverage — see docs/setup.md.
-#   V2H  cu126  sm_50 .. sm_90    Volta  -> Hopper
-#   T2B  cu129  sm_75 .. sm_120   Turing -> Blackwell
+# Arch coverage — see docs/setup.md and .gitlab/.ci-build.yaml.
+#   V2H  cu126  sm_50 .. sm_90    Volta  -> Hopper       (MEASURED, probe job 3287)
+#   T2B  cu130  sm_75 .. sm_120   Turing -> Blackwell    (floor INFERRED, see below)
+#
+# T2B_MIN: measured as 7.5 on cu129; the shipped T2B image is cu130 and its
+# floor has not been read off a built image yet. If cu130 actually floors at
+# sm_80, the only effect is that a T4 (7.5) is told "either" when it means
+# "V2H only" — and V2H is what it is recommended anyway, since V2H wins ties.
+# There is no coverage hole either way: V2H starts at sm_50.
 V2H_MIN=5.0 ; V2H_MAX=9.0
 T2B_MIN=7.5 ; T2B_MAX=12.0
 FLASH_MIN=8.0   # flash-attn 2.x requires Ampere or newer
 
 REGISTRY="gitlab-registry.cern.ch/aft/algorithms/salt"
+# `:latest` is an alias for `:V2H` — kept for backward compatibility. Always
+# print the explicit tag: a bare `latest` gives no way to tell what it covers.
 
 # Compare two dotted capabilities without bc/python: 8.6 -> 806, 12.0 -> 1200.
 _cap_num() { awk -F. '{ printf "%d", $1 * 100 + $2 }' <<<"$1"; }

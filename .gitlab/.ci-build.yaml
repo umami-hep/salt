@@ -1,3 +1,24 @@
+# Salt ships TWO images from ONE setup/Dockerfile. The variants differ in three
+# build args (base image, torch wheel index, flash-attn wheel); everything else
+# is shared, so there is no second file to drift.
+#
+#   V2H  Volta  -> Hopper     cu126  sm_50..sm_90    V100 T4 A100 H100 H200
+#   T2B  Turing -> Blackwell  cu130  sm_75..sm_120   T4 A100 H100/H200 RTX 40xx/50xx
+#
+# cu130 (not cu129) for T2B because prebuilt cp314 flash-attn wheels exist for
+# cu126 and cu130 but NOT cu129 — cu129 would force a 1.5-2.5 h flash-attn
+# source compile into every image build. See setup/Dockerfile for the full
+# rationale and the k8s-gpu driver caveat.
+#
+# TAGS PUBLISHED (see docs/setup.md):
+#   default branch : :V2H  :T2B                    and :latest      -> V2H
+#   git tag vX.Y.Z : :vX-Y-Z-V2H  :vX-Y-Z-T2B      and :vX-Y-Z      -> V2H
+#   MR / push      : temporary_images:<ref>-test-{V2H,T2B}
+#                    and temporary_images:<ref>-test                -> V2H
+#
+# `latest` (and the bare version tag) keep pointing at the V2H/cu126 image,
+# which is exactly what they point at today — adding T2B changes nothing for
+# existing users, nor for .ci-test.yaml, which pulls the bare `-test` tag.
 build_docker: &build_docker
   stage: builds
   retry: 1
@@ -6,28 +27,68 @@ build_docker: &build_docker
     # The kaniko debug image is recommended because it has a shell, and a shell is required for an image to be used with GitLab CI/CD.
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
+  parallel:
+    matrix:
+      - VARIANT: V2H
+        # Volta -> Hopper. Also the DEFAULT variant: it claims the unsuffixed tag.
+        VARIANT_IS_DEFAULT: "true"
+        CUDA_IMAGE: nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+        TORCH_INDEX: https://download.pytorch.org/whl/cu126
+        FLASH_WHEEL: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl
+      - VARIANT: T2B
+        # Turing -> Blackwell.
+        VARIANT_IS_DEFAULT: "false"
+        CUDA_IMAGE: nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
+        TORCH_INDEX: https://download.pytorch.org/whl/cu130
+        FLASH_WHEEL: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp314-cp314-linux_x86_64.whl
   variables:
-    IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:latest
+    REGISTRY_PATH: $CI_REGISTRY_IMAGE
+    # Overridden by `rules:` below for tag pipelines, and wholesale by
+    # build_docker_test. `latest` is spelled out rather than derived so the
+    # backward-compatible destination is impossible to lose in a refactor.
+    IMAGE_BASE_TAG: latest
   script: # Build and push the image
     - |
+      # Per-variant tag. On the default branch that is a bare `:V2H` / `:T2B`;
+      # anywhere else it is suffixed onto the base tag so nothing collides.
+      if [ "$IMAGE_BASE_TAG" = "latest" ]; then
+        VARIANT_TAG="$VARIANT"
+      else
+        VARIANT_TAG="${IMAGE_BASE_TAG}-${VARIANT}"
+      fi
+      DESTINATIONS="--destination ${REGISTRY_PATH}:${VARIANT_TAG}"
+
+      # BACKWARD COMPATIBILITY: the unsuffixed tag (`latest`, `vX-Y-Z`,
+      # `<ref>-test`) keeps meaning what it means today — the cu126 image. Only
+      # the default variant claims it. .ci-test.yaml pulls the unsuffixed
+      # `-test` tag, so this is load-bearing, not cosmetic.
+      if [ "$VARIANT_IS_DEFAULT" = "true" ]; then
+        DESTINATIONS="${DESTINATIONS} --destination ${REGISTRY_PATH}:${IMAGE_BASE_TAG}"
+      fi
+
+      echo "Building ${VARIANT} from ${CUDA_IMAGE} -> ${DESTINATIONS}"
       /kaniko/executor \
         --context "$CI_PROJECT_DIR" \
         --dockerfile "$CI_PROJECT_DIR/setup/Dockerfile" \
-        --destination "$IMAGE_DESTINATION" \
+        --build-arg "CUDA_IMAGE=${CUDA_IMAGE}" \
+        --build-arg "TORCH_INDEX=${TORCH_INDEX}" \
+        --build-arg "FLASH_WHEEL=${FLASH_WHEEL}" \
+        ${DESTINATIONS} \
         --cache=true
-    - echo "Image pushed successfully to ${IMAGE_DESTINATION}"
+    - echo "Image ${VARIANT} pushed successfully"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
       variables:
-        IMAGE_DESTINATION: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+        IMAGE_BASE_TAG: $CI_COMMIT_REF_SLUG
 
 build_docker_test:
   <<: *build_docker
   variables:
-    IMAGE_DESTINATION: $CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test
+    REGISTRY_PATH: $CI_REGISTRY_IMAGE/temporary_images
+    IMAGE_BASE_TAG: ${CI_COMMIT_REF_SLUG}-test
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

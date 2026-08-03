@@ -1,11 +1,47 @@
-# base image
+# ONE Dockerfile, TWO images. The variants differ in exactly three values —
+# base image, torch wheel index, flash-attn wheel — supplied as build args, so
+# there is a single source of truth for everything else.
+#
+#   VARIANT  CUDA   archs (compiled into the torch wheel)  GPUs
+#   -------  -----  ------------------------------------  ---------------------
+#   V2H      12.6   sm_50 .. sm_90                         V100 T4 A100 H100 H200
+#   T2B      13.0   sm_75(*) .. sm_120                     T4 A100 H100/H200 RTX 40xx/50xx
+#
+# V2H = Volta->Hopper, T2B = Turing->Blackwell. No single prebuilt torch wheel
+# spans V100 and Blackwell: upstream dropped Volta from the same releases that
+# added Blackwell. The ranges overlap widely, so only V100 owners (V2H) and
+# Blackwell owners (T2B) are forced to a specific image. Coverage is gap-free —
+# V2H starts at sm_50, so even if T2B's real floor turns out to be sm_80 there
+# is no hole. See docs/setup.md and setup/valid-container-versions.
+#
+# (*) MEASURED for cu126 and cu129 (arch probes on real hardware). The cu130
+#     floor is INFERRED, not measured — read it off a built T2B image with
+#     `python -c "import torch; print(torch.cuda.get_arch_list())"`. The build
+#     below prints the compiled arch flags into the CI log for exactly this.
+#
+# Defaults reproduce the V2H (cu126) image, so an argument-less `docker build`
+# behaves as it always has.
+#
 # nvidia/cuda (NOT pytorch/pytorch): the pytorch images are pinned to Python
 # 3.12, and we want Python 3.14. We bring our own Python (via uv) and install
-# torch from the cu126 wheel index instead. CUDA 12.6 (not 13.x) because CERN's
-# k8s-gpu CI runners ship driver 570.x / CUDA 12.8 — a cuda13 stack fails there
-# with "driver too old, found 12080"; cu126 runs on the 12.8 driver via
-# minor-version compatibility (and on any newer cluster driver too).
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+# torch from the appropriate wheel index instead.
+#
+# DRIVER CAVEAT for the T2B variant, unresolved as of 2026-08-03: CUDA 13 needs
+# a 13.x (580+) driver on the *host*. Every lxplus GPU node was measured on
+# 2026-08-02 to run driver 13.0 or 13.3, so lxplus is fine. CERN's k8s-gpu CI
+# fleet has NOT been re-checked — an older note here claimed 570.x/CUDA 12.8,
+# which if still true means a T2B image cannot run the `gpu-smoke` CI job
+# ("driver too old"). That is why `gpu-smoke` in .gitlab/.ci-test.yaml stays
+# pinned to the V2H (cu126) image, which runs on any 12.8-or-newer driver via
+# minor-version compatibility.
+ARG CUDA_IMAGE=nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+# Re-declared after FROM so they are visible to the RUN steps below. These two
+# must agree with each other AND with CUDA_IMAGE's major version; the gate after
+# the torch install enforces that rather than trusting it.
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu126
+ARG FLASH_WHEEL=https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl
 
 # local and envs
 ENV LANG=C.UTF-8
@@ -39,17 +75,44 @@ ENV PATH="/opt/venv/bin:${PATH}"
 COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
-# Install torch (+torchvision) from the CUDA 12.6 wheel index FIRST, so the later
-# resolves see torch already satisfied (==2.12.0 matches the +cu126 local build)
-# and flash-attn can import it. cp314 wheels are published for both.
-RUN uv pip install --index-url https://download.pytorch.org/whl/cu126 \
-    "torch==2.12.1" "torchvision==0.27.1"
+# Install torch (+torchvision) from the CUDA wheel index FIRST, so the later
+# resolves see torch already satisfied and flash-attn can import it. The torch
+# VERSION is deliberately identical across variants — only the wheel channel
+# differs — so salt's pins are unaffected by the choice of image. cp314 wheels
+# for 2.12.1/0.27.1 are published on both the cu126 and cu130 indices (verified
+# 2026-08-03).
+#
+# The gate is not ceremony: if TORCH_INDEX is wrong or the channel stops
+# publishing cp314, pip does NOT fail — it quietly serves a CPU wheel or a
+# different +cuXXX build, and the image then dies on the user's first kernel
+# launch. Assert the channel we asked for is the channel we got.
+RUN uv pip install --index-url "${TORCH_INDEX}" \
+    "torch==2.12.1" "torchvision==0.27.1" && \
+    python -c "import torch; \
+    want = '${TORCH_INDEX}'.rstrip('/').rsplit('/cu', 1)[-1]; \
+    got = torch.version.cuda; \
+    assert got is not None, 'not a CUDA build — TORCH_INDEX did not serve a +cuXXX wheel'; \
+    assert got.replace('.', '') == want, f'wrong wheel channel: asked cu{want}, got CUDA {got}'; \
+    print('torch', torch.__version__, '/ CUDA', got)"
+
+# Record the compiled GPU architectures in the build log. Informational, NOT a
+# gate: the build runner has no driver, and torch.cuda.get_arch_list() returns
+# [] when is_available() is False, so an assert here would fail a perfectly good
+# image. _cuda_getArchFlags reads the compiled-in flags and needs no device, but
+# is not guaranteed to be available either. This line is the cheapest way to
+# learn what a variant actually covers — see the (*) note in the header.
+RUN python -c "import torch; \
+    f = getattr(torch._C, '_cuda_getArchFlags', None); \
+    print('compiled arch flags:', (f() if f else None) or '<unavailable in the driverless build sandbox>')" \
+    || echo "compiled arch flags: <probe failed; informational only, not a gate>"
 
 # Install flash-attn after torch so it can import the already-installed torch.
-# The correct prebuilt wheel can be found here: https://flashattn.dev/#finder
-# (cp314 / cu126 / torch2.12 variant to match the Python + CUDA + torch above.)
-RUN uv pip install --no-deps \
-    "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl"
+# Prebuilt wheel, never a source build: compiling flash-attn takes 1.5-2.5 h and
+# is pure waste when mjun0812 publishes exactly the cp314 x torch2.12 x cuXXX
+# matrix we need. Wheel finder: https://flashattn.dev/#finder
+# NOTE this constrains which CUDA channels are usable at all — cu126 and cu130
+# have cp314/torch2.12 wheels, cu129 does NOT. That is why T2B is cu130.
+RUN uv pip install --no-deps "${FLASH_WHEEL}"
 
 # py-lap-solver 0.1.4: no cp314 wheel (max cp312), so a source build is needed.
 # Its pyproject uses cmake.minimum-version, which scikit-build-core>=0.8 rejects
