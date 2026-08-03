@@ -263,10 +263,8 @@ class GlobalObjectCuts:
             A ``(N_rows,)`` bool mask of eligible (passing) rows. With no cuts,
             every row is eligible.
 
-        Raises
-        ------
-        KeyError
-            On a cut whose field is absent from ``rows`` (propagated from `Cut.mask`).
+        A `KeyError` propagates from `Cut.mask` for a cut whose field is absent
+        from ``rows``.
         """
         keep = np.ones(len(rows), dtype=bool)
         for c in self.for_split(split):
@@ -444,7 +442,7 @@ class ConstituentCuts:
         np.ndarray
             A compacted, re-padded copy of `batch`.
         """
-        from salt.data.readers.stream import pad_fill  # noqa: PLC0415 - avoid cuts<-stream cycle
+        from salt.data.readers.stream import pad_fill
 
         valid = batch[VALID_FIELD]
         keep = self.keep(batch) & valid

@@ -79,7 +79,85 @@ Salt requires Python 3.10 to 3.14.
     Prebuilt docker images are an easy way to use salt, but can also be a bit less flexible than other approaches.
     You can run the prebuilt docker images using [apptainer](https://apptainer.org/docs/user/latest/).
 
-    The first step is to decide which image you want to use.
+    ### Which image do I need?
+
+    Salt ships **two** images, differing only in which GPU architectures the bundled
+    PyTorch was compiled for. Rather than work it out from a table, ask the machine:
+
+    ```bash
+    ./setup/valid-container-versions
+    ```
+
+    It needs only `nvidia-smi` — no python, no torch, no container — so you can run it
+    before pulling anything. It reports your GPU, its compute capability, which images
+    will work, whether flash-attention is available, and the exact pull command:
+
+    ```
+    GPU: NVIDIA GeForce RTX 5060 Ti
+      compute capability : 12.0  (sm_120)
+      usable images      : T2B only
+                           (V2H tops out at sm_90 — no Blackwell support)
+      flash-attention    : supported
+    ```
+
+    For reference, the coverage it encodes:
+
+    | Your GPU | Image |
+    |---|---|
+    | Tesla V100 / V100S | `V2H` **only** |
+    | Tesla T4 | either |
+    | A100 | either |
+    | H100 / H200 / GH200 | either |
+    | RTX 40xx / 50xx, B100 / B200 | `T2B` **only** |
+
+    `V2H` covers **V**olta→**H**opper, `T2B` covers **T**uring→**B**lackwell. Most GPUs are
+    served by both; only V100 and the newest consumer/datacenter cards are restricted to
+    one. There is no single image covering both ends, because upstream PyTorch dropped
+    Volta from the same wheels that added Blackwell.
+
+    Both images are built from the same `setup/Dockerfile` and contain the same salt and
+    the same PyTorch **version** — they differ only in the CUDA wheel channel, and hence
+    in which GPU architectures are compiled in:
+
+    | Tag | CUDA | Architectures | Also published as |
+    |---|---|---|---|
+    | `salt:V2H` | 12.6 | `sm_50` … `sm_90` | `salt:latest` |
+    | `salt:T2B` | 13.0 | `sm_75` … `sm_120` | — |
+
+    `latest` is an alias for `V2H`, kept so existing setups keep working. **Prefer the
+    explicit tag**: once an image is on disk, a bare `latest` gives you no way to tell
+    which architectures it covers. Release pipelines additionally publish
+    `salt:<version>-V2H` and `salt:<version>-T2B`, with `salt:<version>` aliasing `V2H`.
+
+    !!! warning "Using the wrong image fails silently at first"
+
+        Picking the wrong image does **not** give you a clear error. `torch.cuda.is_available()`
+        still returns `True`, the GPU is listed, the model builds — and then **every**
+        kernel launch dies with
+
+        ```
+        CUDA error: no kernel image is available for execution on the device
+        ```
+
+        The failure lands at your first real operation, not at import or at container
+        start, so it reads as a salt bug or a flaky node rather than as "wrong image".
+        There is also no PTX in these wheels, so there is no JIT fallback to rescue you.
+
+        Check before you train:
+
+        ```bash
+        python -c "import torch; print(torch.cuda.get_device_capability(0), torch.cuda.get_arch_list())"
+        ```
+
+        Your device's capability must appear in the arch list. `(12, 0)` against a list
+        ending at `sm_90` means you want the `T2B` image; `(7, 0)` against a list
+        starting at `sm_75` means you want `V2H`.
+
+    A note on flash-attention: it requires Ampere (sm_80) or newer, so on V100 and T4 salt
+    automatically uses its standard attention path in both images. This is expected and not
+    an error.
+
+    Next, decide how to obtain the image.
     You can either pull an image locally, or use the unpacked images hosted on CVMFS.
     The latter is faster, but requires a CVMFS connection.
 
@@ -92,12 +170,19 @@ Salt requires Python 3.10 to 3.14.
         The images are located in
         `/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/`
 
-        You can run the latest image using
+        You can run an image using
 
         ```bash
+        # V100 ... H100/H200
         apptainer shell -e --nv --bind $PWD \
-            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:latest/
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:V2H/
+
+        # T4 ... Blackwell (RTX 40xx/50xx, B100/B200)
+        apptainer shell -e --nv --bind $PWD \
+            /cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/aft/algorithms/salt:T2B/
         ```
+
+        See [the table above](#which-image-do-i-need) if you are unsure which one you want.
 
         The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
 
@@ -113,20 +198,26 @@ Salt requires Python 3.10 to 3.14.
         export APPTAINER_CACHEDIR=<some path>/.apptainer/
         ```
 
-        Next, pull the image:
+        Next, pull the image for your GPU — `V2H` or `T2B`, see
+        [the table above](#which-image-do-i-need):
 
         ```bash
+        TAG=V2H   # or T2B for RTX 40xx/50xx and B100/B200
+
         apptainer pull --docker-login \
-            $APPTAINER_CACHEDIR/salt.simg \
-            docker://gitlab-registry.cern.ch/aft/algorithms/salt:latest
+            $APPTAINER_CACHEDIR/salt-${TAG}.simg \
+            docker://gitlab-registry.cern.ch/aft/algorithms/salt:${TAG}
         ```
 
         You can then run the image
 
         ```bash
         apptainer shell -e --nv --bind $PWD \
-            $APPTAINER_CACHEDIR/salt.simg
+            $APPTAINER_CACHEDIR/salt-${TAG}.simg
         ```
+
+        Keeping the tag in the filename matters if you ever pull both — a bare `salt.simg`
+        gives no way to tell which architectures it covers once it is on disk.
 
         The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
 
@@ -166,7 +257,9 @@ Salt requires Python 3.10 to 3.14.
     ```bash
     cd /eos/user/${USER:0:1}/$USER          # EOS home (batch-worker-visible)
     git clone https://gitlab.cern.ch/aft/algorithms/salt.git && cd salt
-    # pull salt:latest to /eos/user/<i>/<user>/salt-containers/salt.sif
+    # pull salt:latest (= the V2H image) to /eos/user/<i>/<user>/salt-containers/salt.sif
+    # V2H covers the whole lxplus GPU pool (V100, T4, A100, H100, H200);
+    # SALT_LXPLUS_TAG=T2B overrides it if you ever need the Blackwell image.
     setup/salt-lxplus-gpu pull
     ```
 

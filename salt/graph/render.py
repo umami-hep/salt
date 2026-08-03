@@ -79,7 +79,7 @@ def plan_table(plan: Plan) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Graphviz DOT (design §4.3) — emitted alongside every image render
+# Graphviz DOT — emitted alongside every image render
 # ---------------------------------------------------------------------------
 
 
@@ -124,7 +124,7 @@ _FROZEN_FILL = "#bdbdbd"
 
 
 def _graph_label(text: str) -> str:
-    """A Graphviz quoted-string graph label (escapes ``\\`` and ``"``)."""  # noqa: DOC201
+    r"""A Graphviz quoted-string graph label (escapes ``\\`` and ``"``)."""
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
@@ -163,11 +163,7 @@ def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | No
     if spec is None or not spec.shape:
         return ""
     dims: list[int | str] = list(spec.shape)
-    if (
-        widths is not None
-        and key in widths
-        and _is_feature_dim(dims[-1])
-    ):
+    if widths is not None and key in widths and _is_feature_dim(dims[-1]):
         dims[-1] = widths[key]
     return "(" + ", ".join(str(dim) for dim in dims) + ")"
 
@@ -202,11 +198,7 @@ def _card_node(
     optional `cls` over a `fill` background, plus an optional `badge` line
     (e.g. "frozen") under the class name.
     """
-    sub = (
-        f'<BR/><FONT POINT-SIZE="8" COLOR="#555555">{_html_esc(cls)}</FONT>'
-        if cls
-        else ""
-    )
+    sub = f'<BR/><FONT POINT-SIZE="8" COLOR="#555555">{_html_esc(cls)}</FONT>' if cls else ""
     badge_html = (
         f'<BR/><FONT POINT-SIZE="8" COLOR="#b30000"><B>{_html_esc(badge)}</B></FONT>'
         if badge
@@ -302,16 +294,11 @@ def dot_source(
         )
 
     def _rows(items: Iterable[tuple[str, TensorSpec | None]]) -> list[tuple[str, str, str]]:
-        return [
-            (key, _shape_str(key, spec, widths), _row_colour(key, spec))
-            for key, spec in items
-        ]
+        return [(key, _shape_str(key, spec, widths), _row_colour(key, spec)) for key, spec in items]
 
     if any(edge.producer == SOURCES for edge in plan.edges):
         lines.append(
-            _card_node(
-                SOURCES, SOURCES, "", "#f5f5f5", [], _rows(sorted(plan.sources.items()))
-            )
+            _card_node(SOURCES, SOURCES, "", "#f5f5f5", [], _rows(sorted(plan.sources.items())))
         )
     for step in plan.steps:
         ins = _rows(consumed.get(step.name, {}).items())

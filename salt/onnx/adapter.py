@@ -58,9 +58,7 @@ class OnnxAdapter(nn.Module):
     ) -> None:
         super().__init__()
         if plan.mode is not Mode.ONNX:
-            raise ConfigError(
-                f"OnnxAdapter needs a Mode.ONNX plan, got {plan.mode.name} (design §7)"
-            )
+            raise ConfigError(f"OnnxAdapter needs a Mode.ONNX plan, got {plan.mode.name}")
         if export.model_name is None:
             raise ConfigError(
                 "OnnxAdapter needs a RESOLVED export config — call resolve_export_config first"
@@ -82,7 +80,7 @@ class OnnxAdapter(nn.Module):
                 raise ConfigError(
                     f"module {name!r} carries materialised=False — load a checkpoint or call "
                     "materialise() before export; tracing would bake un-materialised buffer "
-                    "values into the ONNX graph (design §2.3)"
+                    "values into the ONNX graph"
                 )
         self._executor = Executor(plan)
         self._positional: list[ExportInput] = [e for e in export.inputs if e.alias is None]
@@ -103,8 +101,8 @@ class OnnxAdapter(nn.Module):
         if self._export_sink is None:
             raise ConfigError(
                 "OnnxAdapter needs a folded OnnxExportSink in the plan — the off-graph reduce "
-                "manifest was retired at plan-29 W4. Declare an OnnxExportSink naming the "
-                "conversion outputs.* leaves (design §4.2/§6); the conversion nodes "
+                "manifest was retired. Declare an OnnxExportSink naming the conversion "
+                "outputs.* leaves; the conversion nodes "
                 "(ClassProbs/SeqClassIndex/MaskFormerObjects/Combination) own "
                 "the math inside the traced graph."
             )
@@ -231,7 +229,7 @@ class OnnxAdapter(nn.Module):
         except KeyError:
             raise ConfigError(
                 f"export input port {port!r} has no Features variable declaration — every "
-                "export input must be a declared dataset feature stream (design §7; known: "
+                "export input must be a declared dataset feature stream (known: "
                 f"{sorted(self._fields)})"
             ) from None
 
@@ -241,7 +239,7 @@ class OnnxAdapter(nn.Module):
         authority); returns it, or None when no sink is wired (which the
         adapter rejects).
         """
-        from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+        from salt.outputs import OnnxExportSink
 
         for step in plan.steps:
             if isinstance(step.module, OnnxExportSink):
@@ -265,6 +263,6 @@ class OnnxAdapter(nn.Module):
             raise ConfigError(
                 f"export input {entry.port!r}: alias source {entry.alias!r} lacks columns "
                 f"{missing} — the alias gather resolves by name from the Features "
-                f"declarations (design §7; source columns: {list(src_fields)})"
+                f"declarations (source columns: {list(src_fields)})"
             )
         return torch.tensor([src_fields.index(name) for name in dst_fields], dtype=torch.int64)

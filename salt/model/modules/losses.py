@@ -104,7 +104,7 @@ class LossSum(SaltModelModule):
         if not keys:
             raise ConfigError(
                 f"LossSum {self.name!r}: narrowed to an empty loss-key list — no module "
-                "declares a losses.* produce (design §3.3)"
+                "declares a losses.* produce"
             )
         self._loss_keys = keys
         self._check_weight_keys()
@@ -117,7 +117,7 @@ class LossSum(SaltModelModule):
             raise ConfigError(
                 f"LossSum {self.name!r}: loss keys not fixed — pass losses: in config or let "
                 "the framework narrow via collect_loss_keys()/narrow() before compile "
-                "(losses.** is a framework wildcard, design §3.3)"
+                "(losses.** is a framework wildcard)"
             )
         loss_spec = TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)
         return IO(
@@ -179,7 +179,7 @@ class LossGLS(LossSum):
         super().__init__(losses=losses, weights=weights)
         # exact == 1.0 is the faithful semantic; weights are config literals,
         # never computed values
-        if bad := {k: v for k, v in self.weights.items() if v != 1.0}:  # noqa: RUF069
+        if bad := {k: v for k, v in self.weights.items() if v != 1.0}:
             raise ConfigError(
                 f"LossGLS: per-loss weights are not utilised by the geometric mean — got "
                 f"{bad}; set all weights to 1.0, or use LossSum for a weighted sum "
@@ -203,7 +203,7 @@ class LossGLS(LossSum):
             # duck-typed numeric check: LossSum carries `weights` (a dict), not
             # `weight`, and is excluded above regardless
             and isinstance(getattr(module, "weight", None), (int, float))
-            and float(module.weight) != 1.0  # noqa: RUF069 - exact, the v1 semantic
+            and float(module.weight) != 1.0
         }
         if offenders:
             raise ConfigError(

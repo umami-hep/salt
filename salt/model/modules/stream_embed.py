@@ -110,8 +110,7 @@ class StreamEmbed(SaltModelModule):
         if "mup" in (dense or {}):
             raise ConfigError(
                 "StreamEmbed: set mup on the module (init_args.mup), not inside dense — the flag "
-                "is threaded into the composed v1 Dense at bind (design §3.4 muP architectural "
-                "port)"
+                "is threaded into the composed v1 Dense at bind"
             )
         self.stream = stream
         self.out_dim = out_dim
@@ -149,7 +148,9 @@ class StreamEmbed(SaltModelModule):
             requires[key] = TensorSpec(shape=None, dtype="float32")
         if self.featurewise_cfg is not None:
             # the per-event conditioning parameters: a rank-2 [B, n_params] global stream
-            requires[self.params_key] = TensorSpec(shape=("B", sym_dim("P", self.name)), dtype="float32")
+            requires[self.params_key] = TensorSpec(
+                shape=("B", sym_dim("P", self.name)), dtype="float32"
+            )
         return IO(
             requires=unflatten_spec(requires),
             produces=unflatten_spec({

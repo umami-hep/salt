@@ -142,8 +142,7 @@ class GraphDataModule(lightning.LightningDataModule):
             if not isinstance(module, SaltDatasetModule):
                 raise ConfigError(
                     f"module {name!r} ({type(module).__name__}) is not a SaltDatasetModule — "
-                    "data-graph entries must subclass SaltDatasetModule; wrap or extend it "
-                    "(design §6.1)"
+                    "data-graph entries must subclass SaltDatasetModule; wrap or extend it"
                 )
             module.name = name
         # single-Reader guard FIRST, over all modules, before the setup-only
@@ -153,7 +152,7 @@ class GraphDataModule(lightning.LightningDataModule):
         if len(readers) != 1:
             raise ConfigError(
                 f"GraphDataModule needs exactly one Reader in modules, got {len(readers)} "
-                f"({[name for name, _ in readers]}) (design §6.1)"
+                f"({[name for name, _ in readers]})"
             )
         self._reader_name, self._reader_proto = readers[0]
         self.train_file = train_file
@@ -219,7 +218,7 @@ class GraphDataModule(lightning.LightningDataModule):
             raise ConfigError(
                 f"GraphDataModule allows at most one InputSamples, got {len(existing)} "
                 f"({[name for name, _ in existing]}); one InputSamples owns the single "
-                "Reader's source chain (plan-25 §3.1)"
+                "Reader's source chain"
             )
         if not existing:
             files = {
@@ -262,7 +261,7 @@ class GraphDataModule(lightning.LightningDataModule):
             raise ConfigError(
                 f"GraphDataModule allows at most one VDS, got {len(existing)} "
                 f"({[name for name, _ in existing]}); one VDS owns the single Reader's "
-                "wildcard resolution (plan-25 §5.1)"
+                "wildcard resolution"
             )
         if not existing and self._input_samples is not None:
             out = {
@@ -316,7 +315,7 @@ class GraphDataModule(lightning.LightningDataModule):
         self._batch_modules[self._reader_name] = reader
 
     def set_sinks(self, sinks: Mapping[Mode, Iterable[str]]) -> None:
-        """Set the per-mode model-boundary demand (the stage-B wiring hook).
+        """Set the per-mode model-boundary demand.
 
         Must be called (or `sinks` passed at construction) before ``setup``,
         unless the attached LightningModule exposes ``sink_demand()`` (the
@@ -399,11 +398,11 @@ class GraphDataModule(lightning.LightningDataModule):
         this module dict.
         """
         if filename is None:
-            raise ConfigError(f"no file configured for mode {mode.name} (design §6.1)")
+            raise ConfigError(f"no file configured for mode {mode.name}")
         if self._sinks is None:
             raise ConfigError(
                 "GraphDataModule has no sinks — pass sinks= or call set_sinks() with the "
-                "model boundary's demanded keys before setup (design §3.3, §6.1)"
+                "model boundary's demanded keys before setup"
             )
         reader = self._reader_proto.with_source(
             filename=filename, num=num, vds_path=vds_path, stage=_STAGE_OF_MODE[mode]
@@ -474,9 +473,7 @@ class GraphDataModule(lightning.LightningDataModule):
             test_file, num_test = self._resolve_source(Mode.TEST)
             if test_file is None:
                 raise ConfigError("No test file specified, see --data.test_file")
-            self.test_dset = self._make_dataset(
-                Mode.TEST, test_file, num_test, self.test_vds_path
-            )
+            self.test_dset = self._make_dataset(Mode.TEST, test_file, num_test, self.test_vds_path)
             print(f"Created test dataset with {len(self.test_dset):,} entries")
 
     @staticmethod
@@ -533,7 +530,7 @@ class GraphDataModule(lightning.LightningDataModule):
             return
         if self.trainer is not None and not self.trainer.is_global_zero:
             return
-        import shutil  # noqa: PLC0415 - opt-in staging path only
+        import shutil
 
         print("-" * 100)
         print(f"Removing staged files under {root}")

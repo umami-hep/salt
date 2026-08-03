@@ -52,7 +52,7 @@ class SetupToy(SaltDatasetModule):
 
 
 class SelfMergeToy(SetupToy):
-    """A setup-only module that merges into ctx ITSELF and returns ctx (plan-25 §3.8)."""
+    """A setup-only module that merges into ctx ITSELF and returns ctx."""
 
     def setup(self, ctx, stage):
         del stage
@@ -89,7 +89,7 @@ def mods(*modules):
     return {m.name: m for m in modules}
 
 
-# §4.3 — compile_setup_plan (topo + validation, no shape-unification)
+# compile_setup_plan (topo + validation, no shape-unification)
 
 
 def chain_modules():
@@ -173,7 +173,7 @@ class TestCompileSetupPlan:
         assert "inp" in plan.module_names
 
 
-# §4.3(b) — the setup-execution loop (write-once ctx threading)
+# the setup-execution loop (write-once ctx threading)
 
 
 class TestRunSetupPlan:
@@ -193,7 +193,7 @@ class TestRunSetupPlan:
         assert ctx.get("source.r.train.vds_path") == "/data/train.vds.h5"
 
     def test_self_merge_style_module_merges_into_ctx(self):
-        # plan-25 §3.8 "merge yourself + return ctx" style is also supported.
+        # the "merge yourself + return ctx" style is also supported.
         inp = SelfMergeToy(
             "inp",
             produces={"source.r.train.pattern": src()},
@@ -239,7 +239,7 @@ class TestRunSetupPlan:
         assert ctx.get("source.r.val.pattern") == "/val.h5"
 
 
-# §4.4 / §3.6 — the namespace split (AllModesDeadError blocker)
+# the namespace split (AllModesDeadError blocker)
 
 
 class TestNamespaceSplit:

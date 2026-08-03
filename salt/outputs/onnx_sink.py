@@ -18,7 +18,7 @@ from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatt
 # module level — so the export dataclasses can be named in the signature, which
 # is what lets jsonargparse resolve `inputs:`/`combine:` config entries.
 from salt.onnx.config import ExportCombine, ExportConfig, ExportInput, resolve_export_config
-from salt.outputs.output_schema import OutputField, _OUTPUTS_NAMESPACE
+from salt.outputs.output_schema import _OUTPUTS_NAMESPACE, OutputField
 from salt.outputs.sink import Node, collect_manifest_fields
 
 
@@ -88,19 +88,19 @@ class OnnxExportLeaf:
         parts = self.key.split(KEY_SEP)
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
-                f"OnnxExportLeaf key {self.key!r} contains a wildcard — export output keys are "
-                "concrete (design §2.2)"
+                f"OnnxExportLeaf key {self.key!r} contains a wildcard — export output "
+                "keys are concrete"
             )
         if len(parts) < 2 or parts[0] != _OUTPUTS_NAMESPACE:
             raise ConfigError(
                 f"OnnxExportLeaf key {self.key!r} is not under the {_OUTPUTS_NAMESPACE!r} "
                 "namespace — the ONNX sink names the conversion outputs.* leaves the folded "
-                "nodes mint, not raw predictions (design §6.2)"
+                "nodes mint, not raw predictions"
             )
         if self.name is not None and self.names is not None:
             raise ConfigError(
                 f"OnnxExportLeaf {self.key!r} sets BOTH 'name' (single output) and 'names' "
-                "(per-class split_scalars) — pick one (design §6.2)"
+                "(per-class split_scalars) — pick one"
             )
         if self.name is None and self.names is None:
             # single-source naming: default the ONNX suffix to the leaf key's
@@ -115,8 +115,7 @@ class OnnxExportLeaf:
             if self.per_token:
                 raise ConfigError(
                     f"OnnxExportLeaf {self.key!r}: per-class split_scalars outputs ('names') are "
-                    "GLOBAL float scalars — per_token applies to single-name index leaves only "
-                    "(design §6.2)"
+                    "GLOBAL float scalars — per_token applies to single-name index leaves only"
                 )
         if self.dtype not in {"float32", "int8"}:
             raise ConfigError(
@@ -267,15 +266,15 @@ class OnnxExportSink(Node):
         for leaf in leaves:
             if leaf.key in seen_keys:
                 raise ConfigError(
-                    f"OnnxExportSink: duplicate output key {leaf.key!r} — one OnnxExportLeaf per "
-                    "conversion leaf (design §6.2)"
+                    f"OnnxExportSink: duplicate output key {leaf.key!r} — one OnnxExportLeaf "
+                    "per conversion leaf"
                 )
             seen_keys.add(leaf.key)
             for suffix in leaf.suffixes:
                 if suffix in seen_suffixes:
                     raise ConfigError(
                         f"OnnxExportSink: duplicate flat ONNX output name {suffix!r} — the Athena "
-                        "output namespace is flat (design §6.3 / plan 31 W5.1 dup guard)"
+                        "output namespace is flat"
                     )
                 seen_suffixes.add(suffix)
 
@@ -304,7 +303,7 @@ class OnnxExportSink(Node):
         fields -> a ``names`` split leaf. Raises `ConfigError` when nothing is
         declared, when a split leaf mixes in a per-token field, or when two
         fields mint the same key/suffix.
-        """  # noqa: DOC201, DOC501 - private helper, raises named in the summary
+        """
         fields = self._filter_consumed(collect_manifest_fields(self._manifest_sources(), Mode.ONNX))
         by_key: dict[str, list[OutputField]] = {}
         key_order: list[str] = []
@@ -356,7 +355,7 @@ class OnnxExportSink(Node):
         return self._leaves
 
     def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
-        """The resolved export leaves (cached until a manifest source rebinds)."""  # noqa: DOC201 - private helper, one-line
+        """The resolved export leaves (cached until a manifest source rebinds)."""
         if self._leaves_resolved:
             return self._leaves
         return self._resolve_leaves()
@@ -397,6 +396,10 @@ class OnnxExportSink(Node):
         names, dynamic axes, Athena metadata names, the `run_name`-derived
         model name) and validates them.
 
+        A `ConfigError` propagates from that resolution when the contract is
+        incomplete or malformed (no inputs, an invalid model name / track
+        selection, a bad rename or combine).
+
         Parameters
         ----------
         run_name : str, optional
@@ -407,12 +410,6 @@ class OnnxExportSink(Node):
         -------
         ExportConfig
             The resolved export-only half (``outputs == []``).
-
-        Raises
-        ------
-        ConfigError
-            When the contract is incomplete or malformed (no inputs, an
-            invalid model name / track selection, a bad rename or combine).
         """
         return resolve_export_config(
             ExportConfig(
@@ -439,7 +436,7 @@ class OnnxExportSink(Node):
             raise ConfigError(
                 "OnnxExportSink has no model_name — set the sink's `model_name:` (or let "
                 "`salt export` default it from the run name) before deriving the ONNX "
-                "output names (design §6.3)"
+                "output names"
             )
         return self.model_name
 
@@ -501,7 +498,7 @@ class OnnxExportSink(Node):
                     raise ConfigError(
                         f"OnnxExportSink: leaf {leaf.key!r} produces {value.shape[-1]} channels "
                         f"but declares {len(leaf.names)} names {list(leaf.names)} — one scalar "
-                        "per class (design §6.2)"
+                        "per class"
                     )
                 for suffix, part in zip(
                     leaf.names, torch.split(value, 1, -1), strict=True

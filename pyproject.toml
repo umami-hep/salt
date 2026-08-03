@@ -133,6 +133,56 @@ lint.ignore = [
   "PT027", "NPY002", "PT009", "PLW1641", "PLR0904", "N817", "S603", "PD011",
   "S113", "TCH", "PT011", "PLR1702", "S108", "PTH207", "S607", "E203", "SIM115", "PLR0913",
   "PLR0917", "A005", "ANN401", "PLR0915", "RUF015", "PLR6104", "TD003",
+  "PLR0911",  # "too many return statements" — joins the PLR0912/0913/0914/0915/
+              # 0917 family already ignored above; the one hit is main.py's
+              # command dispatch, where a return per subcommand is the clearest form
+  "PLC0415",  # "import should be at top-level" — function-level imports are a
+              # deliberate, repo-wide pattern, not debt: they keep the optional
+              # extras optional (`salt[root]` behind _require_root_deps,
+              # `salt[profile]` behind the line-profiler hint, `salt[muP]`), and
+              # main.py imports inside functions at its jsonargparse patch sites
+              # to avoid an import cycle with the module it is patching
+  "UP040",    # "use the `type` keyword instead of TypeAlias" — NOT a safe rewrite
+              # here. Kind, SetupStage and SourceKind are fed to typing.get_args()
+              # at runtime to build the KINDS / SETUP_STAGES / SOURCE_KINDS
+              # validation tuples; a PEP 695 `type` alias is a TypeAliasType, so
+              # get_args() would return () and the validation would silently
+              # accept everything
+
+  # ---------------------------------------------------------------------
+  # Docstring rules: what this repo gates, and why.
+  #
+  # The docstring policy in CLAUDE.md is deliberate about WHERE full numpy
+  # sections belong:
+  #   * base classes and protocols carry the contract once;
+  #   * concrete implementations restate nothing, or give one line saying
+  #     only what differs;
+  #   * private helpers keep the semantics and drop the ceremony -- no
+  #     Parameters/Returns blocks, because "the signature + type hints carry
+  #     that";
+  #   * properties, getters and setters get one line maximum;
+  #   * full Parameters/Returns sections are for the PUBLIC API -- classes
+  #     named as YAML class_path targets, names exported via __all__, and CLI
+  #     entry points -- because that is what renders on the docs site.
+  #
+  # No linter can decide "is this the public API", so the line drawn here is:
+  # we gate that written documentation is CORRECT, not that it is COMPLETE.
+  # Completeness stays a review judgement.
+  #
+  # Ignored -- each demands a section the policy does not require:
+  "DOC201",  # missing `Returns` section: 577 hits, overwhelmingly private
+             # helpers and concrete overrides that policy says must NOT carry
+             # a Returns block
+  "DOC402",  # missing `Yields` section: same argument, generator flavour
+  "DOC501",  # missing `Raises` section: 169 hits, same shape -- e.g.
+             # salt/data/base.py::_require_root_deps, a private helper whose
+             # docstring is exactly what policy §4 prescribes
+  # NOT ignored, and honoured in code -- these check that what IS written is
+  # true, which is cheap and catches stale docs:
+  #   DOC202 documents a return that never happens
+  #   DOC403 documents yields that never happen
+  #   DOC502 documents a raise that never happens
+  # ---------------------------------------------------------------------
 ]
 exclude = [
   "salt/tests/*",
@@ -147,9 +197,117 @@ mark-parentheses = false
 
 [tool.ruff.lint.per-file-ignores]
 "salt/tests/**" = ["D100", "D101", "D102", "D103", "D104", "D105", "PT019"]
+# datagen ships its own test suite. It fell outside the salt/tests/** exemptions
+# above purely because the plan-61 de-core rename moved datagen under
+# salt/testing/ -- the files are tests and get the same treatment. PLC0415 and
+# PT018 are added on top: these tests import inside test bodies precisely to
+# exercise import-time behaviour, and assert on tuples.
+"salt/testing/datagen/tests/**" = [
+  "D100", "D101", "D102", "D103", "D104", "D105", "PT019", "PLC0415", "PT018",
+]
+# datagen is written to stay extractable as a standalone package, so its
+# intra-package imports are relative on purpose (preserved deliberately through
+# the plan-61 migration). TID252 bans exactly that. SLF001 covers the two places
+# where one datagen module reaches for a sibling's private helper
+# (engine._resolve_link from the inserter; Pipeline setting a writer's
+# _group_specs) -- both are inside the package's own seam.
+"salt/testing/datagen/**" = ["TID252", "SLF001"]
+# GenModule's requires/produces/mutates are per-INSTANCE contract lists that
+# every subclass assigns in its own __init__; the class-level empty lists are
+# only a safety default and are never mutated. RUF012 wants them annotated
+# ClassVar, which is the one annotation that makes mypy reject the instance
+# assignment the design depends on ("Cannot assign to class variable via
+# instance", x15). The two rules cannot both be satisfied here.
+"salt/testing/datagen/modules/base.py" = ["RUF012"]
+# The profiler enters context managers in one Lightning hook (on_fit_start,
+# on_train_batch_start, on_before_backward) and exits them in another, so the
+# __enter__ calls cannot be written as `with` blocks.
+"salt/profiling.py" = ["PLC2801"]
 
 [tool.mypy]
+# Kept for direct `mypy salt/` runs. Under pre-commit it does nothing, because
+# mypy applies `exclude` only when it crawls directories and not to files given
+# on the command line -- the pre-commit hook carries its own `exclude:` for that.
 exclude = '^salt/tests/.*\.py$'
+
+# ---------------------------------------------------------------------------
+# Per-module baseline.
+#
+# Read this as a RATCHET, not an amnesty. Every module in salt/ is type-checked
+# by default; the entries below are the only exceptions, each one narrowed to
+# the module AND to the exact error codes it currently produces. A new error of
+# any other code in these modules still fails, and any error at all in the other
+# ~100 modules still fails. Deleting an entry when its module is clean is the
+# intended direction of travel.
+#
+# Why these are deferred rather than fixed here: with one exception the
+# remaining errors are not local mistakes, they are three structural patterns,
+# and every fix for them means editing type ANNOTATIONS on classes that
+# jsonargparse introspects to build the config schema. In this codebase an
+# annotation is not cosmetic -- it is the config surface -- so retyping these
+# belongs in typed follow-up work with its own config-parity gate, not in a
+# lint-debt pass whose whole promise is behaviour neutrality.
+#
+# The three patterns:
+#   (A) jsonargparse null-deletion. Module dicts are `dict[str, Module | None]`
+#       because a config may set an entry to null to delete it; the Nones are
+#       filtered before use, which mypy cannot see. -> arg-type.
+#   (B) config-dict splatting, `TensorSpec(**spec)` / `Dense(**cfg)`, where the
+#       dict is `dict[str, object]`. Typing it needs TypedDicts for the config
+#       schema. -> arg-type.
+#   (C) attributes that are `X | None` until a bind/setup step fills them, and
+#       are guarded at their use sites by a runtime check mypy does not follow.
+#       -> misc ("None not callable"), union-attr, attr-defined, assignment,
+#       index, type-var.
+# ---------------------------------------------------------------------------
+
+[[tool.mypy.overrides]]
+# (A) module dicts carrying jsonargparse's null-deletion sentinel.
+module = ["salt.data.datamodule", "salt.data.dataset", "salt.cli"]
+disable_error_code = ["arg-type", "misc"]
+
+[[tool.mypy.overrides]]
+# (B) TensorSpec / Dense / task-head construction by splatting a config dict,
+# plus (C) heads whose scaler and loss are bound after __init__.
+module = [
+  "salt.data.processors.multi_target",
+  "salt.model.modules.tasks.classification",
+  "salt.model.modules.tasks.edge",
+  "salt.model.modules.tasks.regression",
+]
+disable_error_code = ["arg-type", "misc", "union-attr"]
+
+[[tool.mypy.overrides]]
+# (C) post-bind state: reader/sink/schema attributes that are None until setup
+# resolves them, and stage strings that are `str` here but `Literal` downstream.
+module = [
+  "salt.data.readers.reader",
+  "salt.outputs.h5_sink",
+  "salt.outputs.output_schema",
+  "salt.model.modules.tasks.base",
+  "salt.model.modules.pooling",
+  "salt.model.modules.losses",
+  "salt.graph.render",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "index", "misc", "type-var", "union-attr"]
+
+[[tool.mypy.overrides]]
+# (C) the planner and SaltModule reach across the duck-typed GraphModule /
+# SinkModule protocols, whose optional members are checked with hasattr.
+module = ["salt.graph.planner", "salt.model.saltmodule"]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "misc", "union-attr"]
+
+[[tool.mypy.overrides]]
+# main.py patches jsonargparse at runtime, so the attributes it sets and reads
+# are not on the stub-visible module surface.
+module = ["salt.main"]
+disable_error_code = ["attr-defined", "union-attr"]
+
+[[tool.mypy.overrides]]
+# datagen modules declare their contract attributes per instance; the pipeline
+# reads them off the base-class type.
+module = ["salt.testing.datagen.engine", "salt.testing.datagen.pipeline"]
+disable_error_code = ["arg-type", "attr-defined", "misc"]
 
 [tool.pytest.ini_options]
 log_cli = true

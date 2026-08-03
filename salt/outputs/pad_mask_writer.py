@@ -47,13 +47,11 @@ class PadMaskWriter(OutputSectionWriter):
         if not names:
             raise ConfigError(
                 "PadMaskWriter needs a non-empty 'streams' list — name the sequence streams whose "
-                "boolean pad-mask column to write (plan 34 W34.2)"
+                "boolean pad-mask column to write"
             )
         if len(set(names)) != len(names):
             dup = sorted({n for n in names if names.count(n) > 1})
-            raise ConfigError(
-                f"PadMaskWriter: duplicate stream(s) {dup} — one entry per stream (plan 34 W34.2)"
-            )
+            raise ConfigError(f"PadMaskWriter: duplicate stream(s) {dup} — one entry per stream")
         self.streams = tuple(names)
 
     def output_key(self, stream: str) -> str:
@@ -77,8 +75,7 @@ class PadMaskWriter(OutputSectionWriter):
         """Pass each stream's bool pad mask through to ``outputs.<stream>.mask`` (fresh clone)."""
         del mode
         return {
-            self.output_key(stream): b.get(f"masks.{stream}").clone()
-            for stream in self.streams
+            self.output_key(stream): b.get(f"masks.{stream}").clone() for stream in self.streams
         }
 
     def mask_streams(self) -> tuple[str, ...]:

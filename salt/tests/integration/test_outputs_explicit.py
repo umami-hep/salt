@@ -1,6 +1,6 @@
 """End-to-end eval-H5 check for the base gn2v2-dummy.yaml — implicit H5 sink.
 
-Plan 50 Phase B: gn2v2-dummy.yaml migrated OFF the explicit-sink ``outputs:``
+Historical note: gn2v2-dummy.yaml migrated OFF the explicit-sink ``outputs:``
 OutputColumn table onto the ``outputs:`` section path (two mode-split
 RunTaskOutput writers). No config declares H5OutputSink/OnnxExportSink — the
 ``salt test`` command wires the H5 sink over the section. This test fits +
@@ -44,8 +44,8 @@ def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str
 
     Exact columns = input-copy source columns FIRST (in source-file order; an
     empty golden ``copy_inputs`` means the v1 copy-ALL default, so every
-    source field is copied), then the task columns in golden order — which,
-    since plan 50 Phase C, includes each task's trailing ``target_{task}``
+    source field is copied), then the task columns in golden order — which
+    includes each task's trailing ``target_{task}``
     label column — then the trailing pad-mask column. Asserting the H5
     dtype.names EQUAL this list (not merely contain it) enforces "no ADDED
     columns" beyond the committed golden.

@@ -1,4 +1,4 @@
-"""W7 gate G7e: per-stage scoped callbacks (plan 12, D-CB).
+"""Gate G7e: per-stage scoped callbacks.
 
 Top-level (global) callbacks ALWAYS propagate for the whole fit and are never
 re-instantiated (Lightning fixes ``trainer.callbacks`` at fit start). A stage may

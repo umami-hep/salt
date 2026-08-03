@@ -39,7 +39,7 @@ and writers and sinks share one section — one spelling per mode across the sur
 
 
 def _fmt_modes(modes: frozenset[Mode]) -> str:
-    """The canonical rendering of a mode set in an error message."""  # noqa: DOC201 - one-line helper
+    """The canonical rendering of a mode set in an error message."""
     return "[" + ", ".join(m.name.lower() for m in PRIMARY_MODES if m in modes) + "]"
 
 
@@ -175,7 +175,7 @@ class SinkContext:
         above, which is what lets the same sink run under a driver that has
         no trainer at all — and what keeps this module free of any Lightning
         import.
-        """  # noqa: DOC201 - one-line constructor contract
+        """
         module = getattr(trainer, "lightning_module", None)
         ckpt_path = getattr(trainer, "ckpt_path", None)
         return cls(
@@ -374,12 +374,12 @@ class Node:
 
     @property
     def modes_configured(self) -> bool:
-        """Whether the config selected `modes:` explicitly (vs taking the class default)."""  # noqa: DOC201 - one-line property
+        """Whether the config selected `modes:` explicitly (vs taking the class default)."""
         return self._configured_modes is not None
 
     @property
     def effective_modes(self) -> frozenset[Mode]:
-        """The modes this node actually runs in: `allowed_modes` narrowed by `modes:`."""  # noqa: DOC201 - one-line property
+        """The modes this node actually runs in: `allowed_modes` narrowed by `modes:`."""
         return self.allowed_modes if self._configured_modes is None else self._configured_modes
 
     # -- manifest sources ---------------------------------------------------
@@ -405,7 +405,7 @@ class Node:
         Section declaration order then model declaration order. A section
         writer folded into the model graph appears in both dicts and is taken
         once, at its section position; this node itself is never a source.
-        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        """
         sources: list[Any] = []
         seen: set[int] = {id(self)}
         for bound in (self._output_section, self._manifest_modules):
@@ -417,7 +417,7 @@ class Node:
         return sources
 
     def _manifest_source_names(self) -> list[str]:
-        """The instance names of the bound manifest sources, for error messages."""  # noqa: DOC201 - private helper, one-line
+        """The instance names of the bound manifest sources, for error messages."""
         return [*(self._output_section or {}), *(self._manifest_modules or {})]
 
     def _filter_consumed(
@@ -433,7 +433,7 @@ class Node:
         ------
         ConfigError
             When a pattern matches none of the available leaf keys.
-        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        """
         patterns = self._consumes
         if patterns is None:
             return list(fields)
@@ -451,7 +451,7 @@ class Node:
         ]
 
     def is_sink(self) -> bool:
-        """Mark this module a terminal sink, excluded from the executor forward loop."""  # noqa: DOC201 - one-line predicate
+        """Mark this module a terminal sink, excluded from the executor forward loop."""
         return True
 
     def is_test_sink(self) -> bool:
@@ -461,18 +461,18 @@ class Node:
         ``declare_io(Mode.TEST).requires`` is non-empty (e.g. `H5OutputSink`);
         an ONNX-only node (`OnnxExportSink`) returns False regardless of
         declaration order.
-        """  # noqa: DOC201 - predicate, no Returns block per docstring policy
+        """
         return bool(flatten_spec(self.declare_io(Mode.TEST).requires))
 
     def declare_io(self, mode: Mode) -> IO:  # pragma: no cover - overridden by subclasses
-        """Declare the node's requires/produces for `mode` (subclass override)."""  # noqa: DOC201 - contract documented on the class
+        """Declare the node's requires/produces for `mode` (subclass override)."""
         del mode
         return IO(requires={}, produces={})
 
     def writer_demand(
         self, model_modules: Mapping[str, Any], reader: Any
     ) -> dict[str, str]:  # pragma: no cover - overridden
-        """The TEST demand this node anchors, GENERATED from `declare_io` (subclass override)."""  # noqa: DOC201 - contract documented on the class
+        """The TEST demand this node anchors, GENERATED from `declare_io` (subclass override)."""
         del model_modules, reader
         return {}
 

@@ -16,6 +16,8 @@ from .base import GenModule
 
 
 class TruthHadronInserter(GenModule):
+    """Add a truth-hadron group and the constituent link field that points into it."""
+
     def __init__(
         self,
         hadron_fields: list[dict] | str,
@@ -82,13 +84,11 @@ class TruthHadronInserter(GenModule):
             "min_valid": 0,
             "fields": track_fields,
         }
-        schema = parse_schema(
-            {
-                "n_samples": infer_n(data, self.n_samples),
-                "groups": [self._hadron_dict, tracks_prime],
-                **self._fill,
-            }
-        )
+        schema = parse_schema({
+            "n_samples": infer_n(data, self.n_samples),
+            "groups": [self._hadron_dict, tracks_prime],
+            **self._fill,
+        })
         self._group_specs = [
             schema.group(self.hadron_name),
             schema.group(self.track_name),
@@ -99,18 +99,12 @@ class TruthHadronInserter(GenModule):
         schema = self._build_schema(data)
 
         # 1. build truth_hadrons (real barcode ids + flavour label, valid mask, -1 fill)
-        hads, _ = _build_group_array(
-            rng, schema, schema.group(self.hadron_name), self.flags or {}
-        )
+        hads, _ = _build_group_array(rng, schema, schema.group(self.hadron_name), self.flags or {})
 
         # 2. widen the existing tracks array with the link column (i4 from parsed field)
         track_group = schema.group(self.track_name)
-        link: LinkField = next(
-            fld for fld in track_group.fields if fld.name == self.link_field
-        )
-        tracks_widened = add_field(
-            data[self.track_name], self.link_field, np.dtype(link.dtype)
-        )
+        link: LinkField = next(fld for fld in track_group.fields if fld.name == self.link_field)
+        tracks_widened = add_field(data[self.track_name], self.link_field, np.dtype(link.dtype))
 
         # 3. resolve the link: g = source GroupSpec (resolver does src = data[g.name]);
         #    f = its LinkField.
@@ -127,12 +121,10 @@ class TruthHadronInserter(GenModule):
         # schema (the tracks spec is contributed by the Tracks module). Return
         # the hadron GroupSpec; the pipeline collects all module group_specs.
         if self._group_specs is None:
-            schema = parse_schema(
-                {
-                    "n_samples": 1,
-                    "groups": [self._hadron_dict],
-                    **self._fill,
-                }
-            )
+            schema = parse_schema({
+                "n_samples": 1,
+                "groups": [self._hadron_dict],
+                **self._fill,
+            })
             return schema.group(self.hadron_name)
         return self._group_specs[0]

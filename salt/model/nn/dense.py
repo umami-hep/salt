@@ -156,5 +156,5 @@ def _reject_width_keys(who: str, cfg: Mapping[str, Any] | None, banned: tuple[st
     if cfg and (bad := sorted(set(cfg) & set(banned))):
         raise ConfigError(
             f"{who}: dense config must not set {bad} — widths are inferred at bind from the "
-            "resolved schema (design §2.3 kills YAML width arithmetic)"
+            "resolved schema (no YAML width arithmetic)"
         )

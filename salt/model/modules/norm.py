@@ -101,7 +101,7 @@ class Normaliser(SaltModelModule):
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate normalisation buffers (means/stds per stream); raises if bound twice."""
         if self._bound:
-            raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice (design §2.3)")
+            raise RuntimeError(f"Normaliser {self.name!r}: bind() called twice")
         for stream in self.streams:
             key = f"inputs.{stream}"
             width = schema.width(key)
@@ -249,8 +249,7 @@ class Normaliser(SaltModelModule):
         if not torch.jit.is_tracing() and not self._materialised_flag:
             raise RuntimeError(
                 f"Normaliser {self.name!r}: forward before materialise() — on a fresh fit "
-                "call materialise(); on checkpoint load the state_dict provides the values "
-                "(design §2.3)"
+                "call materialise(); on checkpoint load the state_dict provides the values"
             )
         return {
             f"normed.{s}": (b.get(f"inputs.{s}") - getattr(self, f"means_{s}"))
@@ -343,16 +342,12 @@ class MaskedInputNormaliser(SaltModelModule):
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate the running-stat buffers (identity init); raises if bound twice."""
         if self._bound:
-            raise RuntimeError(
-                f"MaskedInputNormaliser {self.name!r}: bind() called twice (design §2.3)"
-            )
+            raise RuntimeError(f"MaskedInputNormaliser {self.name!r}: bind() called twice")
         for stream in self.streams:
             width = schema.width(f"inputs.{stream}")
             self.register_buffer(f"running_mean_{stream}", torch.zeros(width))
             self.register_buffer(f"running_var_{stream}", torch.ones(width))
-            self.register_buffer(
-                f"num_batches_tracked_{stream}", torch.zeros((), dtype=torch.long)
-            )
+            self.register_buffer(f"num_batches_tracked_{stream}", torch.zeros((), dtype=torch.long))
             # total VALID-object count seen (cumulative-averaging path only)
             self.register_buffer(f"num_objects_seen_{stream}", torch.zeros((), dtype=torch.long))
         self._bound = True

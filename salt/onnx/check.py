@@ -44,7 +44,7 @@ def make_session(onnx_path: str | Path):
         Session on the CPUExecutionProvider with warning-level logging
         suppressed (unoptimised-subgraph noise).
     """
-    import onnxruntime as ort  # noqa: PLC0415 - heavy import, checker-only
+    import onnxruntime as ort
 
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 3

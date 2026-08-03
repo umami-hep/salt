@@ -50,7 +50,7 @@ _LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 def _seed_columns(sink: H5OutputSink, columns: list[OutputColumn]) -> H5OutputSink:
     """Seed the sink's resolved internal OutputColumns directly.
 
-    Plan 50 Phase B retired the explicit-``outputs`` config table; OutputColumn is
+    The explicit-``outputs`` config table is retired; OutputColumn is
     now the sink's INTERNAL value object (resolved from the bound section). These
     white-box unit tests seed it directly instead of via the removed surface.
     """  # noqa: DOC201 - test helper, no Returns block per docstring policy

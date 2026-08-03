@@ -74,9 +74,7 @@ def _draw_label(
     return out.astype(_np_dtype(fspec.dtype))
 
 
-def _draw_id(
-    rng: np.random.Generator, fspec: IdField, shape: tuple[int, ...]
-) -> np.ndarray:
+def _draw_id(rng: np.random.Generator, fspec: IdField, shape: tuple[int, ...]) -> np.ndarray:
     lo, hi = fspec.range
     if fspec.scope == "global":
         n = int(np.prod(shape))
@@ -171,9 +169,7 @@ def _build_group_array(
     return arr, valid
 
 
-def _apply_invalid_fill(
-    arr: np.ndarray, valid: np.ndarray, schema: Schema, g: GroupSpec
-) -> None:
+def _apply_invalid_fill(arr: np.ndarray, valid: np.ndarray, schema: Schema, g: GroupSpec) -> None:
     """Apply per-field invalid-fill sentinels to invalid constituent slots.
 
     Link fields are skipped here -- they are filled by the resolver in phase 2.
@@ -197,6 +193,7 @@ def _resolve_link(
     flags: dict[str, bool],
 ) -> None:
     """Resolve one ``link`` field against its referenced ``id`` field."""
+    del flags  # uniform resolver signature; link resolution is flag-independent
     n = schema.n_samples
     src = data[g.name]
     src_valid = src["valid"] if "valid" in src.dtype.names else np.ones(src.shape, bool)
@@ -213,7 +210,6 @@ def _resolve_link(
     invalid_fill = f.invalid_fill if f.invalid_fill is not None else schema.fill_int
 
     out = src[f.name].copy()
-    m = out.shape[1]
 
     for i in range(n):
         # valid referenced ids in sample i

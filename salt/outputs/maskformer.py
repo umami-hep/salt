@@ -14,11 +14,11 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.model.base import SaltModelModule
-from salt.outputs.output_schema import OutputField
 
 # The MaskFormer export math is inlined verbatim in salt.onnx.reduces (the
 # shared math seam); this node reuses that exact copy so the two can never drift.
 from salt.onnx.reduces import get_maskformer_outputs
+from salt.outputs.output_schema import OutputField
 from salt.utils.mask_utils import indices_from_mask
 
 
@@ -123,7 +123,7 @@ class MaskFormerObjects(SaltModelModule):
         self.masks_key = f"{stream}.masks"
         self.reg_key = f"preds.{stream}.{regression_task}"
         # the constituent pad mask the TEST index reconstruction reads (padded
-        # constituents -> -1), the same demand the deleted sink used to fold.
+        # constituents -> -1).
         self.pad_key = f"masks.{constituent_stream}"
         # the GLOBAL leading-regression leaf is written under the OBJECT stream; the
         # PER-TOKEN index leaf under the CONSTITUENT stream (its dynamic axis source)
@@ -152,12 +152,10 @@ class MaskFormerObjects(SaltModelModule):
         ``final=False``: they feed `MFLeadVertexDecorator`, so they are visible
         here and excluded from every sink.
 
-        Raises
-        ------
-        ConfigError
-            When the model modules are unbound, the regression task is missing
-            or exposes no `targets`, or its target count disagrees with `n_reg`.
-        """  # noqa: DOC201 - contract stated in the summary
+        A `ConfigError` propagates from the task resolution when the model
+        modules are unbound, the regression task is missing or exposes no
+        `targets`, or its target count disagrees with `n_reg`.
+        """
         if not (mode & Mode.ONNX):
             return []
         fields: list[tuple[str, OutputField]] = [
@@ -199,7 +197,7 @@ class MaskFormerObjects(SaltModelModule):
         return fields
 
     def _resolved_targets(self) -> tuple[str, ...]:
-        """The regression task's targets — one leading-object ONNX name each."""  # noqa: DOC201, DOC501 - private helper, raises documented on manifest_fields
+        """The regression task's targets — one leading-object ONNX name each."""
         who = f"MaskFormerObjects {self.name!r}"
         if self._model_modules is None:
             raise ConfigError(
@@ -244,9 +242,7 @@ class MaskFormerObjects(SaltModelModule):
         """TEST: require the RAW masks + constituent pad mask; produce ``object_index`` [B, T]."""
         requires = {
             self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
-            self.pad_key: TensorSpec(
-                shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST
-            ),
+            self.pad_key: TensorSpec(shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST),
         }
         produces = {
             self.index_key: TensorSpec(shape=None, dtype="int64", kind="data", modes=Mode.TEST),
@@ -267,9 +263,7 @@ class MaskFormerObjects(SaltModelModule):
             self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
         }
         produces = {
-            self.leading_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
-            ),
+            self.leading_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
             self.index_key: TensorSpec(shape=None, dtype="int8", kind="data", modes=Mode.ONNX),
             # the exposed reordered per-vertex outputs the MFLeadVertexDecorator reads
             # (a node->node edge — the decorator's demand keeps this node alive)
@@ -283,7 +277,9 @@ class MaskFormerObjects(SaltModelModule):
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
-        """Width-resolve the leaves: index collapses to 1, leading + vertex regression follow n_reg."""
+        """Width-resolve the leaves: index collapses to 1, leading + vertex regression
+        follow n_reg.
+        """
         del widths
         return {
             self.index_key: 1,
@@ -370,8 +366,8 @@ class MFLeadVertexDecorator(SaltModelModule):
     vertex's ``vertices_regression[..., reg_index]``.
 
     NOTE: this selection differs from the legacy ``leading_object`` reduce
-    (pT-only, no PV/null exclusion on the decorator side) — it is a NEW
-    output, not a relocation; both stay untouched (additive).
+    (pT-only, no PV/null exclusion on the decorator side) — it is a NEW,
+    additive output; the reduce itself is untouched.
 
     When no vertex qualifies (all-null jet, all-PV jet, or empty inputs), the
     jet-level scalars are filled with NaN deterministically via a
@@ -432,14 +428,14 @@ class MFLeadVertexDecorator(SaltModelModule):
         if any(part in {"*", "**"} for part in parts):
             raise ConfigError(
                 f"MFLeadVertexDecorator source {source!r} contains a wildcard — conversion "
-                "sources are concrete (design §2.2)"
+                "sources are concrete"
             )
         if len(parts) < 2 or parts[0] != "outputs":
             raise ConfigError(
                 f"MFLeadVertexDecorator source {source!r} must be a "
                 "'outputs.<object_stream>.<vertices_class_probs>' leaf the MaskFormerObjects "
                 "node exposes (the per-vertex class probs) — it reads a bundle leaf, not a raw "
-                "prediction (USER DESIGN 2026-06-22)"
+                "prediction"
             )
         if not outputs:
             raise ConfigError(
@@ -464,8 +460,8 @@ class MFLeadVertexDecorator(SaltModelModule):
         self.pt_index = self._checked_index(pt_index, "pt_index")
         self.pv_class_index = self._checked_index(pv_class_index, "pv_class_index")
         self.pnull_threshold = float(pnull_threshold)
-        self.null_index = null_index if null_index is None else self._checked_index(
-            null_index, "null_index"
+        self.null_index = (
+            null_index if null_index is None else self._checked_index(null_index, "null_index")
         )
         # preserve declaration order (jsonargparse builds an ordered dict)
         self.outputs_map: tuple[tuple[str, int], ...] = tuple(
@@ -503,7 +499,7 @@ class MFLeadVertexDecorator(SaltModelModule):
         eval-H5 counterpart, so it declares nothing in any other mode. Each
         field is named after the configured output name (the node names its own
         leaf once).
-        """  # noqa: DOC201 - contract stated in the summary
+        """
         if not (mode & Mode.ONNX):
             return []
         return [
@@ -550,7 +546,7 @@ class MFLeadVertexDecorator(SaltModelModule):
         any_qualify = qualify.any(dim=-1)  # [B] does this jet have ANY lead vertex?
         out: dict[str, Tensor] = {}
         lead_exp = lead.unsqueeze(-1)  # [B, 1] for gather along the object axis
-        for (key, (_name, reg_index)) in zip(self.output_keys, self.outputs_map, strict=True):
+        for key, (_name, reg_index) in zip(self.output_keys, self.outputs_map, strict=True):
             col = regression[..., reg_index]  # [B, M]
             value = torch.gather(col, 1, lead_exp).squeeze(1)  # [B] lead-vertex value
             # deterministic NaN fill where no vertex qualifies (empty/all-null/all-PV)

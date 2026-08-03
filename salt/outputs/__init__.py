@@ -28,8 +28,8 @@ from salt.outputs.output_schema import (
     OutputField,
 )
 from salt.outputs.pad_mask_writer import PadMaskWriter
-from salt.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
 from salt.outputs.registry import iter_sinks, register_sink, sink_registry
+from salt.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
 from salt.outputs.sink import (
     Node,
     OutputSink,

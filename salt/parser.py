@@ -45,7 +45,7 @@ def _extract_schedule_cli_overrides(
     <json>``) do NOT start with the ``--training_schedule.`` prefix and pass
     through untouched. Returns the remaining args plus ``(dotted_path, raw_value)``
     pairs.
-    """  # noqa: DOC201
+    """
     prefix = f"--{_TRAINING_SCHEDULE_KEY}."
     kept: list[Any] = []
     overrides: list[tuple[str, Any]] = []
@@ -105,8 +105,7 @@ class DeepMergeParser(LightningArgumentParser):
 
         The top-level ``training_schedule`` leaf is RECURSIVELY deep-merged instead
         (its stage names live one level down under ``stages:``), so stacked configs
-        override per-stage-by-name rather than replacing the whole schedule (plan 03
-        / D1).
+        override per-stage-by-name rather than replacing the whole schedule.
         """
         for key, val_from in list(cfg_from.items()):
             if not isinstance(val_from, dict):
@@ -129,10 +128,10 @@ class DeepMergeParser(LightningArgumentParser):
         validation/``--print_config``, so resolved values freeze into the saved
         run config.
         """
-        # W45.2c import-placement fix: _fan_out_artifacts stays in salt.main
+        # Import placement: _fan_out_artifacts stays in salt.main
         # (it resolves SaltCLI subcommand scopes) and main imports this parser,
         # so a module-top import here would be a parser<->main cycle.
-        from salt.main import (  # noqa: PLC0415
+        from salt.main import (
             _fan_out_artifacts,
             _relocate_training_schedule,
         )
@@ -177,7 +176,7 @@ class DeepMergeParser(LightningArgumentParser):
         serialization seam shared by ``--print_config``, ``salt merge-config``,
         and the ``config.yaml`` a fit run saves, so fixing it here fixes all
         three. Serialization order only — the reparsed object is unchanged.
-        """  # noqa: DOC201
+        """
         text = super().dump(*args, **kwargs)
         return _class_path_before_init_args(text) if isinstance(text, str) else text
 
@@ -197,7 +196,7 @@ def _class_path_before_init_args(text: str) -> str:
     it so every pair reads class-path-first (remaining keys keep their relative
     order). Idempotent; only block-mapping pairs (the salt module/callback/output/
     logger form) are touched — list-item subclasses are left as-is.
-    """  # noqa: DOC201
+    """
     lines = text.split("\n")
     i = 0
     while i < len(lines):
@@ -215,7 +214,7 @@ def _sibling_init_args_before(lines: list[str], idx: int, indent: int) -> int | 
     ``class_path:`` at `idx` in the same parent mapping, or None when
     ``class_path`` already precedes ``init_args`` (scan stops at the first
     shallower key — the parent — so an ancestor ``init_args`` is never matched).
-    """  # noqa: DOC201
+    """
     j = idx - 1
     while j >= 0:
         match = _YAML_KEY.match(lines[j])

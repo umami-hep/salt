@@ -12,9 +12,9 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
+from salt.model.nn.dense import Dense
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField
 from salt.utils.union_find import get_node_assignment_jit, mask_fill_flattened
 
@@ -117,7 +117,7 @@ class VertexingTaskModule(_TaskModuleBase):
         if unknown := sorted(set(weighting) - {"heavy", "fake"}):
             raise ConfigError(
                 f"VertexingTaskModule: unknown origin_weighting keys {unknown} — expected "
-                "'heavy' and 'fake' (design §3.3)"
+                "'heavy' and 'fake'"
             )
         heavy = tuple(weighting.get("heavy", (3, 4, 5)))
         fake = tuple(weighting.get("fake", (1,)))
@@ -179,7 +179,7 @@ class VertexingTaskModule(_TaskModuleBase):
                 f"VertexingTaskModule {self.name!r}: name-based origin_weighting needs the "
                 f"origin label's class names, but the schema artifact has no string-list "
                 f"attr {self.origin_label!r} on the {self.stream!r} group (config: "
-                f"model.modules.{self.name}.init_args.origin_weighting; design §5.1, §2.6) — "
+                f"model.modules.{self.name}.init_args.origin_weighting) — "
                 "dump the schema with the origin class names, or use integer origin ids"
             )
         index = {name: i for i, name in enumerate(attr)}
@@ -201,7 +201,7 @@ class VertexingTaskModule(_TaskModuleBase):
                 raise ConfigError(
                     f"VertexingTaskModule {self.name!r}: origin_weighting {role!r} class "
                     f"{name!r} is not among the {self.origin_label!r} classes {list(classes)} "
-                    f"(config: model.modules.{self.name}.init_args.origin_weighting; design §5.1)"
+                    f"(config: model.modules.{self.name}.init_args.origin_weighting)"
                 )
             ids.append(index[name])
         return tuple(ids)
@@ -247,7 +247,7 @@ class VertexingTaskModule(_TaskModuleBase):
                 f"VertexingTaskModule {self.name!r}: name-based origin_weighting "
                 f"(heavy={list(self._heavy_cfg)}, fake={list(self._fake_cfg)}) was not resolved "
                 "to integer ids before bind — a dataset schema artifact carrying the "
-                f"{self.origin_label!r} class names is required (design §5.1, §2.6). "
+                f"{self.origin_label!r} class names is required. "
                 "resolve_origin_names(reader) runs at fit/test setup; standalone bind needs "
                 "integer origin ids instead"
             )
@@ -464,7 +464,7 @@ class VertexingTaskModule(_TaskModuleBase):
     def _target_field(self, value: Tensor | None = None) -> OutputField:
         """The target-label field: the per-token vertex-index label as an
         unprefixed ``target_{task}`` i4 column (labels are model-independent).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         return OutputField(
             h5_name=f"target_{self.name}",
             onnx_name=None,
@@ -514,7 +514,7 @@ def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:
         if has_name and has_id:
             raise ConfigError(
                 f"VertexingTaskModule: origin_weighting {role!r} list mixes integer ids with "
-                f"class names ({list(entries)!r}) — use one or the other (design §5.1)"
+                f"class names ({list(entries)!r}) — use one or the other"
             )
     return any(isinstance(e, str) for e in (*heavy, *fake))
 
@@ -529,7 +529,7 @@ def _coerce_origin_ids(entries: Sequence[Any], role: str) -> tuple[int, ...]:
             raise ConfigError(
                 f"VertexingTaskModule: origin_weighting {role!r} entries must be INTEGER origin "
                 f"ids or class NAMES (got {e!r} in {list(entries)!r}); v1's hardcoded ids are "
-                "heavy: [3, 4, 5], fake: [1] (design §5.1)"
+                "heavy: [3, 4, 5], fake: [1]"
             )
         ids.append(int(e))
     return tuple(ids)

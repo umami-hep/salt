@@ -1,7 +1,7 @@
 """Training-schedule schema: named stages with per-stage freeze + optimizer/LR.
 
 Parsed and validated fail-loud at `SaltModule.__init__`. It is the single
-canonical home for optimizer/LR config (plan D1/D2): a plain (no
+canonical home for optimizer/LR config: a plain (no
 `training_schedule`) config desugars to a single `fit` stage (see
 `desugar_legacy`), so `SaltModule.configure_optimizers` has exactly one code
 path. This module also owns the per-stage epoch→step allocation math and the
@@ -10,6 +10,7 @@ stage-boundary lookup the `TrainingScheduleCallback` drives.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -31,12 +32,19 @@ __all__ = [
 
 # recognised per-stage keys — anything else is a config typo, rejected fail-loud.
 _STAGE_FIELDS = frozenset({
-    "epochs", "frozen", "trainable", "optimizer", "lrs", "order",
-    "early_stop", "callbacks", "lr_scheduler",
+    "epochs",
+    "frozen",
+    "trainable",
+    "optimizer",
+    "lrs",
+    "order",
+    "early_stop",
+    "callbacks",
+    "lr_scheduler",
 })
-# recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary; plan 12 W7).
+# recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary).
 _EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
-# recognised `lr_scheduler` sub-keys (plan 15 W8): a class spec + Lightning
+# recognised `lr_scheduler` sub-keys: a class spec + Lightning
 # scheduler-config keys.
 _LR_SCHEDULER_FIELDS = frozenset({"class_path", "init_args", "interval", "frequency", "monitor"})
 # OneCycle-only `lrs:` keys — meaningless (and rejected in a stage's OWN override)
@@ -47,7 +55,7 @@ _ONECYCLE_ONLY_LRS = frozenset({"max", "end", "pct_start", "last_epoch"})
 
 @dataclass(frozen=True)
 class EarlyStopConfig:
-    """A stage's early-stopping criterion (plan 12 W7 / D-ES). Mirrors Lightning
+    """A stage's early-stopping criterion. Mirrors Lightning
     `EarlyStopping` vocabulary: end the stage — advance to the next, or end the fit
     on the final stage — when `monitor` fails to improve by at least `min_delta`
     for `patience` consecutive validation checks. The stage's `epochs` remains the
@@ -81,13 +89,12 @@ class EarlyStopConfig:
 
 @dataclass(frozen=True)
 class LRSchedulerConfig:
-    """A stage's LR-scheduler class choice (plan 15 W8). `class_path`/`init_args`
+    """A stage's LR-scheduler class choice. `class_path`/`init_args`
     name a `torch.optim.lr_scheduler` class instantiated at the stage boundary over
     the freshly-rebuilt stage optimizer (never a user-supplied `optimizer`). The
     remaining fields are Lightning scheduler-config keys: `interval` (epoch|step),
     `frequency`, and `monitor` (REQUIRED for a metric-driven scheduler, e.g.
-    `ReduceLROnPlateau`). Absent on a stage → the default per-stage OneCycleLR
-    (byte-parity with the pre-W8 behaviour).
+    `ReduceLROnPlateau`). Absent on a stage → the default per-stage OneCycleLR.
     """
 
     class_path: str
@@ -104,7 +111,7 @@ class StageConfig:
     (default `frozen=()` — everything trainable). `epochs=None` means "take the
     remaining epochs" (only the final stage may omit it). `order` pins execution
     position; otherwise declaration order is used. `early_stop` optionally ends the
-    stage before its epoch cap when a monitored metric stops improving (plan 12 W7).
+    stage before its epoch cap when a monitored metric stops improving.
     """
 
     name: str
@@ -154,25 +161,24 @@ class TrainingSchedule:
     @property
     def has_early_stop(self) -> bool:
         """Whether any stage declares an `early_stop` criterion — the master switch
-        that gates every W7 early-stop code path. When ``False``, boundaries are
-        pure epoch arithmetic and no early-stop checkpoint state is written, so
-        behaviour is bitwise-identical to the pre-W7 tip (the G7a parity guard).
+        that gates every early-stop code path. When ``False``, boundaries are
+        pure epoch arithmetic and no early-stop checkpoint state is written.
         """
         return any(stage.early_stop is not None for stage in self.stages)
 
     @property
     def has_stage_callbacks(self) -> bool:
         """Whether any stage declares scoped `callbacks` — the switch that injects
-        the `StageScopedCallbacks` coordinator (plan 12 W7). When ``False`` no
-        coordinator is added and callback handling is unchanged from the pre-W7 tip.
+        the `StageScopedCallbacks` coordinator. When ``False`` no
+        coordinator is added and callback handling is left untouched.
         """
         return any(stage.callbacks is not None for stage in self.stages)
 
     @property
     def has_lr_scheduler(self) -> bool:
-        """Whether any stage overrides the LR-scheduler class (plan 15 W8) — the
+        """Whether any stage overrides the LR-scheduler class — the
         master switch for the per-stage `lr_scheduler`. When ``False`` every stage
-        uses the default per-stage OneCycleLR, bitwise-identical to the pre-W8 tip.
+        uses the default per-stage OneCycleLR.
         """
         return any(stage.lr_scheduler is not None for stage in self.stages)
 
@@ -180,20 +186,20 @@ class TrainingSchedule:
         """Whether the frozen set differs between any two consecutive stages —
         the condition under which DDP needs ``find_unused_parameters=True``
         (freeze/unfreeze flips break the reducer's fixed bucketing otherwise).
-        """  # noqa: DOC201
+        """
         masks = [frozenset(self.frozen_names(stage)) for stage in self.stages]
-        return any(a != b for a, b in zip(masks, masks[1:], strict=False))
+        return any(a != b for a, b in itertools.pairwise(masks))
 
     def frozen_names(self, stage: StageConfig) -> set[str]:
         """Resolve `stage`'s freeze spec to the set of frozen module names:
         `frozen` freezes those modules; `trainable` freezes their complement over
         `model.modules`; neither freezes nothing.
-        """  # noqa: DOC201
+        """
         if stage.trainable is not None:
             return set(self._module_names) - set(stage.trainable)
         return set(stage.frozen or ())
 
-    def _non_final_epoch_bounds(self, max_epochs: int) -> list[int]:
+    def _non_final_epoch_bounds(self) -> list[int]:
         """Cumulative epoch index at which each *non-final* stage ends (its
         explicit `epochs` summed left-to-right). The final stage owns everything
         from the last bound to `max_epochs`, so it is not represented here.
@@ -209,8 +215,12 @@ class TrainingSchedule:
         """The index of the stage that owns `epoch` (0-based). Non-final stages
         own ``[bound_{i-1}, bound_i)``; the final stage owns everything from the
         last bound onward (so any epochs past the explicit budgets run there).
-        """  # noqa: DOC201
-        for index, bound in enumerate(self._non_final_epoch_bounds(max_epochs)):
+        """
+        # `max_epochs` is accepted for symmetry with `stage_step_allocations`,
+        # which the same caller invokes with the same value; the final stage
+        # owning everything past the last bound makes it unnecessary here.
+        del max_epochs
+        for index, bound in enumerate(self._non_final_epoch_bounds()):
             if epoch < bound:
                 return index
         return len(self.stages) - 1
@@ -222,11 +232,11 @@ class TrainingSchedule:
         rounded at each non-final stage end and the final stage takes the exact
         remainder, so the allocations always sum to `total_steps`. A single-stage
         schedule returns ``[total_steps]`` unchanged (bitwise parity path).
-        """  # noqa: DOC201
+        """
         if not self.is_multi_stage:
             return [total_steps]
         allocations, prev = [], 0
-        for bound in self._non_final_epoch_bounds(max_epochs):
+        for bound in self._non_final_epoch_bounds():
             boundary_step = round(total_steps * bound / max_epochs)
             allocations.append(boundary_step - prev)
             prev = boundary_step
@@ -254,7 +264,7 @@ class TrainingSchedule:
                 raise ConfigError(
                     "training_schedule declares multiple epoch-delimited stages but "
                     f"trainer.max_epochs is {max_epochs} — staged training needs a finite "
-                    "positive max_epochs to allocate per-stage epochs/steps (plan D1)."
+                    "positive max_epochs to allocate per-stage epochs/steps."
                 )
             return
         *non_final, final = self.stages
@@ -263,7 +273,7 @@ class TrainingSchedule:
                 raise ConfigError(
                     f"training_schedule stage {stage.name!r} omits 'epochs' — only the final "
                     "stage may omit it (to take the remaining epochs); every earlier stage needs "
-                    "an explicit positive 'epochs' (plan D1)."
+                    "an explicit positive 'epochs'."
                 )
         explicit_sum = sum(s.epochs for s in self.stages if s.epochs is not None)
         if final.epochs is None:
@@ -273,18 +283,16 @@ class TrainingSchedule:
                     f"training_schedule over-allocates epochs: the explicit stages sum to "
                     f"{explicit_sum} but trainer.max_epochs is {max_epochs}, leaving no epochs "
                     f"for the final stage {final.name!r} (needs >= 1). Reduce stage epochs or "
-                    "raise trainer.max_epochs (plan D1)."
+                    "raise trainer.max_epochs."
                 )
         elif explicit_sum > max_epochs:
             raise ConfigError(
                 f"training_schedule over-allocates epochs: the stages sum to {explicit_sum} "
-                f"but trainer.max_epochs is {max_epochs} (plan D1)."
+                f"but trainer.max_epochs is {max_epochs}."
             )
 
     @classmethod
-    def from_config(
-        cls, raw: Mapping[str, Any], module_names: Sequence[str]
-    ) -> TrainingSchedule:
+    def from_config(cls, raw: Mapping[str, Any], module_names: Sequence[str]) -> TrainingSchedule:
         """Parse + validate a ``training_schedule`` config block (fail-loud).
 
         Expects ``{"stages": {name: {epochs, frozen|trainable, optimizer, lrs,
@@ -307,12 +315,12 @@ class TrainingSchedule:
         if not isinstance(raw, Mapping) or "stages" not in raw:
             raise ConfigError(
                 "training_schedule must be a mapping with a 'stages' key "
-                "(a dict of stage-name -> stage config; plan D1)."
+                "(a dict of stage-name -> stage config)."
             )
         if extra := set(raw) - {"stages"}:
             raise ConfigError(
                 f"training_schedule has unknown top-level key(s) {sorted(extra)} — only "
-                "'stages' is supported (plan D1)."
+                "'stages' is supported."
             )
         raw_stages = raw["stages"]
         if not isinstance(raw_stages, Mapping):
@@ -333,15 +341,15 @@ class TrainingSchedule:
     @classmethod
     def desugar_legacy(cls, module_names: Sequence[str]) -> TrainingSchedule:
         """The single-`fit`-stage schedule a plain (no `training_schedule`) config
-        desugars to (plan D2): one stage, no freeze, no per-stage optimizer/LR
-        override — so `configure_optimizers` falls back to the top-level
-        ``lrs:``/``optimizer:`` and training is bitwise-identical to legacy code.
-        """  # noqa: DOC201
+        desugars to: one stage, no freeze, no per-stage optimizer/LR override —
+        so `configure_optimizers` falls back to the top-level
+        ``lrs:``/``optimizer:``.
+        """
         return cls([StageConfig(name="fit")], module_names)
 
 
 def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
-    """Parse + validate a single stage config into a `StageConfig`."""  # noqa: DOC201, DOC501
+    """Parse + validate a single stage config into a `StageConfig`."""
     if not isinstance(cfg, Mapping):
         raise ConfigError(
             f"training_schedule stage {name!r} must be a mapping of stage fields "
@@ -350,13 +358,13 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
     if unknown := set(cfg) - _STAGE_FIELDS:
         raise ConfigError(
             f"training_schedule stage {name!r} has unknown key(s) {sorted(unknown)} — "
-            f"valid keys are {sorted(_STAGE_FIELDS)} (plan D1)."
+            f"valid keys are {sorted(_STAGE_FIELDS)}."
         )
     frozen, trainable = cfg.get("frozen"), cfg.get("trainable")
     if frozen is not None and trainable is not None:
         raise ConfigError(
             f"training_schedule stage {name!r} sets BOTH 'frozen' and 'trainable' — give at "
-            "most one (the other is its complement over model.modules; plan D1)."
+            "most one (the other is its complement over model.modules)."
         )
     frozen_t = _validate_names(name, "frozen", frozen, module_names)
     trainable_t = _validate_names(name, "trainable", trainable, module_names)
@@ -372,7 +380,7 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
             raise ConfigError(
                 f"training_schedule stage {name!r} sets both 'lr_scheduler' and OneCycle-only "
                 f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
-                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs' (W8)."
+                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs'."
             )
     return StageConfig(
         name=name,
@@ -395,7 +403,7 @@ def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig
     mapping that must NOT set `optimizer` (injected at the boundary); `interval` is
     ``epoch``/``step``; `frequency` a positive int; `monitor` a non-empty string.
     Import + the metric-driven-⇒-monitor rule are enforced at fit start.
-    """  # noqa: DOC201, DOC501
+    """
     raw = cfg.get("lr_scheduler")
     if raw is None:
         return None
@@ -407,7 +415,7 @@ def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig
     if unknown := set(raw) - _LR_SCHEDULER_FIELDS:
         raise ConfigError(
             f"training_schedule stage {stage!r} 'lr_scheduler' has unknown key(s) "
-            f"{sorted(unknown)} — valid keys are {sorted(_LR_SCHEDULER_FIELDS)} (plan 15 W8)."
+            f"{sorted(unknown)} — valid keys are {sorted(_LR_SCHEDULER_FIELDS)}."
         )
     class_path = raw.get("class_path")
     if not isinstance(class_path, str) or not class_path.strip():
@@ -424,7 +432,7 @@ def _parse_lr_scheduler(stage: str, cfg: Mapping[str, Any]) -> LRSchedulerConfig
     if isinstance(init_args, Mapping) and "optimizer" in init_args:
         raise ConfigError(
             f"training_schedule stage {stage!r} 'lr_scheduler.init_args' must not set 'optimizer' "
-            "— the freshly-rebuilt stage optimizer is injected automatically (plan 15 W8)."
+            "— the freshly-rebuilt stage optimizer is injected automatically."
         )
     interval = raw.get("interval", "epoch")
     if interval not in {"epoch", "step"}:
@@ -461,7 +469,7 @@ def _parse_stage_callbacks(
     ``class_path`` and, if present, a mapping ``init_args``. Import/instantiation
     validation of the class is deferred to fit start (`StageScopedCallbacks.setup`),
     so a bad path fails before training rather than at the stage boundary.
-    """  # noqa: DOC201, DOC501
+    """
     raw = cfg.get("callbacks")
     if raw is None:
         return None
@@ -503,7 +511,7 @@ def _parse_early_stop(stage: str, cfg: Mapping[str, Any]) -> EarlyStopConfig | N
     `EarlyStopConfig` (fail-loud); ``None`` when the stage declares none. `monitor`
     is required and non-empty; `mode` is `min`/`max`; `patience` a positive int;
     `min_delta` a non-negative number; `check_finite` a bool.
-    """  # noqa: DOC201, DOC501
+    """
     raw = cfg.get("early_stop")
     if raw is None:
         return None
@@ -515,7 +523,7 @@ def _parse_early_stop(stage: str, cfg: Mapping[str, Any]) -> EarlyStopConfig | N
     if unknown := set(raw) - _EARLY_STOP_FIELDS:
         raise ConfigError(
             f"training_schedule stage {stage!r} 'early_stop' has unknown key(s) {sorted(unknown)} "
-            f"— valid keys are {sorted(_EARLY_STOP_FIELDS)} (plan 12 W7)."
+            f"— valid keys are {sorted(_EARLY_STOP_FIELDS)}."
         )
     monitor = raw.get("monitor")
     if not isinstance(monitor, str) or not monitor.strip():
@@ -561,7 +569,7 @@ def _validate_names(
 ) -> tuple[str, ...] | None:
     """Coerce a freeze name list to a tuple, rejecting non-list values and names
     that are not `model.modules` keys.
-    """  # noqa: DOC201, DOC501
+    """
     if value is None:
         return None
     if isinstance(value, str) or not isinstance(value, Sequence):
@@ -573,13 +581,13 @@ def _validate_names(
     if unknown := [n for n in names if n not in module_names]:
         raise ConfigError(
             f"training_schedule stage {stage!r} '{field}' names unknown module(s) {unknown} — "
-            f"they must be keys of model.modules ({sorted(module_names)}; plan D1)."
+            f"they must be keys of model.modules ({sorted(module_names)})."
         )
     return names
 
 
 def _as_positive_int(stage: str, field: str, value: Any) -> int | None:
-    """Validate an optional positive-integer field."""  # noqa: DOC201, DOC501
+    """Validate an optional positive-integer field."""
     result = _as_int(stage, field, value)
     if result is not None and result < 1:
         raise ConfigError(
@@ -590,7 +598,7 @@ def _as_positive_int(stage: str, field: str, value: Any) -> int | None:
 
 
 def _as_int(stage: str, field: str, value: Any) -> int | None:
-    """Validate an optional integer field (rejects bool and non-int)."""  # noqa: DOC201, DOC501
+    """Validate an optional integer field (rejects bool and non-int)."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -601,19 +609,19 @@ def _as_int(stage: str, field: str, value: Any) -> int | None:
 
 
 def _check_orders(stages: list[StageConfig]) -> None:
-    """Reject duplicate explicit `order` values."""  # noqa: DOC501
+    """Reject duplicate explicit `order` values."""
     explicit = [s.order for s in stages if s.order is not None]
     if len(set(explicit)) != len(explicit):
         raise ConfigError(
             "training_schedule has duplicate explicit 'order' values — each pinned stage order "
-            f"must be unique (got {sorted(explicit)}; plan D1)."
+            f"must be unique (got {sorted(explicit)})."
         )
 
 
 def _order_stages(stages: list[StageConfig]) -> list[StageConfig]:
     """Order stages by explicit `order`, falling back to declaration index; the
     stable sort keeps declaration order among unpinned stages.
-    """  # noqa: DOC201
+    """
     keyed = sorted(
         enumerate(stages),
         key=lambda item: item[1].order if item[1].order is not None else item[0],
@@ -622,12 +630,12 @@ def _order_stages(stages: list[StageConfig]) -> list[StageConfig]:
 
 
 # ---------------------------------------------------------------------------
-# Reducer-safe freeze semantics (plan 06 / W6).
+# Reducer-safe freeze semantics.
 #
 # A module frozen in the INITIAL stage via ``requires_grad=False`` applied BEFORE
 # DDP wraps is permanently excluded from the reducer's fixed managed-parameter
 # set; a later unfreeze never registers a reducer hook, so its grads stay
-# rank-local and ranks silently desync (W5 exp-06 G5d defect). The reducer-safe
+# rank-local and ranks silently desync. The reducer-safe
 # freeze mode fixes this by NEVER dropping ``requires_grad`` on a schedule-managed
 # param that the schedule may later unfreeze under a distributed strategy — every
 # managed param stays in the reducer at wrap. "Frozen" is then enforced by
@@ -730,7 +738,7 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-stage early stopping (plan 12 / W7).
+# Per-stage early stopping.
 #
 # The tracker below owns the monitor/patience/min_delta arithmetic for the ACTIVE
 # stage so it is unit-testable in isolation and the `TrainingScheduleCallback`
@@ -742,7 +750,7 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 
 
 class EarlyStopTracker:
-    """Live early-stop counters for the ACTIVE stage (plan 12 W7). Mutable runtime
+    """Live early-stop counters for the ACTIVE stage. Mutable runtime
     state, checkpointed for exact mid-stage resume and reset at each stage entry.
     Held on the `SaltModule`; the callback drives it but stays stateless.
     """
@@ -771,7 +779,7 @@ class EarlyStopTracker:
         bool
             ``True`` iff the stage's early-stop criterion is now met.
         """
-        import math  # noqa: PLC0415
+        import math
 
         self.check_count += 1
         if self.config.check_finite and not math.isfinite(value):
@@ -786,7 +794,7 @@ class EarlyStopTracker:
     def _improved(self, value: float) -> bool:
         """Whether `value` improves on `best_score` by at least `min_delta` under
         the configured `mode` (`min`: lower is better; `max`: higher is better).
-        """  # noqa: DOC201
+        """
         assert self.best_score is not None
         if self.config.mode == "min":
             return value < self.best_score - self.config.min_delta
@@ -810,9 +818,7 @@ class EarlyStopTracker:
         }
 
     @classmethod
-    def from_state_dict(
-        cls, config: EarlyStopConfig, state: Mapping[str, Any]
-    ) -> EarlyStopTracker:
+    def from_state_dict(cls, config: EarlyStopConfig, state: Mapping[str, Any]) -> EarlyStopTracker:
         """Rebuild a tracker from a checkpointed `state_dict` under `config`.
 
         Returns
@@ -832,7 +838,7 @@ def boundary_record(
     stage_name: str, stage_index: int, global_step: int, epoch: int, reason: str
 ) -> dict[str, Any]:
     """A completed stage-transition record appended to the checkpoint at each
-    boundary (plan 12 W7). `reason` is ``"epochs"`` (the stage hit its epoch cap)
+    boundary. `reason` is ``"epochs"`` (the stage hit its epoch cap)
     or ``"early_stop"`` (its criterion triggered); the records let a resume
     reconstruct the data-dependent stage position rather than epoch arithmetic.
 

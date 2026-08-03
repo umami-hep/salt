@@ -40,15 +40,17 @@ TRACK_SELECTIONS = (
 
 
 def _live_known_reduces() -> tuple[str, ...]:
-    """Registered reduce names, from the live registry (deferred import keeps this module torch-free)."""
-    from salt.onnx.reduces import registered_reduces  # noqa: PLC0415 - deferred torch seam
+    """Registered reduce names, from the live registry (the deferred import keeps this
+    module torch-free).
+    """
+    from salt.onnx.reduces import registered_reduces
 
     return registered_reduces()
 
 
 def _live_per_token_reduces() -> tuple[str, ...]:
     """Registered per-token reduce names, from the live registry (deferred import)."""
-    from salt.onnx.reduces import per_token_reduces  # noqa: PLC0415 - deferred torch seam
+    from salt.onnx.reduces import per_token_reduces
 
     return per_token_reduces()
 
@@ -227,12 +229,12 @@ def validate_model_name(name: str) -> str:
         On an empty name or one containing ``_``/``-``.
     """
     if not name:
-        raise ConfigError("export.model_name must be a non-empty string (design §7)")
+        raise ConfigError("export.model_name must be a non-empty string")
     if "_" in name or "-" in name:
         raise ConfigError(
             f"export.model_name {name!r} must not contain underscores or dashes "
             "(Athena naming restriction, v1 to_onnx.py:169-170) — the run 'name:' is "
-            "unrestricted; only the export name is validated (design §7)"
+            "unrestricted; only the export name is validated"
         )
     return name
 
@@ -252,7 +254,7 @@ def stream_of_input_port(port: str) -> str:
     if len(parts) != 2 or parts[0] != "inputs":
         raise ConfigError(
             f"export input port {port!r} must be a dataset-produced 'inputs.<stream>' key "
-            "(design §7: every export.inputs port is a dataset-produced key)"
+            "(every export.inputs port is a dataset-produced key)"
         )
     return parts[1]
 
@@ -365,12 +367,12 @@ def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
         if entry.name is not None:
             raise ConfigError(
                 f"export input {entry.port!r}: alias entries bind from {entry.alias!r} and "
-                "consume no positional ONNX input — drop 'name' (design §7 alias semantics)"
+                "consume no positional ONNX input — drop 'name'"
             )
         if entry.sequence or entry.dyn_axis is not None:
             raise ConfigError(
-                f"export input {entry.port!r}: sequence alias entries are not supported in M4 "
-                "(the alias mechanism serves the GN3 global [B, F] vector, design §6.6/§7)"
+                f"export input {entry.port!r}: sequence alias entries are not supported "
+                "(the alias mechanism serves the GN3 global [B, F] vector)"
             )
         return replace(entry, athena_name=None)
     if entry.dyn_axis is not None and not entry.sequence:
@@ -405,5 +407,5 @@ def _check_input_uniqueness(inputs: list[ExportInput]) -> None:
         if entry.alias is not None and entry.alias not in seen_ports:
             raise ConfigError(
                 f"export input {entry.port!r}: alias source {entry.alias!r} is not another "
-                "export input port — the alias binds from a declared input's tensor (design §7)"
+                "export input port — the alias binds from a declared input's tensor"
             )

@@ -240,7 +240,7 @@ def _check_incompatibilities(modules: Mapping[str, GraphModule]) -> None:
                     f"module {name!r} ({type(module).__name__}) is incompatible with "
                     f"{other_name!r} ({type(other).__name__}): "
                     f"{type(module).__name__}.incompatible_with = {tuple(forbidden)!r} "
-                    "(plan-25 Rev-2 — e.g. staging a VDS copies h5py pointers, not data); "
+                    "(e.g. staging a VDS copies h5py pointers, not data); "
                     "drop one of them from data.modules"
                 )
 
@@ -312,7 +312,7 @@ def deadcode(
     # eval — info-level, never promoted by --strict. All other modes keep
     # the warning default.
     pruned_suffix = (
-        " (narrowed out of the writer-declared export surface — legitimate, M4.5 amendment §4)"
+        " (narrowed out of the writer-declared export surface — legitimate)"
         if mode == Mode.ONNX
         else ""
     )
@@ -334,9 +334,7 @@ def deadcode(
             "*",
             f"module pruned in mode {mode.name}: {res.pruned[name]}{pruned_suffix}",
             severity=(
-                "info"
-                if (mode == Mode.ONNX or _is_conversion_producer(name))
-                else "warning"
+                "info" if (mode == Mode.ONNX or _is_conversion_producer(name)) else "warning"
             ),
         )
         for name in sorted(res.pruned)
@@ -345,11 +343,11 @@ def deadcode(
     preds_in_test_reason = (
         f"produced but never consumed in mode {mode.name} — an unconsumed preds.* port in "
         "TEST means a computed prediction is never persisted; wire a writer or drop the "
-        "port (design §4.2)"
+        "port"
     )
     preds_in_training_reason = (
         f"produced but never consumed in mode {mode.name} "
-        "(normal: no configured metric callback consumes this prediction — design §3.3)"
+        "(normal: no configured metric callback consumes this prediction)"
     )
     for name, node in res.alive.items():
         used = consumed.get(name, set())
@@ -518,7 +516,7 @@ def _active_sources(sources: NestedSpec, mode: Mode) -> dict[str, TensorSpec]:
     for key, spec in flatten_spec(sources).items():
         if _has_wildcard(key):
             raise ConfigError(
-                f"source key {key!r} may not contain wildcards — sources are concrete (design §2.2)"
+                f"source key {key!r} may not contain wildcards — sources are concrete"
             )
         if spec.active_in(mode):
             src[key] = spec
@@ -541,21 +539,21 @@ def _collect_nodes(
         if name in {SOURCES, SINKS}:
             raise ConfigError(
                 f"module instance name {name!r} collides with a reserved planner sentinel "
-                f"({SOURCES!r}/{SINKS!r}) — rename the module (design §3.1)"
+                f"({SOURCES!r}/{SINKS!r}) — rename the module"
             )
         if not isinstance(module, GraphModule):
             raise ConfigError(
                 f"module {name!r} ({type(module).__name__}) does not implement the GraphModule "
-                "protocol (name + declare_io) (design §2.2)"
+                "protocol (name + declare_io)"
             )
         if module.name != name:
             raise ConfigError(
                 f"module mapped at key {name!r} declares name={module.name!r} — instance names "
-                "must match their config keys (design §2.2)"
+                "must match their config keys"
             )
         io = face.getter(module)
         # framework-internal seam for "only framework-shipped producers may
-        # declare patterns": the attribute is not user API. TODO(M2): bind
+        # declare patterns": the attribute is not user API. TODO: bind
         # the capability to shipped code (module-path check or a framework
         # registry) so user classes cannot grant it to themselves.
         allow_wildcards = bool(getattr(module, "allow_wildcards", False))
@@ -566,7 +564,7 @@ def _collect_nodes(
             if _has_wildcard(key):
                 raise ConfigError(
                     f"module {name!r} declares wildcard require {key!r} — only framework "
-                    "producers may declare patterns, and only in produces (design §2.2)"
+                    "producers may declare patterns, and only in produces"
                 )
             if face.gate(spec, mode):
                 requires[key] = spec
@@ -578,7 +576,7 @@ def _collect_nodes(
                     raise ConfigError(
                         f"module {name!r} declares wildcard produces {key!r} but is not a "
                         "framework wildcard producer (allow_wildcards is not set) — user "
-                        "modules may not declare wildcards (design §2.2)"
+                        "modules may not declare wildcards"
                     )
                 patterns[key] = spec
             else:
@@ -604,7 +602,7 @@ def _concrete_producers(
             if other is not None:
                 raise ConnectivityError(
                     f"[mode={mode.name}] key {key!r} has two producers: {other!r} and {name!r} "
-                    "— every bundle key must have exactly one producer (design §3.1)"
+                    "— every bundle key must have exactly one producer"
                 )
             producer_of[key] = name
     return producer_of
@@ -658,11 +656,11 @@ def _narrow_wildcards(
     mode: Mode,
     sink_origins: Mapping[str, str] | None = None,
 ) -> None:
-    """Narrow wildcard patterns against concrete demand (design §2.2 rules (a)-(d)).
+    """Narrow wildcard patterns against concrete demand.
 
-    Concrete producers beat wildcards (rule (a)); narrowed keys are
-    validated against `schema` when given (rule (d)); the result is written
-    into each node's `narrowed` dict and frozen into the plan (rule (c)).
+    Concrete producers beat wildcards; narrowed keys are validated against
+    `schema` when given; the result is written into each node's `narrowed`
+    dict and frozen into the plan.
     Raises `ConnectivityError` when two wildcard producers match one
     demanded key, or a narrowed key is not in the schema.
     """
@@ -680,7 +678,7 @@ def _narrow_wildcards(
                     raise ConnectivityError(
                         f"[mode={mode.name}] key {key!r} matches wildcard patterns of both "
                         f"{owner!r} and {name!r} — every bundle key must have exactly one "
-                        "producer (design §3.1)"
+                        "producer"
                     )
                 if schema is not None and key not in schema:
                     consumers = ", ".join(
@@ -691,7 +689,7 @@ def _narrow_wildcards(
                     raise ConnectivityError(
                         f"[mode={mode.name}] key {key!r} (demanded by {consumers}) is not in "
                         f"the declared schema — {name!r} can only serve schema-backed keys "
-                        f"(wildcard {pattern!r}, design §2.2 rule (d)).{hint}\n"
+                        f"(wildcard {pattern!r}).{hint}\n"
                         f"  fix: correct the key in the demanding module's config"
                     )
                 wildcard_owner[key] = name
@@ -738,7 +736,7 @@ def _build_edges(
                 raise KindError(
                     f"[mode={mode.name}] module {name!r} port {key!r} expects "
                     f"kind={spec.kind!r} but producer {producer!r} provides "
-                    f"kind={pspec.kind!r} (design §2.2)"
+                    f"kind={pspec.kind!r}"
                 )
             if unify:
                 _unify_edge(key, producer, name, pspec, spec, dims, mode)
@@ -852,7 +850,7 @@ def _check_wildcard_self_feed(nodes: dict[str, _Node], edges: list[Edge], mode: 
             chain = name + "".join(f" -({key})-> {module}" for key, module in path)
             raise CycleError(
                 f"[mode={mode.name}] wildcard producer {name!r}: narrowed outputs transitively "
-                f"feed its own inputs: {chain} (design §2.2 rule (b))"
+                f"feed its own inputs: {chain}"
             )
 
 
@@ -913,7 +911,7 @@ def _topo_order(res: _Resolution) -> list[str]:
         chain = _find_cycle(residual, _module_adjacency(res.edges, res.alive))
         raise CycleError(
             f"[mode={res.mode.name}] dependency cycle: {chain} — a module's outputs may not "
-            "feed its own inputs; cycles are always a config error (design §3.1)"
+            "feed its own inputs; cycles are always a config error"
         )
     return order
 
@@ -983,7 +981,7 @@ class _DimTable:
         if previous is not None and previous[0] != size:
             raise ShapeError(
                 f"[mode={self._mode.name}] symbolic dim {dim!r} is {previous[0]} at "
-                f"{previous[1]} but {size} at {endpoint} — conflicting sizes (design §2.2)"
+                f"{previous[1]} but {size} at {endpoint} — conflicting sizes"
             )
         if previous is None:
             self._size[root] = (size, endpoint)
@@ -1000,7 +998,7 @@ class _DimTable:
             raise ShapeError(
                 f"[mode={self._mode.name}] unifying {a!r} with {b!r} at {endpoint}: "
                 f"{a!r} is {size_a[0]} (from {size_a[1]}) but {b!r} is {size_b[0]} "
-                f"(from {size_b[1]}) — conflicting sizes (design §2.2)"
+                f"(from {size_b[1]}) — conflicting sizes"
             )
         self._parent[root_b] = root_a
         if size_a is None and size_b is not None:
@@ -1137,7 +1135,7 @@ def _check_primary_mode(mode: Mode) -> None:
         names = "/".join(m.name for m in PRIMARY_MODES)
         raise ConfigError(
             f"plans are compiled per primary mode ({names}); got {mode!r} — compile one plan "
-            "per mode (design §3.1)"
+            "per mode"
         )
 
 
@@ -1187,8 +1185,7 @@ def _check_all_modes_dead(
             raise AllModesDeadError(
                 f"module {name!r} ({type(module).__name__}) is dead in every mode ({names}): "
                 "no port is active, or its outputs reach no sink in any mode — a configured "
-                "module must do something; remove it or wire a consumer "
-                "(design §3.1, principle 10)"
+                "module must do something; remove it or wire a consumer"
             )
 
 

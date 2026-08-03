@@ -201,11 +201,7 @@ class MaskFormerTargets(Processor):
         # to different values would emit a [B, max_objects] array against a
         # declared [B, num_objects] shape. The bridge below only equalises
         # them when one is None, so guard the both-set case explicitly.
-        if (
-            num_objects is not None
-            and max_objects is not None
-            and num_objects != max_objects
-        ):
+        if num_objects is not None and max_objects is not None and num_objects != max_objects:
             raise ConfigError(
                 f"MaskFormerTargets: num_objects ({num_objects}) and max_objects "
                 f"({max_objects}) are both set but differ — num_objects is the decoder "

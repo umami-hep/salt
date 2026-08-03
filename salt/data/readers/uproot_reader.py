@@ -210,8 +210,7 @@ class UprootReader(Reader):
         if self.unroll is not None:
             if self.unroll not in self.groups:
                 raise ConfigError(
-                    f"unroll={self.unroll!r} names no configured group (have "
-                    f"{sorted(self.groups)})"
+                    f"unroll={self.unroll!r} names no configured group (have {sorted(self.groups)})"
                 )
             if self.groups[self.unroll].jagged:
                 raise ConfigError(
@@ -350,9 +349,9 @@ class UprootReader(Reader):
         """Stage all resolved ROOT files into `root` (keyed by a source-path digest) and
         re-source onto the staged file (single) or subdirectory (many).
         """
-        import hashlib  # noqa: PLC0415 - opt-in staging path only
+        import hashlib
 
-        from salt.data.readers.vds import stage_file  # noqa: PLC0415 - opt-in staging path only
+        from salt.data.readers.vds import stage_file
 
         root = Path(root)
         srcs = self.sources()
@@ -388,7 +387,7 @@ class UprootReader(Reader):
     def _array_dtype_name(self, arr: Any) -> str:
         """Native-endian numpy dtype name for a (possibly ragged) awkward array."""
         self._require_deps()
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
 
         flat = ak.flatten(arr, axis=None)
         dtype = np.asarray(ak.to_numpy(flat)).dtype
@@ -468,8 +467,8 @@ class UprootReader(Reader):
         if self._table is not None:
             return
         self._require_deps()
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
-        import uproot  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
+        import uproot
 
         files = self._resolve_files()
         cut_fields = self.cuts.fields() if self.cuts is not None else ()
@@ -583,7 +582,7 @@ class UprootReader(Reader):
         ``orig_counts`` is the unroll group's per-entry object count, and the row
         scalars are that group's branches flattened ``[entry][obj] -> [obj]``.
         """
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
 
         row_scalars: dict[str, np.ndarray] = {}
         need_scalars = self.cuts is not None
@@ -654,8 +653,8 @@ class UprootReader(Reader):
         collection level away first (``[entry][obj][const] -> [row][const]``);
         ``unroll=None`` reads per-entry constituents directly.
         """
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
-        import uproot  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
+        import uproot
 
         cfg = self.groups[stream]
         branch = (
@@ -737,8 +736,8 @@ class UprootReader(Reader):
         Linked streams dereference the target container by ``m_persIndex`` per row.
         """
         self._require_deps()
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
-        import uproot  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
+        import uproot
 
         assert self._table is not None
         cfg = self.groups[stream]
@@ -780,7 +779,7 @@ class UprootReader(Reader):
         """Read one normal branch over entry block ``[e0, e1)`` as ``[row]`` / ``[row][const]``
         (flattening the outer collection level away when unrolling).
         """
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
 
         arr = t[self._on_disk(cfg, cfg.branches[f])].array(
             entry_start=e0, entry_stop=e1, library="ak"
@@ -796,7 +795,7 @@ class UprootReader(Reader):
         gathers each demanded target column by index, and returns ``[row][const]``
         awkward arrays (entries flattened away) ready for the kept-row ``sel``.
         """
-        import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+        import awkward as ak
 
         links = t[self._link_branch(cfg)].array(
             entry_start=e0, entry_stop=e1, library="ak"
@@ -870,15 +869,13 @@ class UprootReader(Reader):
     def __getstate__(self) -> dict[str, Any]:
         """Drop transient probe state so the reader pickles under spawn contexts."""
         state = self.__dict__.copy()
-        state.update(
-            {
-                "_table": None,
-                "_num_rows": None,
-                "_mult": {},
-                "_read_fields": {},
-                "schema": None,
-            }
-        )
+        state.update({
+            "_table": None,
+            "_num_rows": None,
+            "_mult": {},
+            "_read_fields": {},
+            "schema": None,
+        })
         return state
 
 
@@ -910,7 +907,7 @@ def _check_single_pers_key(pers_key: Any | None, link_branch: str) -> None:
     """
     if pers_key is None:
         return
-    import awkward as ak  # noqa: PLC0415 - optional reader extra (lazy)
+    import awkward as ak
 
     flat = ak.to_numpy(ak.flatten(pers_key, axis=None))
     nonzero = np.unique(flat[flat != 0]) if flat.size else np.empty(0)

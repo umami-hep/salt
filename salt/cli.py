@@ -26,6 +26,7 @@ import yaml
 
 from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, GraphError
 from salt.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
+from salt.graph.render import dot_source, plan_table
 from salt.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
@@ -40,7 +41,6 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.model.bind import resolve_bind_schema
-from salt.graph.render import dot_source, plan_table
 from salt.schema import dump_schema, load_schema, save_schema
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]
@@ -183,7 +183,7 @@ def load_config(
             raise ConfigError(
                 f"repeated -c is supported for salt trainer configs only (deep-merged "
                 f"left-to-right, the fit/export stacking semantics) — none of "
-                f"{[str(p) for p in paths]} has top-level model:/data: blocks; M1 toy "
+                f"{[str(p) for p in paths]} has top-level model:/data: blocks; toy "
                 "graph configs take exactly one -c"
             )
         return _load_fit_config(paths, set_overrides)
@@ -192,14 +192,13 @@ def load_config(
         return _load_fit_config(paths, set_overrides)
     if set_overrides:
         raise ConfigError(
-            "--set overrides apply to salt trainer configs only "
-            f"({path} is an M1 toy graph config)"
+            f"--set overrides apply to salt trainer configs only ({path} is a toy graph config)"
         )
     modules_raw = raw.get("modules")
     if not isinstance(modules_raw, dict) or not modules_raw:
         raise ConfigError(
             f"config file {path} must declare either a salt trainer config "
-            "(top-level 'model:'/'data:' blocks, the §5.1 fit surface) or an M1 toy graph "
+            "(top-level 'model:'/'data:' blocks, the fit surface) or a toy graph "
             "config (a non-empty 'modules' mapping of name -> {class_path, init_args})"
         )
     modules: dict[str, GraphModule] = {}
@@ -236,7 +235,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     """
     # local import: the trainer surface (lightning/jsonargparse) is heavy
     # and circular with this module (salt.main dispatches to cli.main)
-    from salt.data.processors.labels import Labels  # noqa: PLC0415 - heavy/circular (docstring)
+    from salt.data.processors.labels import Labels
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
@@ -253,10 +252,9 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         raise ConfigError(
             f"config {' + '.join(str(p) for p in paths)}: module name(s) {overlap} appear "
             "in BOTH data.modules and model.modules — instance names must be unique "
-            "across the pipeline graph (design §2.2)"
+            "across the pipeline graph"
         )
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
-    writer_cb = None  # writers: block removed; WriterCallback no longer assembled
     writer_sink_cb = _static_writer_sink_callback(cli)
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
     # fold every callbacks-level renderable sink NODE into the planning module dict
@@ -270,7 +268,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     # the export contract lives on the sink; fold the deprecated top-level
     # export: block onto it through the SAME seam `salt export` uses, so the
     # static render and the exporter never disagree about either home.
-    from salt.onnx.export import _merge_export_alias  # noqa: PLC0415 - heavy/circular
+    from salt.onnx.export import _merge_export_alias
 
     onnx_alias_error: str | None = None
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
@@ -296,7 +294,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
         if node.name in modules:
             raise ConfigError(
                 f"sink node name {node.name!r} collides with a pipeline module — instance "
-                "names must be unique across the graph (design §2.2); rename the callback key"
+                "names must be unique across the graph; rename the callback key"
             )
         modules[node.name] = node
     fitval_callbacks = _static_fitval_callbacks(cli)
@@ -309,14 +307,14 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             # only the callbacks-level sink path (writer_sink_cb / sink_node)
             # drives TEST sinks now.
             try:
-                if sink_node is not None:
-                    # a renderable sink NODE anchors ALL its demand via its declared
-                    # requires (folded into `modules` above) — no flat sinks needed;
-                    # its terminal-consumer demand keeps the producers (and
-                    # transitively their preds.*) alive.
-                    keys = []
-                else:
-                    keys = list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
+                # A renderable sink NODE anchors ALL its demand via its declared
+                # requires (folded into `modules` above) — no flat sinks needed;
+                # its terminal-consumer demand keeps the producers (and
+                # transitively their preds.*) alive. Without one, fall back to
+                # the base TEST anchor.
+                keys = (
+                    [] if sink_node is not None else list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
+                )
                 if writer_sink_cb is not None and sink_node is None:
                     # a non-node persistence sink (duck-typed writer_demand
                     # only): fold its writer_demand into the flat
@@ -353,8 +351,8 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 mode_warnings[mode] = (
                     "the config declares no export contract — the OnnxExportSink names the "
                     "outputs, but its inputs:/model_name: were NOT checked; declare the "
-                    "export-only half on the sink (design §5.1, §7) so `salt graph validate "
-                    "--mode onnx` gates everything `salt export` will trace"
+                    "export-only half on the sink so `salt graph validate --mode onnx` gates "
+                    "everything `salt export` will trace"
                 )
         elif mode & Mode.TRAINING and fitval_callbacks:
             # the static half of the FIT/VAL-sink contract: configured metrics
@@ -367,7 +365,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 )
                 demand = model._callback_demand(mode, fitval_callbacks)  # noqa: SLF001 - same-package adapter
                 # callback-demanded dataset-namespace keys (labels/masks/meta)
-                # are FIT/VAL sinks too — their producers stay alive (§3.1)
+                # are FIT/VAL sinks too — their producers stay alive
                 keys.extend(key for key in demand if key not in keys)
                 sink_origins[mode] = dict(demand)
             except ConfigError as err:
@@ -377,8 +375,8 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             if mode is Mode.ONNX:
                 mode_warnings[mode] = (
                     "the config declares no OnnxExportSink — the ONNX contract was NOT checked "
-                    "(sinks fall back to every preds.* key); since plan-29 W4 the ONNX output "
-                    "manifest is declared by an OnnxExportSink (callbacks.onnx_export) naming "
+                    "(sinks fall back to every preds.* key); the ONNX output manifest is "
+                    "declared by an OnnxExportSink (callbacks.onnx_export) naming "
                     "the conversion outputs.* leaves, so `salt graph validate --mode onnx` "
                     "gates what `salt export` will trace"
                 )
@@ -410,8 +408,8 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
     do). Returns the constructed `SaltCLI` (nothing executed, no data
     touched); raises `ConfigError` on a parse/instantiate failure.
     """
-    from salt.config_utils import disable_logger_in_config  # noqa: PLC0415
-    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (module docstring)
+    from salt.config_utils import disable_logger_in_config
+    from salt.main import SaltCLI
 
     args: list[str] = []
     for path in paths:
@@ -460,7 +458,7 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
     `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
     sinks.
     """
-    from salt.outputs import is_test_persistence_sink, iter_sinks  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import is_test_persistence_sink, iter_sinks
 
     # the SAME registry and the SAME selector the runtime uses
     # (`SaltModule._attached_writer`), so the static render and the real run
@@ -483,7 +481,7 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
     ``salt graph plot --mode onnx`` renders it and keeps the folded conversion
     nodes alive.
     """
-    from salt.outputs import OnnxExportSink, iter_sinks  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import OnnxExportSink, iter_sinks
 
     sinks = iter_sinks(getattr(cli, "trainer", None))
     return next((sink for sink in sinks if isinstance(sink, OnnxExportSink)), None)
@@ -494,7 +492,7 @@ def _static_export_model_name(export_sink: Any, run_name: str) -> str:
     ``model_name`` if set, else the sanitised run name — matching `salt export`'s
     own default.
     """
-    from salt.onnx.config import sanitised_model_name  # noqa: PLC0415 - heavy/circular
+    from salt.onnx.config import sanitised_model_name
 
     name = getattr(export_sink, "model_name", None) if export_sink is not None else None
     return name or sanitised_model_name(run_name)
@@ -676,16 +674,16 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if cfg.schema is None:
         warnings.append(
             "field spellings cannot be checked statically (no 'schema:' in the config); "
-            "a misspelled key will fail at the first batch (design §2.6)"
+            "a misspelled key will fail at the first batch"
         )
     if cfg.reader is not None:
         # default-on class-names <-> schema-attrs cross-check (set AND order);
         # raises ConfigError -> formatted by main()
-        from salt.model.saltmodule import check_class_names  # noqa: PLC0415 - heavy/circular
+        from salt.model.saltmodule import check_class_names
 
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
-            print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order (§2.6)")
+            print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order")
     if cfg.model_modules is not None:
         # muP routing validator: apply_to naming a module without a mup init_arg
         # errors; a mup:true module outside apply_to warns. The same
@@ -693,7 +691,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # `salt graph validate` findings (warnings promotable under --strict).
         # The hard errors would already abort the parse above; this is the
         # first-class CI check + the warning capture.
-        from salt.model.saltmodule import validate_mup_routing  # noqa: PLC0415 - heavy/circular
+        from salt.model.saltmodule import validate_mup_routing
 
         with stdlib_warnings.catch_warnings(record=True) as caught:
             stdlib_warnings.simplefilter("always")
@@ -706,14 +704,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if normalised is not None:
             print(
                 f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
-                "init_arg, no mup:true module left out (§3.4)"
+                "init_arg, no mup:true module left out"
             )
         # edge bind-time validators: edge-stream-first + EdgeAttention-backend
         # forcing. The same `validate_edge_port` SaltModule construction runs;
         # surfaced here as a first-class CI check (these are hard errors — they
         # would already abort the parse above; this captures the OK line / the
         # error message for the validate report).
-        from salt.model.saltmodule import validate_edge_port  # noqa: PLC0415 - heavy/circular
+        from salt.model.saltmodule import validate_edge_port
 
         try:
             n_edge = validate_edge_port(cfg.model_modules)
@@ -723,7 +721,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if n_edge:
             print(
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
-                "the attention backend is edge-compatible (no silent flash bypass; §6.7)"
+                "the attention backend is edge-compatible (no silent flash bypass)"
             )
     # data-free module preflights: duck-typed `preflight()` checks file-backed
     # materialise sources (e.g. the Normaliser norm dict). Warning-level here —
@@ -762,8 +760,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
             bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
             bucket.append(line)
-        # cfg.writers is always None (WriterCallback removed); the
-        # validate_specs block that used it is removed here.
+        # cfg.writers is always None (no WriterCallback), so there is no
+        # writer-spec cross-check to run here.
     for info in infos:
         print(f"info: {info}")
     for warning in warnings:
@@ -771,7 +769,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     for error in errors:
         print(f"ERROR: {error}", file=sys.stderr)
     if errors:
-        return _fail(f"{len(errors)} error-level deadcode finding(s) (design §4.2)")
+        return _fail(f"{len(errors)} error-level deadcode finding(s)")
     if warnings and args.strict:
         return _fail(f"--strict: {len(warnings)} warning(s) promoted to errors")
     return 0
@@ -860,7 +858,7 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
         print(
             "note: this is the dataset-fed STATIC view of the ONNX graph (reader/features "
             "included, no export reduces). The traced export graph is rendered to "
-            "plan_onnx.txt next to network.onnx by `salt export` (design §4.4)."
+            "plan_onnx.txt next to network.onnx by `salt export`."
         )
 
 
@@ -1022,10 +1020,7 @@ def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
     if consumers:
         print(f"  consumers: {', '.join(consumers)}")
     else:
-        print(
-            f"  consumers: none — dead output in mode {mode.name} "
-            "(see salt graph deadcode, design §4.2)"
-        )
+        print(f"  consumers: none — dead output in mode {mode.name} (see salt graph deadcode)")
     return True
 
 
@@ -1062,7 +1057,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
         if mode in active_modes and name in pruned:
             fix = (
                 f"  fix: add a sink or consumer that demands {key!r} in mode {mode.name}, "
-                "or remove the module (design §3.1)"
+                "or remove the module"
             )
             lines.extend((
                 f"  produced by {name!r}, but {name!r} is demand-pruned: {pruned[name]}",
@@ -1073,14 +1068,13 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
             mode_names = "/".join(m.name for m in active_modes)
             lines.append(
                 f"  {name!r} produces {key!r} only in mode(s) {mode_names} — it is "
-                f"mode-gated out of {mode.name} (design §2.2)"
+                f"mode-gated out of {mode.name}"
             )
             explained = True
     for name, pattern in sorted(set(wildcard_hits)):
         lines.append(
             f"  matches wildcard {pattern!r} of {name!r}, but nothing demands {key!r} in "
-            f"mode {mode.name} — wildcard producers only materialise demanded keys "
-            "(design §2.2)"
+            f"mode {mode.name} — wildcard producers only materialise demanded keys"
         )
         explained = True
     for (name, pattern), active_modes in sorted(gated_wildcards.items()):
@@ -1089,7 +1083,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
         mode_names = "/".join(m.name for m in active_modes)
         lines.append(
             f"  matches wildcard {pattern!r} of {name!r}, which is active only in mode(s) "
-            f"{mode_names} — it is mode-gated out of {mode.name} (design §2.2)"
+            f"{mode_names} — it is mode-gated out of {mode.name}"
         )
         explained = True
     src_flat = flatten_spec(cfg.sources)
@@ -1112,6 +1106,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
 # graph resolve [--annotate]
 # ---------------------------------------------------------------------------
 
+
 def _cmd_resolve(args: argparse.Namespace) -> int:
     """``salt graph resolve``: the writer-derived output manifest, eval + ONNX.
     Prints the assembled manifest; with ``--annotate``, writes it into the
@@ -1127,12 +1122,12 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
     if not any(isinstance(raw, dict) and ("model" in raw or "data" in raw) for raw in raws):
         return _fail(
             "salt graph resolve needs a salt trainer config (top-level model:/data: "
-            "blocks) — toy graph configs have no writers block (M4.5 unified manifest)"
+            "blocks) — toy graph configs have no writers block"
         )
-    # the WriterCallback-based manifest (writers.modules) was removed.
-    # `salt graph resolve` no longer has a manifest to derive.
+    # there is no WriterCallback-based manifest (writers.modules) left for
+    # `salt graph resolve` to derive.
     return _fail(
-        "salt graph resolve is no longer supported (W6c removal): the writers.modules "
+        "salt graph resolve is no longer supported: the writers.modules "
         "manifest block was removed; the eval columns and ONNX outputs are now declared "
         "by the outputs: section + OnnxExportSink — inspect those directly "
         "(see gn2v2-dummy.yaml for the canonical config pattern)"
@@ -1169,7 +1164,7 @@ def _add_config_arg(parser: argparse.ArgumentParser) -> None:
         "--config",
         required=True,
         action="append",
-        help="config YAML (salt trainer config or M1 toy graph). Repeatable: trainer "
+        help="config YAML (salt trainer config or toy graph). Repeatable: trainer "
         "configs deep-merge left-to-right (the salt fit/export stacking semantics); "
         "toy graphs take exactly one",
     )
@@ -1196,37 +1191,35 @@ def _add_mode_arg(parser: argparse.ArgumentParser, default: str | None) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the ``salt`` argument parser; each subcommand sets ``func``."""
-    parser = argparse.ArgumentParser(
-        prog="salt", description="salt v2 static graph tooling (M1 kernel CLI, design §4)"
-    )
+    parser = argparse.ArgumentParser(prog="salt", description="salt v2 static graph tooling")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    graph = sub.add_parser("graph", help="static graph tooling (design §4)")
+    graph = sub.add_parser("graph", help="static graph tooling")
     gsub = graph.add_subparsers(dest="graph_command", required=True)
 
-    validate = gsub.add_parser("validate", help="connectivity validation (design §4.1)")
+    validate = gsub.add_parser("validate", help="connectivity validation")
     _add_config_arg(validate)
     _add_mode_arg(validate, default=None)
     validate.add_argument("--strict", action="store_true", help="promote warnings to errors")
     validate.set_defaults(func=_cmd_validate)
 
-    dead = gsub.add_parser("deadcode", help="mode-aware dead-output report (design §4.2)")
+    dead = gsub.add_parser("deadcode", help="mode-aware dead-output report")
     _add_config_arg(dead)
     _add_mode_arg(dead, default=None)
     dead.set_defaults(func=_cmd_deadcode)
 
-    plan = gsub.add_parser("plan", help="print the ordered plan table (design §4.4)")
+    plan = gsub.add_parser("plan", help="print the ordered plan table")
     _add_config_arg(plan)
     _add_mode_arg(plan, default="fit")
     plan.set_defaults(func=_cmd_plan)
 
-    plot = gsub.add_parser("plot", help="render the graph via Graphviz DOT (design §4.3)")
+    plot = gsub.add_parser("plot", help="render the graph via Graphviz DOT")
     _add_config_arg(plot)
     _add_mode_arg(plot, default="fit")
     plot.add_argument("-o", "--output", required=True, help="output image path (.svg/.png/.dot)")
     plot.set_defaults(func=_cmd_plot)
 
-    why = gsub.add_parser("why", help="explain one key's producer/consumers (design §3.1)")
+    why = gsub.add_parser("why", help="explain one key's producer/consumers")
     _add_config_arg(why)
     _add_mode_arg(why, default="fit")
     why.add_argument("--key", required=True, help="dotted bundle key to explain")
@@ -1235,7 +1228,7 @@ def _build_parser() -> argparse.ArgumentParser:
     resolve = gsub.add_parser(
         "resolve",
         help="print the writer-derived output manifest (eval columns + ONNX outputs); "
-        "--annotate writes it into the config (design §4.4, M4.5 unified manifest)",
+        "--annotate writes it into the config",
     )
     _add_config_arg(resolve)
     resolve.add_argument(
@@ -1246,7 +1239,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     resolve.set_defaults(func=_cmd_resolve)
 
-    schema = sub.add_parser("schema", help="dataset schema artifact tooling (design §2.6)")
+    schema = sub.add_parser("schema", help="dataset schema artifact tooling")
     ssub = schema.add_subparsers(dest="schema_command", required=True)
     dump = ssub.add_parser("dump", help="scrape an H5 file into schema.yaml")
     dump.add_argument("file", help="input HDF5 file")
@@ -1265,12 +1258,12 @@ def _add_mup_parsers(sub: Any) -> None:
     the graph-tooling startup path). The ``setup_mup`` console entry forwards
     to ``mup-shapes`` (pyproject.toml).
     """
-    from salt.model.mup import cmd_mup_coord_check, cmd_mup_shapes  # noqa: PLC0415
+    from salt.model.mup import cmd_mup_coord_check, cmd_mup_shapes
 
     shapes = sub.add_parser(
         "mup-shapes",
-        help="generate muP base/delta infshapes for a config (design §3.4, §9.2; the "
-        "setup_mup console entry forwards here)",
+        help="generate muP base/delta infshapes for a config (the setup_mup console "
+        "entry forwards here)",
     )
     _add_config_arg(shapes)
     shapes.add_argument(
@@ -1286,8 +1279,7 @@ def _add_mup_parsers(sub: Any) -> None:
 
     coord = sub.add_parser(
         "mup-coord-check",
-        help="run the muP coordinate-check at several widths; write coord-data CSV + plot "
-        "(design §3.4 690-694)",
+        help="run the muP coordinate-check at several widths; write coord-data CSV + plot",
     )
     _add_config_arg(coord)
     coord.add_argument(
@@ -1305,8 +1297,8 @@ def _add_mup_parsers(sub: Any) -> None:
         default=None,
         help="SHARED base/delta infshape file applied at EVERY swept width (salt mup-shapes "
         "output). Omit to auto-generate one (base=min width, delta=max width) — the shared-base "
-        "protocol that gives a correct width_mult so the MuReadout is damped (the MU-HUMAN fix, "
-        "replacing the per-width self-base that forced width_mult==1)",
+        "protocol that gives a correct width_mult so the MuReadout is damped (a per-width "
+        "self-base would force width_mult==1)",
     )
     coord.set_defaults(func=cmd_mup_coord_check)
 

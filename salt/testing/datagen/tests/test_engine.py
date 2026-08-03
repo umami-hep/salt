@@ -183,9 +183,7 @@ def test_valid_mask_sorted_to_front():
 
 def test_alias_is_byte_identical():
     data = generate_data(_maskformer_schema())
-    assert np.array_equal(
-        data["tracks"].view(np.uint8), data["tracks_dr"].view(np.uint8)
-    )
+    assert np.array_equal(data["tracks"].view(np.uint8), data["tracks_dr"].view(np.uint8))
 
 
 # --------------------------------------------------------------------------- #
@@ -314,8 +312,7 @@ def test_class_names_round_trip_through_write_h5(tmp_path):
         assert f.attrs["unique_jets"] == data["jets"].shape[0]
         assert f.attrs["config"] == "{}"
         names = [
-            n.decode() if isinstance(n, bytes) else n
-            for n in f["jets"].attrs["flavour_label"]
+            n.decode() if isinstance(n, bytes) else n for n in f["jets"].attrs["flavour_label"]
         ]
         assert names == ["bjets", "cjets", "ujets"]
 
@@ -351,8 +348,7 @@ def test_write_h5_flag_class_names(tmp_path):
 
     with h5py.File(out, "r") as f:
         names = [
-            n.decode() if isinstance(n, bytes) else n
-            for n in f["jets"].attrs["flavour_label"]
+            n.decode() if isinstance(n, bytes) else n for n in f["jets"].attrs["flavour_label"]
         ]
         assert names == ["hbb", "hcc", "top", "qcd"]
 
@@ -394,9 +390,7 @@ def test_schema_validation_rejects_link_to_non_id():
                 "name": "tracks",
                 "kind": "constituent",
                 "max_items": 5,
-                "fields": [
-                    {"name": "lk", "type": "link", "references": "hads.flavour"}
-                ],
+                "fields": [{"name": "lk", "type": "link", "references": "hads.flavour"}],
             },
         ],
     }

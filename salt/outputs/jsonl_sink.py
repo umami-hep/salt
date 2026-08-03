@@ -30,7 +30,7 @@ def _jsonable(value: Any) -> Any:
     non-finite float to ``None`` so the file is strict JSON, and the sink then
     dumps with ``allow_nan=False`` so any leak is a loud error, not silent
     corruption.
-    """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+    """
     if isinstance(value, np.ndarray):
         return [_jsonable(v) for v in value]
     if isinstance(value, (list, tuple)):
@@ -170,7 +170,7 @@ class JSONLOutputSink(RuntimeSink):
         resolution: each writer's ``manifest_fields(Mode.TEST)`` contributes
         one column per ``outputs.*`` leaf, its suffixes in field order,
         narrowed by ``consumes:``.
-        """  # noqa: DOC201, DOC501 - private helper, no Returns/Raises blocks per docstring policy
+        """
         if not self._output_section:
             raise ConfigError(
                 "JSONLOutputSink has no `outputs:` section bound — it derives its columns "
@@ -198,7 +198,7 @@ class JSONLOutputSink(RuntimeSink):
         )
 
     def _names_of(self, col: OutputColumn) -> list[str]:
-        """A column's flat eval-H5 names under the current run name."""  # noqa: DOC201 - getter, one-line
+        """A column's flat eval-H5 names under the current run name."""
         return col.column_names(self._run_name)
 
     def _ensure_columns(self) -> tuple[OutputColumn, ...]:
@@ -209,7 +209,7 @@ class JSONLOutputSink(RuntimeSink):
         matches the flat name (``GN2_pb``) or the bare suffix (``pb``), so the
         filter is meaningful before the run name binds; an unmatched selection
         is only an error at `open_schema` (see `_validate_columns`).
-        """  # noqa: DOC201 - private helper, no Returns block per docstring policy
+        """
         if self._resolved is not None:
             return self._resolved
         available = self._section_columns()
@@ -225,7 +225,7 @@ class JSONLOutputSink(RuntimeSink):
         return self._resolved
 
     def _validate_columns(self) -> None:
-        """Raise when `columns` names something the section does not mint."""  # noqa: DOC501 - the raise is the whole point, named in the summary
+        """Raise when `columns` names something the section does not mint."""
         if self.columns is None:
             return
         known: set[str] = set()
@@ -239,7 +239,7 @@ class JSONLOutputSink(RuntimeSink):
             )
 
     def _selected(self, col: OutputColumn, name: str, suffix: str) -> bool:
-        """Whether one flat column name survives the `columns` filter."""  # noqa: DOC201 - predicate, one-line
+        """Whether one flat column name survives the `columns` filter."""
         del col
         return self.columns is None or name in self.columns or suffix in self.columns
 
@@ -249,7 +249,7 @@ class JSONLOutputSink(RuntimeSink):
         """TEST requires the selected ``outputs.*`` leaves + ``meta.rows``; produces
         nothing (a terminal node). Every other mode declares nothing, so the
         planner prunes the sink outside TEST.
-        """  # noqa: DOC201 - contract documented on `RuntimeSink`
+        """
         if not (mode & Mode.TEST):
             return IO(requires={}, produces={})
         req: dict[str, TensorSpec] = {
@@ -260,11 +260,11 @@ class JSONLOutputSink(RuntimeSink):
         return IO(requires=unflatten_spec(req), produces={})
 
     def is_test_sink(self) -> bool:
-        """Always False — auxiliary sink; `H5OutputSink` anchors the TEST demand."""  # noqa: DOC201 - predicate, one-line
+        """Always False — auxiliary sink; `H5OutputSink` anchors the TEST demand."""
         return False
 
     def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
-        """The sink's TEST ``declare_io`` requires, each mapped to a demander description."""  # noqa: DOC201 - contract documented on `RuntimeSink`
+        """The sink's TEST ``declare_io`` requires, each mapped to a demander description."""
         del model_modules, reader
         who = "sink 'JSONLOutputSink' demanding"
         return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
@@ -272,7 +272,7 @@ class JSONLOutputSink(RuntimeSink):
     # -- lifecycle ---------------------------------------------------------
 
     def open_schema(self, ctx: SinkContext) -> None:
-        """Resolve the output path + column schema and open the file for writing."""  # noqa: DOC501 - raises ConfigError, documented on the class
+        """Resolve the output path + column schema and open the file for writing."""
         self._run_name = ctx.run_name
         self._resolved = None  # re-resolve: the run name feeds the column names
         self._validate_columns()
@@ -332,7 +332,7 @@ class JSONLOutputSink(RuntimeSink):
         Mirrors `H5OutputSink`'s template contract (same keys, same sample
         heuristic) so the JSONL lands beside the eval H5; raises `ConfigError`
         when ``ckpt_path`` is unset or the template names an unknown key.
-        """  # noqa: DOC201, DOC501 - private helper, raises named in the summary
+        """
         ckpt_path = ctx.ckpt_path
         if ckpt_path is None:
             raise ConfigError(

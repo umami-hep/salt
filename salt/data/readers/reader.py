@@ -133,7 +133,7 @@ class H5StructuredReader(Reader):
     ) -> None:
         super().__init__()
         if not groups:
-            raise ConfigError("H5StructuredReader needs at least one group (design §6.1)")
+            raise ConfigError("H5StructuredReader needs at least one group")
         self.schema = load_schema(schema) if isinstance(schema, str | Path) else schema
         self.filename = Path(filename) if filename is not None else None
         self.num = num
@@ -183,7 +183,7 @@ class H5StructuredReader(Reader):
         if unknown:
             raise ConfigError(
                 f"group {stream!r}: unknown config keys {sorted(unknown)} — expected "
-                "dataset/truncate/global_object (design §2.6)"
+                "dataset/truncate/global_object"
             )
         return GroupConfig(
             dataset=str(cfg.get("dataset", stream)),
@@ -202,8 +202,7 @@ class H5StructuredReader(Reader):
                 )
                 hint = f"; nearest: {', '.join(near)}" if near else ""
                 raise SchemaError(
-                    f"group {stream!r}: dataset {cfg.dataset!r} not in the schema artifact"
-                    f"{hint} (design §2.6)"
+                    f"group {stream!r}: dataset {cfg.dataset!r} not in the schema artifact{hint}"
                 )
             global_object = cfg.global_object
             if global_object is None:
@@ -211,14 +210,14 @@ class H5StructuredReader(Reader):
                     raise ConfigError(
                         f"group {stream!r}: 'global_object' is unset and no schema artifact is "
                         "available to infer it — set global_object: true/false explicitly or "
-                        "provide schema: (design §2.6, §6.1)"
+                        "provide schema:"
                     )
                 global_object = not gschema.has_valid
             if gschema is not None and not global_object and not gschema.has_valid:
                 raise SchemaError(
                     f"group {stream!r} (dataset {cfg.dataset!r}) is a sequence stream "
                     "(global_object: false) but the schema has no 'valid' field — pad masks "
-                    "cannot be derived (design §6.1)"
+                    "cannot be derived"
                 )
             resolved[stream] = GroupConfig(cfg.dataset, cfg.truncate, global_object)
             if global_object and stream in self.constituent_cuts:
@@ -239,8 +238,7 @@ class H5StructuredReader(Reader):
                         hint = f"; nearest: {', '.join(near)}" if near else ""
                         raise SchemaError(
                             f"constituent-cut/transform field {field!r} for stream "
-                            f"{stream!r} not present in schema group {cfg.dataset!r}"
-                            f"{hint} (design §6.1)"
+                            f"{stream!r} not present in schema group {cfg.dataset!r}{hint}"
                         )
         self.groups = resolved
 
@@ -334,14 +332,13 @@ class H5StructuredReader(Reader):
         sample-axis kept-index for the (per-stage) `CutSpec` (idempotent).
 
         With no cuts the kept-index is `None` — the identity sentinel that preserves
-        the byte-identical contiguous read path (Wave-3c gate).
+        the byte-identical contiguous read path.
         """
         if self._resolved is not None:
             return
         if self.filename is None:
             raise ConfigError(
-                f"reader {self.name!r} has no source file — pass filename= or use "
-                "with_source() (design §6.1)"
+                f"reader {self.name!r} has no source file — pass filename= or use with_source()"
             )
         path = self.filename
         if has_wildcard(path):
@@ -416,7 +413,7 @@ class H5StructuredReader(Reader):
 
     @property
     def h5_source(self) -> Path:
-        """This reader's h5py-openable structured source (the resolved `source_path`)."""
+        """The h5py-openable structured source (the resolved `source_path`)."""
         return self.source_path
 
     def _ensure_open(self) -> None:
@@ -455,13 +452,12 @@ class H5StructuredReader(Reader):
                     hint = f"; nearest: {near[0]}" if near else ""
                     raise SchemaError(
                         f"field {field!r} demanded by {who!r} not present in h5 "
-                        f"group {cfg.dataset!r}{hint} (design §2.6)"
+                        f"group {cfg.dataset!r}{hint}"
                     )
             if not cfg.global_object and "valid" not in file_fields:
                 raise SchemaError(
                     f"group {stream!r} (dataset {cfg.dataset!r}) is a sequence stream but "
-                    f"the file has no 'valid' field — pad masks cannot be derived "
-                    "(design §6.1)"
+                    f"the file has no 'valid' field — pad masks cannot be derived"
                 )
             dtype = get_dtype(ds, list(demanded))
             self._dss[stream] = ds
@@ -512,9 +508,7 @@ class H5StructuredReader(Reader):
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)
         return out
 
-    def _read_kept(
-        self, ds: h5py.Dataset, dtype: np.dtype, file_rows: np.ndarray
-    ) -> np.ndarray:
+    def _read_kept(self, ds: h5py.Dataset, dtype: np.dtype, file_rows: np.ndarray) -> np.ndarray:
         """Fancy-read the ascending kept file rows into a fresh demand-narrowed array.
 
         The row-cut read path (non-contiguous): reads only the demanded fields for the

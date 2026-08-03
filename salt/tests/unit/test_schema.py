@@ -1,4 +1,4 @@
-"""Tests for salt.schema (design §2.6, §11 risk 12)."""
+"""Tests for salt.schema."""
 
 import h5py
 import numpy as np
@@ -17,7 +17,7 @@ from salt.schema import (
     save_schema,
 )
 
-# toy fixtures (no physics — M1 scope)
+# toy fixtures (no physics)
 
 
 @pytest.fixture
@@ -122,7 +122,7 @@ class TestRoundTrip:
         assert "tracks.ftagTruthOriginLabel" in schema.keys()
 
 
-# load tolerance (design §11 risk 12: tolerant of additive change)
+# load tolerance (tolerant of additive change)
 
 
 class TestLoadTolerance:
@@ -240,7 +240,7 @@ class TestValidateKeys:
             schema.keys()
 
 
-# integration: schema.keys() feeds planner wildcard narrowing (§2.2 rule (d))
+# integration: schema.keys() feeds planner wildcard narrowing (rule (d))
 
 
 class Wild:

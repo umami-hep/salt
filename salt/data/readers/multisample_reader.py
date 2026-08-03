@@ -117,7 +117,7 @@ class MultiSampleReader(Reader):
     ) -> None:
         super().__init__()
         if not samples:
-            raise ConfigError("MultiSampleReader needs at least one sample (plan 02)")
+            raise ConfigError("MultiSampleReader needs at least one sample")
         self.samples: list[SampleConfig] = [self._parse_sample(s) for s in samples]
         names = [s.name for s in self.samples]
         if len(set(names)) != len(names):
@@ -145,11 +145,11 @@ class MultiSampleReader(Reader):
         if unknown:
             raise ConfigError(
                 f"sample: unknown config keys {sorted(unknown)} — expected "
-                "name/label/reader/sources (plan 02)"
+                "name/label/reader/sources"
             )
         for required in ("name", "label", "reader"):
             if required not in cfg:
-                raise ConfigError(f"sample: missing required key {required!r} (plan 02)")
+                raise ConfigError(f"sample: missing required key {required!r}")
         return SampleConfig(
             name=str(cfg["name"]),
             label=int(cfg["label"]),
@@ -185,21 +185,21 @@ class MultiSampleReader(Reader):
         if key not in flat:
             raise SchemaError(
                 f"MultiSampleReader: label_stream {self.label_stream!r} is not a produced "
-                f"stream of the sub-readers ({sorted(self.samples[0].reader.streams)}) (plan 02)"
+                f"stream of the sub-readers ({sorted(self.samples[0].reader.streams)})"
             )
         spec = flat[key]
         if spec.shape != ("B",):
             raise SchemaError(
                 f"MultiSampleReader: label_stream {self.label_stream!r} must be a SCALAR "
                 f"(global_object [B]) stream to carry the injected event label, but its shape "
-                f"is {spec.shape} (plan 02)"
+                f"is {spec.shape}"
             )
         # extend the label_stream's field set with the injected label field
         existing = tuple(spec.fields) if spec.fields is not None else ()
         if self.label_field in existing:
             raise ConfigError(
                 f"MultiSampleReader: injected label_field {self.label_field!r} collides with an "
-                f"existing field on stream {self.label_stream!r} (plan 02)"
+                f"existing field on stream {self.label_stream!r}"
             )
         flat[key] = TensorSpec(
             shape=spec.shape,
@@ -236,9 +236,7 @@ class MultiSampleReader(Reader):
                 # no schema artifact — compare on (jagged, field-name set) only
                 fields: tuple[tuple[str, str], ...] = ()
             else:
-                fields = tuple(
-                    sorted((f, str(np.dtype(dt))) for f, dt in gschema.fields.items())
-                )
+                fields = tuple(sorted((f, str(np.dtype(dt))) for f, dt in gschema.fields.items()))
             sig[stream] = (jagged, fields)
         return sig
 
@@ -254,27 +252,26 @@ class MultiSampleReader(Reader):
                 raise SchemaError(
                     f"MultiSampleReader: sample {s.name!r} produces streams {sorted(sig)} but "
                     f"sample {ref.name!r} produces {sorted(ref_sig)} — sub-reader produced "
-                    "streams must be IDENTICAL so batches concatenate (plan 02)"
+                    "streams must be IDENTICAL so batches concatenate"
                 )
             for stream in ref_sig:
                 if sig[stream] != ref_sig[stream]:
                     raise SchemaError(
                         f"MultiSampleReader: stream {stream!r} differs between sample "
                         f"{s.name!r} ({sig[stream]}) and {ref.name!r} ({ref_sig[stream]}) — "
-                        "produced fields/dtypes/jaggedness must be identical (plan 02)"
+                        "produced fields/dtypes/jaggedness must be identical"
                     )
         self._jagged = {stream: jagged for stream, (jagged, _f) in ref_sig.items()}
         self._streams = tuple(ref.reader.streams)
         if self.label_stream not in self._jagged:
             raise SchemaError(
                 f"MultiSampleReader: label_stream {self.label_stream!r} not a produced stream "
-                f"(produced: {sorted(self._jagged)}) (plan 02)"
+                f"(produced: {sorted(self._jagged)})"
             )
         if self._jagged[self.label_stream]:
             raise SchemaError(
                 f"MultiSampleReader: label_stream {self.label_stream!r} is a JAGGED/sequence "
-                "stream; the injected event label must land on a SCALAR (global_object) stream "
-                "(plan 02)"
+                "stream; the injected event label must land on a SCALAR (global_object) stream"
             )
         ref_schema = ref.reader.schema
         if ref_schema is not None:
@@ -286,7 +283,7 @@ class MultiSampleReader(Reader):
                     if self.label_field in fields:
                         raise ConfigError(
                             f"MultiSampleReader: injected label_field {self.label_field!r} "
-                            f"collides with an existing field on {self.label_stream!r} (plan 02)"
+                            f"collides with an existing field on {self.label_stream!r}"
                         )
                     fields[self.label_field] = _LABEL_DTYPE
                 groups[stream] = GroupSchema(fields=fields)
@@ -575,15 +572,13 @@ class MultiSampleReader(Reader):
     def __getstate__(self) -> dict[str, Any]:
         """Drop transient index/probe state so the reader pickles under spawn."""
         state = self.__dict__.copy()
-        state.update(
-            {
-                "_lens": None,
-                "_num_rows": None,
-                "_sample_of": None,
-                "_local_of": None,
-                "_streams": None,
-                "_jagged": None,
-                "schema": None,
-            }
-        )
+        state.update({
+            "_lens": None,
+            "_num_rows": None,
+            "_sample_of": None,
+            "_local_of": None,
+            "_streams": None,
+            "_jagged": None,
+            "schema": None,
+        })
         return state

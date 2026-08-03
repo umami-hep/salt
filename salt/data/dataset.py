@@ -61,7 +61,7 @@ class GraphDataset(Dataset):
         If `sinks` is missing, or not exactly one module is a `Reader`.
     SchemaError
         When a module's declared raw fields are absent from the schema
-        artifact (static validation, design §2.6).
+        artifact (static validation).
     GraphError
         Any plan-compilation error (connectivity, kinds, shapes, cycles).
     """
@@ -79,7 +79,7 @@ class GraphDataset(Dataset):
         if sinks is None:
             raise ConfigError(
                 "GraphDataset needs explicit sinks (the model boundary's demanded keys) — "
-                "label narrowing is demand-driven (design §3.3, §6.1)"
+                "label narrowing is demand-driven"
             )
         for name, module in modules.items():
             module.name = name  # instance names come from the config dict key
@@ -87,7 +87,7 @@ class GraphDataset(Dataset):
         if len(readers) != 1:
             raise ConfigError(
                 f"GraphDataset needs exactly one Reader module, got {len(readers)} "
-                f"({[r.name for r in readers]}) (design §6.1)"
+                f"({[r.name for r in readers]})"
             )
         self._modules = modules
         self._reader = readers[0]
@@ -103,8 +103,7 @@ class GraphDataset(Dataset):
         if self._reader.schema is None:
             warnings.warn(
                 f"reader {self._reader.name!r} has no schema artifact: field spellings "
-                "cannot be checked statically; a misspelled key will fail at worker bind "
-                "(design §2.6)",
+                "cannot be checked statically; a misspelled key will fail at worker bind",
                 stacklevel=2,
             )
         self._plan: Plan = self._compile()
@@ -142,7 +141,7 @@ class GraphDataset(Dataset):
                     hint = f"; nearest: {', '.join(near)}" if near else ""
                     raise SchemaError(
                         f"field {field!r} demanded by module {step.name!r} not present in "
-                        f"the schema for stream {parts[1]!r}{hint} (design §2.6)"
+                        f"the schema for stream {parts[1]!r}{hint}"
                     )
         return plan
 
@@ -287,7 +286,7 @@ class GraphDataset(Dataset):
                     raise MutationError(
                         f"[mode={self._mode.name}] boundary leaf {key!r} aliases a reusable "
                         "reader buffer — it would be overwritten by the next batch in this "
-                        "worker; copy at the producing module (design §2.4 contract #9)"
+                        "worker; copy at the producing module"
                     )
                 value = torch.from_numpy(maybe_copy(value))
             node = out

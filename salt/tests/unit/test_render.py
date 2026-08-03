@@ -96,7 +96,7 @@ _HAS_DOT = shutil.which("dot") is not None
 
 
 class TestPlotCli:
-    """`salt graph plot` renders the §4.3 DOT to PNG+PDF via the dot binary."""
+    """`salt graph plot` renders the DOT to PNG+PDF via the dot binary."""
 
     def test_dot_sidecar_written_even_without_image(self, tmp_path):
         # a .dot target short-circuits before any dot invocation: the DOT
@@ -132,7 +132,7 @@ class TestPlotCli:
 
 
 class TestShapeStrWidthSubstitution:
-    """`_shape_str` substitutes the SYMBOLIC FEATURE dim, keeps data dims (design §4.3)."""
+    """`_shape_str` substitutes the SYMBOLIC FEATURE dim, keeps data dims."""
 
     def test_symbolic_feature_dim_becomes_concrete(self):
         # E:enc is a feature family — the resolved width replaces it as the LAST

@@ -1,4 +1,4 @@
-"""Tests for the `VDS` setup module + its datamodule auto-injection (W3.B)."""
+"""Tests for the `VDS` setup module + its datamodule auto-injection."""
 
 from __future__ import annotations
 
@@ -72,8 +72,8 @@ def _wired_vds(*, reader="reader", vds_capable=True, out=None) -> VDS:
     return vds
 
 
-# a stub ShmStage-named setup module for the incompatibility check (W3.S
-# doesn't exist yet — the rule matches on class NAME, not type).
+# a stub ShmStage-named setup module for the incompatibility check (the real
+# ShmStage doesn't exist yet — the rule matches on class NAME, not type).
 
 
 class ShmStage(SaltDatasetModule):
@@ -373,12 +373,12 @@ class TestDatamoduleAutoInjection:
         assert dm._vds is None
 
     def test_first_batch_byte_identical_to_trunk(self, data):
-        """Served bytes via the VDS-resolved path == via the W3.A alias trunk path."""
+        """Served bytes via the VDS-resolved path == via the alias trunk path."""
         dm_vds = GraphDataModule(
             modules=build_modules(data), batch_size=128, sinks=SINKS, pin_memory=False
         )
         dm_vds.setup("fit")
-        # the trunk W3.A path: deprecated train_file/val_file aliases, reader bound
+        # the trunk path: deprecated train_file/val_file aliases, reader bound
         # directly (no explicit InputSamples module in the dict).
         dm_trunk = GraphDataModule(
             modules={

@@ -85,7 +85,8 @@ def flatten_tensor_dict(
 
 def masked_softmax(x: Tensor, mask: BoolTensor | None, dim: int = -1) -> Tensor:
     """Softmax that ignores padded elements: masked (``True``) entries are set to
-    ``-inf`` before the softmax and zeroed after."""
+    ``-inf`` before the softmax and zeroed after.
+    """
     if mask is not None:
         mask = add_dims(mask, x.dim())
         x = x.masked_fill(mask, -torch.inf)

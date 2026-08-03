@@ -1,4 +1,4 @@
-"""Unit tests for ``salt inference`` (plan 50 Phase D): parsing/dispatch, the
+"""Unit tests for ``salt inference``: parsing/dispatch, the
 export-selection sink, label-demand-free ONNX plan compilation, and the
 unlabelled-file dataset path.
 """
@@ -189,7 +189,7 @@ class TestExportSelectionSink:
         test_sink = H5OutputSink()
         test_sink.bind_output_section(section)
         suffixes = [s for c in test_sink._resolve_columns("run") for s in c.suffixes]  # noqa: SLF001
-        assert "target_jets_classification" in suffixes  # Phase C label column
+        assert "target_jets_classification" in suffixes  # label column
         assert "pPileup" in suffixes  # per-token per-class prob (TEST-only)
         assert "TrackOrigin" not in suffixes  # the argmax leaf is export-only
 
@@ -373,7 +373,7 @@ class TestLabelFreePlanCompile:
         assert not labelled_edges, f"{config}: ONNX plan consumes labels {labelled_edges}"
         # the Labels wildcard narrowed against the ONNX demand: the collected step
         # produces NO label key and reads NO field (no label dataset is ever
-        # touched — the 50a Task 2 contract).
+        # touched).
         for step in plan.steps:
             if step.name != "labels":
                 continue

@@ -1,4 +1,4 @@
-"""Tests for salt.graph.bundle (design §2.1)."""
+"""Tests for salt.graph.bundle."""
 
 import numpy as np
 import pytest
@@ -116,7 +116,7 @@ class TestGetSet:
         assert b.keys() == ["z.last", "a.first", "z.other"]
 
     def test_dict_valued_leaf(self):
-        # e.g. the seq.layout meta leaf (design §2.1) — a plain dict stored opaquely
+        # e.g. the seq.layout meta leaf — a plain dict stored opaquely
         layout = {"jets": slice(0, 1), "tracks": slice(1, 41)}
         b = Bundle()
         b.set("seq.layout", layout)
@@ -220,7 +220,7 @@ class TestSubtree:
             b.subtree("a..b")
 
 
-# merge (executor path: write-once + declaration check, design §2.1/§3.2)
+# merge (executor path: write-once + declaration check)
 
 
 class TestMerge:

@@ -80,12 +80,10 @@ class TaskOutput(SaltModelModule):
         own leaf key, so the ONNX name and dtype come from the task and are
         typed nowhere. Empty when the op has no ONNX representation.
 
-        Raises
-        ------
-        ConfigError
-            When the model modules are unbound, or the source task is missing
-            or ships no manifest surface.
-        """  # noqa: DOC201 - contract stated in the summary
+        A `ConfigError` propagates from the task resolution when the model
+        modules are unbound, or the source task is missing or ships no
+        manifest surface.
+        """
         if not (mode & Mode.ONNX) or not self.op.has_onnx_manifest:
             return []
         task = self._resolved_task()
@@ -96,7 +94,7 @@ class TaskOutput(SaltModelModule):
         ]
 
     def _resolved_task(self) -> Any:
-        """The live source task, resolved from the bound model modules."""  # noqa: DOC201, DOC501 - private helper, raises documented on manifest_fields
+        """The live source task, resolved from the bound model modules."""
         who = f"{type(self).__name__} {self.output_name!r}"
         if self._model_modules is None:
             raise ConfigError(

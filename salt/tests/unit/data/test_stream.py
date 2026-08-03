@@ -1,4 +1,4 @@
-"""Unit tests for the shared `Reader`-base stream helpers (plan 24, Wave 2)."""
+"""Unit tests for the shared `Reader`-base stream helpers."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def _jagged_cols(counts: list[int], seed: int = 0) -> tuple[dict, list[str], Gro
 
 
 def _explicit_fill(dt: np.dtype) -> object:
-    """The pre-Wave-2 inline pad fill (float 0.0 / int -1 / bool False / unsigned 0)."""
+    """The explicit inline pad fill (float 0.0 / int -1 / bool False / unsigned 0)."""
     if dt.kind == "f":
         return 0.0
     if dt.kind == "i":
@@ -124,7 +124,7 @@ def _explicit_fill(dt: np.dtype) -> object:
 def _manual_contiguous(
     cols: dict, fields: list[str], t: int, gschema: GroupSchema, b: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """A hand-rolled contiguous truncate+pad+valid build (the pre-Wave-2 path)."""
+    """A hand-rolled contiguous truncate+pad+valid build."""
     first = cols[fields[0]]
     counts = np.asarray(ak.num(first, axis=1)) if b > 0 else np.zeros(0, dtype=np.int64)
     valid = np.arange(t)[None, :] < np.minimum(counts, t)[:, None]

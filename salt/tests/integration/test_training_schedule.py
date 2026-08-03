@@ -1,6 +1,6 @@
-"""W3 gates: multi-stage `training_schedule` execution + legacy desugaring.
+"""Gates: multi-stage `training_schedule` execution + legacy desugaring.
 
-Gates (plan 01 W3):
+Gates:
 
 - **G3a** — a legacy config (no `training_schedule`) desugars to a single `fit`
   stage and trains bitwise-identically to the pre-desugar behaviour. The

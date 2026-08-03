@@ -1,7 +1,7 @@
 """H5OutputSink open_schema reader-shape gate — a structured-reader-less
 (global-only, no ``.groups``/``.source_path``) reader is accepted when nothing
 demands the source file, and rejected (naming the capability) when pad-mask
-columns or input-copying are requested (plan 51 T0).
+columns or input-copying are requested.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ _N = 128  # rows (>= the ftag H5Writer default chunk size of 100)
 class _GlobalReader:
     """A minimal global-only reader: one 'mnist' stream, NO groups/source_path.
 
-    Mirrors the plan-51 IdxReader — carries ``.filename`` (for _output_path)
+    Mirrors the tutorial IdxReader — carries ``.filename`` (for _output_path)
     but exposes neither ``.groups`` nor ``.source_path``.
     """
 

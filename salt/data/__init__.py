@@ -5,15 +5,15 @@
 from __future__ import annotations
 
 from salt.data.base import Processor, Reader, SaltDatasetModule, WorkerCtx
-from salt.data.readers.cuts import ConstituentCuts, Cut, CutSpec, GlobalObjectCuts
 from salt.data.datamodule import GraphDataModule
 from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
+from salt.data.input_samples import InputSamples
 from salt.data.processors.features import Features
 from salt.data.processors.ftag_labeller import FtagLabeller
-from salt.data.input_samples import InputSamples
 from salt.data.processors.labels import Labels
 from salt.data.processors.maskformer_targets import MaskFormerTargets
 from salt.data.processors.multi_target import MultiTarget
+from salt.data.readers.cuts import ConstituentCuts, Cut, CutSpec, GlobalObjectCuts
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.readers.reader import GroupConfig, H5StructuredReader
 from salt.data.readers.stream import OffsetIndex, StreamConfig

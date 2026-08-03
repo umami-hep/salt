@@ -1,4 +1,4 @@
-"""Unit tests for `SaltModelModule` (mirror of salt/model/base.py, plan 49)."""
+"""Unit tests for `SaltModelModule` (mirror of salt/model/base.py)."""
 
 from __future__ import annotations
 

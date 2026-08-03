@@ -41,19 +41,18 @@ class SinkAdapter(Callback):
 
     @property
     def state_key(self) -> str:
-        """Per-sink state key, so two adapters are never conflated by Lightning."""  # noqa: DOC201 - one-line property
+        """Per-sink state key, so two adapters are never conflated by Lightning."""
         return f"SinkAdapter[{getattr(self.sink, 'name', type(self.sink).__name__)}]"
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         """Enforce single-device TEST; raises `ConfigError` otherwise (multi-device
         out of scope).
-        """  # noqa: DOC501 - the raise is named in the summary line
+        """
         del pl_module
         if stage == "test" and trainer.world_size != 1:
             raise ConfigError(
                 f"{type(self.sink).__name__} requires a single device, got "
-                f"world_size={trainer.world_size} — multi-device test writing is out of scope "
-                "(design §5.3, v1 contract)"
+                f"world_size={trainer.world_size} — multi-device test writing is out of scope"
             )
 
     def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:

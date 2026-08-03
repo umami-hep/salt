@@ -1,4 +1,4 @@
-"""Plan 50 Phase C gates — per-task target-label emission in TEST mode.
+"""Per-task target-label emission in TEST mode.
 
 Label emission is a FIRST-CLASS GRAPH CONTRACT: ``get_output(mode=TEST)``
 emits each task's target-label column(s), ``get_output_manifest(mode=TEST)``

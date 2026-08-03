@@ -87,7 +87,7 @@ def derive_onnx_sources(export: ExportConfig, variables: Mapping[str, Sequence[s
             raise ConfigError(
                 f"export input {entry.port!r}: stream {stream!r} has no Features variable "
                 "declaration (config: data.modules.features.init_args.variables) — export "
-                "input widths derive from it (design §7.1)"
+                "input widths derive from it"
             )
         fields = tuple(variables[stream])
         if entry.sequence:
@@ -129,13 +129,13 @@ def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
     Raises `ConfigError` if more than one `OnnxExportSink` is configured
     (the Athena tuple has a single ordering authority).
     """
-    from salt.outputs import OnnxExportSink  # noqa: PLC0415 - heavy/circular
+    from salt.outputs import OnnxExportSink
 
     found = [m for m in modules.values() if isinstance(m, OnnxExportSink)]
     if len(found) > 1:
         raise ConfigError(
             "more than one OnnxExportSink is configured — the ONNX output tuple has a single "
-            "ordering authority; declare exactly one export sink (design §6.3)"
+            "ordering authority; declare exactly one export sink"
         )
     return found[0] if found else None
 
@@ -159,7 +159,7 @@ def compile_onnx_plan(
     Raises
     ------
     ConfigError
-        When neither a legacy manifest nor a folded export sink supplies demand.
+        When no folded export sink supplies demand.
     ShapeError
         On a rank/shape mismatch — augmented with the ``export.inputs``
         attribution when the offending key is an export input port.
@@ -167,11 +167,11 @@ def compile_onnx_plan(
     export_sink = _onnx_export_sink(modules)
     if export_sink is None:
         raise ConfigError(
-            "compile_onnx_plan needs a folded OnnxExportSink in model.modules (plan-29 W4) — "
+            "compile_onnx_plan needs a folded OnnxExportSink in model.modules — "
             "the off-graph reduce manifest was retired. "
             "Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
             "conversion nodes (ClassProbs/SeqClassIndex/MaskFormerObjects/"
-            "Combination) own the math inside the traced graph (design §4.2/§6)."
+            "Combination) own the math inside the traced graph."
         )
     # the folded OnnxExportSink anchors its conversion leaves as a terminal node
     # (the planner pulls them in), so no flat `sinks=` are needed.
@@ -200,7 +200,7 @@ def compile_onnx_plan(
                 f"{message}\n  this source comes from export.inputs (config: "
                 f"export.inputs[{i}], port {entry.port!r}) — if {stream!r} is a "
                 f"{'fixed-width global' if entry.sequence else 'variable-length sequence'} "
-                f"stream, {fix} (design §5.1)"
+                f"stream, {fix}"
             ) from err
         raise
 
@@ -265,8 +265,8 @@ def export_graph(
     if outputs:
         raise ConfigError(
             "export_graph no longer accepts a reduce-manifest `outputs=` list — the off-graph "
-            "reduce manifest was retired at plan-29 W4. Wire an OnnxExportSink naming the "
-            "conversion outputs.* leaves instead (design §4.2/§6)."
+            "reduce manifest was retired. Wire an OnnxExportSink naming the "
+            "conversion outputs.* leaves instead."
         )
     resolved = resolve_export_config(export, run_name)
     plan = compile_onnx_plan(modules, resolved, variables)
@@ -310,7 +310,7 @@ def export_graph(
     # the authoritative rendering of the graph Athena will run (the static
     # `salt graph plan --mode onnx` view is dataset-fed and may differ); the
     # output manifest is appended.
-    from salt.graph.render import plan_table  # noqa: PLC0415 - lazy: keeps onnx import light
+    from salt.graph.render import plan_table
 
     plan_txt_path = onnx_path.parent / "plan_onnx.txt"
     # the folded export-sink's output table renders from the adapter's generated
@@ -336,7 +336,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
     """Parse the ``salt export`` CLI arguments."""
     parser = argparse.ArgumentParser(
         prog="salt export",
-        description="Export a trained salt model to ONNX (design §7).",
+        description="Export a trained salt model to ONNX.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -349,7 +349,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         "--manifest",
         action="store_true",
         help="print the writer-derived output manifest (full ONNX names, dtypes, reduces) "
-        "and exit — no checkpoint needed (M4.5 unified manifest)",
+        "and exit — no checkpoint needed",
     )
     parser.add_argument(
         "-c",
@@ -420,8 +420,8 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     data touched). Raises `ConfigError` when the parse fails (with the
     ``--set`` hint, mirroring ``salt graph``).
     """
-    from salt.main import SaltCLI  # noqa: PLC0415 - heavy/circular (main dispatches here)
-    from salt.config_utils import disable_logger_in_config  # noqa: PLC0415 - heavy/circular
+    from salt.config_utils import disable_logger_in_config
+    from salt.main import SaltCLI
 
     args: list[str] = []
     for path in config_paths:
@@ -457,14 +457,14 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
     Returns ``{stream: ordered variable list}``. Raises `ConfigError` when
     the config has no `Features` processor.
     """
-    from salt.data.processors.features import Features  # noqa: PLC0415 - heavy/circular
+    from salt.data.processors.features import Features
 
     for module in cli.datamodule.modules.values():
         if isinstance(module, Features):
             return dict(module.variables)
     raise ConfigError(
         "the run config declares no salt.data.Features module — export input widths "
-        "derive from its variable lists (design §7.1)"
+        "derive from its variable lists"
     )
 
 
@@ -480,7 +480,7 @@ rather than a spurious both-homes error."""
 
 
 def _alias_is_set(key: str, value: Any) -> bool:
-    """Whether an export-contract field carries a user-set value, not its default."""  # noqa: DOC201 - one-line predicate
+    """Whether an export-contract field carries a user-set value, not its default."""
     if key == "track_selection":
         return value != _TRACK_SELECTION_DEFAULT
     return bool(value)
@@ -535,6 +535,10 @@ def _resolve_export_contract(
     ``-n/--name`` override on top, and resolves the sink's contract against the
     run ``name:``.
 
+    A `ConfigError` propagates from the alias merge when a key is set in both
+    homes, and from the sink's own resolution when the contract is incomplete
+    or malformed.
+
     Parameters
     ----------
     cli : Any
@@ -548,11 +552,6 @@ def _resolve_export_contract(
     -------
     ExportConfig
         The resolved export-only half.
-
-    Raises
-    ------
-    ConfigError
-        On a key set in both homes, or an incomplete/malformed contract.
     """
     _merge_export_alias(cli, export_sink)
     if model_name is not None:
@@ -580,7 +579,7 @@ def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str
             raise ConfigError(
                 f"export input {entry.port!r}: the config declares {configured} variables but "
                 f"the checkpoint schema stores width {stored} — the Features list drifted "
-                "since training (design §7.1 schema cross-check)"
+                "since training"
             )
 
 
@@ -652,7 +651,7 @@ def main(args: Sequence[str] | None = None) -> int:
     print("-" * 100)
     print(f"Done! Saved ONNX model at {result.onnx_path}")
     if result.plan_txt_path is not None:
-        print(f"ONNX plan table (the traced graph, design §4.4): {result.plan_txt_path}")
+        print(f"ONNX plan table (the traced graph): {result.plan_txt_path}")
     print("-" * 100)
     return 0
 
@@ -685,7 +684,7 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
 
     Returns 0 on success (errors raise `GraphError`, handled by `main`).
     """
-    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink
 
     config_paths = _resolve_config_paths(parsed)
     cli = _run_free_cli(config_paths, parsed.set_overrides)
@@ -695,7 +694,7 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
         raise ConfigError(
             "config has no OnnxExportSink — the ONNX output manifest is declared by an "
             "OnnxExportSink in the outputs: section, naming the conversion outputs.* "
-            "leaves. Add the conversion nodes + the OnnxExportSink (design §4.2/§6)."
+            "leaves. Add the conversion nodes + the OnnxExportSink."
         )
     resolved = _resolve_export_contract(cli, export_sink, parsed.name)
     if export_sink.model_name is None:
@@ -716,7 +715,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     contract, a config-declared ``export.outputs``, or schema drift;
     `FileExistsError` on an existing output without ``--overwrite``.
     """
-    from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
+    from salt.model.saltmodule import SaltModule
 
     ckpt_path: Path = parsed.ckpt_path
     config_paths = _resolve_config_paths(parsed)
@@ -728,7 +727,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     # the export contract (model_name/inputs/rename/combine). Find it on the
     # parsed CLI and fold it into the planning module dict so its declared leaves
     # anchor the ONNX plan demand.
-    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink
 
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
@@ -757,7 +756,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the sink's outputs: section key (design §2.2)"
+            "the sink's outputs: section key"
         )
     modules[export_sink.name] = export_sink
     _cross_check_schema(model, resolved, variables)

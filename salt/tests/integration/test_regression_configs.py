@@ -1,4 +1,4 @@
-"""End-to-end smoke for shipped v2-native configs (plan 10/11 M5 + plan 12 M6)."""
+"""End-to-end smoke for shipped v2-native configs."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
-        # base2 default-ON CometLogger (plan-24 Wave 0) → off for the fast_dev_run
+        # base2 default-ON CometLogger → off for the fast_dev_run
         # fit so no offline Comet archive is written (and lr_monitor drops)
         "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
@@ -114,7 +114,7 @@ def test_dl1_config_fast_dev_run_fit(data, tmp_path):
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
-        # base2 default-ON CometLogger (plan-24 Wave 0) → off for the fast_dev_run
+        # base2 default-ON CometLogger → off for the fast_dev_run
         # fit so no offline Comet archive is written (and lr_monitor drops)
         "--trainer.logger=false",
         "--trainer.fast_dev_run=2",

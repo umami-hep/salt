@@ -56,8 +56,8 @@ def inference_demand(export: ExportConfig) -> list[str]:
     mask) + the ``meta.rows`` row anchor. Alias pseudo-inputs are synthesised
     by the adapter from their source port and consume nothing. Label-free by
     construction: no ``labels.*`` key can appear here, so `Labels` narrows to
-    nothing and a label-stripped file reads fine (plan 50 §D / 50a Task 2).
-    """  # noqa: DOC201 - list of dotted keys, per docstring policy
+    nothing and a label-stripped file reads fine.
+    """
     demand: list[str] = []
     for entry in export.inputs:
         if entry.alias is not None:
@@ -78,14 +78,14 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
     and the section's `InputCopyWriter`/`PadMaskWriter` contribute their
     copy/mask columns only when their ``modes:`` include ``export``.
     Raises `ConfigError` on an empty/missing section (no WHAT to write).
-    """  # noqa: DOC201, DOC501 - constructor-shaped helper, per docstring policy
-    from salt.outputs import H5OutputSink  # noqa: PLC0415 - heavy/circular
+    """
+    from salt.outputs import H5OutputSink
 
     if not section:
         raise ConfigError(
             "salt inference needs a top-level `outputs:` section with at least one "
             "export-mode RunTaskOutput — the export selection IS the inference output "
-            "set (plan 50 decision 2). Add `modes: [test, export]` (or omit `modes:`) "
+            "set. Add `modes: [test, export]` (or omit `modes:`) "
             "on the RunTaskOutput to export"
         )
     sink = H5OutputSink(output=str(output) if output is not None else INFERENCE_OUTPUT)
@@ -101,7 +101,7 @@ def _jet_args(adapter: OnnxAdapter, bundle: Bundle, i: int) -> tuple[torch.Tenso
     via the batch pad mask (Athena feeds valid tokens only; valid tokens are
     the leading rows, the reader's pad layout — enforced per batch by
     `_check_leading_valid`).
-    """  # noqa: DOC201 - private helper, per docstring policy
+    """
     args: list[torch.Tensor] = []
     for entry in adapter._positional:  # noqa: SLF001 - same-package (check.py precedent)
         x = bundle.get(entry.port)
@@ -121,7 +121,7 @@ def _check_leading_valid(mask: Any, stream: str) -> None:
     the two agree only when every valid token precedes every padded one (the
     dumper/reader pad layout). A file with interior padded tokens would
     otherwise yield silently value/mask-misaligned per-token columns.
-    """  # noqa: DOC501 - private helper, per docstring policy
+    """
     if bool((mask[..., :-1] & ~mask[..., 1:]).any()):
         raise ConfigError(
             f"masks.{stream}: valid tokens are not the leading rows (a padded token "
@@ -138,7 +138,7 @@ def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
     Both the export-selection sink columns and the `OnnxExportSink` leaves
     derive from the SAME section ``manifest_fields(Mode.ONNX)`` walk, so they
     are 1:1 by leaf key; a mismatch raises `ConfigError` (never a silent drop).
-    """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+    """
     prefix = export_sink.resolved_model_name()
     leaves = {leaf.key: leaf for leaf in export_sink.leaves}
     plan: list[tuple[Any, str, bool]] = []
@@ -147,8 +147,8 @@ def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
         if leaf is None or len(col.suffixes) != 1:
             raise ConfigError(
                 f"inference H5 column {col.key!r} has no 1:1 ONNX tuple counterpart — "
-                f"export leaves are {sorted(leaves)} (plan 50 Phase D invariant: the H5 "
-                "selection IS the export selection)"
+                f"export leaves are {sorted(leaves)} (the H5 selection IS the export "
+                "selection)"
             )
         plan.append((col, f"{prefix}_{leaf.suffixes[0]}", bool(leaf.per_token)))
     return plan
@@ -215,7 +215,7 @@ def run_inference(
     """The programmatic core of ``salt inference``.
 
     Parses the run config through the real salt surface (run-free — the
-    Phase B implicit-sink wiring runs, so the export-mode `OnnxExportSink` is
+    implicit-sink wiring runs, so the export-mode `OnnxExportSink` is
     discovered exactly as ``salt export`` finds it), loads the checkpoint,
     compiles the ``Mode.ONNX`` plan through `compile_onnx_plan`, and executes
     the `OnnxAdapter` eagerly per jet over the test file, writing the named
@@ -251,8 +251,8 @@ def run_inference(
         On a missing export sink / export-mode selection, an incomplete export
         contract, or any sink schema error.
     """
-    from salt.cli import _static_onnx_export_sink  # noqa: PLC0415 - heavy/circular
-    from salt.model.saltmodule import SaltModule  # noqa: PLC0415 - heavy/circular
+    from salt.cli import _static_onnx_export_sink
+    from salt.model.saltmodule import SaltModule
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     cli = _run_free_cli(config_paths, overrides)
@@ -260,7 +260,7 @@ def run_inference(
     if export_sink is None:
         raise ConfigError(
             "config assembles no ONNX export selection — salt inference's task columns "
-            "ARE the export output set (plan 50 decision 2). Give at least one outputs: "
+            "ARE the export output set. Give at least one outputs: "
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
     variables = _features_variables(cli)
@@ -280,7 +280,7 @@ def run_inference(
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the sink's outputs: section key (design §2.2)"
+            "the sink's outputs: section key"
         )
     modules[export_sink.name] = export_sink
     plan = compile_onnx_plan(modules, resolved, variables)
@@ -292,7 +292,7 @@ def run_inference(
     adapter.float()  # the export_graph precision contract
     # the dataset: the CLI datamodule with the INFERENCE demand — export input
     # ports + pad masks + meta.rows, never labels (Labels narrows to nothing,
-    # so a label-stripped file binds and reads green; 50a Task 2).
+    # so a label-stripped file binds and reads green).
     dm = cli.datamodule
     dm.set_sinks({Mode.TEST: inference_demand(resolved)})
     dm.setup("test")
@@ -324,14 +324,14 @@ def run_inference(
 
 
 def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
-    """Parse the ``salt inference`` CLI arguments."""  # noqa: DOC201 - argparse boilerplate
+    """Parse the ``salt inference`` CLI arguments."""
     parser = argparse.ArgumentParser(
         prog="salt inference",
         description=(
             "Label-free inference (labels are never demanded, so label-stripped files "
             "run green; export-mode InputCopyWriter columns still pass source fields "
-            "through verbatim, labels included): write the EXPORT output set to H5 "
-            "(plan 50). Compiles the same Mode.ONNX selection as salt export and "
+            "through verbatim, labels included): write the EXPORT output set to H5. "
+            "Compiles the same Mode.ONNX selection as salt export and "
             "executes it eagerly per jet — offline inference == Athena semantics by "
             "construction."
         ),
@@ -382,7 +382,7 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
     """The run-config stack: explicit ``-c`` files, or the ``salt export`` sibling
     inference (``<ckpt>/../../config.yaml``); raises `ConfigError` when neither
     resolves.
-    """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+    """
     if parsed.config:
         return list(parsed.config)
     inferred = parsed.ckpt_path.parents[1] / "config.yaml"

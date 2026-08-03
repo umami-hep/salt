@@ -107,17 +107,17 @@ class Executor:
             if module is None:
                 raise ConfigError(
                     f"modules mapping has no entry {step.name!r}, required by the "
-                    f"{plan.mode.name} plan (design §3.2)"
+                    f"{plan.mode.name} plan"
                 )
             if not isinstance(module, GraphModule):
                 raise ConfigError(
                     f"module {step.name!r} ({type(module).__name__}) does not implement the "
-                    "GraphModule protocol (name + declare_io) (design §2.2)"
+                    "GraphModule protocol (name + declare_io)"
                 )
             if module.name != step.name:
                 raise ConfigError(
                     f"module supplied for step {step.name!r} declares name={module.name!r} — "
-                    "instance names must match their plan-step names (design §2.2)"
+                    "instance names must match their plan-step names"
                 )
             self._modules[step.name] = module
             self._allowed[step.name] = _declared_reads(module, step, plan.mode)
@@ -128,7 +128,7 @@ class Executor:
             if not callable(module):
                 raise ConfigError(
                     f"module {step.name!r} ({type(module).__name__}) is not callable — the "
-                    "executor invokes modules as module(bundle, mode) (design §3.2)"
+                    "executor invokes modules as module(bundle, mode)"
                 )
             self._forward_steps.append(step)
 
@@ -155,7 +155,7 @@ class Executor:
         if missing:
             raise KeyError(
                 f"input bundle is missing source leaves required by the {self.plan.mode.name} "
-                f"plan: {missing} — the caller provides every non-optional source (design §3.2)"
+                f"plan: {missing} — the caller provides every non-optional source"
             )
         for step in self._forward_steps:
             module = cast("Callable[[Any, Mode], Any]", self._modules[step.name])
@@ -173,15 +173,14 @@ class Executor:
             if not isinstance(produced, dict):
                 raise DeclarationError(
                     f"module {step.name!r} returned {type(produced).__name__} — modules return "
-                    "their declared produces as a dict of newly produced keys "
-                    "(design §2.5, §3.2)"
+                    "their declared produces as a dict of newly produced keys"
                 )
             if versions is not None and (mutated := _first_mutated(bundle, versions)) is not None:
                 raise MutationError(
                     f"[mode={self.plan.mode.name}] module {step.name!r} mutated bundle key "
                     f"{mutated!r} in place during debug execution — bundle leaves are read-only "
                     "for modules; clone before mutating (e.g. b.get(...).clone()) and return "
-                    "new keys (design §2.1, §3.2)"
+                    "new keys"
                 )
             expected = set(step.produces)
             bundle.merge(
@@ -253,7 +252,7 @@ class _ReadTrackedBundle:
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} accessed Bundle.data directly under "
             "debug execution — raw payload access bypasses read tracking; read declared keys "
-            "via get()/subtree() (design §3.2)"
+            "via get()/subtree()"
         )
 
     def get(self, key: str) -> Any:
@@ -310,8 +309,7 @@ class _ReadTrackedBundle:
         del value
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} called set({key!r}, ...) on its "
-            "bundle view — modules RETURN their produced keys; the executor merges them "
-            "(design §3.2)"
+            "bundle view — modules RETURN their produced keys; the executor merges them"
         )
 
     def merge(self, produced: dict[str, Any], who: str = "", expected: Any = None) -> NoReturn:
@@ -319,7 +317,7 @@ class _ReadTrackedBundle:
         del produced, who, expected
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} called merge() on its bundle view "
-            "— merging is executor-only; modules RETURN their produced keys (design §2.1, §3.2)"
+            "— merging is executor-only; modules RETURN their produced keys"
         )
 
     def _undeclared(self, key: str, verb: str = "read") -> NoReturn:
@@ -331,7 +329,7 @@ class _ReadTrackedBundle:
             f"[mode={self._mode.name}] module {self._who!r} {verb} bundle key {key!r} which is "
             f"not in its declared requires — declared: {declared}. fix: amend "
             f"{self._who!r}.declare_io to require {key!r} (optional=True if consumed-if-"
-            "present), or drop the access (design §3.2, §4.1)"
+            "present), or drop the access"
         )
 
 
@@ -367,13 +365,13 @@ def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -
             if path in leaves:
                 raise DeclarationError(
                     f"module {who!r} returned overlapping keys: {key!r} descends through the "
-                    f"returned leaf {path!r} (design §2.1 write-once)"
+                    f"returned leaf {path!r} (write-once)"
                 )
             node = node.setdefault(parts[depth], {})
         if parts[-1] in node:
             raise DeclarationError(
                 f"module {who!r} returned overlapping keys: {key!r} is both a leaf and a "
-                "prefix of other returned keys (design §2.1 write-once)"
+                "prefix of other returned keys (write-once)"
             )
         node[parts[-1]] = value
         leaves.add(key)
@@ -392,9 +390,7 @@ def _flatten_returned(
     """
     for name, value in produced.items():
         if not isinstance(name, str):
-            raise DeclarationError(
-                f"module {who!r} returned a non-str produced key {name!r} (design §2.1)"
-            )
+            raise DeclarationError(f"module {who!r} returned a non-str produced key {name!r}")
         key = f"{prefix}{KEY_SEP}{name}" if prefix else name
         try:
             split_key(key)
@@ -408,6 +404,6 @@ def _flatten_returned(
         if key in flat:
             raise DeclarationError(
                 f"module {who!r} returned key {key!r} more than once (e.g. both nested and "
-                "dotted spellings) (design §2.1 write-once)"
+                "dotted spellings) (write-once)"
             )
         flat[key] = value

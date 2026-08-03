@@ -77,7 +77,7 @@ class TestVectorConcat:
         out = vc(b, Mode.FIT)
         cat = out["vconcat.global"]
         assert cat.shape == (4, 18)
-        # pooled FIRST, global features LAST (design §6.6 1390-1391)
+        # pooled FIRST, global features LAST
         assert torch.equal(cat[:, :16], torch.ones(4, 16))
         assert torch.equal(cat[:, 16:], 9 * torch.ones(4, 2))
 

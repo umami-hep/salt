@@ -24,8 +24,8 @@ from salt.graph.spec import (
 )
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense, _reject_width_keys
 from salt.model.modules.stream_embed import _stream_len
+from salt.model.nn.dense import Dense, _reject_width_keys
 
 _EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")
 """Recognised edge-feature names. EdgeFeatures rejects anything outside this
@@ -190,7 +190,7 @@ class EdgeFeatures(SaltModelModule):
         """
         super().__init__()
         if not features:
-            raise ConfigError("EdgeFeatures: features must be a non-empty sequence (design §6.7)")
+            raise ConfigError("EdgeFeatures: features must be a non-empty sequence")
         if len(set(features)) != len(tuple(features)):
             raise ConfigError(f"EdgeFeatures: duplicate features in {tuple(features)}")
         unknown = [f for f in features if f not in _EDGE_FEATURES]

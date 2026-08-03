@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import gzip
 import json
+import operator
 import shutil
 import sys
 import tempfile
@@ -738,7 +739,8 @@ def _resolve_target(dotted: str) -> tuple[Any, str, Any]:
     if function is None:
         raise ValueError(f"{dotted!r} does not exist")
     if not callable(function):
-        raise ValueError(f"{dotted!r} is not callable")
+        # ValueError, and salt/tests/unit/test_profiling.py pins that contract.
+        raise ValueError(f"{dotted!r} is not callable")  # noqa: TRY004
     return owner, attr, function
 
 
@@ -937,8 +939,8 @@ def _dataset_summary(
             }
             for lineno, hits, duration in timings
         )
-    functions.sort(key=lambda entry: entry["total_s"], reverse=True)
-    hot.sort(key=lambda entry: entry["total_s"], reverse=True)
+    functions.sort(key=operator.itemgetter("total_s"), reverse=True)
+    hot.sort(key=operator.itemgetter("total_s"), reverse=True)
     return {
         "batches": batches,
         "wall_s": elapsed,

@@ -330,8 +330,8 @@ asked. All numbers below come from the demo run above.
 
 !!! note "Provenance of these numbers"
 
-    The figures in this section were produced by the study's demo experiment
-    (exp 08), pinned to salt at commit `2419254`. The current branch head adds a
+    The figures in this section were produced by a demo experiment, pinned to
+    salt at commit `2419254`. The current branch head adds a
     reducer-safe DDP freeze fix (`8f89278`, see [Multi-GPU](#multi-gpu-fine-tuning))
     that does **not** change any single-GPU number here — the run was not
     re-executed at head.

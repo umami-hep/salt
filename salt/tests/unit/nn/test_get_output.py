@@ -1,13 +1,10 @@
 """Unit gates for the task modules' ``get_output`` output rendering.
 
-Closure evidence (plan 50 Phase E, 2026-07-14): the legacy per-task oracles
-``get_h5``/``output_names``/``onnx_outputs`` were retired with the G1 output
-generation. Every comparison that used them is re-anchored here onto LITERAL
-expected schemas/values — the eval math written out explicitly (softmax /
-masked-softmax / union-find / de-scale) and the literal column/ONNX suffix
-lists, cross-checked against the committed per-config schema goldens at
-``salt/tests/_fixtures/output_goldens/`` (captured at 96d88d8, regenerated
-green through Phase C).
+Every comparison is anchored on LITERAL expected schemas/values — the eval
+math written out explicitly (softmax / masked-softmax / union-find /
+de-scale) and the literal column/ONNX suffix lists, cross-checked against the
+committed per-config schema goldens at
+``salt/tests/_fixtures/output_goldens/``.
 """
 
 from __future__ import annotations
@@ -514,7 +511,7 @@ def test_vtx_get_output_test_padded_positions_carry_int32_min_sentinel():
     """Vertexing (TEST) with PADDED tracks: the padded fill path at value level.
 
     The union-find chain fills padded positions with -inf, which the eval int
-    cast turns into int32 min (-2147483648, the design §8 sentinel); valid
+    cast turns into int32 min (-2147483648, the sentinel); valid
     positions carry non-negative vertex indices, never the sentinel.
     """
     module = _bind_vertexing()

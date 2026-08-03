@@ -20,8 +20,8 @@ from salt.graph.spec import (
 )
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.featurewise import FeaturewiseTransformation
 from salt.model.modules.stream_embed import _stream_len
+from salt.model.nn.featurewise import FeaturewiseTransformation
 from salt.model.nn.transformer import Transformer
 
 _SEQ_LEN = sym_dim("S", "seq")
@@ -169,8 +169,7 @@ class TransformerEncoder(SaltModelModule):
             raise ConfigError(
                 "TransformerEncoder: 'edges' and 'edge_embed_dim' must be set together — "
                 f"got edges={edges!r}, edge_embed_dim={edge_embed_dim}. Set both for an edge "
-                "encoder (v1 GN2XE.yaml:79 edge_embed_dim with an edge_init_net), or neither "
-                "(FD §6.7 1422-1424)"
+                "encoder (v1 GN2XE.yaml:79 edge_embed_dim with an edge_init_net), or neither"
             )
         if update_edges and edges is None:
             raise ConfigError(
@@ -207,7 +206,7 @@ class TransformerEncoder(SaltModelModule):
             # from the module onto itself (rescale_params=False) so a standalone mup
             # encoder is forward-runnable/traceable without a real shape file; import
             # locally to avoid a hard mup dependency for non-mup encoders.
-            from mup import set_base_shapes  # noqa: PLC0415
+            from mup import set_base_shapes
 
             set_base_shapes(self.encoder, self.encoder, rescale_params=False)
         self.out_dim = self.encoder.out_dim
@@ -217,8 +216,8 @@ class TransformerEncoder(SaltModelModule):
         self._encoder_film_cfg: dict[str, Any] | None = None
         self._global_film_cfg: dict[str, Any] | None = None
         self.featurewise_global: FeaturewiseTransformation | None = None
-        for fw in featurewise or ():
-            fw = dict(fw)
+        for entry in featurewise or ():
+            fw = dict(entry)
             layer = fw.get("layer")
             # one params key is shared by all FiLM entries; take it from any entry
             pk = fw.pop("parameters", None)
@@ -316,7 +315,7 @@ class TransformerEncoder(SaltModelModule):
                 f"TransformerEncoder {self.name!r}: edge_embed_dim={self.edge_embed_dim} but the "
                 f"resolved {self.edges_key!r} width is {resolved} — set edge_embed_dim to the "
                 "EdgeEmbed out_dim (the encoder's EdgeAttention projections were sized from "
-                "edge_embed_dim at construction, attention.py:535; FD §6.7 1422-1424)"
+                "edge_embed_dim at construction, attention.py:535)"
             )
 
     def set_export_mode(self) -> None:
@@ -334,7 +333,7 @@ class TransformerEncoder(SaltModelModule):
 
     def _fold_mu_readout(self) -> None:
         """Fold the `MuReadout` out-proj into a plain `nn.Linear`; no-op if already folded."""
-        from mup import MuReadout  # noqa: PLC0415
+        from mup import MuReadout
 
         proj = getattr(self.encoder, "out_proj", None)
         if not isinstance(proj, MuReadout):

@@ -132,15 +132,15 @@ _is_test_persistence_sink = is_test_persistence_sink
 
 
 def _resolve_lr_scheduler_class(class_path: str) -> type:
-    """Import a stage `lr_scheduler.class_path` to its class (plan 15 W8). Reuses the
+    """Import a stage `lr_scheduler.class_path` to its class. Reuses the
     CLI's `salt.core.*`-aware resolver (local import avoids a load-time cycle).
 
     Raises
     ------
     ConfigError
         The dotted path is not importable / not a class.
-    """  # noqa: DOC201
-    from salt.main import _resolve_class_path  # noqa: PLC0415 - avoid import cycle
+    """
+    from salt.main import _resolve_class_path
 
     try:
         cls = _resolve_class_path(class_path)
@@ -165,8 +165,8 @@ def _reachable_sinks(model: Any) -> list[Any]:
 
     Attribute reads are defensive because the white-box tests call the
     consumers of this helper unbound, against a stand-in model.
-    """  # noqa: DOC201 - private accessor
-    from salt.outputs.registry import iter_sinks  # noqa: PLC0415 - heavy/circular
+    """
+    from salt.outputs.registry import iter_sinks
 
     found = list(iter_sinks(getattr(model, "_trainer", None)))
     for sink in getattr(model, "_section_sinks", ()) or ():
@@ -184,8 +184,8 @@ def _is_section_sink(entry: Any) -> bool:
     accidentally matches it — which means every section WRITER matches the
     Protocol too. The discriminator is the `Node` base, plus the answer a
     duck-typed sink gives to ``is_sink()``.
-    """  # noqa: DOC201 - private predicate
-    from salt.outputs.sink import Node  # noqa: PLC0415 - heavy/circular
+    """
+    from salt.outputs.sink import Node
 
     if isinstance(entry, Node):
         return True
@@ -195,9 +195,9 @@ def _is_section_sink(entry: Any) -> bool:
 
 def _is_metric_driven_scheduler(cls: type) -> bool:
     """Whether `cls` is a metric-driven LR scheduler — i.e. a `ReduceLROnPlateau`
-    (sub)class whose ``step(metrics)`` needs a monitored value (design §3). This is
+    (sub)class whose ``step(metrics)`` needs a monitored value. This is
     the deterministic detection rule for the `monitor`-required check.
-    """  # noqa: DOC201
+    """
     return issubclass(cls, torch.optim.lr_scheduler.ReduceLROnPlateau)
 
 
@@ -232,9 +232,9 @@ class SaltModule(lightning.LightningModule):
           ``salt mup-shapes`` / ``setup_mup``, applied at bind time so
           `MuReadout.width_mult()` resolves against real base widths.
     training_schedule : dict, optional
-        Optional staged-training schedule ``{"stages": {name: {...}}}`` (plan D1).
+        Optional staged-training schedule ``{"stages": {name: {...}}}``.
         Its config home is the TOP-LEVEL ``training_schedule:`` key (peer of
-        ``trainer:``/``data:``/``model:``, plan 03); the CLI
+        ``trainer:``/``data:``/``model:``); the CLI
         (`salt.main._relocate_training_schedule`) injects the resolved value
         into this constructor arg before instantiation, and rejects a nested
         ``model.init_args.training_schedule`` fail-loud. Passed directly when
@@ -269,7 +269,7 @@ class SaltModule(lightning.LightningModule):
         # BARE `dict` (not Mapping[str, Any]): a subscripted mapping value type makes
         # jsonargparse recurse and EAGERLY instantiate nested {class_path, init_args}
         # specs (stage `callbacks:`/`lr_scheduler:`), which corrupts them before
-        # `TrainingSchedule.from_config` validates the raw specs (W8.0) and is
+        # `TrainingSchedule.from_config` validates the raw specs and is
         # impossible for an LR scheduler (no optimizer yet). A bare `dict` has no
         # `__args__`, so jsonargparse keeps the schedule opaque and the specs raw.
         training_schedule: dict | None = None,
@@ -281,13 +281,12 @@ class SaltModule(lightning.LightningModule):
         # a null entry — from a config-file or CLI override — deletes the module.
         modules = {key: module for key, module in modules.items() if module is not None}
         if not modules:
-            raise ConfigError("SaltModule needs a non-empty module dict (design §3.4)")
+            raise ConfigError("SaltModule needs a non-empty module dict")
         for key, module in modules.items():
             if not isinstance(module, SaltModelModule):
                 raise ConfigError(
                     f"module {key!r} ({type(module).__name__}) is not a SaltModelModule — "
-                    "model-graph entries must subclass SaltModelModule; wrap or extend it "
-                    "(design §2.5)"
+                    "model-graph entries must subclass SaltModelModule; wrap or extend it"
                 )
             # instance names come from the config dict key, before any declare_io/compile
             module.name = key
@@ -301,7 +300,7 @@ class SaltModule(lightning.LightningModule):
         if missing := [k for k in _LRS_REQUIRED if k not in lrs]:
             raise ConfigError(
                 f"lrs is missing required keys {missing} — the OneCycleLR schema is "
-                f"{list(_LRS_REQUIRED)} (+ optional weight_decay, last_epoch; design §3.4)"
+                f"{list(_LRS_REQUIRED)} (+ optional weight_decay, last_epoch)"
             )
         if optimizer not in _OPTIMIZERS:
             raise ConfigError(
@@ -310,7 +309,7 @@ class SaltModule(lightning.LightningModule):
         # validates apply_to against the module dict and warns on a mup-on module
         # left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
-        # staged-training schedule (plan D1/D2): parsed + validated against the
+        # staged-training schedule: parsed + validated against the
         # model-module names NOW (before the outputs: writers are folded into the
         # graph dict). It is the single canonical home for optimizer/LR config —
         # a plain config (no training_schedule) desugars to one `fit` stage that
@@ -329,7 +328,7 @@ class SaltModule(lightning.LightningModule):
         # `_apply_stage_freeze` at fit setup / each boundary, re-asserted every
         # epoch via `train`.
         self._frozen_module_names: set[str] = set()
-        # per-stage early-stop runtime state (plan 12 W7). All inert unless the
+        # per-stage early-stop runtime state. All inert unless the
         # schedule declares `early_stop` on some stage (`has_early_stop` master
         # switch) — the legacy path never touches them, so no new checkpoint state
         # is written and behaviour is bitwise-identical. `_stage_start_epoch` is the
@@ -342,7 +341,7 @@ class SaltModule(lightning.LightningModule):
         self._early_stop_tracker: EarlyStopTracker | None = None
         self._boundary_records: list[dict[str, Any]] = []
         self._pending_early_advance = False
-        # reducer-safe freeze mode (plan 06/W6): decided at fit `setup` from the
+        # reducer-safe freeze mode: decided at fit `setup` from the
         # attached strategy + schedule. When True, schedule-managed params keep
         # `requires_grad=True` at DDP wrap (so a later unfreeze stays rank-synced);
         # "frozen" is enforced by optimizer-exclusion + eval + per-step grad
@@ -402,9 +401,7 @@ class SaltModule(lightning.LightningModule):
         # programmatic-construction path: compose the outputs: section now (the CLI
         # path passes outputs=None here and composes via instantiate_classes).
         if outputs:
-            self.compose_output_section(
-                {key: w for key, w in outputs.items() if w is not None}
-            )
+            self.compose_output_section({key: w for key, w in outputs.items() if w is not None})
 
     def compose_output_section(self, section: Mapping[str, SaltModelModule | SinkModule]) -> None:
         """Compose the top-level ``outputs:`` section onto the model.
@@ -447,7 +444,7 @@ class SaltModule(lightning.LightningModule):
         if not section:
             return
         for key, w in section.items():
-            # accepted shapes (design §2.5): a graph-folded section writer
+            # accepted shapes: a graph-folded section writer
             # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter
             # today) or a terminal callback-style sink
             # (SinkModule) — see salt.model.base.SaltModelModule for the
@@ -458,12 +455,12 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"outputs: section writer {key!r} ({type(w).__name__}) is neither a "
                     "SaltModelModule nor a SinkModule — model-graph outputs: entries must "
-                    "subclass SaltModelModule; wrap or extend it (design §2.5)"
+                    "subclass SaltModelModule; wrap or extend it"
                 )
             if key in self._graph_modules:
                 raise ConfigError(
                     f"outputs: section writer {key!r} collides with a model module — instance "
-                    "names are unique across the pipeline graph (plan 34 W34.2)"
+                    "names are unique across the pipeline graph"
                 )
             w.name = key
         # PARTITION: sinks out of the writer section entirely. Both exclusions
@@ -563,7 +560,7 @@ class SaltModule(lightning.LightningModule):
                 if _has_wildcard(key):
                     raise ConfigError(
                         f"boundary demand key {key!r} (mode {mode.name}) contains a wildcard — "
-                        "narrow it before compile (design §2.2 rule (d), §3.3)"
+                        "narrow it before compile"
                     )
                 if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
                     consumers = ", ".join(
@@ -573,7 +570,7 @@ class SaltModule(lightning.LightningModule):
                         f"[mode={mode.name}] key {key!r} is required by module(s) {consumers} "
                         "but no model module produces it, and it cannot come from the dataset "
                         f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                        f"keys only, design §6.1).\n  fix: add or restore a module producing "
+                        f"keys only).\n  fix: add or restore a module producing "
                         f"{key!r}, or correct the requiring module's config"
                     )
             origins = {
@@ -587,14 +584,14 @@ class SaltModule(lightning.LightningModule):
                     if _has_wildcard(key):
                         raise ConfigError(
                             f"writer demand key {key!r} ({who}) contains a wildcard — "
-                            "writer requires are concrete keys (design §2.2, §8)"
+                            "writer requires are concrete keys"
                         )
                     if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
                         raise ConfigError(
                             f"[mode=TEST] key {key!r} is required by {who} but no model "
                             "module produces it, and it cannot come from the dataset (the "
                             f"dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                            "keys only, design §6.1, §8).\n  fix: correct the writer's "
+                            "keys only).\n  fix: correct the writer's "
                             "requires, or add a module producing the key"
                         )
                     demand.append(key)
@@ -612,14 +609,14 @@ class SaltModule(lightning.LightningModule):
                     if _has_wildcard(key):
                         raise ConfigError(
                             f"callback demand key {key!r} ({who}) contains a wildcard — "
-                            "callback requires are concrete keys (design §2.2, §3.1)"
+                            "callback requires are concrete keys"
                         )
                     if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
                         raise ConfigError(
                             f"[mode={mode.name}] key {key!r} is required by {who} but no "
                             "model module produces it, and it cannot come from the dataset "
                             f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                            "keys only, design §6.1, §3.1).\n  fix: correct the callback's "
+                            "keys only).\n  fix: correct the callback's "
                             "requires, or add a module producing the key"
                         )
                     demand.append(key)
@@ -694,7 +691,7 @@ class SaltModule(lightning.LightningModule):
         if name in modules:
             raise ConfigError(
                 f"sink node name {name!r} collides with a model module — instance names must be "
-                "unique across the pipeline graph (design §2.2); rename the callback key"
+                "unique across the pipeline graph; rename the callback key"
             )
         folded = dict(modules)
         folded[name] = sink_node
@@ -779,7 +776,7 @@ class SaltModule(lightning.LightningModule):
             if "loss.total" not in produced:
                 raise ConfigError(
                     f"no module produces 'loss.total' in mode {mode.name} — training plans "
-                    "anchor on it; add a LossSum module (design §3.3)"
+                    "anchor on it; add a LossSum module"
                 )
             sinks = ["loss.total"]
             for key in self._callback_demand(mode, callbacks):
@@ -798,7 +795,7 @@ class SaltModule(lightning.LightningModule):
                 if not consumed:
                     raise ConfigError(
                         "[mode=TEST] the configured writers consume nothing the model "
-                        "produces — check writers.modules (design §8)"
+                        "produces — check writers.modules"
                     )
                 return consumed
         # the ONNX output manifest is not writer-derived — the folded OnnxExportSink
@@ -807,7 +804,7 @@ class SaltModule(lightning.LightningModule):
         if not preds:
             raise ConfigError(
                 f"no module produces a 'preds.*' key in mode {mode.name} — evaluation plans "
-                "anchor on predictions (design §3.1, §3.3)"
+                "anchor on predictions"
             )
         return preds
 
@@ -877,7 +874,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"recompiled {mode.name} plan hash changed within one run "
                 f"({previous.plan_hash[:16]}… -> {plan.plan_hash[:16]}…) — the dataset "
-                "boundary or module config drifted (design §3.1 determinism)"
+                "boundary or module config drifted"
             )
         self.plans[mode] = plan
         self._executors[mode] = Executor(plan)
@@ -891,8 +888,8 @@ class SaltModule(lightning.LightningModule):
         """
         if stage not in {"fit", "test"}:
             raise ConfigError(
-                f"stage {stage!r} is not supported by SaltModule in M2 — use trainer.fit or "
-                "trainer.test (validate/predict entry points are M5+, design §9.5)"
+                f"stage {stage!r} is not supported by SaltModule — use trainer.fit or "
+                "trainer.test (validate/predict entry points are not supported)"
             )
         # bind the outputs: section to the attached sink BEFORE any boundary/demand
         # resolution — the sink's declare_io/writer_demand resolves its columns
@@ -935,14 +932,12 @@ class SaltModule(lightning.LightningModule):
         """Validate the schedule against the attached trainer and apply stage 0's
         freeze mask at fit setup (Gotcha #2 — before the initial optimizer build).
         When any stage declares `early_stop`, also runs the early-stop preflight
-        and seeds stage 0's live counters (plan 12 W7).
+        and seeds stage 0's live counters.
 
-        Raises
-        ------
-        ConfigError
-            On an over-allocated epoch budget, a multi-stage schedule with no
-            finite `trainer.max_epochs` (see `TrainingSchedule.validate_epochs`), or
-            an `early_stop` stage under a trainer with validation disabled.
+        A `ConfigError` propagates from the validators on an over-allocated epoch
+        budget, a multi-stage schedule with no finite `trainer.max_epochs` (see
+        `TrainingSchedule.validate_epochs`), or an `early_stop` stage under a
+        trainer with validation disabled.
         """
         max_epochs = getattr(self._trainer, "max_epochs", None)
         self._schedule.validate_epochs(max_epochs)
@@ -951,7 +946,7 @@ class SaltModule(lightning.LightningModule):
         # Decide the freeze mode BEFORE applying the stage-0 mask: under a DDP
         # strategy with a freeze set that changes across stages, keep every managed
         # param requires_grad=True at wrap so the reducer manages them across flips
-        # (W6 fix for the init-frozen-unfreeze desync). Off DDP / static freeze,
+        # (fixes the init-frozen-unfreeze desync). Off DDP / static freeze,
         # stays False → the requires_grad-based freeze (bitwise-parity path).
         self._reducer_safe_freeze = reducer_safe_freeze_required(
             getattr(self._trainer, "strategy", None), self._schedule
@@ -980,11 +975,11 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 "training_schedule declares an 'early_stop' stage but the trainer has validation "
                 "disabled (limit_val_batches=0) — early stopping is evaluated on validation-epoch "
-                "end and could never fire. Enable validation or remove early_stop (plan 12 W7)."
+                "end and could never fire. Enable validation or remove early_stop."
             )
 
     def _preflight_lr_scheduler(self) -> None:
-        """Fail fast at fit setup for every stage's `lr_scheduler` (plan 15 W8):
+        """Fail fast at fit setup for every stage's `lr_scheduler`:
         import its `class_path` (unimportable → ConfigError) and enforce the
         metric-driven-⇒-`monitor` rule (a `ReduceLROnPlateau`-family scheduler needs
         a monitored metric). Inert unless the schedule declares an `lr_scheduler`
@@ -1007,25 +1002,25 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"training_schedule stage {stage.name!r} lr_scheduler {cfg.class_path} is "
                     "metric-driven (a ReduceLROnPlateau subclass) and requires a 'monitor' "
-                    "(a trainer.callback_metrics key, e.g. 'val/loss') — plan 15 W8."
+                    "(a trainer.callback_metrics key, e.g. 'val/loss')."
                 )
 
     def _make_early_stop_tracker(self, stage: StageConfig) -> EarlyStopTracker | None:
         """A fresh `EarlyStopTracker` for `stage` (reset counters), or ``None`` when
         the stage declares no `early_stop`.
-        """  # noqa: DOC201
+        """
         return EarlyStopTracker(stage.early_stop) if stage.early_stop is not None else None
 
     def _apply_stage_freeze(self, stage: StageConfig) -> None:
-        """Apply `stage`'s freeze mask as a DELTA against the currently-frozen set
-        (plan D1 semantics): modules entering the frozen set get ``eval()`` (stops
+        """Apply `stage`'s freeze mask as a DELTA against the currently-frozen
+        set: modules entering the frozen set get ``eval()`` (stops
         dropout + running-stat updates during training); modules leaving it are
         restored to ``train()``. Modules outside both sets are left untouched, so
         the desugared no-freeze path never mutates a param (bitwise parity).
 
         The requires_grad handling depends on the freeze mode (see
         `apply_stage_freeze`): the default mode toggles ``requires_grad`` so the
-        optimizer excludes frozen params by it; reducer-safe mode (W6, under DDP
+        optimizer excludes frozen params by it; reducer-safe mode (under DDP
         with a freeze-flipping schedule) leaves ``requires_grad=True`` on every
         managed param so the reducer keeps managing it across the flip, excluding
         frozen params from the optimizer by membership instead. Records the frozen
@@ -1050,7 +1045,8 @@ class SaltModule(lightning.LightningModule):
         new stage's start epoch (so the per-stage epoch-cap count is measured from
         here). The optimizer/LR rebuild is done by the caller
         (`TrainingScheduleCallback`) via ``strategy.setup_optimizers`` right after.
-        `reason` is ``"epochs"`` or ``"early_stop"`` (recorded only under W7).
+        `reason` is ``"epochs"`` or ``"early_stop"`` (recorded only under the
+        `early_stop` switch).
         """
         self._current_stage_index = new_index
         stage = self._schedule.stages[new_index]
@@ -1070,7 +1066,7 @@ class SaltModule(lightning.LightningModule):
         epochs``); the final stage never advances by cap (its early-stop ends the
         fit instead). Data-dependent boundaries make this replace the pure
         epoch-arithmetic `stage_index_for_epoch` whenever any stage can early-stop.
-        """  # noqa: DOC201
+        """
         idx = self._current_stage_index
         if idx >= len(self._schedule.stages) - 1:
             return idx
@@ -1107,7 +1103,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"training_schedule stage {stage.name!r} early_stop monitors "
                 f"{stage.early_stop.monitor!r} but it is absent from trainer.callback_metrics — "
-                "check the metric name (e.g. 'val/loss') or that validation logs it (plan 12 W7)."
+                "check the metric name (e.g. 'val/loss') or that validation logs it."
             )
         assert self._early_stop_tracker is not None
         return self._early_stop_tracker.check(monitored)
@@ -1204,8 +1200,8 @@ class SaltModule(lightning.LightningModule):
         if fit_hash != val_hash:
             raise ConfigError(
                 f"the VAL plan ({val_hash[:16]}…) differs structurally from the FIT plan "
-                f"({fit_hash[:16]}…) — VAL is contractually the identical plan in M2 "
-                "(design §3.4; VAL-divergent module ports need the M6 exemption mechanism)"
+                f"({fit_hash[:16]}…) — VAL is contractually the identical plan "
+                "(VAL-divergent module ports would need an exemption mechanism)"
             )
 
     def _graph_datamodule(self) -> GraphDataModule:
@@ -1217,7 +1213,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 "SaltModule compiles its plans against a GraphDataModule's dataset boundary — "
                 f"pass one to trainer.fit/test (got {type(dm).__name__}; raw dataloaders are "
-                "not supported, design §3.4/§6.1)"
+                "not supported)"
             )
         return dm
 
@@ -1229,7 +1225,7 @@ class SaltModule(lightning.LightningModule):
         if dset is None:
             raise ConfigError(
                 f"the datamodule has no {stage} dataset — its setup did not run or the "
-                f"{stage}_file is unset (design §6.1)"
+                f"{stage}_file is unset"
             )
         return dset.boundary_specs()
 
@@ -1250,7 +1246,7 @@ class SaltModule(lightning.LightningModule):
         if self._bound:
             raise ConfigError(
                 "SaltModule modules are already bound — bind happens exactly once, before any "
-                "state-dict load (design §2.3)"
+                "state-dict load"
             )
         bind_all(self._graph_modules, schema)
         self._apply_mup_shapes()
@@ -1266,15 +1262,15 @@ class SaltModule(lightning.LightningModule):
         """
         if self.mup_cfg is None or not self.mup_cfg.get("shape_path"):
             return
-        from pathlib import Path as _Path  # noqa: PLC0415 - local, muP-only path
+        from pathlib import Path as _Path
 
-        from mup import set_base_shapes  # noqa: PLC0415 - mup is optional, muP-only path
+        from mup import set_base_shapes
 
         shape_path = _Path(self.mup_cfg["shape_path"])
         if not shape_path.is_file():
             raise ConfigError(
                 f"model.init_args.mup.shape_path {str(shape_path)!r} does not exist — generate it "
-                "with `salt mup-shapes` (setup_mup) before fit (design §3.4, §9.2)"
+                "with `salt mup-shapes` (setup_mup) before fit"
             )
         # the file carries infshapes for the whole net (generated from net) — apply
         # it ONCE over self.net so the apply_to MuReadout/linears get their
@@ -1313,7 +1309,7 @@ class SaltModule(lightning.LightningModule):
         which would otherwise un-eval a frozen module (re-enabling dropout /
         running-stat updates); this override keeps frozen modules in eval across
         epoch boundaries. No-op when nothing is frozen.
-        """  # noqa: DOC201
+        """
         super().train(mode)
         if mode and self._frozen_module_names:
             for name in self._frozen_module_names:
@@ -1343,7 +1339,7 @@ class SaltModule(lightning.LightningModule):
         if executor is None:
             raise ConfigError(
                 f"no compiled plan for mode {mode.name} — run under trainer.fit/test or call "
-                "compile_mode() first (design §3.4)"
+                "compile_mode() first"
             )
         bundle = batch if isinstance(batch, Bundle) else Bundle(dict(batch))
         return executor.run(bundle, debug=self.debug)
@@ -1401,7 +1397,7 @@ class SaltModule(lightning.LightningModule):
         """
         optimizer = optimizer or self.optimizer
         if self.mup_cfg is not None:
-            from mup.optim import MuAdamW  # noqa: PLC0415 - mup is optional, muP-only path
+            from mup.optim import MuAdamW
 
             return MuAdamW
         if optimizer == "lion":
@@ -1424,7 +1420,7 @@ class SaltModule(lightning.LightningModule):
         desugared single `fit` stage overrides neither, so this returns the
         top-level pair unchanged (the bitwise-parity path). A stage's `lrs`
         deep-overrides the top-level keys; its `optimizer` replaces the name.
-        """  # noqa: DOC201
+        """
         stage = self._schedule.stages[self._current_stage_index]
         lrs = {**self.lrs, **stage.lrs} if stage.lrs is not None else self.lrs
         return lrs, stage.optimizer or self.optimizer
@@ -1438,7 +1434,7 @@ class SaltModule(lightning.LightningModule):
         cap measured from its ACTUAL start epoch (see `_early_stop_stage_total_steps`)
         so a stage that starts early — because an earlier stage early-stopped — never
         over-steps its OneCycle.
-        """  # noqa: DOC201
+        """
         total = self.trainer.estimated_stepping_batches
         if not self._schedule.is_multi_stage:
             return total
@@ -1455,7 +1451,7 @@ class SaltModule(lightning.LightningModule):
         earlier stages ended). Sized ``>=`` the steps a stage can actually take, so
         OneCycle never over-steps; equals the arithmetic split when no stage stops
         early. Truncated early, the stage simply under-runs its envelope (D-ES).
-        """  # noqa: DOC201
+        """
         max_epochs = self.trainer.max_epochs
         steps_per_epoch = max(1, round(total / max_epochs))
         index = self._current_stage_index
@@ -1470,11 +1466,11 @@ class SaltModule(lightning.LightningModule):
 
     def configure_optimizers(self) -> tuple[list[Optimizer], list[dict]]:
         """Build the active stage's optimizer (over TRAINABLE params only — frozen
-        modules are excluded entirely, plan D1) + its LR scheduler. Re-invoked by the
+        modules are excluded entirely) + its LR scheduler. Re-invoked by the
         `TrainingScheduleCallback` at each stage boundary via
         ``trainer.strategy.setup_optimizers``. The scheduler is the default
         step-interval OneCycleLR over the stage's step allocation, unless the stage
-        declares an `lr_scheduler` (plan 15 W8) — then that class is instantiated over
+        declares an `lr_scheduler` — then that class is instantiated over
         the freshly-built optimizer instead.
         """
         lrs, optimizer_name = self._active_optim_config()
@@ -1517,13 +1513,13 @@ class SaltModule(lightning.LightningModule):
 
     def _build_stage_lr_scheduler(self, opt: Optimizer, cfg: LRSchedulerConfig) -> dict[str, Any]:
         """Instantiate the stage's chosen LR-scheduler class over the freshly-rebuilt
-        `opt` (plan 15 W8) and wrap it in the Lightning scheduler-config dict. The
+        `opt` and wrap it in the Lightning scheduler-config dict. The
         optimizer is injected as the first positional argument; a user-supplied
         `init_args.optimizer` was already rejected at parse. A metric-driven scheduler
         (`ReduceLROnPlateau`) is wired through Lightning's monitor mechanics
         (`reduce_on_plateau`/`monitor`); its rank-consistency rides on the synced
-        monitor (design §7).
-        """  # noqa: DOC201
+        monitor.
+        """
         cls = _resolve_lr_scheduler_class(cfg.class_path)
         scheduler = cls(opt, **(dict(cfg.init_args) if cfg.init_args else {}))
         entry: dict[str, Any] = {
@@ -1549,7 +1545,7 @@ class SaltModule(lightning.LightningModule):
         scheduler state this checkpoint carries* (the currently-active stage). On
         resume, `on_load_checkpoint` sets `_current_stage_index` back to it BEFORE
         the optimizer is rebuilt, so `configure_optimizers` constructs an optimizer
-        whose `state_dict` shape matches the saved optimizer state (W4). This is
+        whose `state_dict` shape matches the saved optimizer state. This is
         epoch-boundary granular: stage transitions are keyed off the epoch (see
         `TrainingScheduleCallback`), so a checkpoint saved at an epoch boundary
         (Lightning's default val-loss `ModelCheckpoint`) resumes exactly; a
@@ -1575,11 +1571,11 @@ class SaltModule(lightning.LightningModule):
     def _schedule_checkpoint_state(self) -> dict[str, Any]:
         """The `schedule` sub-payload for the checkpoint. Legacy/no-early-stop
         configs get exactly ``{stage_index, stage_name}`` (byte-identical to the
-        pre-W7 tip — the G7a parity guard). Under the `early_stop` master switch it
+        legacy payload — a parity guard). Under the `early_stop` master switch it
         additionally carries the active stage's start epoch, the completed-boundary
         records, and the live early-stop counters, so a data-dependent resume
-        reconstructs the exact stage position + patience state (plan 12 W7).
-        """  # noqa: DOC201
+        reconstructs the exact stage position + patience state.
+        """
         state: dict[str, Any] = {
             "stage_index": self._current_stage_index,
             "stage_name": self._schedule.stages[self._current_stage_index].name,
@@ -1598,7 +1594,7 @@ class SaltModule(lightning.LightningModule):
         ``_orig_mod.`` state_dict prefix, rejects the v1 (``ModelWrapper``)
         state-dict layout with `ConfigError`, and (on a fit resume of a multi-stage
         schedule) restores the saved stage index + freeze mask BEFORE the optimizer
-        is rebuilt (W4 — see `_restore_schedule_stage`). Marks the instance
+        is rebuilt (see `_restore_schedule_stage`). Marks the instance
         checkpoint-loaded (disables `materialise`).
         """
         state_dict = checkpoint.get("state_dict")
@@ -1626,10 +1622,10 @@ class SaltModule(lightning.LightningModule):
                     fields={key: tuple(val) for key, val in stored.get("fields", {}).items()},
                 )
             )
-        # W4 resume: re-establish the saved schedule stage + freeze mask now, while
+        # On resume: re-establish the saved schedule stage + freeze mask now, while
         # the model is bound but the optimizer has NOT yet been built (Lightning
         # restore order: setup("fit") -> on_load_checkpoint -> configure_optimizers
-        # -> restore_optimizers_and_schedulers, empirically confirmed by the W4
+        # -> restore_optimizers_and_schedulers, empirically confirmed by a
         # restore-order probe). setup("fit") already applied stage 0; this promotes
         # it to the checkpoint's stage k so `configure_optimizers` builds a stage-k
         # optimizer whose state_dict shape matches the saved (stage-k) optimizer
@@ -1640,7 +1636,7 @@ class SaltModule(lightning.LightningModule):
 
     def _restore_schedule_stage(self, schedule_state: Mapping[str, Any] | None) -> None:
         """On a fit resume, set `_current_stage_index` + apply the saved stage's
-        freeze mask (multi-stage only), then restore the W7 early-stop counters
+        freeze mask (multi-stage only), then restore the early-stop counters
         (any-stage, when declared).
 
         No-op unless the trainer is fitting: `salt test --ckpt_path` never mutates
@@ -1660,7 +1656,7 @@ class SaltModule(lightning.LightningModule):
         """
         if schedule_state is None:
             return
-        from lightning.pytorch.trainer.states import TrainerFn  # noqa: PLC0415
+        from lightning.pytorch.trainer.states import TrainerFn
 
         fn = getattr(getattr(self._trainer, "state", None), "fn", None)
         if fn is not None and fn != TrainerFn.FITTING:
@@ -1671,7 +1667,7 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"checkpoint records training_schedule stage index {index}, out of range for "
                     f"the current {len(self._schedule.stages)}-stage schedule — the schedule "
-                    "changed since the checkpoint was written; resume is not defined (plan 02 W4)."
+                    "changed since the checkpoint was written; resume is not defined."
                 )
             saved_name = schedule_state.get("stage_name")
             current_name = self._schedule.stages[index].name
@@ -1679,7 +1675,7 @@ class SaltModule(lightning.LightningModule):
                 raise ConfigError(
                     f"checkpoint records training_schedule stage {index} as {saved_name!r} but the "
                     f"current schedule names it {current_name!r} — the schedule changed since the "
-                    "checkpoint was written; resume is not defined (plan 02 W4)."
+                    "checkpoint was written; resume is not defined."
                 )
             self._current_stage_index = index
             self._apply_stage_freeze(self._schedule.stages[index])
@@ -1689,9 +1685,9 @@ class SaltModule(lightning.LightningModule):
             self._restore_early_stop_state(index, schedule_state)
 
     def _restore_early_stop_state(self, index: int, schedule_state: Mapping[str, Any]) -> None:
-        """Restore the W7 early-stop resume state: the active stage's start epoch,
+        """Restore the early-stop resume state: the active stage's start epoch,
         the completed-boundary records, and the live counters (so a mid-stage resume
-        continues patience exactly). A checkpoint that predates W7 (no
+        continues patience exactly). A checkpoint carrying no
         `early_stop_state`) resets the counters fresh for the restored stage. When
         the persisted criterion fingerprint no longer matches the current stage's
         `early_stop`, resume is undefined and raises (same policy as the stage-name
@@ -1717,7 +1713,7 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"checkpoint records an early_stop criterion {saved_fp} for stage "
                 f"{stage.name!r} but the current config declares {current_fp} — the criterion "
-                "changed since the checkpoint; patience resume is not defined (plan 12 W7)."
+                "changed since the checkpoint; patience resume is not defined."
             )
         self._early_stop_tracker = EarlyStopTracker.from_state_dict(stage.early_stop, es_state)
 
@@ -1731,7 +1727,7 @@ class SaltModule(lightning.LightningModule):
         msg = (
             f"plan-hash mismatch for mode {mode.name}: checkpoint has {stored[:16]}…, the "
             f"current config compiles {plan.plan_hash[:16]}… — the module graph or dataset "
-            "boundary changed since the checkpoint was written (design §2.3, risk 9)"
+            "boundary changed since the checkpoint was written"
         )
         if mode is Mode.FIT:
             raise ConfigError(msg)
@@ -1748,7 +1744,7 @@ class SaltModule(lightning.LightningModule):
         Returns the input unchanged when no ``_orig_mod.`` prefix is present
         (so callers can detect a no-op by identity); raises `ConfigError` on a
         v1 layout.
-        """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+        """
         if state_dict and any(k.startswith("model.pool_net.") for k in state_dict):
             raise ConfigError(
                 "this checkpoint has the v1 (ModelWrapper) state-dict layout "
@@ -1818,7 +1814,9 @@ class SaltModule(lightning.LightningModule):
                     _LOG.info(
                         "--init_from: %s plan hash differs (checkpoint %s…, current %s…) — "
                         "not enforced on a weights-only warm start.",
-                        mode.name, stored[:16], plan.plan_hash[:16],
+                        mode.name,
+                        stored[:16],
+                        plan.plan_hash[:16],
                     )
 
         loaded, new, dropped = self._apply_warm_start(ckpt_state, path)
@@ -1827,7 +1825,10 @@ class SaltModule(lightning.LightningModule):
         _LOG.info(
             "--init_from %s: %d module(s) loaded, %d new (fresh init + materialise), "
             "%d dropped.\n%s",
-            path, len(loaded), len(new), len(dropped),
+            path,
+            len(loaded),
+            len(new),
+            len(dropped),
             _warm_start_summary(loaded, new, dropped),
         )
 
@@ -1837,7 +1838,7 @@ class SaltModule(lightning.LightningModule):
         """Classify + load `ckpt_state` by module; returns ``(loaded, new,
         dropped)`` module-name lists. Raises `ConfigError` on partial coverage
         of a retained module (see `_warm_start_from_checkpoint`).
-        """  # noqa: DOC201, DOC501 - private helper, per docstring policy
+        """
         current_state = self.state_dict()
         current_by_mod = _partition_by_module(current_state)
         ckpt_by_mod = _partition_by_module(ckpt_state)
@@ -1872,9 +1873,7 @@ class SaltModule(lightning.LightningModule):
                 "Offenders:\n" + "\n".join(partial)
             )
         dropped = sorted(
-            name
-            for name in ckpt_by_mod
-            if name is not None and name not in self._graph_modules
+            name for name in ckpt_by_mod if name is not None and name not in self._graph_modules
         )
         # only compatible retained-module tensors are handed to load_state_dict;
         # strict=False tolerates the missing new-module keys (never shape errors,
@@ -1887,7 +1886,7 @@ def _partition_by_module(state: Mapping[str, Tensor]) -> dict[str | None, dict[s
     """Group a ``net.<name>.*`` state dict by module name. Keys outside the
     ``net.<name>.`` layout land under the ``None`` bucket (never a model
     module — informational only).
-    """  # noqa: DOC201 - private helper, per docstring policy
+    """
     grouped: dict[str | None, dict[str, Tensor]] = {}
     for key, value in state.items():
         parts = key.split(".", 2)
@@ -1896,14 +1895,12 @@ def _partition_by_module(state: Mapping[str, Tensor]) -> dict[str | None, dict[s
     return grouped
 
 
-def _coverage_mismatch(
-    current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]
-) -> str | None:
+def _coverage_mismatch(current: Mapping[str, Tensor], ckpt: Mapping[str, Tensor]) -> str | None:
     """Return a one-line description of why `ckpt` does not fully cover
     `current` (missing/unexpected keys, or a shape/dtype mismatch on a shared
     key), or ``None`` when coverage is exact. Runs BEFORE `load_state_dict`
     because PyTorch raises on a shape mismatch even under ``strict=False``.
-    """  # noqa: DOC201 - private helper, per docstring policy
+    """
     cur_keys, ckpt_keys = set(current), set(ckpt)
     if missing := cur_keys - ckpt_keys:
         return f"{len(missing)} key(s) missing from checkpoint (e.g. {min(missing)})"
@@ -1919,7 +1916,7 @@ def _coverage_mismatch(
 
 
 def _warm_start_summary(loaded: list[str], new: list[str], dropped: list[str]) -> str:
-    """A per-module warm-start summary table (loaded / new / dropped)."""  # noqa: DOC201
+    """A per-module warm-start summary table (loaded / new / dropped)."""
     rows = [
         *(f"  loaded   {name}" for name in loaded),
         *(f"  new      {name}  (fresh init + materialise)" for name in new),
@@ -1940,8 +1937,7 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         where = f" (produced by {name!r}, config: model.modules.{name})" if name else ""
         lines.append(f"  - {key!r}{where}")
     lines.append(
-        "an unconsumed preds.* port in TEST means a computed prediction is never "
-        "persisted (design §4.2, §8)."
+        "an unconsumed preds.* port in TEST means a computed prediction is never persisted."
     )
     dead_tasks = {
         parts[2]
@@ -2052,19 +2048,19 @@ def validate_mup_routing(
     if not isinstance(mup, Mapping):
         raise ConfigError(
             f"model.init_args.mup must be a mapping with 'apply_to' (and optional 'shape_path'), "
-            f"got {type(mup).__name__} (design §3.4 line 685)"
+            f"got {type(mup).__name__}"
         )
     if unknown := set(mup) - _MUP_KEYS:
         raise ConfigError(
             f"model.init_args.mup has unknown key(s) {sorted(unknown)} — expected "
-            f"{sorted(_MUP_KEYS)} (design §3.4 line 685)"
+            f"{sorted(_MUP_KEYS)}"
         )
     apply_to = mup.get("apply_to")
     if not isinstance(apply_to, (list, tuple)) or not apply_to:
         raise ConfigError(
             "model.init_args.mup needs a non-empty 'apply_to' list of module instance names "
             "(EXPLICIT names, NOT a regex — the v2 design break from v1's apply_to/parameter_name "
-            "zip, configuration_muP.py:98; design §3.4 line 685)"
+            "zip, configuration_muP.py:98)"
         )
     for raw in apply_to:
         if not isinstance(raw, str):
@@ -2075,15 +2071,14 @@ def validate_mup_routing(
         if raw not in modules:
             raise ConfigError(
                 f"model.init_args.mup.apply_to names {raw!r}, which is not a configured module — "
-                f"known modules: {sorted(modules)} (design §3.4: apply_to is an explicit "
+                f"known modules: {sorted(modules)} (apply_to is an explicit "
                 "instance-name list)"
             )
         if not module_supports_mup(modules[raw]):
             raise ConfigError(
                 f"model.init_args.mup.apply_to names {raw!r} "
                 f"({type(modules[raw]).__name__}), which has no 'mup' init_arg — only modules "
-                "that accept mup (StreamEmbed, TransformerEncoder) can be muP-routed "
-                "(design §3.4 line 695 validator rule 1)"
+                "that accept mup (StreamEmbed, TransformerEncoder) can be muP-routed"
             )
     applied = set(apply_to)
     for name, module in modules.items():
@@ -2091,8 +2086,8 @@ def validate_mup_routing(
             warnings.warn(
                 f"module {name!r} has mup: true but is NOT in model.init_args.mup.apply_to — its "
                 "base shapes / MuAdamW grouping are skipped by the routing stage, so its training "
-                "dynamics silently diverge from the muP intent (design §3.4 line 695 validator "
-                "rule 2). Add it to apply_to or set its mup: false.",
+                "dynamics silently diverge from the muP intent. Add it to apply_to or "
+                "set its mup: false.",
                 stacklevel=2,
             )
     return {"apply_to": list(apply_to), "shape_path": mup.get("shape_path")}
@@ -2188,7 +2183,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 f"encoder {name!r} declares an edge port (edges={module.edges_key!r}) but no "
                 "Concat is configured — the edge tensor's stream must be the FIRST concat stream "
                 "so the [B, T, T, D_e] edge matrix aligns with the leading sequence rows "
-                "(v1 sort-first hack, saltmodel.py:66-73; FD §6.7 1425-1431)"
+                "(v1 sort-first hack, saltmodel.py:66-73)"
             )
         concat_name, first_stream = concat
         if edge_stream != first_stream:
@@ -2199,8 +2194,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 "rows of the concatenated sequence (the encoder zero-pads it to the "
                 "register-augmented length assuming the edge stream is first, "
                 f"transformer.py:689-719). fix: put {edge_stream!r} first in {concat_name!r}'s "
-                "streams (v1 did this silently via the init-net sort, saltmodel.py:66-73; "
-                "FD §6.7 1425-1431 rule a)"
+                "streams (v1 did this silently via the init-net sort, saltmodel.py:66-73)"
             )
         # -- rule (b): no non-edge attention backend alongside an edge port -----
         # EdgeAttention encoders always run raw torch attention, so any other
@@ -2214,7 +2208,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
                 "edge features were on (transformer.py:599-601) — v2 makes that a named error so "
                 "a flash-varlen edge config fails loudly instead of running unexpectedly-slow raw "
                 "attention. fix: set the encoder's attention.attn_type to 'torch-math' (or drop "
-                "the edge port). FD §6.7 1425-1431 rule b"
+                "the edge port)."
             )
     return len(encoders)
 
@@ -2287,7 +2281,7 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
             raise ConfigError(
                 f"class_names of module {name!r} (config: model.modules.{name}."
                 f"init_args.class_names) do not match the {label!r} attr of the "
-                f"{stream!r} group in the schema artifact ({diagnosis}, design §2.6).\n"
+                f"{stream!r} group in the schema artifact ({diagnosis}).\n"
                 f"  configured: {configured}\n"
                 f"  schema:     {stored}\n"
                 f"  fix: set class_names to the schema order (or re-dump the schema if "

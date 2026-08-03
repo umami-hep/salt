@@ -53,9 +53,9 @@ class Concat(SaltModelModule):
             raise ConfigError(f"Concat: duplicate streams in {tuple(streams)}")
         if registers != 0:
             raise ConfigError(
-                "Concat: registers are internal to TransformerEncoder in M2 (the composed v1 "
+                "Concat: registers are internal to TransformerEncoder (the composed v1 "
                 "Transformer appends them, transformer.py:679-681) — set "
-                "encoder num_registers instead; Concat-owned registers land at M7 (design §5.1)"
+                "encoder num_registers instead"
             )
         self.streams = tuple(streams)
         self.registers = registers
@@ -222,7 +222,7 @@ class VectorConcat(SaltModelModule):
         if out in inputs:
             raise ConfigError(
                 f"VectorConcat: out {out!r} appears in inputs {tuple(inputs)} — a module cannot "
-                "consume its own output (design §2.1 write-once)"
+                "consume its own output (write-once)"
             )
         self.inputs = tuple(inputs)
         self.out_key = out

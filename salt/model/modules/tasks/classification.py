@@ -13,13 +13,13 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.model.bind import ResolvedSchema
-from salt.model.nn.dense import Dense
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import (
     _checked_weight_source,
     _loss_class,
     _TaskModuleBase,
 )
+from salt.model.nn.dense import Dense
 from salt.outputs.output_schema import OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 
@@ -98,7 +98,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         if not class_names:
             raise ConfigError(
                 f"ClassificationTaskModule: class_names is required and explicit for label "
-                f"{label!r} (design §3.3 — no CLASS_NAMES fallback)"
+                f"{label!r} (no CLASS_NAMES fallback)"
             )
         if len(set(class_names)) != len(tuple(class_names)):
             raise ConfigError(
@@ -277,7 +277,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         if len(values) != len(self.class_names):
             raise ValueError(
                 f"class dict {path} has {len(values)} weights for {self.stream}.{self.label} "
-                f"but the task declares {len(self.class_names)} class_names (design §3.3)"
+                f"but the task declares {len(self.class_names)} class_names"
             )
         with torch.no_grad():
             self.loss.weight.copy_(torch.as_tensor(values, dtype=torch.float32))
@@ -309,7 +309,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         # breaks jsonargparse's hasattr(value, "__args__") protocol walk over
         # this module's globals if imported at module level — the whole
         # model.modules config would fail to parse.
-        from ftag import Flavours  # noqa: PLC0415
+        from ftag import Flavours
 
         return [Flavours[c].px if c in Flavours else f"p{c}" for c in self.class_names]
 
@@ -393,7 +393,7 @@ class ClassificationTaskModule(_TaskModuleBase):
     def _target_field(self, value: Tensor | None = None) -> OutputField:
         """The target-label field: the consumed class label as an unprefixed
         ``target_{task}`` i4 column (labels are model-independent).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         return OutputField(
             h5_name=f"target_{self.name}",
             onnx_name=None,
@@ -408,7 +408,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         """The class label exactly as the loss consumes it: post ``label_map``
         remap; for a padded seq head, padded and invalid (``-2``) positions
         read ``-1`` (mirrors `head_forward`).
-        """  # noqa: DOC201 - private helper, no Returns block
+        """
         labels = b.get(self.label_key)
         if self.label_map is not None:
             mapped = torch.clone(labels)

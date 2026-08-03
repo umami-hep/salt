@@ -1,6 +1,6 @@
 """Unit tests for the shared row-cut engine (`Reader._apply_row_cuts`) and
 `H5StructuredReader` sample-axis row cuts (kept-index at prepare + filtered read;
-cuts=None identity), plan 65 W1.
+cuts=None identity).
 """
 
 from __future__ import annotations

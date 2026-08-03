@@ -1,6 +1,6 @@
-"""Plan 50 Phase D gate — ``salt inference`` end-to-end on the dummy fixture.
+"""End-to-end gate — ``salt inference`` on the dummy fixture.
 
-The three-part gate (plan 50 §Phase D):
+The three-part gate:
 
 (a) on a labelled file, the inference H5 columns correspond ONE-TO-ONE to the
     export-mode `OutputField` selection and the ONNX tuple order/names
