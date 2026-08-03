@@ -24,7 +24,7 @@ from salt.model.modules import (
     resolve_bind_schema,
 )
 from salt.model.modules.tasks import ClassificationTaskModule
-from salt.onnx import (
+from salt.outputs.sinks.onnx import (
     ExportConfig,
     ExportInput,
     check_onnx,
@@ -33,7 +33,7 @@ from salt.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.outputs import OnnxExportLeaf, OnnxExportSink, SeqClassIndex
+from salt.outputs import OnnxExportSink, SeqClassIndex
 from salt.tests._fixtures.gn2v2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
@@ -44,6 +44,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
 )
 from salt.tests.unit.onnx.test_adapter import (
     VARIABLES,
+    bind_producers,
     gn2_export_cfg,
     gn2_folded_modules,
     gn2_resolved,
@@ -292,17 +293,12 @@ def two_stream(tmp_path_factory):
         "electron_origin_index": _n(
             SeqClassIndex(task="electron_origin", stream="electrons"), "electron_origin_index"
         ),
-        "onnx_export": _n(OnnxExportSink(outputs=[
-            OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-            OnnxExportLeaf(
-                key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-            ),
-            OnnxExportLeaf(
-                key="outputs.electrons.electron_origin", name="ElectronOrigin", dtype="int8",
-                per_token=True, dyn_axis="n_electrons",
-            ),
-        ]), "onnx_export"),
+        "onnx_export": _n(OnnxExportSink(), "onnx_export"),
     })
+    # the tuple is collected from the producers above: the jet probs inherit
+    # pb/pc/pu from their task, and each SeqClassIndex inherits its pascal-cased
+    # per-token name (TrackOrigin / ElectronOrigin) and its n_<stream> axis.
+    bind_producers(modules)
     resolved = resolve_export_config(export_cfg, "two_stream")
     plan = compile_onnx_plan(modules, resolved, variables)
     bind_all(modules, resolve_bind_schema([plan]))
@@ -434,6 +430,29 @@ class TestSaltSurface:
         assert export_cfg.rename == {}
         assert export_cfg.combine == []
 
+    def test_export_contract_round_trips_onto_the_sink(self):
+        # the contract's NEW config home is the ONNX sink: jsonargparse must
+        # resolve its `inputs:` entries into ExportInput dataclasses
+        from salt.main import CONFIG_DIR, SaltCLI
+
+        cli = SaltCLI(
+            args=[
+                "--config",
+                str(CONFIG_DIR / "MaskFormer.yaml"),
+                "--model.modules.norm.init_args.norm_dict=unused.yaml",
+            ],
+            run=False,
+        )
+        assert cli._get(cli.config_init, "export") is None  # migrated: no block left
+        sink = cli._get(cli.config_init, "outputs")["onnx_export"]
+        assert isinstance(sink, OnnxExportSink)
+        assert sink.model_name == "MFv2"
+        assert [entry.port for entry in sink.inputs] == ["inputs.jets", "inputs.tracks"]
+        assert sink.inputs[1].sequence is True
+        assert sink.inputs[1].dyn_axis == "n_tracks"
+        assert sink.rename == {}
+        assert sink.combine == []
+
     def test_dispatch_wired_into_salt(self):
         from salt.main import main as salt_main
 
@@ -442,7 +461,7 @@ class TestSaltSurface:
         assert excinfo.value.code == 0
 
     def test_cli_export_from_checkpoint(self, cli_run, capsys):
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         rc = export_main([
             "--ckpt_path",
@@ -482,10 +501,9 @@ class TestSaltSurface:
         assert "-o/--overwrite" in err
 
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
-        # a run config trained WITHOUT an export: block must fail with the
-        # exact working stacking command in the message (review fix: the
-        # old 'stack an override config' hint was not actionable)
-        from salt.onnx.export import main as export_main
+        # a run config trained without ANY export contract (no top-level block,
+        # nothing on the sink) must fail naming the sink's inputs: as the home
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         config.pop("export")
@@ -494,14 +512,15 @@ class TestSaltSurface:
         rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(no_export_cfg)])
         assert rc == 1
         err = capsys.readouterr().err
-        assert "no export: block" in err
-        assert f"-c {no_export_cfg} -c" in err  # the copy-pasteable fix
+        assert "declares no input" in err
+        assert "OnnxExportSink" in err
+        assert "init_args.inputs" in err  # the config address to fix
 
     def test_export_block_stacked_as_second_config(self, cli_run, tmp_path):
         # the documented escape hatch: -c is repeatable, later files
         # deep-merge on top (the fit semantics) — an export-block-only
         # override file completes a run config trained without one
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         export_block = {"export": config.pop("export")}
@@ -535,7 +554,7 @@ class TestSaltSurface:
         # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
         # needed (the off-graph writer manifest is retired — the sink names the
         # folded conversion outputs.* leaves)
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         rc = export_main(["--manifest", "-c", str(cli_run.run_dir / "config.yaml")])
         assert rc == 0
@@ -546,9 +565,9 @@ class TestSaltSurface:
         assert "folded conversion node (outputs.* leaf)" in out
 
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
-        # the migration error must fire on the CLI path with the
-        # writers: pointer (quality bar)
-        from salt.onnx.export import main as export_main
+        # the retired export.outputs carrier must fire on the CLI path, through
+        # the deprecated top-level block (its only remaining spelling)
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         config["export"] = dict(config["export"])
@@ -561,4 +580,4 @@ class TestSaltSurface:
         assert rc == 1
         err = capsys.readouterr().err
         assert "export.outputs was REMOVED" in err
-        assert "writers" in err
+        assert "OnnxExportSink" in err

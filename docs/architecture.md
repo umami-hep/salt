@@ -7,8 +7,9 @@ statically, and no data file is touched before the run starts.
 
 ## Parity-closure doctrine (v1 vs v2 comparisons)
 
-The v1 stack (`salt.models`, `salt.data`, `salt.utils`, `salt.callbacks`,
-`salt.onnx`, `salt.main`, `salt.modelwrapper`) is being deleted from `main`.
+The v1 stack (the `salt.models`, `salt.data`, `salt.utils`, `salt.callbacks`,
+`salt.onnx`, `salt.main` and `salt.modelwrapper` of pin `29c67a1`) is being
+deleted from `main`.
 All v1↔v2 numerical parity was established and passed at the frozen commit
 **`29c67a1`** (`29c67a186f01`) — the last commit where both stacks coexist and
 the parity gates (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
@@ -188,15 +189,26 @@ to the single `--config` — when stacking a second `--config`, pass
 test-file stem heuristic + `--data.test_suff`); the test plan/graph
 artifacts are written into the same directory.
 
-Prediction writing is declared in the top-level `outputs:` section (deep-
-mergeable, like `callbacks:`): an ORDERED dict of section writers
-(`salt.outputs.OutputSectionWriter` graph modules). The section says
-WHAT is written, and in which modes; the COMMAND wires the matching
-implicit sink: `salt test` instantiates the H5 sink
-(`salt.outputs.H5OutputSink`) over the section, and the ONNX parse
-folds an `OnnxExportSink` naming the export-mode leaves. Every model
-config defines its own section (`base2.yaml` ships none) — **dict order =
-per-group column order**, the v1 layout being:
+Prediction writing is declared in the top-level `outputs:` section, the
+single deep-mergeable home for everything that leaves the model. It
+carries two kinds of entry, partitioned by type at parse time:
+
+- **writers** (`salt.outputs.OutputSectionWriter` graph modules) — an
+  ORDERED dict saying WHAT is written and in which modes;
+- **sinks** (`salt.outputs.Node` subclasses) — the destinations, held
+  aside on the model rather than folded into the graph, and therefore
+  EXCLUDED from the ordering.
+
+Usually no sink is declared at all: the COMMAND wires the matching
+implicit one over the section — `salt test` instantiates the H5 sink
+(`salt.outputs.H5OutputSink`), and the ONNX parse folds an
+`OnnxExportSink` naming the export-mode leaves. A config declares a sink
+only when it carries a manifest the command cannot guess (`MaskFormer.yaml`)
+or when it is a third-party one; the implicit wiring then leaves it alone.
+A sink declared under `callbacks:` is accepted for one deprecation window.
+
+Every model config defines its own section (`base2.yaml` ships none) —
+**writer dict order = per-group column order**, the v1 layout being:
 
 ```yaml
 outputs:
@@ -218,8 +230,9 @@ requires each listed task's raw `preds.*` leaf (plus the task's
 `outputs.<stream>.<task>.<col>` leaf per returned `OutputField`; the
 sinks consume ONLY `outputs.*` leaves. Demand-gating keeps exactly the
 demanded producers alive, and a produced `preds.*` key consumed by **no**
-sink is a hard error — narrowing a `RunTaskOutput` `tasks:` list and
-forgetting a task fails loudly instead of silently dropping columns. The same error fires statically from
+sink is a hard error — narrowing a `RunTaskOutput` `tasks:`
+list and forgetting a task fails loudly instead of silently dropping
+columns. The same error fires statically from
 `salt graph validate`/`deadcode`. A `salt test` config without an
 `outputs:` section is refused, and a config still carrying the retired
 top-level `writers:` block fails with a clean migration `ConfigError`. A
@@ -259,8 +272,10 @@ declare a sink instance explicitly when it needs a capability the
 injected default cannot mint from the section: an `H5OutputSink`
 carrying `object_groups` (a generic per-object H5 group on a different row axis,
 used by MaskFormer to write `[B, n_objects]`-shaped outputs alongside the standard
-per-jet columns), or an `OnnxExportSink` with explicit `OnnxExportLeaf` entries
-(per-token or reduced outputs the section cannot produce). The object math itself
+per-jet columns), or an `OnnxExportSink` declared by name when the command would
+not inject one. Its tuple is always collected from the producers' own
+`manifest_fields(mode)` — an explicit leaf list is a hard error; `consumes:`
+(fnmatch patterns over the leaf key) narrows what a sink takes. The object math itself
 (`MaskFormerObjects` reconstructing matched objects from mask logits) lives in a
 graph module and writes `outputs.*` leaves like any other; the sink has no MaskFormer
 knowledge. `MaskFormer.yaml` shows both patterns in use. The command leaves
@@ -281,8 +296,9 @@ All conversions are traceable torch ops running INSIDE the graph — there
 is no off-graph numpy step between the model and either sink.
 
 Naming policy: fields declare logical **suffixes**; the TEST column is
-`{run_name}_{suffix}` and the ONNX output is `{export.model_name}_{suffix}`
-— one declaration, two prefixes. For classification the suffix list is
+`{run_name}_{suffix}` and the ONNX output is `{model_name}_{suffix}` (the
+export sink's `model_name` init arg) — one declaration, two prefixes. For
+classification the suffix list is
 literally the `class_names`-derived list both modes share, so reordering
 classes moves eval columns AND Athena outputs together (the v1
 eval-vs-ONNX vertex-naming drift class is unrepresentable). Cross-mode
@@ -292,7 +308,7 @@ single suffix `HadronIndex` in both the eval-H5 column and the ONNX
 output (the eval column, ours to name, was unified onto the Athena name).
 
 The assembled ONNX manifest is a FLAT namespace: two leaves minting one
-suffix is a hard error naming both (fix via `export.rename:`). Inspect
+suffix is a hard error naming both (fix via the sink's `rename:`). Inspect
 everything with `salt export --manifest` (no checkpoint needed) or the
 manifest table appended to the export-time `plan_onnx.txt`.
 
@@ -422,8 +438,8 @@ ONNX tuple output, named `{run_name}_{suffix}` for tuple output
 int8 `TrackOrigin` column, not per-class probs); per-token columns are
 zero-padded to the file length, with the `mask` column marking pads.
 
-**Label-free.** The dataset demand is derived from `export.inputs` alone
-(feature ports + pad masks + `meta.rows`) — no `labels.*` key is ever
+**Label-free.** The dataset demand is derived from the export sink's `inputs`
+alone (feature ports + pad masks + `meta.rows`) — no `labels.*` key is ever
 demanded, so the command runs unchanged on a label-stripped file (the
 `Labels` producer narrows to nothing; export-mode `get_output` is
 label-free on the task side). No `target_{task}` columns are
@@ -440,8 +456,9 @@ What governs participation is the single `modes:` surface: `export` in a
 `RunTaskOutput`'s modes list puts its tasks in the ONNX tuple AND the
 inference H5; `modes: [test]` keeps them eval-only. A config whose section
 mints no export-mode field is refused (there is nothing Athena-visible to
-write). The explicit `OnnxExportLeaf` escape hatch (MaskFormer object
-reduces) has no H5 counterpart here and is out of scope. Note the eager
+write). Model-graph producers (the MaskFormer object reduces, a `Combination`)
+declare ONNX-only fields, so they contribute to the tuple but not to a `salt
+test` column. Note the eager
 loop runs per jet (the ONNX-mode graph branches assume the Athena calling
 convention) — for bulk labelled evaluation use `salt test`; this command
 is the offline twin of the deployed network.
@@ -487,15 +504,17 @@ case) and never promoted, so `--strict` passes on a standard tagger config.
 the implicit `OnnxExportSink` folded over the
 section's export-mode leaves — exactly what `salt export` will trace —
 with errors attributed to the declaring section writer (`outputs.<name>`).
-The export-only half of the `export:` block is validated as `salt export`
-does: an invalid `export.model_name` (`_`/`-`) is an error-level
-`validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
+The export-only half of the contract — now the sink's `init_args` — is
+validated as `salt export` does: an invalid `model_name` (`_`/`-`) is an
+error-level `validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
 `rename:`/`combine:` are checked against the assembled manifest, and a
 legacy config still carrying `export.outputs` fails with the migration
-error. A trainer config without an `export:` block keeps the
-section-derived sinks but WARNS that inputs/model_name were unchecked
-(promoted under `--strict` — the converter CI gate expects converted
-configs to carry the block). Predictions narrowed out of the manifest (a
+error. A trainer config whose sink declares neither `inputs` nor
+`model_name` (and carries no deprecated top-level `export:` block either)
+keeps the section-derived sinks but WARNS that inputs/model_name were
+unchecked (promoted under `--strict` — the converter CI gate expects
+converted configs to declare the sink's `init_args`). Predictions narrowed
+out of the manifest (a
 `modes: [test]` writer, or a task listed in no export-mode
 `RunTaskOutput`) show up as info-level ONNX deadcode findings (the
 export-pruning story). Note the static ONNX plan/plot remain the
@@ -589,11 +608,12 @@ salt export --ckpt_path <run_dir>/checkpoints/epoch=...-loss=....ckpt
 ```
 
 `-c` is **repeatable** with the fit deep-merge semantics — the supported
-way to export a run trained before the export block existed:
+way to export a run trained before the export sink's `init_args` were
+declared:
 
 ```bash
-salt export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_block.yaml
-# my_export_block.yaml carries ONLY the export: block below
+salt export --ckpt_path <ckpt> -c <run_dir>/config.yaml -c my_export_sink.yaml
+# my_export_sink.yaml carries ONLY the outputs.onnx_export sink entry below
 ```
 
 The export contract has two halves ("one manifest and a half"):
@@ -604,24 +624,34 @@ The export contract has two halves ("one manifest and a half"):
    There is NO `export.outputs` section: a config declaring one fails with
    the migration error. Inspect the assembled manifest any time with
    `salt export --manifest -c <config>` (no checkpoint needed).
-2. **The export-only half** lives in the **`export:` block** (top-level,
-   shipped in the gn2v2 configs; parsed by the normal salt surface so it
-   round-trips through saved run configs):
+2. **The export-only half** lives in the **`OnnxExportSink`'s `init_args`**
+   (declared under the top-level `outputs:` section; parsed by the normal
+   salt surface so it round-trips through saved run configs):
 
 ```yaml
-export:
-  model_name: GN2v2 # no '_'/'-' — validated ONLY at export time; the run
-  #                   name stays unrestricted (default: run name stripped)
-  inputs:
-    - { port: inputs.jets, name: jet_features } # [1, F] global
-    - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
-  # optional Athena-presentation post-processing of the output manifest
-  # (the v1 --rename/--combine_outputs features — readers of exotic
-  # configs consult the outputs: section AND these two keys):
-  rename: { pu: plight } # old suffix -> new (existence-checked)
-  combine: # new output = sum(scale * existing GLOBAL output)
-    - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN2v2 # no '_'/'-' — validated ONLY at export time; the run
+      #                   name stays unrestricted (default: run name stripped)
+      inputs:
+        - { port: inputs.jets, name: jet_features } # [1, F] global
+        - { port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks } # [L, F]
+      # optional Athena-presentation post-processing of the output manifest
+      # (the v1 --rename/--combine_outputs features — readers of exotic
+      # configs consult the outputs: section AND these two keys):
+      rename: { pu: plight } # old suffix -> new (existence-checked)
+      combine: # new output = sum(scale * existing GLOBAL output)
+        - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
 ```
+
+   A top-level `export:` block setting these same five keys is a deprecated
+   alias, kept for one release window (`DeprecationWarning` on use): each key
+   it sets fills a field the sink itself left unset, and a key carried by
+   both homes is a `ConfigError` naming the key and both homes.
+   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/gn2v2-dummy.yaml`
+   still ships the deprecated block, deliberately, as the alias-window proof.
 
 How it works (no data file is touched — config + checkpoint only):
 
@@ -644,8 +674,9 @@ How it works (no data file is touched — config + checkpoint only):
   renames apply first (existence-checked), combined outputs are linear
   combinations of the (renamed) GLOBAL float outputs computed inside the
   traced graph, and they insert after the global entries but BEFORE the
-  per-token aux entries — the v1 output order, owned by the
-  `OnnxExportSink` tuple assembly (globals → combines → per-token aux).
+  per-token aux entries — the v1 output order. The `OnnxExportSink` tuple
+  itself follows its manifest sources' declaration order, which is not a
+  contract: Athena consumes the outputs by name.
   Both are recorded in `gnn_config` byte-compatibly with v1
   (`combine_outputs`/`rename_outputs`).
 - **Multi-stream trace-safety**: eager `Split` slicing is wrong under
@@ -678,10 +709,10 @@ How it works (no data file is touched — config + checkpoint only):
   proof the traced graph is correct.
 
 Programmatic surface for gates/tests (no checkpoint needed):
-`salt.onnx.export_graph(modules, export_cfg, variables, path)` — the
+`salt.outputs.sinks.onnx.export_graph(modules, export_cfg, variables, path)` — the
 output set derives from the folded `OnnxExportSink` in `modules`; passing
 a legacy reduce-manifest `outputs=` list is a hard `ConfigError` — plus
-`salt.onnx.check_onnx(adapter, path, ...)`.
+`salt.outputs.sinks.onnx.check_onnx(adapter, path, ...)`.
 
 ## Checkpoints and resume
 

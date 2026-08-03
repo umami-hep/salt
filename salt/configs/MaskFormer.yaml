@@ -150,8 +150,9 @@ model:
       # (reordered per-constituent index); TEST mints outputs.tracks.HadronIndex
       # from the RAW masks (the eval-H5 HadronIndex, indices_from_mask + pad->-1).
       # `index_name: HadronIndex` is the SINGLE source of the index name — the
-      # h5_output object group / OnnxExportSink derive their column / ONNX suffix
-      # from the leaf's terminal segment (no sink-side respelling).
+      # h5_output object group derives its column from the leaf's terminal
+      # segment and the node's own ONNX manifest names the export output (no
+      # sink-side respelling).
       # Demand-gated: FIT/VAL prune it; the h5_output object group / OnnxExportSink
       # pull it into TEST / ONNX respectively. (Instance name kept for ONNX
       # plan-hash stability — it now serves TEST too.)
@@ -200,11 +201,13 @@ outputs:
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-callbacks:
-  # consumes matched.objects.* -> keeps the matched loss alive under pruning
-  maskformer_metrics:
-    class_path: salt.callbacks.MaskformerMetrics
+  # --- sinks -----------------------------------------------------------------
+  # Sinks live in this same section, partitioned out by type: the writer order
+  # above is the eval-H5 column order, and a sink takes no part in it, so these
+  # two entries sit at the end for readability only. The H5 sink is declared
+  # here because it carries the MaskFormer-specific eval-H5 object groups; the
+  # ONNX sink is declared only so it is wired by name — its tuple is collected
+  # from the producers' own manifests.
   h5_output:
     class_path: salt.outputs.H5OutputSink
     init_args:
@@ -230,23 +233,25 @@ callbacks:
           # single-source: the column suffix defaults to the leaf terminal (HadronIndex)
           fields:
             - {leaf: outputs.tracks.HadronIndex, dtype: i8}
+  # the ONNX tuple is collected from the producers: run_tasks' tasks name the
+  # jet probabilities + the per-token TrackOrigin index, and
+  # maskformer_objects_onnx names the leading_objects_<target> scalars (one per
+  # `regression.targets` entry) and the int8 per-token HadronIndex.
   onnx_export:
     class_path: salt.outputs.OnnxExportSink
     init_args:
-      outputs:
-        - key: outputs.objects.leading_object
-          names: [leading_objects_pt, leading_objects_Lxy, leading_objects_deta,
-                  leading_objects_dphi, leading_objects_mass]
-        # single-source: the ONNX suffix defaults to the leaf terminal (HadronIndex)
-        - key: outputs.tracks.HadronIndex
-          dtype: int8
-          per_token: true
+      # the ONNX artifact contract: the Athena model name + the input signature
+      # `salt export` traces against (the output tuple is collected from the
+      # producers' own manifests, above)
+      model_name: MFv2 # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
-export:
-  model_name: MFv2 # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+callbacks:
+  # consumes matched.objects.* -> keeps the matched loss alive under pruning
+  maskformer_metrics:
+    class_path: salt.callbacks.MaskformerMetrics
 
 trainer:
   max_epochs: 40

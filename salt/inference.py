@@ -9,7 +9,6 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -18,18 +17,19 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, GraphError
 from salt.graph.spec import Mode
-from salt.onnx.adapter import OnnxAdapter
-from salt.onnx.config import (
+from salt.outputs.sinks.onnx.adapter import OnnxAdapter
+from salt.outputs.sinks.onnx.config import (
     ExportConfig,
-    resolve_export_config,
     stream_of_input_port,
 )
-from salt.onnx.export import (
+from salt.outputs.sinks.onnx.export import (
     _cross_check_schema,
     _features_variables,
+    _resolve_export_contract,
     _run_free_cli,
     compile_onnx_plan,
 )
+from salt.outputs.sinks.sink import SinkContext
 
 __all__ = ["INFERENCE_OUTPUT", "build_inference_sink", "inference_demand", "main", "run_inference"]
 
@@ -248,22 +248,14 @@ def run_inference(
     Raises
     ------
     ConfigError
-        On a missing export block / export-mode selection, an explicit-leaf
-        (MaskFormer escape hatch) config, or any sink schema error.
+        On a missing export sink / export-mode selection, an incomplete export
+        contract, or any sink schema error.
     """
     from salt.cli import _static_onnx_export_sink
     from salt.model.saltmodule import SaltModule
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     cli = _run_free_cli(config_paths, overrides)
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - main.py precedent
-    if export_cfg is None:
-        raise ConfigError(
-            f"config {config_paths[0]} has no export: block — salt inference feeds the "
-            "model through the Athena input contract (export.inputs), so declare it (or "
-            "stack an override file carrying only the export: block as a second -c)"
-        )
-    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
@@ -271,14 +263,10 @@ def run_inference(
             "ARE the export output set. Give at least one outputs: "
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
-    if export_sink._explicit_leaves:  # noqa: SLF001 - same-package scope guard
-        raise ConfigError(
-            "salt inference supports the outputs:-section export selection only — this "
-            "config declares explicit OnnxExportLeaf entries (the MaskFormer object-reduce "
-            "escape hatch), which have no H5 counterpart here"
-        )
     variables = _features_variables(cli)
-    resolved = resolve_export_config(export_cfg, run_name)
+    # the sink carries the Athena input contract salt inference feeds the model
+    # through, resolved via the same seam `salt export` uses
+    resolved = _resolve_export_contract(cli, export_sink)
     if export_sink.model_name is None:
         export_sink.model_name = resolved.model_name
     model = SaltModule.load_from_checkpoint(
@@ -292,7 +280,7 @@ def run_inference(
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the callbacks key"
+            "the sink's outputs: section key"
         )
     modules[export_sink.name] = export_sink
     plan = compile_onnx_plan(modules, resolved, variables)
@@ -310,15 +298,15 @@ def run_inference(
     dm.setup("test")
     dset = dm.test_dset
     sink = build_inference_sink(cli.model._output_section, output)  # noqa: SLF001 - section home
-    # the sink's lifecycle is driven directly (no Lightning test loop runs
-    # here); it reads only these trainer facts, duck-typed:
-    trainer = SimpleNamespace(
-        lightning_module=model,
+    # the sink's lifecycle is driven directly — no Lightning test loop runs
+    # here, so the context is built from what this driver genuinely knows.
+    # num_test_batches is None: inference always covers the whole dataset.
+    ctx = SinkContext(
+        run_name=getattr(model, "name", None) or "salt",
         datamodule=dm,
         ckpt_path=str(ckpt_path),
-        num_test_batches=None,
     )
-    sink.open_schema(trainer)
+    sink.open_schema(ctx)
     try:
         column_plan = _column_plan(sink, export_sink)
         total = len(dset)

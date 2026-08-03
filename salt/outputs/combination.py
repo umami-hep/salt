@@ -11,6 +11,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.model.base import SaltModelModule
+from salt.outputs.output_schema import OutputField
 
 
 class Combination(SaltModelModule):
@@ -95,6 +96,23 @@ class Combination(SaltModelModule):
         requires = {self.source: TensorSpec(shape=None, dtype="float32", kind="data")}
         produces = {self.output_key: TensorSpec(shape=None, dtype="float32", kind="data")}
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
+    def manifest_fields(self, mode: Mode) -> list[tuple[str, OutputField]]:
+        """The combined leaf's ONNX field manifest — one global float scalar named `name`.
+
+        ONNX-ONLY: a combination has no eval-H5 representation, so it declares
+        nothing in any other mode.
+        """
+        if not (mode & Mode.ONNX):
+            return []
+        field = OutputField(
+            h5_name=None,
+            onnx_name=self.output_name,
+            dtype="f4",
+            axis="global",
+            final=True,
+        )
+        return [(self.output_key, field)]
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """The combination collapses the source last dim to a single scalar column (width 1)."""

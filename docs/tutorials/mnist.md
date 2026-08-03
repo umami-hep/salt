@@ -342,8 +342,8 @@ module produces), this command tells you now, with the producer/consumer names,
 instead of a shape error mid-training.
 
 Two warnings are expected and harmless here: no `schema:` artifact (field
-spellings can't be checked statically for a custom reader) and no `export:`
-block (this tutorial does not export to ONNX).
+spellings can't be checked statically for a custom reader) and no export
+contract declared (this tutorial does not export to ONNX).
 
 !!! warning "Stale validate results after editing your config"
 

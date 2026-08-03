@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from salt.onnx.config import ExportConfig, stream_of_input_port
+from salt.outputs.sinks.onnx.config import ExportConfig, stream_of_input_port
 
 __all__ = ["ONNX_MODEL_VERSION", "build_gnn_config", "load_run_metadata", "write_metadata"]
 

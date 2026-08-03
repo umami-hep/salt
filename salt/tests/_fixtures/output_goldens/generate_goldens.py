@@ -229,7 +229,7 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
     )
     from salt.graph.errors import ConfigError  # noqa: PLC0415
     from salt.graph.spec import Mode  # noqa: PLC0415
-    from salt.onnx.export import _run_free_cli  # noqa: PLC0415
+    from salt.outputs.sinks.onnx.export import _merge_export_alias, _run_free_cli  # noqa: PLC0415
     from salt.outputs import H5OutputSink  # noqa: PLC0415
 
     stack_paths = [CONFIG_DIR / c for c in spec.stack]
@@ -307,11 +307,12 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
 
     if onnx_sink is not None:
         try:
+            # fold the deprecated top-level export: block onto the sink first
+            _merge_export_alias(cli, onnx_sink)
             if onnx_sink.model_name is None:
-                export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001
-                onnx_sink.model_name = _static_export_model_name(export_cfg, run_name)
+                onnx_sink.model_name = _static_export_model_name(onnx_sink, run_name)
             result["onnx"] = {
-                "is_dumb_section": onnx_sink._is_dumb_section(),  # noqa: SLF001
+                "is_dumb_section": bool(onnx_sink._output_section),  # noqa: SLF001
                 "model_name": onnx_sink.model_name,
                 "output_names": onnx_sink.output_names(),
                 "output_dtypes": onnx_sink.output_dtypes(),

@@ -9,13 +9,12 @@ from pathlib import Path
 from typing import Any, TextIO
 
 import numpy as np
-from lightning import Trainer
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.sink import OutputSink
+from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 
 __all__ = ["JSONLOutputSink"]
 
@@ -45,10 +44,10 @@ def _jsonable(value: Any) -> Any:
     return float(value)
 
 
-class JSONLOutputSink(OutputSink):
+class JSONLOutputSink(RuntimeSink):
     """Write the eval columns as newline-delimited JSON, one object per row.
 
-    A deliberately minimal reference implementation of the `OutputSink`
+    A deliberately minimal reference implementation of the `RuntimeSink`
     contract — the answer to "how do I write salt's outputs in some other
     format?". It is a real, tested sink, not pseudo-code: it resolves its
     column schema from the same bound ``outputs:`` section the H5 sink uses
@@ -84,41 +83,60 @@ class JSONLOutputSink(OutputSink):
         Whether to truncate an existing file, by default True. False refuses
         to clobber (raises `ConfigError`), which is the safer setting when the
         template is not checkpoint-unique.
+    modes : Sequence[str] | None, optional
+        Which planner modes to run in. REQUIRED when this sink is declared in
+        the ``outputs:`` section: an auxiliary sink rides alongside the
+        primary H5 sink rather than replacing it, so it states when it runs
+        rather than inheriting a default. By default None (= ``[test]``).
+    consumes : Sequence[str] | None, optional
+        fnmatch patterns over the ``outputs.*`` leaf key narrowing the columns
+        taken from the section, by default None (every column it mints).
+        Complementary to `columns`, which selects by FLAT COLUMN NAME.
 
     Attributes
     ----------
     name : str
-        The graph-node instance name (overridable by the ``callbacks:`` dict key).
+        The graph-node instance name (overridable by the section dict key).
 
     Notes
     -----
     Nothing is validated in the constructor. `ConfigError` is raised later, at
     run setup, when no ``outputs:`` section is bound, when `columns` names a
-    column the section does not mint, when ``trainer.ckpt_path`` is unset, or
+    column the section does not mint, when the context carries no checkpoint
+    path, or
     when the target exists and `overwrite` is False.
 
     Examples
     --------
-    Wire it in ``callbacks:`` — the ``outputs:`` section is unchanged, and
-    ``salt test`` still writes its eval H5::
+    Declare it in the ``outputs:`` section alongside the writers. The writers
+    keep their declaration order (it is the eval-H5 column order); a sink is
+    excluded from that ordering, so where it sits in the section is free::
 
-        callbacks:
+        outputs:
+          inputs_copy: {class_path: salt.outputs.InputCopyWriter, ...}
+          run_tasks: {class_path: salt.outputs.RunTaskOutput, ...}
           jsonl:
             class_path: salt.outputs.JSONLOutputSink
             init_args:
+              modes: [test]
               columns: [GN2_pb, GN2_pc, GN2_pu]
+
+    ``salt test`` still writes its eval H5 — this sink is auxiliary and does
+    not displace the H5 persistence sink.
     """
 
     name: str = "jsonl_output"
-    """The graph-node instance name (overridable by the ``callbacks:`` dict key)."""
+    """The graph-node instance name (overridable by the section dict key)."""
 
     def __init__(
         self,
         columns: Sequence[str] | None = None,
         output: str = DEFAULT_OUTPUT,
         overwrite: bool = True,
+        modes: Sequence[str] | None = None,
+        consumes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes, consumes=consumes)
         self.columns = tuple(columns) if columns is not None else None
         self.output = output
         self.overwrite = overwrite
@@ -139,15 +157,19 @@ class JSONLOutputSink(OutputSink):
         this method, before any ``declare_io`` / ``writer_demand`` resolution.
         """
         self._output_section = section
+        self._invalidate_manifest()
+
+    def _invalidate_manifest(self) -> None:
+        """Drop the cached column table after a manifest source rebinds."""
         self._resolved = None
 
     def _section_columns(self) -> tuple[OutputColumn, ...]:
         """Every TEST `OutputColumn` the bound section mints, in section order.
 
         Same walk (and therefore the same names and order) as the H5 sink's
-        section resolution: each `RunTaskOutput`'s ``manifest_fields(Mode.TEST)``
-        contributes one column per ``outputs.*`` leaf, its suffixes in field
-        order.
+        resolution: each writer's ``manifest_fields(Mode.TEST)`` contributes
+        one column per ``outputs.*`` leaf, its suffixes in field order,
+        narrowed by ``consumes:``.
         """
         if not self._output_section:
             raise ConfigError(
@@ -156,17 +178,15 @@ class JSONLOutputSink(OutputSink):
             )
         by_key: dict[str, list[Any]] = {}
         order: list[str] = []
-        for writer in self._output_section.values():
-            is_rto = getattr(writer, "is_run_task_output", None)
-            if not (callable(is_rto) and is_rto()):
+        for leaf_key, field in self._filter_consumed(
+            collect_manifest_fields(self._output_section.values(), Mode.TEST)
+        ):
+            if field.h5_name is None:
                 continue
-            for leaf_key, field in writer.manifest_fields(Mode.TEST):
-                if field.h5_name is None:
-                    continue
-                if leaf_key not in by_key:
-                    by_key[leaf_key] = []
-                    order.append(leaf_key)
-                by_key[leaf_key].append(field)
+            if leaf_key not in by_key:
+                by_key[leaf_key] = []
+                order.append(leaf_key)
+            by_key[leaf_key].append(field)
         return tuple(
             OutputColumn(
                 key=key,
@@ -251,14 +271,13 @@ class JSONLOutputSink(OutputSink):
 
     # -- lifecycle ---------------------------------------------------------
 
-    def open_schema(self, trainer: Trainer) -> None:
+    def open_schema(self, ctx: SinkContext) -> None:
         """Resolve the output path + column schema and open the file for writing."""
-        pl_module = trainer.lightning_module
-        self._run_name = getattr(pl_module, "name", "salt")
+        self._run_name = ctx.run_name
         self._resolved = None  # re-resolve: the run name feeds the column names
         self._validate_columns()
         self._ensure_columns()
-        self.output_path = self._output_path(trainer)
+        self.output_path = self._output_path(ctx)
         if self.output_path.exists() and not self.overwrite:
             raise ConfigError(
                 f"JSONLOutputSink refuses to overwrite {self.output_path} — pass "
@@ -307,21 +326,20 @@ class JSONLOutputSink(OutputSink):
 
     # -- helpers -----------------------------------------------------------
 
-    def _output_path(self, trainer: Trainer) -> Path:
+    def _output_path(self, ctx: SinkContext) -> Path:
         """Render the output template against the checkpoint and the test sample.
 
         Mirrors `H5OutputSink`'s template contract (same keys, same sample
         heuristic) so the JSONL lands beside the eval H5; raises `ConfigError`
         when ``ckpt_path`` is unset or the template names an unknown key.
         """
-        ckpt_path = trainer.ckpt_path
+        ckpt_path = ctx.ckpt_path
         if ckpt_path is None:
             raise ConfigError(
-                "JSONLOutputSink needs trainer.ckpt_path — run salt test with --ckpt_path "
+                "JSONLOutputSink needs a checkpoint path — run salt test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint)"
             )
-        dset = getattr(getattr(trainer, "datamodule", None), "test_dset", None)
-        reader = getattr(dset, "reader", None)
+        reader = ctx.reader
         src = getattr(reader, "filename", None) or getattr(reader, "source_path", None)
         stem = Path(src).stem if src is not None else self._run_name
         keys = {

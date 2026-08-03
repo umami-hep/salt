@@ -20,7 +20,7 @@ from salt.model.modules import (
     resolve_bind_schema,
 )
 from salt.model.modules.tasks import ClassificationTaskModule
-from salt.onnx import (
+from salt.outputs.sinks.onnx import (
     ExportConfig,
     ExportInput,
     OnnxAdapter,
@@ -30,8 +30,8 @@ from salt.onnx import (
     sanitised_model_name,
     validate_model_name,
 )
-from salt.onnx.config import ExportOutput, default_athena_name
-from salt.onnx.reduces import (
+from salt.outputs.sinks.onnx.config import ExportOutput, default_athena_name
+from salt.outputs.sinks.onnx.reduces import (
     BoundReduce,
     ReduceCtx,
     bind_reduce,
@@ -44,6 +44,7 @@ from salt.outputs import (
     ClassProbs,
     OnnxExportLeaf,
     OnnxExportSink,
+    OutputField,
     SeqClassIndex,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
@@ -77,6 +78,20 @@ def _named(node, name):
     return node
 
 
+class _SplitStub:
+    """An ONNX-only producer minting N global float fields under one leaf key."""
+
+    def __init__(self, key, names):
+        self.key = key
+        self.names = list(names)
+
+    def manifest_fields(self, mode):
+        """The N global fields, ONNX-only."""
+        if not (mode & Mode.ONNX):
+            return []
+        return [(self.key, OutputField(h5_name=None, onnx_name=n)) for n in self.names]
+
+
 def gn2_folded_modules(tmp_path):
     """The GN2 module dict + the folded conversion nodes + OnnxExportSink."""
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
@@ -85,19 +100,17 @@ def gn2_folded_modules(tmp_path):
         "track_origin_index": _named(
             SeqClassIndex(task="track_origin", stream="tracks"), "track_origin_index"
         ),
-        "onnx_export": _named(gn2_export_sink(), "onnx_export"),
+        "onnx_export": _named(OnnxExportSink(), "onnx_export"),
     })
+    bind_producers(modules)
     return modules
 
 
-def gn2_export_sink() -> OnnxExportSink:
-    """The GN2 OnnxExportSink: pb/pc/pu (split) + TrackOrigin int8 (folded conversion nodes)."""
-    return OnnxExportSink(outputs=[
-        OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-        OnnxExportLeaf(
-            key="outputs.tracks.track_origin", name="TrackOrigin", dtype="int8", per_token=True
-        ),
-    ])
+def bind_producers(modules) -> None:
+    """Bind the model modules to every producer/sink that resolves names from them."""
+    for module in modules.values():
+        if callable(getattr(module, "bind_model_modules", None)):
+            module.bind_model_modules(modules)
 
 
 def gn2_resolved(run_name: str = "GN2_v2", **overrides) -> ExportConfig:
@@ -251,15 +264,20 @@ class TestExportSinkOutputs:
 
     def test_duplicate_output_name_rejected(self):
         with pytest.raises(ConfigError, match="duplicate flat ONNX output name"):
-            OnnxExportSink(outputs=[
+            OnnxExportSink._validate_leaves([  # noqa: SLF001 - direct guard check
                 OnnxExportLeaf(key="outputs.jets.a", names=["pb", "pc"]),
                 OnnxExportLeaf(key="outputs.jets.b", name="pb", dtype="int8", per_token=True),
             ])
 
-    def test_empty_sink_defers_to_section(self):
-        """An omitted/empty `outputs` defers to a bound `outputs:` section."""
+    def test_explicit_outputs_list_rejected(self):
+        """The config-level leaf list is retired — producers name their own leaves."""
+        with pytest.raises(ConfigError, match="no longer accepts an explicit"):
+            OnnxExportSink(outputs=[OnnxExportLeaf(key="outputs.jets.a", names=["pb", "pc"])])
+
+    def test_empty_sink_defers_to_its_manifest_sources(self):
+        """An omitted `outputs` defers to the bound manifest sources."""
         sink = OnnxExportSink(outputs=[], model_name="M")
-        with pytest.raises(ConfigError, match="has no export leaves"):
+        with pytest.raises(ConfigError, match="collected no ONNX output"):
             sink.output_names()
 
 
@@ -275,7 +293,7 @@ class TestRetiredReduces:
     def test_no_shipped_reduces_registered(self):
         # the five shipped reduce REGISTRATIONS are gone (the conversion
         # nodes own the math); registered_reduces() carries no shipped name
-        from salt.onnx.reduces import registered_reduces  # noqa: PLC0415
+        from salt.outputs.sinks.onnx.reduces import registered_reduces  # noqa: PLC0415
 
         shipped = {"split_scalars", "argmax", "vertex_union_find", "leading_object", "object_index"}
         assert shipped.isdisjoint(set(registered_reduces()))
@@ -283,10 +301,8 @@ class TestRetiredReduces:
     def test_split_named_split_helper_is_the_sink(self):
         # the split_scalars NAMING split now lives on the OnnxExportSink (v1
         # task.py:301 torch.split+squeeze) — pinned here on a hand-made bundle
-        sink = OnnxExportSink(
-            outputs=[OnnxExportLeaf(key="outputs.jets.c", names=["pb", "pc", "pu"])],
-            model_name="M",
-        )
+        sink = OnnxExportSink(model_name="M")
+        sink.bind_model_modules({"probs": _SplitStub("outputs.jets.c", ["pb", "pc", "pu"])})
         b = Bundle()
         probs = torch.tensor([[0.5, 0.3, 0.2]])
         b.set("outputs.jets.c", probs)
@@ -316,7 +332,7 @@ def _bind_passthrough_int8(out_cfg, ctx):
 @pytest.fixture
 def fresh_reduce_name():
     """Yield a never-registered reduce name and unregister it on teardown."""
-    import salt.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
+    import salt.outputs.sinks.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
 
     name = "test_passthrough_int8"
     assert name not in reduces_mod._REGISTRY, "fixture name already registered (leak)"  # noqa: SLF001
@@ -340,7 +356,7 @@ class TestRegisterReduce:
     def test_config_known_reduces_is_a_live_registry_view(self, fresh_reduce_name):
         # the config-level public names stay a LIVE view of the registry (PEP 562
         # __getattr__); a freshly-registered probe reduce shows up in the view
-        from salt.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
+        from salt.outputs.sinks.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
 
         register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
         assert set(cfg.KNOWN_REDUCES) == set(registered_reduces())
@@ -353,7 +369,7 @@ class TestRegisterReduce:
         # live everywhere: registry, config view, dtype lookup
         assert fresh_reduce_name in registered_reduces()
         assert reduce_dtype(fresh_reduce_name) == "int8"
-        from salt.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
+        from salt.outputs.sinks.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
 
         assert fresh_reduce_name in cfg.KNOWN_REDUCES
         # the registered spec carries the declared field knowledge
@@ -437,9 +453,10 @@ class TestOnnxPlan:
         # error (the folded sink anchors the demand)
         write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
         modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-        bad_sink = OnnxExportSink(outputs=[
-            OnnxExportLeaf(key="outputs.jets.typo_task", names=["pb", "pc", "pu"]),
-        ])
+        bad_sink = OnnxExportSink()
+        bad_sink.bind_model_modules({
+            "typo": _SplitStub("outputs.jets.typo_task", ["pb", "pc", "pu"])
+        })
         bad_sink.name = "onnx_export"
         modules["onnx_export"] = bad_sink
         with pytest.raises(ConnectivityError):
@@ -618,12 +635,8 @@ class TestExportModeProtocol:
         modules["jet_probs"] = _named(
             ClassProbs(task="jets_classification", stream="jets"), "jet_probs"
         )
-        modules["onnx_export"] = _named(
-            OnnxExportSink(outputs=[
-                OnnxExportLeaf(key="outputs.jets.jets_classification", names=["pb", "pc", "pu"]),
-            ]),
-            "onnx_export",
-        )
+        modules["onnx_export"] = _named(OnnxExportSink(), "onnx_export")
+        bind_producers(modules)
         resolved = resolve_export_config(_flash_export_cfg(), "flash_run")
         plan = compile_onnx_plan(modules, resolved, VARIABLES)
         bind_all(modules, resolve_bind_schema([plan]))

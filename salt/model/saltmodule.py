@@ -42,7 +42,7 @@ from salt.model.bind import (
 )
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW, Lion
-from salt.outputs.sink import is_test_persistence_sink
+from salt.outputs.sinks.sink import is_test_persistence_sink
 from salt.schedule import (
     EarlyStopTracker,
     LRSchedulerConfig,
@@ -153,6 +153,44 @@ def _resolve_lr_scheduler_class(class_path: str) -> type:
             f"training_schedule lr_scheduler.class_path {class_path!r} does not name a class."
         )
     return cls
+
+
+def _reachable_sinks(model: Any) -> list[Any]:
+    """Every sink `model` can reach: the trainer registry, then its own section sinks.
+
+    `iter_sinks` stays the single discovery path and is authoritative; section
+    sinks are appended (deduplicated by identity) so the PROGRAMMATIC path
+    still resolves — ``SaltModule(outputs=...)`` composes in ``__init__``,
+    where there is no trainer for them to have been registered on.
+
+    Attribute reads are defensive because the white-box tests call the
+    consumers of this helper unbound, against a stand-in model.
+    """
+    from salt.outputs.sinks.registry import iter_sinks
+
+    found = list(iter_sinks(getattr(model, "_trainer", None)))
+    for sink in getattr(model, "_section_sinks", ()) or ():
+        if not any(seen is sink for seen in found):
+            found.append(sink)
+    return found
+
+
+def _is_section_sink(entry: Any) -> bool:
+    """Whether an ``outputs:`` section entry is a SINK rather than a writer.
+
+    Note this cannot select on the `SinkModule` Protocol: it is
+    runtime-checkable and structural, and `SaltModelModule` carries an
+    ``is_sink`` method (defaulting to False) precisely so a model module never
+    accidentally matches it — which means every section WRITER matches the
+    Protocol too. The discriminator is the `Node` base, plus the answer a
+    duck-typed sink gives to ``is_sink()``.
+    """
+    from salt.outputs.sinks.sink import Node
+
+    if isinstance(entry, Node):
+        return True
+    is_sink = getattr(entry, "is_sink", None)
+    return callable(is_sink) and bool(is_sink())
 
 
 def _is_metric_driven_scheduler(cls: type) -> bool:
@@ -325,9 +363,21 @@ class SaltModule(lightning.LightningModule):
         # modules: entries above + the non-manifest-only outputs: writers folded
         # in by compose_output_section below — never a terminal sink.
         self._graph_modules: dict[str, SaltModelModule] = dict(modules)
+        # a producer that names its own outputs.* leaves (ClassProbs / SeqClassIndex /
+        # MaskFormerObjects / MFLeadVertexDecorator) resolves the source task from the
+        # model graph. Bind the LIVE dict, so the section writers compose_output_section
+        # folds in below are visible to it too.
+        for module in modules.values():
+            if callable(getattr(module, "bind_model_modules", None)):
+                module.bind_model_modules(self._graph_modules)
         # the top-level outputs: section, composed AFTER the model (empty until
         # compose_output_section runs — either here or from the CLI path).
         self._output_section: dict[str, SaltModelModule | SinkModule] = {}
+        # sinks declared in that same section, partitioned out of it: they are
+        # neither graph modules nor manifest entries. The CLI registers these on
+        # the trainer; on the programmatic path (SaltModule(outputs=...), no
+        # trainer) this list IS the registry — see `_sinks`.
+        self._section_sinks: list[Any] = []
         self.plans: dict[Mode, Plan] = {}
         self._executors: dict[Mode, Executor] = {}
         self.schema: ResolvedSchema | None = None
@@ -356,10 +406,21 @@ class SaltModule(lightning.LightningModule):
     def compose_output_section(self, section: Mapping[str, SaltModelModule | SinkModule]) -> None:
         """Compose the top-level ``outputs:`` section onto the model.
 
-        Section writers (`RunTaskOutput` / `InputCopyWriter` / `PadMaskWriter`) are
+        The section holds two kinds of entry, partitioned here by type.
+
+        Section WRITERS (`RunTaskOutput` / `InputCopyWriter` / `PadMaskWriter`) are
         folded into the planning module dict (and `net`, params-free so the
         state_dict is unchanged). Their ``outputs.*`` leaves reach a sink only in
-        TEST/ONNX, so FIT/VAL demand-prune them.
+        TEST/ONNX, so FIT/VAL demand-prune them. Their declaration ORDER is the
+        eval-H5 per-group column order.
+
+        Section SINKS (`salt.outputs.Node` subclasses — the H5 persistence sink,
+        the ONNX manifest, an auxiliary sink) are held aside in `_section_sinks`
+        instead. They are excluded from the graph module dict (a sink is folded
+        into the per-mode plan separately, at ``compile_mode``) and from the bound
+        section manifest (a sink reads that manifest, so it must not contain
+        itself). That exclusion is also what keeps a sink out of the column
+        ordering: the writers' order is untouched by where a sink sits.
 
         MANIFEST-ONLY writers (`InputCopyWriter` — input copies are re-read from the
         source H5 by the SINK, never flowing through the graph) are NOT folded into
@@ -370,13 +431,13 @@ class SaltModule(lightning.LightningModule):
         Parameters
         ----------
         section : Mapping[str, SaltModelModule | SinkModule]
-            The section writers by instance name, in declaration order (the eval-H5
-            column-order authority).
+            The section entries by instance name, in declaration order (the eval-H5
+            column-order authority for the writers among them).
 
         Raises
         ------
         ConfigError
-            For a section writer that is neither a `SaltModelModule` nor a
+            For a section entry that is neither a `SaltModelModule` nor a
             `SinkModule`, or whose name collides with a model module.
         """
         section = {key: w for key, w in section.items() if w is not None}
@@ -402,19 +463,27 @@ class SaltModule(lightning.LightningModule):
                     "names are unique across the pipeline graph"
                 )
             w.name = key
+        # PARTITION: sinks out of the writer section entirely. Both exclusions
+        # matter — out of `graph_writers` (else the sink is folded into `net` /
+        # `_graph_modules` and collides with the compile-time sink fold) and out
+        # of `_output_section` (else the sink binds a manifest containing
+        # itself, and the column resolver iterates over it).
+        sinks = {key: w for key, w in section.items() if _is_section_sink(w)}
+        writers = {key: w for key, w in section.items() if key not in sinks}
         # the model-side modules before the section folds in — RunTaskOutput
         # resolves its tasks against these.
         model_modules = dict(self._graph_modules)
         graph_writers = {
             key: w
-            for key, w in section.items()
+            for key, w in writers.items()
             if not (callable(getattr(w, "is_manifest_only", None)) and w.is_manifest_only())
         }
         for key, w in graph_writers.items():
             self.net[key] = w  # ride the ModuleDict (params-free, state_dict unchanged)
             self._graph_modules[key] = w
-        self._output_section = dict(section)
-        for w in section.values():
+        self._output_section = dict(writers)
+        self._section_sinks = list(sinks.values())
+        for w in writers.values():
             if callable(getattr(w, "bind_model_modules", None)):
                 w.bind_model_modules(model_modules)
 
@@ -556,19 +625,20 @@ class SaltModule(lightning.LightningModule):
         return out
 
     def _attached_writer(self) -> tuple[Any, Any]:
-        """The attached TEST writer/sink callback + reader, duck-typed on
-        ``writer_demand``. Order-independent: an ONNX-only sink's
+        """The attached TEST writer/sink node + reader, duck-typed on
+        ``writer_demand``. Read from `_sinks` — the trainer's registry plus any
+        section-declared sink. Order-independent: an ONNX-only sink's
         ``is_test_sink()`` discriminator skips it so it is never chosen as the
         TEST persistence sink; a plain duck-typed sink without ``is_test_sink``
         counts as one. ``(None, None)`` when none is attached.
         """
         trainer = self._trainer
-        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
         callback = next(
             (
-                cb
-                for cb in callbacks or []
-                if callable(getattr(cb, "writer_demand", None)) and _is_test_persistence_sink(cb)
+                sink
+                for sink in _reachable_sinks(self)
+                if callable(getattr(sink, "writer_demand", None))
+                and _is_test_persistence_sink(sink)
             ),
             None,
         )
@@ -595,21 +665,19 @@ class SaltModule(lightning.LightningModule):
         return None
 
     def _bind_output_section_to_sink(self) -> None:
-        """Bind the outputs: section to every attached sink callback.
+        """Bind both manifest sources to every attached sink.
 
         Sinks resolve their column schema + copy spec + mask streams from the
-        section manifest, so the section must be bound before any
-        declare_io/writer_demand resolution. Binds to every attached callback
-        exposing ``bind_output_section`` (H5 persistence + ONNX export).
-        No-op when no outputs: section is configured.
+        outputs: section AND from the model's graph modules (a producer names
+        its own leaves), so both must be bound before any
+        declare_io/writer_demand resolution. Duck-typed on the two bind
+        methods, so a sink implementing neither is left alone.
         """
-        if not self._output_section:
-            return
-        trainer = self._trainer
-        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-        for cb in callbacks or []:
-            if callable(getattr(cb, "bind_output_section", None)):
-                cb.bind_output_section(self._output_section)
+        for sink in _reachable_sinks(self):
+            if callable(getattr(sink, "bind_model_modules", None)):
+                sink.bind_model_modules(self._graph_modules)
+            if self._output_section and callable(getattr(sink, "bind_output_section", None)):
+                sink.bind_output_section(self._output_section)
 
     @staticmethod
     def _fold_sink_node(
@@ -773,14 +841,13 @@ class SaltModule(lightning.LightningModule):
         # plan_hash is unchanged (the trained checkpoint loads unperturbed).
         modules = dict(self._graph_modules)
         sink_node = self._attached_sink_node()
-        # bind the outputs: section to the sink so it dumps the section's
+        # bind both manifest sources to the sink so it names the declared
         # outputs.* leaves in declaration order, not producer discovery.
-        if (
-            self._output_section
-            and sink_node is not None
-            and callable(getattr(sink_node, "bind_output_section", None))
-        ):
-            sink_node.bind_output_section(self._output_section)
+        if sink_node is not None:
+            if callable(getattr(sink_node, "bind_model_modules", None)):
+                sink_node.bind_model_modules(self._graph_modules)
+            if self._output_section and callable(getattr(sink_node, "bind_output_section", None)):
+                sink_node.bind_output_section(self._output_section)
         folded_sink = sink_node is not None and mode is Mode.TEST
         if folded_sink:
             # the sink node anchors ALL its demand via its declared requires —

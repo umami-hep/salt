@@ -12,8 +12,9 @@ import h5py
 import pytest
 
 from salt.graph.errors import ConfigError
-from salt.outputs.h5_sink import H5OutputSink
+from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.output_schema import OutputColumn
+from salt.outputs.sinks.sink import SinkContext
 
 pytestmark = pytest.mark.cpu_always
 
@@ -47,18 +48,6 @@ class _DataModule:
         self.test_suff = None
 
 
-class _Module:
-    name = "salt"
-
-
-class _Trainer:
-    def __init__(self, dm: _DataModule, ckpt_path: str) -> None:
-        self.lightning_module = _Module()
-        self.datamodule = dm
-        self.ckpt_path = ckpt_path
-        self.num_test_batches = None  # -> _expected_rows falls back to len(dset)
-
-
 def _seed_global_column(sink: H5OutputSink) -> None:
     """Seed one global prob column on the 'mnist' stream (bypass section binding)."""
     sink._columns = (  # noqa: SLF001 - the explicit table is retired as a config surface
@@ -67,9 +56,11 @@ def _seed_global_column(sink: H5OutputSink) -> None:
     sink._columns_resolved = True  # noqa: SLF001
 
 
-def _trainer(tmp_path: Path) -> _Trainer:
-    return _Trainer(
-        _DataModule(_GlobalReader(tmp_path / "t10k-images-idx3-ubyte")),
+def _ctx(tmp_path: Path) -> SinkContext:
+    """The open-time context: num_test_batches None -> rows fall back to len(dset)."""  # noqa: DOC201 - test helper
+    return SinkContext(
+        run_name="salt",
+        datamodule=_DataModule(_GlobalReader(tmp_path / "t10k-images-idx3-ubyte")),
         ckpt_path=str(tmp_path / "e0-loss=0.1.ckpt"),
     )
 
@@ -79,7 +70,7 @@ def test_groupless_reader_ok_when_nothing_needs_source(tmp_path):
     out = tmp_path / "eval.h5"
     sink = H5OutputSink(output=str(out))  # no copy_inputs, write_pad_mask=False default
     _seed_global_column(sink)
-    sink.open_schema(_trainer(tmp_path))
+    sink.open_schema(_ctx(tmp_path))
     assert sink._h5 is not None  # noqa: SLF001 - FIXED-mode writer was created
     assert out.exists()  # schema file written to disk
     with h5py.File(out) as f:
@@ -102,7 +93,7 @@ def test_groupless_reader_rejected_when_source_needed(tmp_path, kwargs, match):
     sink = H5OutputSink(output=str(tmp_path / "eval.h5"), **kwargs)
     _seed_global_column(sink)
     with pytest.raises(ConfigError, match=match):
-        sink.open_schema(_trainer(tmp_path))
+        sink.open_schema(_ctx(tmp_path))
 
 
 # Case 3 (H5StructuredReader-shaped reader path UNCHANGED) is already exercised

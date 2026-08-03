@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch import Tensor
@@ -12,13 +12,28 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.outputs.output_schema import _OUTPUTS_NAMESPACE
-from salt.outputs.sink import OutputSink
+from salt.outputs.output_schema import _OUTPUTS_NAMESPACE, OutputField
+
+# salt.outputs already imports salt.outputs.sinks.onnx at module level
+# (salt.outputs.maskformer -> salt.outputs.sinks.onnx.reduces), and nothing under
+# salt.outputs.sinks.onnx imports salt.outputs at module level — so the export
+# dataclasses can be named in the signature, which is what lets jsonargparse
+# resolve `inputs:`/`combine:` config entries.
+from salt.outputs.sinks.onnx.config import (
+    ExportCombine,
+    ExportConfig,
+    ExportInput,
+    resolve_export_config,
+)
+from salt.outputs.sinks.sink import Node, collect_manifest_fields
 
 
 @dataclass(frozen=True)
 class OnnxExportLeaf:
     """One ONNX output: the conversion ``outputs.*`` leaf + its Athena naming.
+
+    The sink's internal representation of one resolved output, built from the
+    producers' declared fields — not a config surface.
 
     The conversion already ran in the trace, so the sink does no per-batch
     compute — it just NAMES the demanded conversion leaves into the flat
@@ -129,7 +144,7 @@ class OnnxExportLeaf:
         return self.dyn_axis or f"n_{self.stream}"
 
 
-class OnnxExportSink(OutputSink):
+class OnnxExportSink(Node):
     """The ONNX sink: a declare-only terminal node naming the conversion leaves.
 
     A pure terminal `SinkModule` for ``Mode.ONNX``: its ONNX-mode
@@ -141,7 +156,17 @@ class OnnxExportSink(OutputSink):
     per-batch compute: it just flattens/names the populated ``outputs.*``
     into the flat Athena output tuple.
 
-    It is the folded-path counterpart to the legacy `salt.onnx.reduces`
+    The tuple is AUTO-COLLECTED: every bound manifest source declaring
+    ``manifest_fields(Mode.ONNX)`` contributes its own names and dtypes
+    (`collect_manifest_fields`), so a module minting ``outputs.*`` leaves is
+    the single place those leaves are named. The flat tuple ORDER is GLOBAL
+    float scalars before PER-TOKEN aux outputs, applied within each manifest
+    group — the ``outputs:`` section's writers, then the model's graph modules
+    — with declaration order inside each block. It is pinned by the committed
+    per-config goldens (``salt/tests/_fixtures/output_goldens/``), so a
+    reordering is a visible schema change rather than a silent one.
+
+    It is the folded-path counterpart to the legacy `salt.outputs.sinks.onnx.reduces`
     path: `compile_onnx_plan` sources its ONNX sinks from
     ``declare_io(Mode.ONNX).requires`` when an export node is present, and
     the `OnnxAdapter` reads the named leaves from the executed bundle instead
@@ -152,60 +177,94 @@ class OnnxExportSink(OutputSink):
 
     Outside ``Mode.ONNX`` the node declares empty requires AND empty
     produces, so the planner prunes it from FIT/VAL/TEST — the FIT
-    ``plan_hash`` is unchanged. It has no Lightning lifecycle (export never
-    runs ``test_step``): the ``open_schema``/``consume``/``flush`` hooks are
-    inert no-ops; its only job is naming the leaves at adapter construction.
+    ``plan_hash`` is unchanged. It is a `Node`, not a `RuntimeSink`: export
+    never runs a test loop, so there is no lifecycle to have. Its only job is
+    naming the leaves at adapter construction, which happens at compile time.
+
+    It is also the CONFIG HOME of the whole ONNX artifact contract: the Athena
+    model name and input signature (`inputs`, `track_selection`) and the
+    manifest post-processing (`rename`, `combine`) live here alongside the
+    output tuple, and `export_config` assembles them into the resolved
+    `salt.outputs.sinks.onnx.ExportConfig` that ``salt export`` / ``salt inference`` trace
+    against. The top-level ``export:`` block is a deprecated alias for these
+    same keys (`salt.outputs.sinks.onnx.export` folds it in, and a key set in both homes is
+    a `ConfigError`).
 
     Parameters
     ----------
-    outputs : Sequence[OnnxExportLeaf | Mapping[str, Any]]
-        The export outputs, in flat Athena tuple order — globals, then
-        combines, then per-token aux (the export node's list is the
-        authority, not executor topo order). Each entry is an
-        `OnnxExportLeaf` (or a mapping jsonargparse builds into one).
     model_name : str | None, optional
-        The Athena output-name prefix (``{model_name}_{suffix}``). When None
-        it is supplied at adapter construction from the resolved export
-        config, by default None.
+        The Athena output-name prefix (``{model_name}_{suffix}``) and
+        ``doc_string``; no ``_``/``-`` allowed. None (the default) defaults it
+        to the run ``name:`` with ``_``/``-`` stripped, at export time.
+    inputs : Sequence[ExportInput | Mapping[str, Any]] | None, optional
+        The ONNX graph inputs in positional order, each an `ExportInput` (or
+        the equivalent mapping) naming the bundle port it feeds. Required to
+        export; None (the default) leaves the signature undeclared.
+    track_selection : str, optional
+        Athena-side track selection used in the default metadata input names,
+        by default ``r22default``.
+    rename : Mapping[str, str] | None, optional
+        Manifest suffix renames ``old -> new``, recorded in the ``gnn_config``
+        metadata, by default None.
+    combine : Sequence[ExportCombine | Mapping[str, Any]] | None, optional
+        Combined outputs (``sum(scale * output(suffix))``), by default None.
+    modes : Sequence[str] | None, optional
+        Which planner modes to run in. `allowed_modes` is ``[onnx]``, so
+        ``[onnx]`` (or its writer-vocabulary spelling ``[export]``) is the
+        only accepted list, and omitting it (the default) means the same.
+    consumes : Sequence[str] | None, optional
+        fnmatch patterns over the ``outputs.*`` leaf key narrowing the
+        collected tuple, by default None (every declared final ONNX leaf).
+    outputs : None
+        RETIRED as a config surface. Only ``None``/``[]`` is accepted; any
+        truthy value raises `ConfigError`. A module minting ``outputs.*``
+        leaves names them by implementing ``manifest_fields(mode)``; use
+        `consumes` to narrow what this sink takes.
 
     Raises
     ------
     ConfigError
-        For an empty outputs list, a duplicate leaf key, or a duplicate flat
-        Athena suffix.
+        For any truthy ``outputs`` value (the retired explicit-leaf surface),
+        or (at resolution) an empty collected tuple, a duplicate leaf key, or
+        a duplicate flat Athena suffix.
     """
 
     name = "onnx_export"
     """The graph-node instance name (overridable by the config dict key)."""
 
+    allowed_modes: ClassVar[frozenset[Mode]] = frozenset({Mode.ONNX})
+    """Export only — a manifest node has nothing to declare in any other mode."""
+
     def __init__(
         self,
-        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]] | None = None,
         model_name: str | None = None,
+        inputs: Sequence[ExportInput | Mapping[str, Any]] | None = None,
+        track_selection: str = "r22default",
+        rename: Mapping[str, str] | None = None,
+        combine: Sequence[ExportCombine | Mapping[str, Any]] | None = None,
+        modes: Sequence[str] | None = None,
+        consumes: Sequence[str] | None = None,
+        outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]] | None = None,
     ) -> None:
-        super().__init__()
-        leaves = [
-            leaf if isinstance(leaf, OnnxExportLeaf) else OnnxExportLeaf(**dict(leaf))
-            for leaf in outputs or []
-        ]
-        # The export tuple comes from EITHER the explicit `outputs:` leaf list (the
-        # export configs / the MaskFormer escape hatch) OR a bound dumb `outputs:`
-        # section. With explicit leaves the tuple is resolved up front; with a
-        # section it resolves lazily on first access. One MUST resolve.
-        self._leaves_resolved = bool(leaves)
-        # dumb-section binding (see H5OutputSink.bind_output_section).
-        self._output_section: Mapping[str, Any] | None = None
-        if leaves:
-            self._validate_leaves(leaves)
-        self._leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
-        # the EXPLICIT leaves (the MaskFormer object reduces — leading_object +
-        # object_index) survive a later `bind_output_section`: when a dumb section
-        # is ALSO bound (the MaskFormer cutover names the 1:1 head leaves through
-        # the section AND the object reduces explicitly), `_resolve_section_leaves`
-        # merges these on top of the section's RunTaskOutput leaves. Empty for the
-        # section-only and explicit-only configs.
-        self._explicit_leaves: tuple[OnnxExportLeaf, ...] = tuple(leaves)
+        super().__init__(modes=modes, consumes=consumes)
+        if outputs:
+            raise ConfigError(
+                "OnnxExportSink no longer accepts an explicit `outputs:` OnnxExportLeaf list — "
+                "the ONNX tuple is collected from the producers' own manifests. A module that "
+                "mints outputs.* leaves names them by implementing manifest_fields(mode) "
+                "(RunTaskOutput does it for the section's tasks; ClassProbs / SeqClassIndex / "
+                "Combination / MaskFormerObjects do it for the model graph). Use `consumes:` "
+                "(fnmatch patterns over the leaf key) to narrow what this sink takes."
+            )
+        self._leaves: tuple[OnnxExportLeaf, ...] = ()
+        self._leaves_resolved = False
         self.model_name = model_name
+        # the export-only half of the contract, coerced from dataclasses OR plain
+        # config mappings (jsonargparse resolves the union either way)
+        self.inputs: list[ExportInput] = [ExportInput.coerce(e) for e in inputs or ()]
+        self.track_selection = track_selection
+        self.rename: dict[str, str] = dict(rename or {})
+        self.combine: list[ExportCombine] = [ExportCombine.coerce(c) for c in combine or ()]
 
     @staticmethod
     def _validate_leaves(leaves: Sequence[OnnxExportLeaf]) -> None:
@@ -228,95 +287,117 @@ class OnnxExportSink(OutputSink):
                 seen_suffixes.add(suffix)
 
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
-        """Capture the ``outputs:`` section so the dumb ONNX sink names its leaves.
+        """Capture the ``outputs:`` section — the first manifest source.
 
-        When bound, the sink NAMES the per-field ``outputs.*`` leaves the
-        section's `RunTaskOutput` mints (in section declaration order, the
-        canonical globals -> combines -> per-token tuple order, not executor
-        topo order). It does no math and no ``torch.split`` / ``.squeeze`` —
-        ``get_output`` already squeezed each global per-class value to a
-        0-dim scalar, so the dumb sink only names the already-scalar values.
+        The sink NAMES nothing itself: it names the ``outputs.*`` leaves the
+        section's writers declare through ``manifest_fields(Mode.ONNX)``. It
+        does no math and no ``torch.split`` / ``.squeeze`` for a section field
+        — ``get_output`` already squeezed each global per-class value to a
+        0-dim scalar, so the sink only names the already-scalar values.
         """
         self._output_section = section
+        self._invalidate_manifest()
+
+    def _invalidate_manifest(self) -> None:
+        """Drop the cached leaf tuple after a manifest source rebinds."""
         self._leaves_resolved = False
 
-    def _is_dumb_section(self) -> bool:
-        """Whether an ``outputs:`` section is bound (the dumb-section path is active)."""
-        return bool(self._output_section)
+    def _leaves_from_fields(
+        self, fields: Sequence[tuple[str, OutputField]]
+    ) -> list[OnnxExportLeaf]:
+        """Mint one leaf per ``outputs.*`` key, grouping the key's fields.
 
-    def _section_run_task_outputs(self) -> list[Any]:
-        """The bound section's `RunTaskOutput` writers, in section declaration order."""
-        if not self._output_section:
-            return []
-        return [
-            w
-            for w in self._output_section.values()
-            if callable(getattr(w, "is_run_task_output", None)) and w.is_run_task_output()
-        ]
-
-    def _resolve_section_leaves(self) -> tuple[OnnxExportLeaf, ...]:
-        """Resolve ONNX export leaves from the bound ``outputs:`` section.
-
-        Walks each `RunTaskOutput`'s ``manifest_fields(Mode.ONNX)`` in
-        SECTION DECLARATION ORDER, keeps FINAL fields with an ``onnx_name``,
-        and mints one single-``name`` `OnnxExportLeaf` per field. Ordered
-        GLOBAL scalars first then PER-TOKEN aux (independent of executor
-        topo order). Raises `ConfigError` when the section mints no ONNX
-        leaf or two fields mint the same suffix.
+        Keys in first-appearance order: one field -> a single-``name`` leaf
+        (per-token when the field is), N fields -> a ``names`` split leaf.
+        A split leaf is a set of GLOBAL float scalars, so a per-token field
+        mixed into one is a `ConfigError`.
         """
-        globals_block: list[OnnxExportLeaf] = []
-        per_token_block: list[OnnxExportLeaf] = []
-        for run_task in self._section_run_task_outputs():
-            for leaf_key, field in run_task.manifest_fields(Mode.ONNX):
-                if field.resolved_onnx_name is None:
-                    continue
-                suffix = field.resolved_onnx_name
-                if field.axis == "per_token":
-                    per_token_block.append(
-                        OnnxExportLeaf(
-                            key=leaf_key, name=suffix, dtype=field.onnx_dtype, per_token=True
-                        )
+        by_key: dict[str, list[OutputField]] = {}
+        key_order: list[str] = []
+        for leaf_key, field in fields:
+            if field.resolved_onnx_name is None:
+                continue
+            if leaf_key not in by_key:
+                by_key[leaf_key] = []
+                key_order.append(leaf_key)
+            by_key[leaf_key].append(field)
+        leaves: list[OnnxExportLeaf] = []
+        for leaf_key in key_order:
+            group = by_key[leaf_key]
+            if len(group) == 1:
+                field = group[0]
+                leaves.append(
+                    OnnxExportLeaf(
+                        key=leaf_key,
+                        name=field.resolved_onnx_name,
+                        dtype=field.onnx_dtype,
+                        per_token=field.axis == "per_token",
                     )
-                else:
-                    # a single already-scalar per-class value -> ONE single-name
-                    # leaf (not a split): the dumb sink only names it.
-                    globals_block.append(
-                        OnnxExportLeaf(key=leaf_key, name=suffix, dtype=field.onnx_dtype)
-                    )
-        # the EXPLICIT leaves (the MaskFormer object reduces — leading_object +
-        # object_index) are appended AFTER the entire section block, preserving
-        # the v1 manifest/writer order. They form their own globals-then-per-token
-        # sub-block appended last — NOT merged into the section's blocks (merging
-        # would hoist the leading_object globals ahead of the section's per-token
-        # TrackOrigin, breaking the v1 tuple order). The dup guard below rejects
-        # any key/suffix clash between section and explicit leaves.
-        explicit_globals = [leaf for leaf in self._explicit_leaves if not leaf.per_token]
-        explicit_per_token = [leaf for leaf in self._explicit_leaves if leaf.per_token]
-        ordered = (*globals_block, *per_token_block, *explicit_globals, *explicit_per_token)
-        if not ordered:
-            raise ConfigError(
-                "OnnxExportSink (dumb-section) found no RunTaskOutput field with an ONNX leaf — "
-                "wire a RunTaskOutput([tasks]) in the outputs: section"
+                )
+                continue
+            if any(f.axis == "per_token" for f in group):
+                raise ConfigError(
+                    f"OnnxExportSink: leaf {leaf_key!r} declares several ONNX fields including a "
+                    "per-token one — a multi-name split leaf is a set of GLOBAL float scalars, so "
+                    "a per-token field must be the leaf's only field"
+                )
+            leaves.append(
+                OnnxExportLeaf(
+                    key=leaf_key,
+                    names=[str(f.resolved_onnx_name) for f in group],
+                    dtype=group[0].onnx_dtype,
+                )
             )
-        self._validate_leaves(ordered)
-        self._leaves = ordered
+        return leaves
+
+    def _resolve_leaves(self) -> tuple[OnnxExportLeaf, ...]:
+        """Resolve the export leaves from the bound manifest sources.
+
+        The Athena tuple order is GLOBAL float scalars before PER-TOKEN aux
+        outputs, applied WITHIN each manifest-source group (the ``outputs:``
+        section, then the model's graph modules) and the groups concatenated
+        in that order. Ordering per group rather than once over everything is
+        what keeps a model-graph producer's globals (e.g. the MaskFormer
+        ``leading_objects_*`` reduces) behind the section's own per-token
+        leaves (e.g. ``TrackOrigin``) instead of hoisting them to the front.
+        Within a block, declaration order.
+
+        ``consumes:`` narrows the collected manifest first, validated against
+        every declared leaf so a pattern matching nothing anywhere is loud.
+        Raises `ConfigError` when nothing is declared, when a split leaf mixes
+        in a per-token field, or when two fields mint the same key/suffix.
+        """
+        per_group = [
+            collect_manifest_fields(group, Mode.ONNX) for group in self._manifest_source_groups()
+        ]
+        # validate + narrow ONCE over the flat manifest: a `consumes:` pattern is
+        # checked against every declared leaf, not just one group's. The filter is
+        # a pure function of the leaf key, so replaying it per group by key
+        # membership is the same narrowing.
+        kept = {key for key, _ in self._filter_consumed([f for g in per_group for f in g])}
+        leaves: list[OnnxExportLeaf] = []
+        for group_fields in per_group:
+            group_leaves = self._leaves_from_fields([f for f in group_fields if f[0] in kept])
+            leaves.extend(leaf for leaf in group_leaves if not leaf.per_token)
+            leaves.extend(leaf for leaf in group_leaves if leaf.per_token)
+        if not leaves:
+            raise ConfigError(
+                "OnnxExportSink collected no ONNX output — no bound producer declared a final "
+                "Mode.ONNX field. Sources searched: "
+                f"{self._manifest_source_names()}. Wire a RunTaskOutput whose `modes:` include "
+                "'export' in the outputs: section, or a conversion producer "
+                "(ClassProbs / SeqClassIndex / Combination / MaskFormerObjects) in model.modules."
+            )
+        self._validate_leaves(leaves)
+        self._leaves = tuple(leaves)
         self._leaves_resolved = True
-        return ordered
+        return self._leaves
 
     def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
-        """Resolve the export leaves — explicit, or from the bound ``outputs:``
-        section (the section's `RunTaskOutput` fields in declaration order);
-        raises `ConfigError` when neither is configured.
-        """
+        """The resolved export leaves (cached until a manifest source rebinds)."""
         if self._leaves_resolved:
             return self._leaves
-        if self._is_dumb_section():
-            return self._resolve_section_leaves()
-        raise ConfigError(
-            "OnnxExportSink has no export leaves — give it an explicit `outputs:` "
-            "OnnxExportLeaf list, or compose a top-level `outputs:` section "
-            "(RunTaskOutput) that binds to it"
-        )
+        return self._resolve_leaves()
 
     @property
     def leaves(self) -> tuple[OnnxExportLeaf, ...]:
@@ -344,6 +425,42 @@ class OnnxExportSink(OutputSink):
         }
         return IO(requires=unflatten_spec(req), produces={})
 
+    # -- the export contract ------------------------------------------------
+
+    def export_config(self, run_name: str = "salt") -> ExportConfig:
+        """The RESOLVED export contract this sink declares.
+
+        Assembles the sink's own fields into an `ExportConfig` and hands it to
+        `salt.outputs.sinks.onnx.resolve_export_config`, which fills the defaults (input
+        names, dynamic axes, Athena metadata names, the `run_name`-derived
+        model name) and validates them.
+
+        A `ConfigError` propagates from that resolution when the contract is
+        incomplete or malformed (no inputs, an invalid model name / track
+        selection, a bad rename or combine).
+
+        Parameters
+        ----------
+        run_name : str, optional
+            The run ``name:``, the default `model_name` source, by default
+            ``"salt"``.
+
+        Returns
+        -------
+        ExportConfig
+            The resolved export-only half (``outputs == []``).
+        """
+        return resolve_export_config(
+            ExportConfig(
+                model_name=self.model_name,
+                track_selection=self.track_selection,
+                inputs=list(self.inputs),
+                rename=dict(self.rename),
+                combine=list(self.combine),
+            ),
+            run_name,
+        )
+
     # -- generated export metadata --------
 
     def resolved_model_name(self) -> str:
@@ -356,18 +473,18 @@ class OnnxExportSink(OutputSink):
         """
         if self.model_name is None:
             raise ConfigError(
-                "OnnxExportSink has no model_name — set export.model_name (or the sink's "
-                "model_name) before deriving the ONNX output names"
+                "OnnxExportSink has no model_name — set the sink's `model_name:` (or let "
+                "`salt export` default it from the run name) before deriving the ONNX "
+                "output names"
             )
         return self.model_name
 
     def output_names(self) -> list[str]:
-        """The flat ONNX output names, in declared tuple order (``{model_name}_{suffix}``).
+        """The flat ONNX output names, in resolved tuple order (``{model_name}_{suffix}``).
 
-        The single ordering authority for the folded path: the export
-        node's leaf list order IS the Athena tuple order (globals, combines,
-        per-token aux), independent of executor topo order — so reordering
-        ``model.modules`` for memory tuning never reorders the tuple.
+        The order is the manifest-source order (section writers, then model
+        modules, each in declaration order), independent of executor topo
+        order. It is not a contract — Athena consumes the outputs by name.
         """
         prefix = self.resolved_model_name()
         return [f"{prefix}_{suffix}" for leaf in self._ensure_leaves() for suffix in leaf.suffixes]

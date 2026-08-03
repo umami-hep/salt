@@ -27,16 +27,15 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.onnx.adapter import OnnxAdapter
-from salt.onnx.check import CheckResult, check_onnx
-from salt.onnx.config import (
+from salt.outputs.sinks.onnx.adapter import OnnxAdapter
+from salt.outputs.sinks.onnx.check import CheckResult, check_onnx
+from salt.outputs.sinks.onnx.config import (
     ExportConfig,
+    reject_declared_outputs,
     resolve_export_config,
-    sanitised_model_name,
     stream_of_input_port,
-    validate_model_name,
 )
-from salt.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
+from salt.outputs.sinks.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
 
 __all__ = [
     "ExportResult",
@@ -388,7 +387,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         default=[],
         metavar="KEY=VALUE",
         help="config override applied on the run-free parse (repeatable), e.g. "
-        "--set export.model_name=GN2v2",
+        "--set outputs.onnx_export.init_args.model_name=GN2v2",
     )
     parser.add_argument(
         "--check",
@@ -467,6 +466,98 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
         "the run config declares no salt.data.Features module — export input widths "
         "derive from its variable lists"
     )
+
+
+_ALIAS_KEYS = ("model_name", "inputs", "track_selection", "rename", "combine")
+"""The export-contract keys the deprecated top-level ``export:`` block still fills."""
+
+_TRACK_SELECTION_DEFAULT = ExportConfig().track_selection
+"""The unset sentinel for the one non-empty-defaulted alias key."""
+
+_ALIAS_MERGED = "_salt_export_alias_merged"
+"""Marks a sink the alias already folded onto, so a second merge is a no-op
+rather than a spurious both-homes error."""
+
+
+def _alias_is_set(key: str, value: Any) -> bool:
+    """Whether an export-contract field carries a user-set value, not its default."""
+    if key == "track_selection":
+        return value != _TRACK_SELECTION_DEFAULT
+    return bool(value)
+
+
+def _merge_export_alias(cli: Any, export_sink: Any) -> None:
+    """Fold a parsed top-level ``export:`` block onto the ONNX sink.
+
+    The block is a deprecated alias for the sink's own export keys: each one it
+    sets fills a field the sink LEFT UNSET, and a key carried by both homes
+    raises `ConfigError` naming it and both homes rather than picking a winner
+    silently. A declared ``export.outputs`` stays the hard error it is. A
+    no-op when the config declares no block.
+    """
+    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - the main.py _get precedent
+    if export_cfg is None or getattr(export_sink, _ALIAS_MERGED, False):
+        return
+    reject_declared_outputs(export_cfg.outputs)
+    warnings.warn(
+        "the top-level `export:` block is deprecated — its keys "
+        f"({', '.join(_ALIAS_KEYS)}) are now init_args of the ONNX sink, e.g.\n"
+        "  outputs:\n"
+        "    onnx_export:\n"
+        "      class_path: salt.outputs.OnnxExportSink\n"
+        "      init_args: {model_name: ..., inputs: [...]}\n"
+        "Move the block onto the sink; it is read for one deprecation window and a key "
+        "set in both homes is an error.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    for key in _ALIAS_KEYS:
+        block_value = getattr(export_cfg, key, None)
+        if not _alias_is_set(key, block_value):
+            continue
+        if _alias_is_set(key, getattr(export_sink, key, None)):
+            raise ConfigError(
+                f"export.{key} is set in BOTH homes — the deprecated top-level `export:` "
+                f"block and the OnnxExportSink's `{key}:` init_arg. Delete the top-level "
+                f"export.{key}; the sink is the export contract."
+            )
+        setattr(export_sink, key, block_value)
+    setattr(export_sink, _ALIAS_MERGED, True)
+
+
+def _resolve_export_contract(
+    cli: Any, export_sink: Any, model_name: str | None = None
+) -> ExportConfig:
+    """The resolved export contract for a parsed run config.
+
+    The single seam every export-side caller goes through: folds the deprecated
+    top-level ``export:`` block onto the sink (`_merge_export_alias`), applies a
+    ``-n/--name`` override on top, and resolves the sink's contract against the
+    run ``name:``.
+
+    A `ConfigError` propagates from the alias merge when a key is set in both
+    homes, and from the sink's own resolution when the contract is incomplete
+    or malformed.
+
+    Parameters
+    ----------
+    cli : Any
+        The run-free `SaltCLI` (`_run_free_cli` output).
+    export_sink : Any
+        The config's `salt.outputs.OnnxExportSink`.
+    model_name : str | None, optional
+        CLI model-name override, applied after the alias merge, by default None.
+
+    Returns
+    -------
+    ExportConfig
+        The resolved export-only half.
+    """
+    _merge_export_alias(cli, export_sink)
+    if model_name is not None:
+        export_sink.model_name = model_name
+    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
+    return export_sink.export_config(run_name)
 
 
 def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str, Any]) -> None:
@@ -597,22 +688,17 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
 
     config_paths = _resolve_config_paths(parsed)
     cli = _run_free_cli(config_paths, parsed.set_overrides)
-    export_cfg = cli._get(cli.config_init, "export") or ExportConfig()  # noqa: SLF001 - main.py precedent
-    if parsed.name is not None:
-        export_cfg.model_name = parsed.name
-    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
     # the manifest derives from the folded OnnxExportSink's declared leaves.
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
-            "config has no OnnxExportSink — the ONNX output manifest is "
-            "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
-            "outputs.* leaves. Add the conversion nodes + the OnnxExportSink."
+            "config has no OnnxExportSink — the ONNX output manifest is declared by an "
+            "OnnxExportSink in the outputs: section, naming the conversion outputs.* "
+            "leaves. Add the conversion nodes + the OnnxExportSink."
         )
+    resolved = _resolve_export_contract(cli, export_sink, parsed.name)
     if export_sink.model_name is None:
-        export_sink.model_name = validate_model_name(
-            export_cfg.model_name or sanitised_model_name(run_name)
-        )
+        export_sink.model_name = resolved.model_name
     rows = list(zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True))
     width = max((len(name) for name, _ in rows), default=1)
     print(f"ONNX output manifest (folded conversion nodes, model_name={export_sink.model_name}):")
@@ -625,9 +711,9 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     """The CLI export flow: parse config, derive manifest, load checkpoint, export.
 
     Returns the export result and the eager checker reference. Raises
-    `ConfigError` on a missing config/export block, a config-declared
-    ``export.outputs``, or schema drift; `FileExistsError` on an existing
-    output without ``--overwrite``.
+    `ConfigError` on a missing config / export sink, an incomplete export
+    contract, a config-declared ``export.outputs``, or schema drift;
+    `FileExistsError` on an existing output without ``--overwrite``.
     """
     from salt.model.saltmodule import SaltModule
 
@@ -635,33 +721,26 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     config_paths = _resolve_config_paths(parsed)
     config_path = config_paths[0]
     cli = _run_free_cli(config_paths, parsed.set_overrides)
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - the main.py _get precedent
-    if export_cfg is None:
-        raise ConfigError(
-            f"config {config_path} has no export: block — declare export.inputs (and "
-            "optionally model_name/rename/combine; outputs derive from the writers) "
-            "in the run config, or stack an override file carrying only the export: block "
-            f"as a second config:\n  salt export --ckpt_path {ckpt_path} "
-            f"-c {config_path} -c my_export_block.yaml"
-        )
-    if parsed.name is not None:
-        export_cfg.model_name = parsed.name
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
     variables = _features_variables(cli)
-    # the folded OnnxExportSink (wired at callbacks:) is the sole ONNX output
-    # authority. Find it on the parsed CLI and fold it into the planning module
-    # dict so its declared leaves anchor the ONNX plan demand.
+    # the folded OnnxExportSink is the sole ONNX authority — the output tuple AND
+    # the export contract (model_name/inputs/rename/combine). Find it on the
+    # parsed CLI and fold it into the planning module dict so its declared leaves
+    # anchor the ONNX plan demand.
     from salt.cli import _static_onnx_export_sink
 
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
         raise ConfigError(
-            "config has no OnnxExportSink — the ONNX output manifest is "
-            "declared by an OnnxExportSink (callbacks.onnx_export) naming the conversion "
-            "outputs.* leaves the folded nodes mint (ClassProbs/SeqClassIndex/"
-            "MaskFormerObjects/Combination). The off-graph reduce manifest was retired; add the "
-            "conversion nodes + the OnnxExportSink to the run config."
+            f"config {config_path} has no OnnxExportSink — the ONNX output manifest and the "
+            "export contract are declared by an OnnxExportSink in the outputs: section, "
+            "naming the conversion outputs.* leaves the folded nodes mint (ClassProbs/"
+            "SeqClassIndex/MaskFormerObjects/Combination). Add the conversion nodes + the "
+            "OnnxExportSink to the run config, or stack an override file carrying only the "
+            f"sink as a second config:\n  salt export --ckpt_path {ckpt_path} "
+            f"-c {config_path} -c my_export_sink.yaml"
         )
+    resolved = _resolve_export_contract(cli, export_sink, parsed.name)
     # data-less checkpoint load: binds from the stored salt_core schema before the
     # strict state-dict load
     model = SaltModule.load_from_checkpoint(
@@ -670,7 +749,6 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         map_location=torch.device("cpu"),
         weights_only=False,  # pytorch 2.6+ flipped this default to True
     )
-    resolved = resolve_export_config(export_cfg, run_name)
     if export_sink.model_name is None:
         export_sink.model_name = resolved.model_name
     # fold the export sink into the modules the planner/adapter see
@@ -678,7 +756,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     if export_sink.name in modules:
         raise ConfigError(
             f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the callbacks key"
+            "the sink's outputs: section key"
         )
     modules[export_sink.name] = export_sink
     _cross_check_schema(model, resolved, variables)

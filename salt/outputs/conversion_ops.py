@@ -18,6 +18,9 @@ from salt.utils.tensor_utils import masked_softmax
 class ConversionOp:
     """Eval-math strategy behind `TaskOutput`; base is an identity passthrough."""
 
+    has_onnx_manifest: bool = True
+    """Whether the converted leaf has an ONNX representation the sink can name."""
+
     def extra_requires(self, stream: str) -> dict[str, TensorSpec]:
         """Extra input ports this op reads beyond the source ``preds.*`` leaf (none by default)."""
         del stream
@@ -129,6 +132,10 @@ class SeqClassProbsOp(ConversionOp):
         Whether the stream carries a per-token pad mask, by default True
         (False for a fixed-count query bank).
     """
+
+    has_onnx_manifest: bool = False
+    """Per-token probability columns are an eval-H5 representation; the ONNX
+    counterpart is `SeqClassIndexOp`'s argmax index."""
 
     def __init__(self, has_pad_mask: bool = True) -> None:
         self.has_pad_mask = bool(has_pad_mask)

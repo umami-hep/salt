@@ -29,8 +29,9 @@ from salt import cli as graph_cli
 from salt.data.datamodule import GraphDataModule
 from salt.graph.errors import ConfigError, GraphError
 from salt.model.saltmodule import SaltModule
-from salt.onnx.config import ExportConfig
 from salt.outputs.run_task_output import OutputSectionWriter
+from salt.outputs.sinks.onnx.config import ExportConfig
+from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
@@ -129,7 +130,7 @@ _CLASS_PATH_REMAP: dict[str, str] = {
     "salt.core.outputs": "salt.outputs",
     "salt.core.graph": "salt.graph",
     "salt.core.callbacks": "salt.callbacks",
-    "salt.core.onnx": "salt.onnx",
+    "salt.core.onnx": "salt.outputs.sinks.onnx",
     "salt.core.utils": "salt.utils",
     "salt.core.testing": "salt.testing",
     "salt.core.optim": "salt.optim",
@@ -644,10 +645,12 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             "--callbacks",
-            type=dict[str, Callback | None] | None,
+            type=dict[str, Callback | Node | None] | None,
             default={},
             help="dict-keyed callbacks, deep-mergeable; assembled into trainer.callbacks "
-            "(an entry set to null is removed)",
+            "(an entry set to null is removed). An output SINK declared here "
+            "is accepted for one deprecation window and wired through the sink registry "
+            "instead — declare sinks in the `outputs:` section.",
         )
         parser.add_argument(
             "--writers.modules",
@@ -659,25 +662,29 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             "--outputs",
-            type=dict[str, OutputSectionWriter | None] | None,
+            type=dict[str, OutputSectionWriter | Node | None] | None,
             default=None,
-            help="top-level outputs: section — dict-keyed GraphModule writers "
-            "(RunTaskOutput / InputCopyWriter / PadMaskWriter), deep-mergeable, composed AFTER "
-            "the model; the section field order drives the eval-H5 TASK-column order (an entry "
-            "set to null is removed). NOT a link_arguments link — the section is composed onto "
-            "the model in instantiate_classes (SaltModule.compose_output_section), not wired via "
-            "link_arguments.",
+            help="the top-level outputs: section — everything that leaves the model, "
+            "dict-keyed and deep-mergeable (an entry set to null is removed). Two kinds of "
+            "entry: WRITERS (RunTaskOutput / InputCopyWriter / PadMaskWriter), whose "
+            "declaration order drives the eval-H5 TASK-column order, and SINKS "
+            "(H5OutputSink / OnnxExportSink / your own), which are partitioned out by type "
+            "and therefore excluded from that ordering. Composed AFTER the model; NOT a "
+            "link_arguments link — the section is composed onto the model in "
+            "instantiate_classes (SaltModule.compose_output_section).",
         )
         parser.add_argument(
             "--export",
             type=ExportConfig | None,
             default=None,
-            help="the export-ONLY half of the ONNX contract, consumed by `salt export`: "
-            "model_name (no '_'/'-', validated ONLY at export time), "
-            "inputs (port/name/sequence/dyn_axis/alias) and the rename/combine "
-            "manifest post-processing. The OUTPUT manifest derives from the outputs: "
-            "section's export-mode selection — declaring export.outputs is a hard error "
-            "at export time. Inert during fit/test; round-trips through saved run configs.",
+            help="DEPRECATED alias for the ONNX sink's own export keys — model_name, "
+            "inputs (port/name/sequence/dyn_axis/alias), track_selection and the "
+            "rename/combine manifest post-processing now live at "
+            "outputs.<sink>.init_args on the OnnxExportSink. Accepted "
+            "for one deprecation window: `salt export` folds each key it sets onto a "
+            "field the sink LEFT UNSET, and a key carried by both homes is a hard error. "
+            "Declaring export.outputs stays a hard error. Inert during fit/test; "
+            "round-trips through saved run configs.",
         )
         parser.add_argument(
             "--compile",
@@ -765,19 +772,56 @@ class SaltCLI(LightningCLI):
         ahead of the stock ``trainer.callbacks`` list. Drops the default
         ``lr_monitor`` LearningRateMonitor when no experiment logger is
         attached (it hard-raises on a logger-less trainer).
+
+        Output SINKS declared under ``callbacks:`` are PARTITIONED out — a
+        sink is not a Lightning callback any more. They are wired onto the
+        built trainer through the sink registry (and, for a runtime sink, a
+        generated adapter), which is the deprecation window for the old
+        placement; the ``outputs:`` section is where sinks belong.
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         has_logger = bool(self._get(self.config_init, "trainer.logger"))
+        live = [(key, cb) for key, cb in callbacks_dict.items() if cb is not None]
+        aliased_sinks = [(key, cb) for key, cb in live if isinstance(cb, Node)]
         assembled = [
             cb
-            for cb in callbacks_dict.values()
-            if cb is not None and (has_logger or not _needs_logger(cb))
+            for key, cb in live
+            if not isinstance(cb, Node) and (has_logger or not _needs_logger(cb))
         ]
         stock = self._get(self.config_init, "trainer.callbacks") or []
         assembled = self._maybe_add_schedule_callback(assembled, stock)
         if assembled:
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
-        return super().instantiate_trainer(**kwargs)
+        trainer = super().instantiate_trainer(**kwargs)
+        self._attach_aliased_sinks(trainer, aliased_sinks)
+        return trainer
+
+    @staticmethod
+    def _attach_aliased_sinks(trainer: Trainer, aliased: Sequence[tuple[str, Any]]) -> None:
+        """Wire ``callbacks:``-declared sinks onto `trainer` (the alias window).
+
+        Each sink is registered and, if it has a lifecycle, given its adapter.
+        Node names are left exactly as the class defaults them, which is what
+        the callbacks placement always did, so a config left alone keeps its
+        plan hash. Warns once per config: sinks belong in ``outputs:``.
+        """
+        if not aliased:
+            return
+        from salt.callbacks.sink_adapter import (
+            attach_runtime_sink,
+        )
+
+        warnings.warn(
+            "declaring output sink(s) "
+            + ", ".join(repr(key) for key, _ in aliased)
+            + " under `callbacks:` is deprecated — a sink is no longer a lightning "
+            "Callback. Move them to the top-level `outputs:` section; the callbacks: "
+            "placement is accepted for one release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        for _key, sink in aliased:
+            attach_runtime_sink(trainer, sink)
 
     def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
         """Auto-inject the schedule driver callbacks on ``fit``; the user never
@@ -856,21 +900,98 @@ class SaltCLI(LightningCLI):
         if init_from and model is not None and getattr(self.config, "subcommand", None) == "fit":
             model._init_from = str(init_from)  # noqa: SLF001 - same-package wiring
         composer = getattr(model, "compose_output_section", None) if model is not None else None
+        writers: Any = None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
+            # compose FIRST: this partitions the section into writers (folded
+            # into the graph) and sinks (held on model._section_sinks).
             composer(live_section)
-            # the command wires the implicit per-command sinks
-            # (test -> H5, export/graph -> ONNX) over the composed section, before
-            # the bind loop — so a config declaring only WHAT (modules + modes)
-            # gets the right sink without ever naming H5OutputSink/OnnxExportSink.
-            self._inject_command_sinks(live_section)
-            # bind the section to the sink callbacks NOW: datamodule setup runs
-            # BEFORE model setup and resolves the sink's writer_demand, which
-            # needs the section already bound.
-            trainer = getattr(self, "trainer", None)
-            for cb in trainer.callbacks if trainer is not None else []:
-                if callable(getattr(cb, "bind_output_section", None)):
-                    cb.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
+            writers = getattr(model, "_output_section", live_section)
+            # register the section-declared sinks BEFORE the implicit injection:
+            # _inject_command_sinks reads iter_sinks and skips a kind that is
+            # already present, so registering first is what stops a declared
+            # sink being double-wired alongside an injected one.
+            self._register_section_sinks(model)
+            # plan 50 Phase B: the command wires the implicit per-command sinks
+            # (test -> H5, export/graph -> ONNX) over the composed section — so a
+            # config declaring only WHAT (writers + modes) gets the right sink
+            # without ever naming H5OutputSink/OnnxExportSink.
+            self._inject_command_sinks(writers)
+            self._validate_wired_sinks(model)
+        # bind both manifest sources to the registered sinks NOW: datamodule setup
+        # runs BEFORE model setup and resolves the sink's writer_demand, which
+        # needs them already bound. The model modules bind even with no outputs:
+        # section — a conversion producer in model.modules names its own leaves.
+        from salt.outputs.sinks.registry import iter_sinks
+
+        graph_modules = getattr(model, "_graph_modules", None) if model is not None else None
+        for sink in iter_sinks(getattr(self, "trainer", None)):
+            if graph_modules is not None and callable(getattr(sink, "bind_model_modules", None)):
+                sink.bind_model_modules(graph_modules)
+            if writers and callable(getattr(sink, "bind_output_section", None)):
+                sink.bind_output_section(writers)
+
+    def _register_section_sinks(self, model: Any) -> None:
+        """Wire every ``outputs:``-declared sink onto the trainer.
+
+        Goes through the one wiring entry point (`attach_runtime_sink`), so a
+        section-declared sink is registered for discovery and — if it has a
+        lifecycle — gets its generated adapter, exactly like a sink that
+        arrived any other way.
+        """
+        from salt.callbacks.sink_adapter import attach_runtime_sink
+
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        for sink in getattr(model, "_section_sinks", ()):
+            attach_runtime_sink(trainer, sink)
+
+    def _validate_wired_sinks(self, model: Any) -> None:
+        """Validate the fully wired sink set; raises `ConfigError` on either breach.
+
+        Two rules, checked once everything is registered:
+
+        1. **Exactly one TEST persistence sink.** More than one sink claiming
+           the TEST boundary demand is ambiguous — the runtime picks the first
+           and silently ignores the rest, so it is refused instead.
+        2. **An auxiliary sink states its `modes:`.** A section-declared
+           `RuntimeSink` that opts out of being the persistence sink rides
+           ALONGSIDE it, so it says when it runs rather than inheriting a
+           default that reads as if it were the primary sink.
+        """
+        from salt.outputs import is_test_persistence_sink, iter_sinks
+        from salt.outputs.sinks.sink import RuntimeSink
+
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        persistence = [
+            sink
+            for sink in iter_sinks(trainer)
+            if callable(getattr(sink, "writer_demand", None)) and is_test_persistence_sink(sink)
+        ]
+        if len(persistence) > 1:
+            names = ", ".join(repr(getattr(s, "name", type(s).__name__)) for s in persistence)
+            raise ConfigError(
+                f"{len(persistence)} TEST persistence sinks are wired ({names}) — exactly one "
+                "may anchor the TEST boundary demand. Keep one, and make any additional sink "
+                "auxiliary by overriding `is_test_sink()` to return False (see "
+                "salt.outputs.JSONLOutputSink and docs/outputs.md)."
+            )
+        for sink in getattr(model, "_section_sinks", ()):
+            if (
+                isinstance(sink, RuntimeSink)
+                and not is_test_persistence_sink(sink)
+                and not sink.modes_configured
+            ):
+                raise ConfigError(
+                    f"auxiliary sink {getattr(sink, 'name', type(sink).__name__)!r} "
+                    f"({type(sink).__name__}) is declared in the `outputs:` section without a "
+                    "`modes:` list — an auxiliary sink runs alongside the persistence sink "
+                    "rather than replacing it, so it must state its modes explicitly "
+                    "(e.g. `modes: [test]`)."
+                )
 
     def _inject_command_sinks(self, section: Mapping[str, Any]) -> None:
         """Wire the implicit per-command output sinks over the composed section.
@@ -886,37 +1007,40 @@ class SaltCLI(LightningCLI):
           and the exporter see the same implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
 
-        A sink already present in ``trainer.callbacks`` (a programmatic build,
-        or the MaskFormer ONNX escape hatch) is left alone — never double-wired.
+        A sink already registered — declared in the ``outputs:`` section (the
+        documented form), left in ``callbacks:`` through the deprecation
+        alias, or built programmatically — is left alone; never double-wired.
         """
+        from salt.callbacks.sink_adapter import attach_runtime_sink
         from salt.graph.spec import Mode
         from salt.outputs import (
             H5OutputSink,
             OnnxExportSink,
+            iter_sinks,
         )
 
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
             return
         trainer = getattr(self, "trainer", None)
-        callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-        if callbacks is None:
+        if trainer is None:
             return
+        registered = iter_sinks(trainer)
 
         def _present(cls: type) -> bool:
-            return any(isinstance(cb, cls) for cb in callbacks)
+            return any(isinstance(sink, cls) for sink in registered)
 
         # H5 sink: any command that persists TEST predictions (test or run-free)
         if _section_runs_mode(section, Mode.TEST) and not _present(H5OutputSink):
             h5 = H5OutputSink()
             h5.name = "h5_output"
-            callbacks.append(h5)
+            attach_runtime_sink(trainer, h5)
         # ONNX sink: only the run-free parses assemble the ONNX tuple, and only
         # when a RunTaskOutput opts into export (a test-only section mints none).
         if subcommand is None and _section_produces_onnx(section) and not _present(OnnxExportSink):
             onnx = OnnxExportSink()
             onnx.name = "onnx_export"
-            callbacks.append(onnx)
+            attach_runtime_sink(trainer, onnx)
 
     def _detach_fit_logger(self) -> Any:
         """Stash + null the fit-stage ``trainer.logger`` ahead of the parser pass,
@@ -1093,7 +1217,7 @@ def main(args: Sequence[str] | None = None) -> int:
     if argv and argv[0] == _EXPORT_COMMAND:
         # local import: the exporter pulls onnx/onnxruntime — not needed at
         # fit/test/graph startup
-        from salt.onnx import export as onnx_export
+        from salt.outputs.sinks.onnx import export as onnx_export
 
         return onnx_export.main(argv[1:])
     if argv and argv[0] == _INFERENCE_COMMAND:

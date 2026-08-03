@@ -24,7 +24,7 @@ import onnx
 import pytest
 
 from salt.main import CONFIG_DIR, main
-from salt.onnx import make_session
+from salt.outputs.sinks.onnx import make_session
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict

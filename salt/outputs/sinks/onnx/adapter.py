@@ -15,7 +15,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
 from salt.graph.planner import Plan
 from salt.graph.spec import Mode
-from salt.onnx.config import (
+from salt.outputs.sinks.onnx.config import (
     ExportConfig,
     ExportInput,
     stream_of_input_port,

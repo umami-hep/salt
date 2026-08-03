@@ -78,7 +78,7 @@ class TestDumbOnnxSinkNoDoubleSplit:
         rt = _bound_run_task(tmp_path, ["jets_classification", "track_origin"])
         sink = OnnxExportSink(model_name="GN2v2")
         sink.bind_output_section({"run_tasks": rt})
-        leaves = sink._resolve_section_leaves()  # noqa: SLF001 - direct guard check
+        leaves = sink.leaves
         # every leaf is single-name (the no-double-split invariant): no leaf carries
         # a plural `names` split, because get_output already split per-class.
         for leaf in leaves:
@@ -105,5 +105,5 @@ class TestDumbOnnxSinkNoDoubleSplit:
         """A bound ONNX section with no ONNX leaf is a hard fail."""
         sink = OnnxExportSink(model_name="GN2v2")
         sink.bind_output_section({})  # empty section
-        with pytest.raises(ConfigError, match="no RunTaskOutput field with an ONNX leaf"):
-            sink._resolve_section_leaves()  # noqa: SLF001 - direct guard check
+        with pytest.raises(ConfigError, match="collected no ONNX output"):
+            sink.output_names()

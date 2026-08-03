@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 from torch import Tensor
 
 from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.model.base import SaltModelModule
 from salt.outputs.conversion_ops import (
@@ -15,6 +17,7 @@ from salt.outputs.conversion_ops import (
     SeqClassIndexOp,
     SeqClassProbsOp,
 )
+from salt.outputs.output_schema import OutputField
 
 
 class TaskOutput(SaltModelModule):
@@ -59,6 +62,59 @@ class TaskOutput(SaltModelModule):
         self.op = op if op is not None else ConversionOp()
         self.pred_key = f"preds.{stream}.{task}"
         self.output_key = f"outputs.{stream}.{self.output_name}"
+        # the model module dict, bound at compile so the producer can resolve the
+        # source task whose manifest NAMES its ONNX output(s).
+        self._model_modules: Mapping[str, Any] | None = None
+
+    def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
+        """Capture the model module dict so the producer can resolve its source task."""
+        self._model_modules = model_modules
+
+    def manifest_fields(self, mode: Mode) -> list[tuple[str, OutputField]]:
+        """The converted leaf's ONNX field manifest, derived from the source task.
+
+        ONNX-ONLY: the eval-H5 representation of these tasks rides the
+        ``outputs:`` section's `RunTaskOutput`, so declaring TEST fields here
+        would duplicate its columns. Each field the task's
+        ``get_output_manifest(Mode.ONNX)`` names is tagged with this producer's
+        own leaf key, so the ONNX name and dtype come from the task and are
+        typed nowhere. Empty when the op has no ONNX representation.
+
+        A `ConfigError` propagates from the task resolution when the model
+        modules are unbound, or the source task is missing or ships no
+        manifest surface.
+        """
+        if not (mode & Mode.ONNX) or not self.op.has_onnx_manifest:
+            return []
+        task = self._resolved_task()
+        return [
+            (self.output_key, field)
+            for field in task.get_output_manifest(Mode.ONNX, "salt")
+            if field.resolved_onnx_name is not None
+        ]
+
+    def _resolved_task(self) -> Any:
+        """The live source task, resolved from the bound model modules."""
+        who = f"{type(self).__name__} {self.output_name!r}"
+        if self._model_modules is None:
+            raise ConfigError(
+                f"{who} has no model modules bound — it derives its ONNX output names from "
+                f"task {self.task!r}'s own manifest; ensure the producer is composed with the "
+                "model (bind_model_modules is called at compile)"
+            )
+        task = self._model_modules.get(self.task)
+        if task is None:
+            raise ConfigError(
+                f"{who}: task {self.task!r} is not a model module — candidates are "
+                f"{sorted(self._model_modules)}"
+            )
+        if not callable(getattr(task, "get_output_manifest", None)):
+            raise ConfigError(
+                f"{who}: task {self.task!r} ({type(task).__name__}) ships no "
+                "get_output_manifest — the ONNX sink needs the output NAMES/DTYPES before "
+                "any batch runs"
+            )
+        return task
 
     def declare_io(self, mode: Mode) -> IO:
         """Requires ``preds.<stream>.<task>`` (+ op extras); produces the ``outputs.*`` leaf."""

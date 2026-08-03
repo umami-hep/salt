@@ -13,7 +13,6 @@ from typing import Any
 import h5py
 import numpy as np
 from ftag.hdf5 import H5Writer
-from lightning import Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.graph.bundle import Bundle
@@ -28,7 +27,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
-from salt.outputs.sink import OutputSink
+from salt.outputs.sinks.sink import OutputSink, RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
 
 _SinkCallback = OutputSink
@@ -51,7 +50,7 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
-class H5OutputSink(OutputSink):
+class H5OutputSink(RuntimeSink):
     """The H5 sink: a terminal graph node serialising ``outputs.*`` to the eval H5.
 
     A `GraphModule` terminal node whose ``declare_io`` requires the demanded
@@ -119,6 +118,13 @@ class H5OutputSink(OutputSink):
         leaf, which the sink demands (keeping its producer alive) and packs.
         Generic: the sink has no per-consumer knowledge. Empty/None (the
         default) makes the mechanism a strict no-op (byte-identical schema).
+    modes : Sequence[str] | None, optional
+        Which planner modes to run in. `allowed_modes` is ``[test]``, so
+        ``[test]`` is the only accepted list and omitting it (the default)
+        means the same thing.
+    consumes : Sequence[str] | None, optional
+        fnmatch patterns over the ``outputs.*`` leaf key narrowing the
+        collected column schema, by default None (every declared final leaf).
 
     Raises
     ------
@@ -139,8 +145,10 @@ class H5OutputSink(OutputSink):
         output: str = DEFAULT_OUTPUT,
         half_precision: bool = False,
         object_groups: Sequence[ObjectGroup | Mapping[str, Any]] | None = None,
+        modes: Sequence[str] | None = None,
+        consumes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes, consumes=consumes)
         # The explicit OutputColumn table is RETIRED as a config
         # surface — the H5 sink is now implicit (the command wires it) and derives
         # its column schema from the bound outputs: section (RunTaskOutput +
@@ -236,6 +244,16 @@ class H5OutputSink(OutputSink):
         self._section_mode = Mode.ONNX
         self._columns_resolved = False
 
+    def _invalidate_manifest(self) -> None:
+        """Drop the DERIVED column table after a manifest source rebinds.
+
+        A table that did not come from a manifest source (`_explicit_columns`)
+        survives: there is nothing to re-derive it from, so dropping it would
+        leave the sink with no columns at all.
+        """
+        if not self._explicit_columns:
+            self._columns_resolved = False
+
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
         """Capture the ``outputs:`` section so the dumb sink dumps its leaves.
 
@@ -251,6 +269,7 @@ class H5OutputSink(OutputSink):
         and a test-only one never adds ``salt inference`` columns).
         """
         self._output_section = section
+        self._invalidate_manifest()
         # the section drives copy_inputs + write_pad_mask too (override the ctor
         # knobs in dumb mode): collect from the InputCopyWriter / PadMaskWriter
         # that RUN in this sink's selection mode.
@@ -285,16 +304,6 @@ class H5OutputSink(OutputSink):
     def _is_dumb_section(self) -> bool:
         """Whether an ``outputs:`` section is bound (the dumb-section path is active)."""
         return bool(self._output_section)
-
-    def _run_task_outputs(self) -> list[Any]:
-        """The bound section's `RunTaskOutput` writers, in section declaration order."""
-        if not self._output_section:
-            return []
-        return [
-            w
-            for w in self._output_section.values()
-            if callable(getattr(w, "is_run_task_output", None)) and w.is_run_task_output()
-        ]
 
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
         """Resolve the H5 column table — explicit, or from the bound ``outputs:`` section.
@@ -334,37 +343,40 @@ class H5OutputSink(OutputSink):
         return field.resolved_onnx_name
 
     def _resolve_section_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
-        """Resolve H5 columns from the bound ``outputs:`` section manifest.
+        """Resolve H5 columns from the bound manifest sources.
 
-        Walks the section's `RunTaskOutput` writers'
-        ``manifest_fields(<selection mode>)`` (value-free `OutputField`
-        metadata, ``Mode.TEST`` unless `use_export_selection` switched to
-        ``Mode.ONNX``) in SECTION DECLARATION ORDER, keeps the FINAL fields the
+        Collects every FINAL field the bound producers declare for the
+        selection mode (``Mode.TEST`` unless `use_export_selection` switched to
+        ``Mode.ONNX``), narrows it by ``consumes:``, keeps the fields the
         selection names (`_column_suffix`), and assembles ONE `OutputColumn`
         per ``outputs.*`` leaf (suffixes in field order; export-mode leaves are
-        single-suffix by construction). The SECTION field order is the H5
+        single-suffix by construction). The MANIFEST field order is the H5
         column order authority (not executor topo order). Caches the resolved
         table (run-name-stable). The section's InputCopyWriter/PadMaskWriter
         contribute their columns through the copy / mask paths
         (`_merge_columns`), not here.
 
+        The model-graph producers declare ONNX-only fields, so widening the
+        source set beyond the section leaves the TEST column set unchanged.
+
         Raises
         ------
         ConfigError
-            When the section mints no final task column for the selection, or
+            When no producer mints a final task column for the selection, or
             two leaves mint the same flat H5 column.
         """
         by_key: dict[str, list[tuple[str, Any]]] = {}
         key_order: list[str] = []
-        for run_task in self._run_task_outputs():
-            for output_key, field in run_task.manifest_fields(self._section_mode):
-                suffix = self._column_suffix(field)
-                if suffix is None:
-                    continue
-                if output_key not in by_key:
-                    by_key[output_key] = []
-                    key_order.append(output_key)
-                by_key[output_key].append((suffix, field))
+        for output_key, field in self._filter_consumed(
+            collect_manifest_fields(self._manifest_sources(), self._section_mode)
+        ):
+            suffix = self._column_suffix(field)
+            if suffix is None:
+                continue
+            if output_key not in by_key:
+                by_key[output_key] = []
+                key_order.append(output_key)
+            by_key[output_key].append((suffix, field))
         if not key_order:
             raise ConfigError(
                 "H5OutputSink (dumb-section) found no RunTaskOutput task with a final "
@@ -484,10 +496,10 @@ class H5OutputSink(OutputSink):
 
     # -- node lifecycle (relocated VERBATIM from on_test_*) --------
 
-    def open_schema(self, trainer: Trainer) -> None:
+    def open_schema(self, ctx: SinkContext) -> None:
         """Create the eval H5 with the full schema BEFORE the first batch.
 
-        Resolves the output path + total rows from the trainer/datamodule,
+        Resolves the output path + total rows from the context's datamodule,
         opens the source handle for input copies, merges the output /
         input-copy / pad-mask columns into per-group dtypes/shapes, and
         creates the FIXED-mode `H5Writer`.
@@ -504,8 +516,7 @@ class H5OutputSink(OutputSink):
             pad-mask columns or input-copying, which genuinely need that source
             file — such a reader with neither demand is fine.
         """
-        pl_module = trainer.lightning_module
-        dm = getattr(trainer, "datamodule", None)
+        dm = ctx.datamodule
         dset = getattr(dm, "test_dset", None)
         if dset is None:
             raise ConfigError(
@@ -513,7 +524,7 @@ class H5OutputSink(OutputSink):
                 f"got {type(dm).__name__}"
             )
         reader = dset.reader
-        self._run_name = getattr(pl_module, "name", "salt")
+        self._run_name = ctx.run_name
         streams = tuple(getattr(reader, "streams", ()) or ())
         groups = getattr(reader, "groups", None)
         self._mask_streams = self._pad_mask_streams()
@@ -566,7 +577,7 @@ class H5OutputSink(OutputSink):
                     f"H5OutputSink: pad-mask stream {stream!r} is not a sequence stream — "
                     f"pad masks exist for {list(sequence_streams)} only"
                 )
-        total = self._expected_rows(trainer, len(dset), dm.batch_size)
+        total = self._expected_rows(ctx, len(dset), dm.batch_size)
         # resolve the NON-reader object groups' trailing shapes (object_groups).
         # Empty object_groups -> {} so self._object_shapes stays empty and the
         # column merge below is byte-identical to a plain sink (the no-op path).
@@ -574,7 +585,7 @@ class H5OutputSink(OutputSink):
         if source_path is not None:  # the no-source branch reaches here only with copying off
             self._open_copies(source_path, group_datasets, streams)
         dtypes, shapes = self._merge_columns(streams, sequence_streams, group_datasets, total)
-        self.output_path = self._output_path(trainer, dm, reader)
+        self.output_path = self._output_path(ctx, dm, reader)
         self._h5 = H5Writer(
             dst=self.output_path,
             dtypes=dtypes,
@@ -944,13 +955,13 @@ class H5OutputSink(OutputSink):
         return (total,)
 
     @staticmethod
-    def _expected_rows(trainer: Trainer, total: int, batch_size: int) -> int:
+    def _expected_rows(ctx: SinkContext, total: int, batch_size: int) -> int:
         """Rows the (possibly ``limit_test_batches``-capped) loop will write.
 
         ``min(total, num_batches * batch_size)`` — with the sequential
         no-drop sampler only the last batch is partial.
         """
-        num_batches = getattr(trainer, "num_test_batches", None)
+        num_batches = ctx.num_test_batches
         if not num_batches:
             return total
         limit = num_batches[0]
@@ -958,14 +969,14 @@ class H5OutputSink(OutputSink):
             return min(total, int(limit) * batch_size)
         return total
 
-    def _output_path(self, trainer: Trainer, dm: Any, reader: Any) -> Path:
+    def _output_path(self, ctx: SinkContext, dm: Any, reader: Any) -> Path:
         """Render the output template; raises `ConfigError` when ``ckpt_path``
         is unset or the template names an unknown key.
         """
-        ckpt_path = trainer.ckpt_path
+        ckpt_path = ctx.ckpt_path
         if ckpt_path is None:
             raise ConfigError(
-                "H5OutputSink needs trainer.ckpt_path — run salt test with --ckpt_path "
+                "H5OutputSink needs a checkpoint path — run salt test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint, v1 contract)"
             )
         # name the output after the reader's file. A single-file reader exposes

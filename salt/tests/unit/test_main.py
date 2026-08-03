@@ -787,9 +787,9 @@ class TestGraphFitConfigAdapter:
         assert "underscores or dashes" in err
 
     def test_validate_onnx_export_less_config_warns(self, tmp_path, capsys):
-        # a trainer config without an export: block keeps the all-preds
+        # a trainer config declaring no export contract keeps the all-preds
         # fallback but says so — and --strict promotes it (the converted-config
-        # CI gate expects the block to exist)
+        # CI gate expects the contract to exist)
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
@@ -801,7 +801,7 @@ class TestGraphFitConfigAdapter:
         out, err = capsys.readouterr()
         assert rc == 0  # non-strict: warning only
         assert "OK [mode=ONNX]" in out
-        assert "no export: block" in err
+        assert "declares no export contract" in err
         assert (
             main(["graph", "validate", "-c", str(no_export), "--mode", "onnx", "--strict", *flags])
             == 1

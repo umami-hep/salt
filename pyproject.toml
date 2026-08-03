@@ -282,7 +282,7 @@ disable_error_code = ["arg-type", "misc", "union-attr"]
 # resolves them, and stage strings that are `str` here but `Literal` downstream.
 module = [
   "salt.data.readers.reader",
-  "salt.outputs.h5_sink",
+  "salt.outputs.sinks.h5_sink",
   "salt.outputs.output_schema",
   "salt.model.modules.tasks.base",
   "salt.model.modules.pooling",

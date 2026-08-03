@@ -391,6 +391,7 @@ class _ObjectRegressionStub(torch.nn.Module):
         self.stream = "objects"
         self.pred_key = "preds.objects.regression"
         self.num_objects = MASKFORMER_NUM_OBJECTS
+        self.targets = tuple(targets)
         self.output_suffixes = tuple(targets)
         self.proj = torch.nn.Linear(MASKFORMER_ENC_DIM, len(self.output_suffixes))
 

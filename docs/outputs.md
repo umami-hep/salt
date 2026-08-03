@@ -92,9 +92,9 @@ truncated away reads `mask = False`.
 
 !!! info "Only one device is supported for the test loop"
 
-    Every sink enforces `trainer.world_size == 1` and raises a clear
-    `ConfigError` otherwise. Multi-device test writing is out of scope, so a
-    sink never needs a rank-zero guard.
+    The generated adapter enforces `world_size == 1` for every sink and raises
+    a clear `ConfigError` otherwise. Multi-device test writing is out of scope,
+    so a sink never needs a rank-zero guard of its own.
 
 ## Where column names come from
 
@@ -108,7 +108,7 @@ nothing else about naming. The prefix is added by whoever is writing:
 | Destination | Column / output name | Prefix source |
 |---|---|---|
 | eval H5 (`salt test`) | `{run_name}_{suffix}` | the `name:` field of your config |
-| ONNX (`salt export`) | `{model_name}_{suffix}` | `export.model_name`, else the sanitised run name |
+| ONNX (`salt export`) | `{model_name}_{suffix}` | the export sink's `model_name` init arg, else the sanitised run name |
 
 So a config with `name: GN2` and a classification task over classes `b, c, u`
 gives eval columns `GN2_pb`, `GN2_pc`, `GN2_pu`. Export the same model as
@@ -136,9 +136,11 @@ naming both — a collision fails at run setup, not silently.
 
 ## Declaring outputs: the `outputs:` section
 
-`outputs:` is a top-level, deep-mergeable section (like `callbacks:`) holding
-an **ordered dict** of section writers. Dict order is column order within each
-group. The standard v1-compatible layout:
+`outputs:` is a top-level, deep-mergeable dict section: everything that leaves
+the model is declared here, and nowhere else. It holds two kinds of entry.
+
+**Writers** describe the columns. They are **ordered** — dict order is column
+order within each group. The standard v1-compatible layout:
 
 ```yaml
 outputs:
@@ -162,10 +164,39 @@ outputs:
 | `InputCopyWriter` | source-file variables re-read by row | `streams:` (`null` = every stream with a task), `variables:` to narrow |
 | `PadMaskWriter` | a bool `mask` column per stream | `streams:` |
 
+**Sinks** describe the destination — a file, the ONNX output tuple. You rarely
+declare one (the usual sinks are wired by the command, see [How sinks get
+attached](#how-sinks-get-attached)), but when you do it goes in this same
+section:
+
+```yaml
+outputs:
+  run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
+  jsonl:
+    class_path: salt.outputs.JSONLOutputSink
+    init_args:
+      modes: [test]
+```
+
+A sink is **excluded from the ordering**: entries are partitioned by type, so
+only the writers form the ordered column list and where a sink sits in the
+section makes no difference. Put them wherever reads best — the shipped
+configs put them last.
+
+Setting an entry to `null` deletes it, which is how a stacked config drops a
+writer or a sink it inherited.
+
 Every model config declares its own section; `base2.yaml` ships none. A
 `salt test` config with no `outputs:` section is refused, and a config still
 carrying the retired top-level `writers:` block fails with a migration error
 pointing here.
+
+!!! note "Sinks used to live under `callbacks:`"
+
+    A sink declared under `callbacks:` still works, with a deprecation
+    warning, for one release. Move it into `outputs:` — a sink is not a
+    Lightning callback, and splitting one concept across two top-level blocks
+    is what the section unifies.
 
 ### Modes: eval, export, or both
 
@@ -298,7 +329,7 @@ columns — and the `OnnxExportSink` names them `{model_name}_{suffix}` and pack
 them into the flat output tuple.
 
 The ONNX namespace is flat: two leaves minting the same suffix is a hard error
-naming both (resolve it with `export.rename:`). Inspect the whole manifest,
+naming both (resolve it with the export sink's `rename:`). Inspect the whole manifest,
 without a checkpoint, with:
 
 ```bash
@@ -329,22 +360,45 @@ get.
 
 Write a sink when you want a **different file format**, not different columns.
 
-A sink is a `salt.outputs.OutputSink`: simultaneously a terminal graph node and
-a `lightning.Callback`. The Lightning hooks are already implemented on the base
-and forward to five named lifecycle methods, so you never write a Lightning
-hook yourself.
+A sink is a terminal graph node with a lifecycle. There are two base classes:
+
+- **`salt.outputs.RuntimeSink`** — a node that consumes batches as they are
+  produced. This is what you subclass to write a file.
+- **`salt.outputs.Node`** — its declare-only parent, for a node with no
+  run-time work at all. `OnnxExportSink` is the one case in the tree: export
+  never runs a test loop, so naming the leaves at compile time is its whole
+  job.
+
+A sink is **not** a Lightning callback and never sees a `Trainer`. The
+Lightning test loop reaches a `RuntimeSink` through an adapter salt generates
+for it, and `salt inference` — which runs no Lightning at all — calls the same
+methods directly. So you never write a Lightning hook, and no driver is
+privileged.
 
 ### The contract
 
 | You provide | Called | Does |
 |---|---|---|
-| `name` | — | the graph-node instance name (a `callbacks:` dict key overrides it) |
+| `name` | — | the graph-node instance name (the `outputs:` dict key overrides it) |
+| `allowed_modes` | — | the modes a config may select for this class; see [Modes](#modes-when-a-sink-runs) |
 | `declare_io(mode)` | at compile | declares which `outputs.*` leaves the sink needs; produces nothing |
 | `writer_demand(model_modules, reader)` | at compile | the same keys as a `{key: who-wants-it}` map, for error messages |
-| `open_schema(trainer)` | once, before the first batch | open the file, resolve the schema |
+| `open_schema(ctx)` | once, before the first batch | open the file, resolve the schema |
 | `consume(bundle)` | once per test batch | read each required leaf with `bundle.get(key)` and append |
 | `flush()` | once, after the last batch | close and report |
 | `close_if_open()` | on every exit path, including a crash | idempotent cleanup |
+
+`open_schema` receives a **`SinkContext`**, not a trainer: a small frozen
+record of the run facts a sink actually reads, which every driver can build
+honestly.
+
+| `SinkContext` field | Is |
+|---|---|
+| `run_name` | the run name, the prefix on output column names |
+| `ckpt_path` | the checkpoint being evaluated (output paths template on it) |
+| `datamodule` | the datamodule; `ctx.reader` is the shortcut to `test_dset.reader` |
+| `num_test_batches` | per-dataloader batch counts, or `None` for "the whole dataset" |
+| `world_size` | devices taking part; always 1 (multi-device TEST is out of scope) |
 
 `declare_io` is the important one. It is the *single* declaration that drives
 both the planner (demand-gating keeps exactly the producers you require alive)
@@ -383,13 +437,67 @@ Two predicates decide how the machinery treats your sink:
   in the per-batch forward loop and calls your `consume` instead of a `forward`,
   and the graph render gives it its own sink card. You would only override it to
   `False` if your class were really a producer, in which case it should subclass
-  `OutputSectionWriter` rather than `OutputSink`.
+  `OutputSectionWriter` rather than `RuntimeSink`.
 - `is_test_sink()` — whether this is *the* TEST persistence sink. **Exactly one
-  attached callback holds that role**; it anchors the TEST boundary demand. The
-  base answers `True` whenever `declare_io(Mode.TEST).requires` is non-empty,
-  which is correct for a primary sink (`H5OutputSink`) and for an ONNX-only
-  sink (`OnnxExportSink`, whose TEST requires are empty). An **auxiliary** sink
-  that runs alongside the H5 sink must override it to return `False`.
+  wired sink may hold that role** (two is a hard error at wiring); it anchors
+  the TEST boundary demand. The base answers `True` whenever
+  `declare_io(Mode.TEST).requires` is non-empty, which is correct for a primary
+  sink (`H5OutputSink`) and for an ONNX-only node (`OnnxExportSink`, whose TEST
+  requires are empty). An **auxiliary** sink that runs alongside the H5 sink
+  must override it to return `False`.
+
+### Modes: when a sink runs
+
+Each sink class declares `allowed_modes`, the modes it may be configured for —
+`{test}` for a `RuntimeSink`, `{onnx}` for `OnnxExportSink`. A config narrows
+that with a `modes:` list, which must be a subset (anything else is a
+`ConfigError` naming both sets).
+
+`modes:` is load-bearing, not decorative: outside its effective modes a sink
+declares empty IO, so the planner prunes it **and every producer that was kept
+alive only for it**. Narrowing therefore changes the compiled plan — that is
+the point of it.
+
+Omitting `modes:` means `allowed_modes`, which for every shipped sink is
+exactly what its `declare_io` already gated on, so omitting it changes nothing.
+
+The vocabulary is the planner's own modes — `fit`, `val`, `test`, `onnx` —
+plus `export` as a second spelling of `onnx`, because that is what a section
+*writer*'s `modes:` list calls it and the two live in one section.
+
+!!! note "`salt inference` is not a mode"
+
+    `salt inference` drives a sink's lifecycle directly, with no planner mode
+    and no registration, so it is outside what `modes:` selects. There is no
+    mode name for it, deliberately.
+
+An **auxiliary** sink (one whose `is_test_sink()` is `False`) must state
+`modes:` explicitly when declared in the section. It rides alongside the
+persistence sink rather than replacing it, so it says when it runs rather than
+inheriting a default that would read as if it were the primary sink.
+
+### Consumes: what a sink takes
+
+`modes:` picks WHEN a sink runs; `consumes:` picks WHAT it takes. A sink
+collects its outputs from every bound producer declaring `manifest_fields(mode)`
+— the section's writers first, then the model's graph modules. `consumes:` is a
+list of fnmatch patterns over the dotted leaf key that narrows that collection:
+
+```yaml
+outputs:
+  jsonl:
+    class_path: salt.outputs.JSONLOutputSink
+    init_args:
+      modes: [test]
+      consumes: [outputs.jets.*]
+```
+
+Omitting it (the default) takes everything declared. A pattern matching none of
+the available leaves is a `ConfigError` naming the pattern and listing the keys,
+so a typo fails loudly; an empty list is a `ConfigError` too (to switch a sink
+off, delete its entry with `<key>: null`). Narrowing composes with demand-gating
+rather than replacing it — a leaf that no sink consumes is still the existing
+dead-prediction hard error.
 
 ### How sinks get attached
 
@@ -405,14 +513,19 @@ you never name `H5OutputSink` or `OnnxExportSink` in a config.
 Wiring `H5OutputSink` yourself with an explicit `OutputColumn` table is a hard
 error — that surface is retired, and the section replaced it.
 
-Your own sink goes in `callbacks:`, and the command leaves it alone (it only
-injects a sink type that is not already present):
+Declare a sink explicitly only when it carries a manifest the command cannot
+guess (`salt/configs/MaskFormer.yaml` is the shipped example), or when it is
+your own. Either way it goes in the `outputs:` section, and the command leaves
+it alone — the implicit wiring only injects a sink type that is not already
+present:
 
 ```yaml
-callbacks:
+outputs:
+  run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
   my_sink:
-    class_path: my_module.MyOutputSink
-    init_args: {}
+    class_path: my_module.MySink
+    init_args:
+      modes: [test]
 ```
 
 `class_path` is resolved with a normal import, so the module must be on
@@ -422,19 +535,23 @@ apptainer: `--env PYTHONPATH=/path/to/dir`).
 ### Worked example: `JSONLOutputSink`
 
 Salt ships a small, tested example of exactly this:
-[`salt/outputs/jsonl_sink.py`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/outputs/jsonl_sink.py).
+[`salt/outputs/sinks/jsonl_sink.py`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/outputs/sinks/jsonl_sink.py).
 `JSONLOutputSink` writes the eval columns as newline-delimited JSON — one JSON
 object per jet — beside the eval H5. It is deliberately minimal, but it is a
 real sink that exercises the whole lifecycle, and it is the file to copy when
 you write your own.
 
 ```yaml
-callbacks:
+outputs:
   jsonl:
     class_path: salt.outputs.JSONLOutputSink
     init_args:
+      modes: [test]                       # required: it is an auxiliary sink
       columns: [GN2_pb, GN2_pc, GN2_pu]   # omit for every column the section mints
 ```
+
+Stack that on a config that already has an `outputs:` section and the entry
+deep-merges into it, beside the writers.
 
 Run `salt test` with that stacked on your config (pass `--ckpt_path`
 explicitly when you stack a second `--config`) and you get, next to the eval
@@ -449,8 +566,8 @@ What it demonstrates, point by point — these are the things a real sink has to
 get right, and the reasons they are not optional:
 
 - **It derives its schema from the bound `outputs:` section**, not from its own
-  config. `bind_output_section()` is called on every attached callback that
-  exposes it, before any `declare_io` resolution; the sink then walks the
+  config. `bind_output_section()` is called on every wired sink that exposes
+  it, before any `declare_io` resolution; the sink then walks the
   section's `RunTaskOutput.manifest_fields(Mode.TEST)` for exactly the names,
   dtypes and order the H5 sink uses. Deriving from the section is what
   guarantees your file and the eval H5 agree.
@@ -474,8 +591,12 @@ get right, and the reasons they are not optional:
   every non-finite float to `null` and then calls `json.dumps(...,
   allow_nan=False)` so anything that slipped through raises instead of silently
   writing a corrupt file. Whatever your format is, decide this explicitly.
-- **Cleanup is idempotent.** `close_if_open()` runs from `teardown` on every
-  exit path, including an exception mid-test, and is safe to call twice.
+- **Cleanup is idempotent.** `close_if_open()` runs on every exit path and is
+  safe to call twice. That takes *two* Lightning hooks, not one: an exception
+  raised inside the test loop unwinds past `teardown`, and `on_exception` is
+  the only hook Lightning still calls there. The generated adapter wires both,
+  so a crashed `salt test` still releases the handle — but only because
+  `close_if_open` is genuinely idempotent, which is your side of the contract.
 
 ### Reading the section schema
 
@@ -495,8 +616,8 @@ Most sinks want the same columns as the eval H5. Three pieces give you that:
   run-name prefixed).
 
 The flat column name is then `f"{run_name}_{field.h5_name}"` when
-`field.prefix` else `field.h5_name`, with `run_name` read from
-`trainer.lightning_module.name` at `open_schema`.
+`field.prefix` else `field.h5_name`, with `run_name` read from `ctx.run_name`
+at `open_schema`.
 
 ### A second worked example: a CSV sink
 
@@ -510,14 +631,14 @@ from pathlib import Path
 
 import numpy as np
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.outputs import OutputSink
+from salt.outputs import RuntimeSink
 
 
-class CSVOutputSink(OutputSink):
+class CSVOutputSink(RuntimeSink):
     name = "csv_output"
 
-    def __init__(self, output: str = "{ckpt_dir}/{ckpt_stem}__test_{sample}.csv"):
-        super().__init__()
+    def __init__(self, output: str = "{ckpt_dir}/{ckpt_stem}__test_{sample}.csv", modes=None):
+        super().__init__(modes=modes)
         self.output = output
         self._section = None
         self._fields = []          # [(leaf_key, OutputField)]
@@ -558,11 +679,10 @@ class CSVOutputSink(OutputSink):
 
     # -- lifecycle ---------------------------------------------------------
 
-    def open_schema(self, trainer) -> None:
-        self._run_name = getattr(trainer.lightning_module, "name", "salt")
-        ckpt = Path(trainer.ckpt_path)
-        reader = trainer.datamodule.test_dset.reader
-        stem = Path(getattr(reader, "filename", None) or ckpt.stem).stem
+    def open_schema(self, ctx) -> None:
+        self._run_name = ctx.run_name
+        ckpt = Path(ctx.ckpt_path)
+        stem = Path(getattr(ctx.reader, "filename", None) or ckpt.stem).stem
         path = Path(self.output.format(
             ckpt_dir=str(ckpt.parent),
             ckpt_stem=ckpt.stem,
@@ -595,9 +715,11 @@ class CSVOutputSink(OutputSink):
 
 ```yaml
 # csv.yaml — stack as a second --config on salt test (pass --ckpt_path too)
-callbacks:
+outputs:
   csv:
     class_path: csv_sink.CSVOutputSink
+    init_args:
+      modes: [test]
 ```
 
 Note the two shape decisions this example has to make and states explicitly:
@@ -613,10 +735,10 @@ summary — the whole thing is short:
 ```python
 # row_count_sink.py
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.outputs import OutputSink
+from salt.outputs import RuntimeSink
 
 
-class RowCountSink(OutputSink):
+class RowCountSink(RuntimeSink):
     name = "row_count"
 
     def declare_io(self, mode: Mode) -> IO:
@@ -628,7 +750,7 @@ class RowCountSink(OutputSink):
     def is_test_sink(self) -> bool:
         return False  # auxiliary: the H5 sink stays the demand anchor
 
-    def open_schema(self, trainer):
+    def open_schema(self, ctx):
         self.rows = 0
 
     def consume(self, bundle):
@@ -654,7 +776,10 @@ Notes for sink authors:
 
 | Class | Role |
 |---|---|
-| `salt.outputs.OutputSink` | base class for every sink — the extension point |
+| `salt.outputs.RuntimeSink` | base class for a sink with a lifecycle — the extension point |
+| `salt.outputs.Node` | its declare-only parent, for a node with no run-time work |
+| `salt.outputs.SinkContext` | the run facts `open_schema` receives |
+| `salt.outputs.OutputSink` | deprecated alias of `RuntimeSink`; subclassing it warns |
 | `salt.outputs.H5OutputSink` | the eval-H5 sink (implicit on `salt test`) |
 | `salt.outputs.OnnxExportSink` | the ONNX tuple sink (implicit on `salt export`) |
 | `salt.outputs.JSONLOutputSink` | the worked example: newline-delimited JSON |
