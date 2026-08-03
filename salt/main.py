@@ -656,14 +656,16 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             "--outputs",
-            type=dict[str, OutputSectionWriter | None] | None,
+            type=dict[str, OutputSectionWriter | Node | None] | None,
             default=None,
-            help="plan-34 W34.2 top-level outputs: section — dict-keyed GraphModule writers "
-            "(RunTaskOutput / InputCopyWriter / PadMaskWriter), deep-mergeable, composed AFTER "
-            "the model; the section field order drives the eval-H5 TASK-column order (an entry "
-            "set to null is removed). NOT a link_arguments link — the section is composed onto "
-            "the model in instantiate_classes (SaltModule.compose_output_section), not wired via "
-            "link_arguments.",
+            help="the top-level outputs: section — everything that leaves the model, "
+            "dict-keyed and deep-mergeable (an entry set to null is removed). Two kinds of "
+            "entry: WRITERS (RunTaskOutput / InputCopyWriter / PadMaskWriter), whose "
+            "declaration order drives the eval-H5 TASK-column order, and SINKS "
+            "(H5OutputSink / OnnxExportSink / your own), which are partitioned out by type "
+            "and therefore excluded from that ordering. Composed AFTER the model; NOT a "
+            "link_arguments link — the section is composed onto the model in "
+            "instantiate_classes (SaltModule.compose_output_section).",
         )
         parser.add_argument(
             "--export",
@@ -890,12 +892,21 @@ class SaltCLI(LightningCLI):
         composer = getattr(model, "compose_output_section", None) if model is not None else None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
+            # compose FIRST: this partitions the section into writers (folded
+            # into the graph) and sinks (held on model._section_sinks).
             composer(live_section)
+            writers = getattr(model, "_output_section", live_section)
+            # register the section-declared sinks BEFORE the implicit injection:
+            # _inject_command_sinks reads iter_sinks and skips a kind that is
+            # already present, so registering first is what stops a declared
+            # sink being double-wired alongside an injected one.
+            self._register_section_sinks(model)
             # plan 50 Phase B: the command wires the implicit per-command sinks
-            # (test -> H5, export/graph -> ONNX) over the composed section, before
-            # the bind loop — so a config declaring only WHAT (modules + modes)
-            # gets the right sink without ever naming H5OutputSink/OnnxExportSink.
-            self._inject_command_sinks(live_section)
+            # (test -> H5, export/graph -> ONNX) over the composed section — so a
+            # config declaring only WHAT (writers + modes) gets the right sink
+            # without ever naming H5OutputSink/OnnxExportSink.
+            self._inject_command_sinks(writers)
+            self._validate_wired_sinks(model)
             # bind the section to the registered sinks NOW: datamodule setup runs
             # BEFORE model setup and resolves the sink's writer_demand, which
             # needs the section already bound.
@@ -903,7 +914,69 @@ class SaltCLI(LightningCLI):
 
             for sink in iter_sinks(getattr(self, "trainer", None)):
                 if callable(getattr(sink, "bind_output_section", None)):
-                    sink.bind_output_section(model._output_section)  # noqa: SLF001 - same-package wiring
+                    sink.bind_output_section(writers)
+
+    def _register_section_sinks(self, model: Any) -> None:
+        """Wire every ``outputs:``-declared sink onto the trainer.
+
+        Goes through the one wiring entry point (`attach_runtime_sink`), so a
+        section-declared sink is registered for discovery and — if it has a
+        lifecycle — gets its generated adapter, exactly like a sink that
+        arrived any other way.
+        """
+        from salt.callbacks.sink_adapter import attach_runtime_sink  # noqa: PLC0415 - heavy/circular
+
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        for sink in getattr(model, "_section_sinks", ()):
+            attach_runtime_sink(trainer, sink)
+
+    def _validate_wired_sinks(self, model: Any) -> None:
+        """Validate the fully wired sink set; raises `ConfigError` on either breach.
+
+        Two rules, checked once everything is registered:
+
+        1. **Exactly one TEST persistence sink.** More than one sink claiming
+           the TEST boundary demand is ambiguous — the runtime picks the first
+           and silently ignores the rest, so it is refused instead.
+        2. **An auxiliary sink states its `modes:`.** A section-declared
+           `RuntimeSink` that opts out of being the persistence sink rides
+           ALONGSIDE it, so it says when it runs rather than inheriting a
+           default that reads as if it were the primary sink.
+        """  # noqa: DOC501 - both raises are named in the summary
+        from salt.outputs import is_test_persistence_sink, iter_sinks  # noqa: PLC0415 - heavy/circular
+        from salt.outputs.sink import RuntimeSink  # noqa: PLC0415 - heavy/circular
+
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        persistence = [
+            sink
+            for sink in iter_sinks(trainer)
+            if callable(getattr(sink, "writer_demand", None)) and is_test_persistence_sink(sink)
+        ]
+        if len(persistence) > 1:
+            names = ", ".join(repr(getattr(s, "name", type(s).__name__)) for s in persistence)
+            raise ConfigError(
+                f"{len(persistence)} TEST persistence sinks are wired ({names}) — exactly one "
+                "may anchor the TEST boundary demand. Keep one, and make any additional sink "
+                "auxiliary by overriding `is_test_sink()` to return False (see "
+                "salt.outputs.JSONLOutputSink and docs/outputs.md)."
+            )
+        for sink in getattr(model, "_section_sinks", ()):
+            if (
+                isinstance(sink, RuntimeSink)
+                and not is_test_persistence_sink(sink)
+                and not sink.modes_configured
+            ):
+                raise ConfigError(
+                    f"auxiliary sink {getattr(sink, 'name', type(sink).__name__)!r} "
+                    f"({type(sink).__name__}) is declared in the `outputs:` section without a "
+                    "`modes:` list — an auxiliary sink runs alongside the persistence sink "
+                    "rather than replacing it, so it must state its modes explicitly "
+                    "(e.g. `modes: [test]`)."
+                )
 
     def _inject_command_sinks(self, section: Mapping[str, Any]) -> None:
         """Wire the implicit per-command output sinks over the composed section.
@@ -920,9 +993,9 @@ class SaltCLI(LightningCLI):
           implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
 
-        A sink already registered (a ``callbacks:``-declared one, a
-        programmatic build, or the MaskFormer ONNX escape hatch) is left alone
-        — never double-wired.
+        A sink already registered — declared in the ``outputs:`` section (the
+        documented form), left in ``callbacks:`` through the deprecation
+        alias, or built programmatically — is left alone; never double-wired.
         """
         from salt.callbacks.sink_adapter import attach_runtime_sink  # noqa: PLC0415 - heavy/circular
         from salt.graph.spec import Mode  # noqa: PLC0415 - avoid import cycle at top

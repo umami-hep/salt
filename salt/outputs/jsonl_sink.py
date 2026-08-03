@@ -83,11 +83,16 @@ class JSONLOutputSink(RuntimeSink):
         Whether to truncate an existing file, by default True. False refuses
         to clobber (raises `ConfigError`), which is the safer setting when the
         template is not checkpoint-unique.
+    modes : Sequence[str] | None, optional
+        Which planner modes to run in. REQUIRED when this sink is declared in
+        the ``outputs:`` section: an auxiliary sink rides alongside the
+        primary H5 sink rather than replacing it, so it states when it runs
+        rather than inheriting a default. By default None (= ``[test]``).
 
     Attributes
     ----------
     name : str
-        The graph-node instance name (overridable by the ``callbacks:`` dict key).
+        The graph-node instance name (overridable by the section dict key).
 
     Notes
     -----
@@ -99,26 +104,34 @@ class JSONLOutputSink(RuntimeSink):
 
     Examples
     --------
-    Wire it in ``callbacks:`` — the ``outputs:`` section is unchanged, and
-    ``salt test`` still writes its eval H5::
+    Declare it in the ``outputs:`` section alongside the writers. The writers
+    keep their declaration order (it is the eval-H5 column order); a sink is
+    excluded from that ordering, so where it sits in the section is free::
 
-        callbacks:
+        outputs:
+          inputs_copy: {class_path: salt.outputs.InputCopyWriter, ...}
+          run_tasks: {class_path: salt.outputs.RunTaskOutput, ...}
           jsonl:
             class_path: salt.outputs.JSONLOutputSink
             init_args:
+              modes: [test]
               columns: [GN2_pb, GN2_pc, GN2_pu]
+
+    ``salt test`` still writes its eval H5 — this sink is auxiliary and does
+    not displace the H5 persistence sink.
     """
 
     name: str = "jsonl_output"
-    """The graph-node instance name (overridable by the ``callbacks:`` dict key)."""
+    """The graph-node instance name (overridable by the section dict key)."""
 
     def __init__(
         self,
         columns: Sequence[str] | None = None,
         output: str = DEFAULT_OUTPUT,
         overwrite: bool = True,
+        modes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes)
         self.columns = tuple(columns) if columns is not None else None
         self.output = output
         self.overwrite = overwrite

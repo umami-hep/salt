@@ -118,6 +118,10 @@ class H5OutputSink(RuntimeSink):
         leaf, which the sink demands (keeping its producer alive) and packs.
         Generic: the sink has no per-consumer knowledge. Empty/None (the
         default) makes the mechanism a strict no-op (byte-identical schema).
+    modes : Sequence[str] | None, optional
+        Which planner modes to run in. `allowed_modes` is ``[test]``, so
+        ``[test]`` is the only accepted list and omitting it (the default)
+        means the same thing.
 
     Raises
     ------
@@ -138,8 +142,9 @@ class H5OutputSink(RuntimeSink):
         output: str = DEFAULT_OUTPUT,
         half_precision: bool = False,
         object_groups: Sequence[ObjectGroup | Mapping[str, Any]] | None = None,
+        modes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes)
         # plan 50 Phase B: the explicit OutputColumn table is RETIRED as a config
         # surface — the H5 sink is now implicit (the command wires it) and derives
         # its column schema from the bound outputs: section (RunTaskOutput +

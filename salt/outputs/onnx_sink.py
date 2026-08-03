@@ -168,6 +168,10 @@ class OnnxExportSink(Node):
         The Athena output-name prefix (``{model_name}_{suffix}``). When None
         it is supplied at adapter construction from the resolved export
         config, by default None.
+    modes : Sequence[str] | None, optional
+        Which planner modes to run in. `allowed_modes` is ``[onnx]``, so
+        ``[onnx]`` (or its writer-vocabulary spelling ``[export]``) is the
+        only accepted list, and omitting it (the default) means the same.
 
     Raises
     ------
@@ -186,8 +190,9 @@ class OnnxExportSink(Node):
         self,
         outputs: Sequence[OnnxExportLeaf | Mapping[str, Any]] | None = None,
         model_name: str | None = None,
+        modes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(modes=modes)
         leaves = [
             leaf if isinstance(leaf, OnnxExportLeaf) else OnnxExportLeaf(**dict(leaf))
             for leaf in outputs or []

@@ -200,11 +200,11 @@ outputs:
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-callbacks:
-  # consumes matched.objects.* -> keeps the matched loss alive under pruning
-  maskformer_metrics:
-    class_path: salt.callbacks.MaskformerMetrics
+  # --- sinks -----------------------------------------------------------------
+  # Sinks live in this same section, partitioned out by type: the writer order
+  # above is the eval-H5 column order, and a sink takes no part in it, so these
+  # two entries sit at the end for readability only. Both are declared here
+  # rather than defaulted because each carries a MaskFormer-specific manifest.
   h5_output:
     class_path: salt.outputs.H5OutputSink
     init_args:
@@ -241,6 +241,11 @@ callbacks:
         - key: outputs.tracks.HadronIndex
           dtype: int8
           per_token: true
+
+callbacks:
+  # consumes matched.objects.* -> keeps the matched loss alive under pruning
+  maskformer_metrics:
+    class_path: salt.callbacks.MaskformerMetrics
 
 export:
   model_name: MFv2 # Athena name: no '_'/'-'

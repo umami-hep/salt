@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import functools
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from salt.graph.bundle import Bundle
-from salt.graph.spec import IO, Mode, flatten_spec
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, PRIMARY_MODES, Mode, flatten_spec
 
 __all__ = [
     "Node",
@@ -16,10 +18,76 @@ __all__ = [
     "RuntimeSink",
     "SinkContext",
     "is_test_persistence_sink",
+    "parse_modes",
 ]
 
 ALL_MODES: frozenset[Mode] = frozenset({Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX})
 """The permissive `Node.allowed_modes` default; concrete sinks narrow it."""
+
+_MODE_BY_NAME: dict[str, Mode] = {mode.name.lower(): mode for mode in PRIMARY_MODES}
+"""The config vocabulary for ``modes:`` — the planner's own `Mode` names, lowercased."""
+
+_MODE_BY_NAME["export"] = Mode.ONNX
+"""``export`` is accepted for `Mode.ONNX`: it is what a section WRITER's own
+``modes:`` list calls that mode (`salt.outputs.run_task_output.parse_output_modes`),
+and writers and sinks share one section — one spelling per mode across the surface."""
+
+
+def _fmt_modes(modes: frozenset[Mode]) -> str:
+    """The canonical rendering of a mode set in an error message."""  # noqa: DOC201 - one-line helper
+    return "[" + ", ".join(m.name.lower() for m in PRIMARY_MODES if m in modes) + "]"
+
+
+def parse_modes(modes: Sequence[str | Mode], owner: str) -> frozenset[Mode]:
+    """Parse a config ``modes:`` list into planner `Mode` members.
+
+    The vocabulary is the planner's own — ``fit``/``val``/``test``/``onnx``,
+    case-insensitive, plus ``export`` for ``onnx`` (the spelling a section
+    WRITER's ``modes:`` list uses, and writers and sinks share one section).
+
+    It deliberately has no entry for `salt inference`: that driver calls a
+    sink's lifecycle directly, with no planner mode and no registration, so it
+    is outside what ``modes:`` selects (see ``docs/outputs.md``).
+
+    Parameters
+    ----------
+    modes : Sequence[str | Mode]
+        The configured mode names. Must name at least one mode — to switch a
+        sink off, delete its section entry (``<key>: null``) rather than
+        declaring it with no modes.
+    owner : str
+        The declaring class name, for the error message.
+
+    Returns
+    -------
+    frozenset[Mode]
+        The parsed modes.
+
+    Raises
+    ------
+    ConfigError
+        On an empty list, or a name that is not a planner mode.
+    """
+    if not modes:
+        raise ConfigError(
+            f"{owner}: `modes:` is an empty list — name at least one of "
+            f"{_fmt_modes(ALL_MODES)}, or delete the sink from the section entirely "
+            "with `<key>: null`."
+        )
+    parsed: set[Mode] = set()
+    for entry in modes:
+        if isinstance(entry, Mode):
+            parsed.add(entry)
+            continue
+        key = str(entry).strip().lower()
+        if key not in _MODE_BY_NAME:
+            raise ConfigError(
+                f"{owner}: {entry!r} is not a mode — `modes:` takes the planner's own mode "
+                f"names {_fmt_modes(ALL_MODES)}. (`salt inference` drives a sink directly, "
+                "outside the planner's modes, and is not selectable here.)"
+            )
+        parsed.add(_MODE_BY_NAME[key])
+    return frozenset(parsed)
 
 
 @dataclass(frozen=True)
@@ -137,7 +205,12 @@ class Node:
     ``declare_io(mode)``
         The node's requires/produces for `mode`. A sink requires the
         ``outputs.*`` leaves it serialises (plus anything else it needs, e.g.
-        ``meta.rows``) and produces nothing.
+        ``meta.rows``) and produces nothing. Whatever a subclass returns here
+        is gated by `effective_modes` first: outside them the node declares
+        empty IO, so the planner prunes it and every producer kept alive only
+        for it. Overriding `declare_io` is all a subclass does — the gate is
+        applied to the override automatically, so `modes:` works for a
+        third-party sink exactly as it does for the shipped ones.
 
     Two predicates control how the graph machinery treats the node:
 
@@ -166,6 +239,69 @@ class Node:
 
     allowed_modes: ClassVar[frozenset[Mode]] = ALL_MODES
     """The modes a config may select for this class (concrete classes narrow it)."""
+
+    _configured_modes: frozenset[Mode] | None = None
+    """The config's ``modes:`` selection; None means "the class default"."""
+
+    def __init__(self, modes: Sequence[str | Mode] | None = None) -> None:
+        """Select which planner modes this node runs in.
+
+        Parameters
+        ----------
+        modes : Sequence[str | Mode] | None, optional
+            The modes to run in, from ``fit``/``val``/``test``/``onnx``.
+            Omitted (the default) means `allowed_modes` — for every shipped
+            sink that is exactly the set its `declare_io` already gates on,
+            so an omitted list changes nothing.
+
+        Raises
+        ------
+        ConfigError
+            When a requested mode is outside `allowed_modes`.
+        """
+        if modes is None:
+            return
+        selected = parse_modes(modes, type(self).__name__)
+        if extra := selected - self.allowed_modes:
+            raise ConfigError(
+                f"{type(self).__name__}: modes {_fmt_modes(extra)} are not allowed for this "
+                f"sink — requested modes={_fmt_modes(selected)}, "
+                f"allowed_modes={_fmt_modes(self.allowed_modes)}"
+            )
+        self._configured_modes = selected
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Gate a subclass's own `declare_io` on `effective_modes`.
+
+        Applied here rather than at wiring time so the gate reaches EVERY
+        sink, including a third-party one the wiring never special-cases —
+        a `modes:` list that some sinks ignored would be a config surface
+        that lies. Discovery is untouched: `salt.outputs.iter_sinks` stays
+        the single place a sink is found.
+        """
+        super().__init_subclass__(**kwargs)
+        declared = cls.__dict__.get("declare_io")
+        if declared is None or getattr(declared, "_salt_mode_gated", False):
+            return
+
+        @functools.wraps(declared)
+        def _mode_gated(self: Node, mode: Mode, _inner: Any = declared) -> IO:
+            if not any(mode & selected for selected in self.effective_modes):
+                return IO(requires={}, produces={})
+            return _inner(self, mode)
+
+        _mode_gated._salt_mode_gated = True  # type: ignore[attr-defined]  # noqa: SLF001
+        cls.declare_io = _mode_gated  # type: ignore[method-assign]
+
+    @property
+    def modes_configured(self) -> bool:
+        """Whether the config selected `modes:` explicitly (vs taking the class default)."""  # noqa: DOC201 - one-line property
+        return self._configured_modes is not None
+
+    @property
+    def effective_modes(self) -> frozenset[Mode]:
+        """The modes this node actually runs in: `allowed_modes` narrowed by `modes:`."""  # noqa: DOC201 - one-line property
+        return self.allowed_modes if self._configured_modes is None else self._configured_modes
 
     def is_sink(self) -> bool:
         """Mark this module a terminal sink, excluded from the executor forward loop."""  # noqa: DOC201 - one-line predicate
