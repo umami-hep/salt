@@ -204,12 +204,15 @@ def two_node_mf(tmp_path_factory):
 def test_two_node_mf_export_contract(two_node_mf):
     """The two-node chain wires object_index (per-token int8) + the jet-level decorator scalars."""
     adapter = two_node_mf.adapter
+    # both nodes are model modules, so they share one manifest group and the
+    # tuple is that group's globals then its per-token leaves — the decorator's
+    # two jet-level scalars, then the reconstruction node's index.
     assert adapter.output_names == [
-        "MaskFormer_HadronIndex",
         "MaskFormer_lead_vertex_pt",
         "MaskFormer_lead_vertex_mass",
+        "MaskFormer_HadronIndex",
     ]
-    assert adapter.output_dtypes == ["int8", "float32", "float32"]
+    assert adapter.output_dtypes == ["float32", "float32", "int8"]
     # only the per-token index carries a dynamic axis; the jet-level scalars are global
     assert adapter.dynamic_axes["MaskFormer_HadronIndex"] == {0: "n_tracks"}
     assert "MaskFormer_lead_vertex_pt" not in adapter.dynamic_axes
