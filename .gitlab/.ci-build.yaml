@@ -27,20 +27,14 @@ build_docker: &build_docker
     # The kaniko debug image is recommended because it has a shell, and a shell is required for an image to be used with GitLab CI/CD.
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
+  # ONLY the short variant name goes in the matrix. GitLab bakes every matrix
+  # VALUE into the generated job name, and the name is capped at 255 chars — with
+  # the wheel URLs in here the cap is blown, `needs: [build_docker_test]` cannot
+  # resolve, and the whole pipeline fails at CREATION with zero jobs and no log
+  # to read. Keep the per-variant values in the script below.
   parallel:
     matrix:
-      - VARIANT: V2H
-        # Volta -> Hopper. Also the DEFAULT variant: it claims the unsuffixed tag.
-        VARIANT_IS_DEFAULT: "true"
-        CUDA_IMAGE: nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
-        TORCH_INDEX: https://download.pytorch.org/whl/cu126
-        FLASH_WHEEL: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl
-      - VARIANT: T2B
-        # Turing -> Blackwell.
-        VARIANT_IS_DEFAULT: "false"
-        CUDA_IMAGE: nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
-        TORCH_INDEX: https://download.pytorch.org/whl/cu130
-        FLASH_WHEEL: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17/flash_attn-2.8.3%2Bcu130torch2.12-cp314-cp314-linux_x86_64.whl
+      - VARIANT: [V2H, T2B]
   variables:
     REGISTRY_PATH: $CI_REGISTRY_IMAGE
     # Overridden by `rules:` below for tag pipelines, and wholesale by
@@ -49,6 +43,28 @@ build_docker: &build_docker
     IMAGE_BASE_TAG: latest
   script: # Build and push the image
     - |
+      # Per-variant build args. These live here rather than in `parallel:matrix`
+      # because matrix values become part of the job name (255-char cap).
+      #   V2H  Volta  -> Hopper     cu126  sm_50..sm_90   V100 T4 A100 H100 H200
+      #   T2B  Turing -> Blackwell  cu130  sm_75..sm_120  T4 A100 Hopper RTX 40/50xx
+      FLASH_BASE="https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.17"
+      case "$VARIANT" in
+        V2H)
+          VARIANT_IS_DEFAULT="true"   # claims the unsuffixed tag
+          CUDA_IMAGE="nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
+          TORCH_INDEX="https://download.pytorch.org/whl/cu126"
+          FLASH_WHEEL="${FLASH_BASE}/flash_attn-2.8.3%2Bcu126torch2.12-cp314-cp314-linux_x86_64.whl"
+          ;;
+        T2B)
+          VARIANT_IS_DEFAULT="false"
+          CUDA_IMAGE="nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04"
+          TORCH_INDEX="https://download.pytorch.org/whl/cu130"
+          FLASH_WHEEL="${FLASH_BASE}/flash_attn-2.8.3%2Bcu130torch2.12-cp314-cp314-linux_x86_64.whl"
+          ;;
+        *)
+          echo "Unknown VARIANT '$VARIANT'" >&2; exit 1 ;;
+      esac
+
       # Per-variant tag. On the default branch that is a bare `:V2H` / `:T2B`;
       # anywhere else it is suffixed onto the base tag so nothing collides.
       if [ "$IMAGE_BASE_TAG" = "latest" ]; then
