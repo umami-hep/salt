@@ -14,7 +14,7 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import TensorSpec
-from salt.onnx.config import ExportOutput
+from salt.outputs.sinks.onnx.config import ExportOutput
 from salt.utils.mask_utils import indices_from_mask
 from salt.utils.union_find import mask_fill_flattened
 
@@ -293,7 +293,7 @@ def reduce_spec(name: str) -> ReduceSpec:
     except KeyError:
         raise ConfigError(
             f"unknown reduce {name!r} — registry: {registered_reduces()} "
-            "(register it via salt.onnx.reduces.register_reduce)"
+            "(register it via salt.outputs.sinks.onnx.reduces.register_reduce)"
         ) from None
 
 

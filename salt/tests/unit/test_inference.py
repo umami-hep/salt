@@ -34,9 +34,9 @@ from salt.inference import (
 )
 from salt.main import CONFIG_DIR, main
 from salt.model.modules import bind_all, resolve_bind_schema
-from salt.onnx.adapter import OnnxAdapter
-from salt.onnx.config import ExportConfig, ExportInput, resolve_export_config
-from salt.onnx.export import compile_onnx_plan
+from salt.outputs.sinks.onnx.adapter import OnnxAdapter
+from salt.outputs.sinks.onnx.config import ExportConfig, ExportInput, resolve_export_config
+from salt.outputs.sinks.onnx.export import compile_onnx_plan
 from salt.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter, SinkContext
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.run_task_output import RunTaskOutput

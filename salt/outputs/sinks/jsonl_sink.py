@@ -14,7 +14,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.sink import RuntimeSink, SinkContext, collect_manifest_fields
+from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 
 __all__ = ["JSONLOutputSink"]
 

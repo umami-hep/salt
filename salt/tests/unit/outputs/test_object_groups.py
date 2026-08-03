@@ -14,7 +14,7 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode, flatten_spec
-from salt.outputs.h5_sink import H5OutputSink
+from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
 
 pytestmark = pytest.mark.cpu_always

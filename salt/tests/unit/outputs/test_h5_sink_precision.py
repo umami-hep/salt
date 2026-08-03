@@ -14,9 +14,9 @@ import pytest
 import torch
 
 from salt.graph.bundle import Bundle
-from salt.outputs.h5_sink import H5OutputSink
+from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.sink import SinkContext
+from salt.outputs.sinks.sink import SinkContext
 
 pytestmark = pytest.mark.cpu_always
 

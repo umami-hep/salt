@@ -229,7 +229,7 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
     )
     from salt.graph.errors import ConfigError  # noqa: PLC0415
     from salt.graph.spec import Mode  # noqa: PLC0415
-    from salt.onnx.export import _merge_export_alias, _run_free_cli  # noqa: PLC0415
+    from salt.outputs.sinks.onnx.export import _merge_export_alias, _run_free_cli  # noqa: PLC0415
     from salt.outputs import H5OutputSink  # noqa: PLC0415
 
     stack_paths = [CONFIG_DIR / c for c in spec.stack]

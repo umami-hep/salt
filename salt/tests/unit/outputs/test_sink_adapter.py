@@ -22,8 +22,8 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode
 from salt.outputs import H5OutputSink, Node, OnnxExportSink, RuntimeSink
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.registry import iter_sinks, register_sink, sink_registry
-from salt.outputs.sink import SinkContext
+from salt.outputs.sinks.registry import iter_sinks, register_sink, sink_registry
+from salt.outputs.sinks.sink import SinkContext
 
 pytestmark = pytest.mark.cpu_always
 
@@ -246,7 +246,7 @@ def test_adapters_have_distinct_state_keys():
 
 
 def test_sink_module_imports_no_lightning():
-    """`salt/outputs/sink.py` must stay driver-agnostic — no lightning import."""
+    """`salt/outputs/sinks/sink.py` must stay driver-agnostic — no lightning import."""
     text = Path(inspect.getsourcefile(RuntimeSink)).read_text(encoding="utf-8")
     imports = [
         line

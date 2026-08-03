@@ -2,9 +2,9 @@
 (config dataclasses, export core, adapter, checker, CLI).
 """
 
-from salt.onnx.adapter import OnnxAdapter
-from salt.onnx.check import CheckResult, check_onnx, compare_once, make_session
-from salt.onnx.config import (
+from salt.outputs.sinks.onnx.adapter import OnnxAdapter
+from salt.outputs.sinks.onnx.check import CheckResult, check_onnx, compare_once, make_session
+from salt.outputs.sinks.onnx.config import (
     ExportCombine,
     ExportConfig,
     ExportInput,
@@ -13,13 +13,13 @@ from salt.onnx.config import (
     sanitised_model_name,
     validate_model_name,
 )
-from salt.onnx.export import (
+from salt.outputs.sinks.onnx.export import (
     ExportResult,
     compile_onnx_plan,
     derive_onnx_sources,
     export_graph,
 )
-from salt.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
+from salt.outputs.sinks.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
 
 __all__ = [
     "CheckResult",

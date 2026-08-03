@@ -12,14 +12,20 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
-
-# salt.outputs already imports salt.onnx at module level (salt.outputs.maskformer
-# -> salt.onnx.reduces), and nothing under salt.onnx imports salt.outputs at
-# module level — so the export dataclasses can be named in the signature, which
-# is what lets jsonargparse resolve `inputs:`/`combine:` config entries.
-from salt.onnx.config import ExportCombine, ExportConfig, ExportInput, resolve_export_config
 from salt.outputs.output_schema import _OUTPUTS_NAMESPACE, OutputField
-from salt.outputs.sink import Node, collect_manifest_fields
+
+# salt.outputs already imports salt.outputs.sinks.onnx at module level
+# (salt.outputs.maskformer -> salt.outputs.sinks.onnx.reduces), and nothing under
+# salt.outputs.sinks.onnx imports salt.outputs at module level — so the export
+# dataclasses can be named in the signature, which is what lets jsonargparse
+# resolve `inputs:`/`combine:` config entries.
+from salt.outputs.sinks.onnx.config import (
+    ExportCombine,
+    ExportConfig,
+    ExportInput,
+    resolve_export_config,
+)
+from salt.outputs.sinks.sink import Node, collect_manifest_fields
 
 
 @dataclass(frozen=True)
@@ -158,7 +164,7 @@ class OnnxExportSink(Node):
     modules, each in declaration order — and is not a contract: Athena
     consumes the outputs by name.
 
-    It is the folded-path counterpart to the legacy `salt.onnx.reduces`
+    It is the folded-path counterpart to the legacy `salt.outputs.sinks.onnx.reduces`
     path: `compile_onnx_plan` sources its ONNX sinks from
     ``declare_io(Mode.ONNX).requires`` when an export node is present, and
     the `OnnxAdapter` reads the named leaves from the executed bundle instead
@@ -177,9 +183,9 @@ class OnnxExportSink(Node):
     model name and input signature (`inputs`, `track_selection`) and the
     manifest post-processing (`rename`, `combine`) live here alongside the
     output tuple, and `export_config` assembles them into the resolved
-    `salt.onnx.ExportConfig` that ``salt export`` / ``salt inference`` trace
+    `salt.outputs.sinks.onnx.ExportConfig` that ``salt export`` / ``salt inference`` trace
     against. The top-level ``export:`` block is a deprecated alias for these
-    same keys (`salt.onnx.export` folds it in, and a key set in both homes is
+    same keys (`salt.outputs.sinks.onnx.export` folds it in, and a key set in both homes is
     a `ConfigError`).
 
     Parameters
@@ -392,7 +398,7 @@ class OnnxExportSink(Node):
         """The RESOLVED export contract this sink declares.
 
         Assembles the sink's own fields into an `ExportConfig` and hands it to
-        `salt.onnx.resolve_export_config`, which fills the defaults (input
+        `salt.outputs.sinks.onnx.resolve_export_config`, which fills the defaults (input
         names, dynamic axes, Athena metadata names, the `run_name`-derived
         model name) and validates them.
 

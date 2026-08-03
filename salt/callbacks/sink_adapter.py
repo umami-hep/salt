@@ -8,8 +8,8 @@ from lightning import Callback, LightningModule, Trainer
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.outputs.registry import register_sink
-from salt.outputs.sink import RuntimeSink, SinkContext
+from salt.outputs.sinks.registry import register_sink
+from salt.outputs.sinks.sink import RuntimeSink, SinkContext
 
 __all__ = ["SinkAdapter", "attach_runtime_sink"]
 

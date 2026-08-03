@@ -9,7 +9,7 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode, flatten_spec
-from salt.onnx.reduces import (
+from salt.outputs.sinks.onnx.reduces import (
     get_maskformer_outputs,
 )
 from salt.outputs import (

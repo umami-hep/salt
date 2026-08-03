@@ -23,7 +23,7 @@ from salt.outputs import (
     SinkContext,
     is_test_persistence_sink,
 )
-from salt.outputs.h5_sink import _SinkCallback  # noqa: PLC2701 - the alias under test
+from salt.outputs.sinks.h5_sink import _SinkCallback  # noqa: PLC2701 - the alias under test
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.run_task_output import RunTaskOutput
 from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test fixtures

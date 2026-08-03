@@ -27,7 +27,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
-from salt.outputs.sink import OutputSink, RuntimeSink, SinkContext, collect_manifest_fields
+from salt.outputs.sinks.sink import OutputSink, RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
 
 _SinkCallback = OutputSink

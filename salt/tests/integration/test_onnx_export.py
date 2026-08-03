@@ -24,7 +24,7 @@ from salt.model.modules import (
     resolve_bind_schema,
 )
 from salt.model.modules.tasks import ClassificationTaskModule
-from salt.onnx import (
+from salt.outputs.sinks.onnx import (
     ExportConfig,
     ExportInput,
     check_onnx,
@@ -461,7 +461,7 @@ class TestSaltSurface:
         assert excinfo.value.code == 0
 
     def test_cli_export_from_checkpoint(self, cli_run, capsys):
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         rc = export_main([
             "--ckpt_path",
@@ -503,7 +503,7 @@ class TestSaltSurface:
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
         # a run config trained without ANY export contract (no top-level block,
         # nothing on the sink) must fail naming the sink's inputs: as the home
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         config.pop("export")
@@ -520,7 +520,7 @@ class TestSaltSurface:
         # the documented escape hatch: -c is repeatable, later files
         # deep-merge on top (the fit semantics) — an export-block-only
         # override file completes a run config trained without one
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         export_block = {"export": config.pop("export")}
@@ -554,7 +554,7 @@ class TestSaltSurface:
         # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
         # needed (the off-graph writer manifest is retired — the sink names the
         # folded conversion outputs.* leaves)
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         rc = export_main(["--manifest", "-c", str(cli_run.run_dir / "config.yaml")])
         assert rc == 0
@@ -567,7 +567,7 @@ class TestSaltSurface:
     def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
         # the retired export.outputs carrier must fire on the CLI path, through
         # the deprecated top-level block (its only remaining spelling)
-        from salt.onnx.export import main as export_main
+        from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
         config["export"] = dict(config["export"])

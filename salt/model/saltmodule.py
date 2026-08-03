@@ -42,7 +42,7 @@ from salt.model.bind import (
 )
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.optim import HybridMuonAdamW, Lion
-from salt.outputs.sink import is_test_persistence_sink
+from salt.outputs.sinks.sink import is_test_persistence_sink
 from salt.schedule import (
     EarlyStopTracker,
     LRSchedulerConfig,
@@ -166,7 +166,7 @@ def _reachable_sinks(model: Any) -> list[Any]:
     Attribute reads are defensive because the white-box tests call the
     consumers of this helper unbound, against a stand-in model.
     """
-    from salt.outputs.registry import iter_sinks
+    from salt.outputs.sinks.registry import iter_sinks
 
     found = list(iter_sinks(getattr(model, "_trainer", None)))
     for sink in getattr(model, "_section_sinks", ()) or ():
@@ -185,7 +185,7 @@ def _is_section_sink(entry: Any) -> bool:
     Protocol too. The discriminator is the `Node` base, plus the answer a
     duck-typed sink gives to ``is_sink()``.
     """
-    from salt.outputs.sink import Node
+    from salt.outputs.sinks.sink import Node
 
     if isinstance(entry, Node):
         return True

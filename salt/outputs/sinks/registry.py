@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from salt.outputs.sink import Node
+from salt.outputs.sinks.sink import Node
 
 __all__ = ["iter_sinks", "register_sink", "sink_registry"]
 

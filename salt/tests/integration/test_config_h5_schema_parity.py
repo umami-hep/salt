@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from salt.main import CONFIG_DIR
-from salt.onnx.export import _run_free_cli
+from salt.outputs.sinks.onnx.export import _run_free_cli
 
 pytestmark = pytest.mark.cpu_always
 

@@ -11,14 +11,14 @@ import yaml
 from salt.cli import load_config
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode
-from salt.onnx.config import (
+from salt.outputs.sinks.onnx.config import (
     ExportCombine,
     ExportConfig,
     ExportInput,
     ExportOutput,
     resolve_export_config,
 )
-from salt.onnx.export import _merge_export_alias, _resolve_export_contract
+from salt.outputs.sinks.onnx.export import _merge_export_alias, _resolve_export_contract
 from salt.outputs import OnnxExportSink
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 

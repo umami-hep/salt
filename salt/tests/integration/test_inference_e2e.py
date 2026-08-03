@@ -23,8 +23,8 @@ import yaml
 from numpy.lib.recfunctions import repack_fields
 
 from salt.main import CONFIG_DIR, main
-from salt.onnx.check import make_session
-from salt.onnx.export import main as export_main
+from salt.outputs.sinks.onnx.check import make_session
+from salt.outputs.sinks.onnx.export import main as export_main
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict  # noqa: PLC2701

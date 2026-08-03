@@ -17,7 +17,7 @@ from numpy.lib.recfunctions import unstructured_to_structured as u2s
 from salt.graph.bundle import Bundle
 from salt.graph.spec import Mode, flatten_spec
 from salt.outputs import MaskFormerObjects, ObjectGroup, ObjectGroupField
-from salt.outputs.h5_sink import H5OutputSink
+from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.output_schema import OutputColumn
 from salt.utils.mask_utils import indices_from_mask
 

@@ -268,7 +268,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     # the export contract lives on the sink; fold the deprecated top-level
     # export: block onto it through the SAME seam `salt export` uses, so the
     # static render and the exporter never disagree about either home.
-    from salt.onnx.export import _merge_export_alias
+    from salt.outputs.sinks.onnx.export import _merge_export_alias
 
     onnx_alias_error: str | None = None
     export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
@@ -492,7 +492,7 @@ def _static_export_model_name(export_sink: Any, run_name: str) -> str:
     ``model_name`` if set, else the sanitised run name — matching `salt export`'s
     own default.
     """
-    from salt.onnx.config import sanitised_model_name
+    from salt.outputs.sinks.onnx.config import sanitised_model_name
 
     name = getattr(export_sink, "model_name", None) if export_sink is not None else None
     return name or sanitised_model_name(run_name)

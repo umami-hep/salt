@@ -22,7 +22,7 @@ from salt.outputs import (
     OnnxExportSink,
     PadMaskWriter,
 )
-from salt.outputs.sink import ALL_MODES, Node, RuntimeSink
+from salt.outputs.sinks.sink import ALL_MODES, Node, RuntimeSink
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always

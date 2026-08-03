@@ -43,14 +43,14 @@ def _live_known_reduces() -> tuple[str, ...]:
     """Registered reduce names, from the live registry (the deferred import keeps this
     module torch-free).
     """
-    from salt.onnx.reduces import registered_reduces
+    from salt.outputs.sinks.onnx.reduces import registered_reduces
 
     return registered_reduces()
 
 
 def _live_per_token_reduces() -> tuple[str, ...]:
     """Registered per-token reduce names, from the live registry (deferred import)."""
-    from salt.onnx.reduces import per_token_reduces
+    from salt.outputs.sinks.onnx.reduces import per_token_reduces
 
     return per_token_reduces()
 
@@ -58,8 +58,9 @@ def _live_per_token_reduces() -> tuple[str, ...]:
 def __getattr__(name: str) -> tuple[str, ...]:
     """Resolve the live ``KNOWN_REDUCES``/``PER_TOKEN_REDUCES`` attributes (PEP 562).
 
-    These are live views of the `salt.onnx.reduces` registry, resolved on attribute access —
-    accessing them triggers the deferred registry import, never at this module's own import.
+    These are live views of the `salt.outputs.sinks.onnx.reduces` registry,
+    resolved on attribute access — accessing them triggers the deferred registry
+    import, never at this module's own import.
     """
     if name == "KNOWN_REDUCES":
         return _live_known_reduces()
@@ -114,7 +115,7 @@ class ExportInput:
 class ExportOutput:
     """One ONNX output group for the custom-reduce binder protocol.
 
-    The parameter object `salt.onnx.reduces.bind_reduce` (the public
+    The parameter object `salt.outputs.sinks.onnx.reduces.bind_reduce` (the public
     ``register_reduce`` extension surface) consumes; never config-parsed
     (`resolve_export_config` hard-errors on a config-declared
     ``export.outputs`` — the live output manifest is the folded

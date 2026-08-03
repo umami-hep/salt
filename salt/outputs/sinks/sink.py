@@ -481,7 +481,7 @@ class RuntimeSink(Node):
     """A terminal node that also consumes batches: the lifecycle lives here.
 
     Adds the four driver-called methods to `Node`. `H5OutputSink` writes the
-    eval H5, and `JSONLOutputSink` (in ``salt/outputs/jsonl_sink.py``) is the
+    eval H5, and `JSONLOutputSink` (in ``salt/outputs/sinks/jsonl_sink.py``) is the
     worked example of a third format. Subclass this to add a format of your
     own; see ``docs/outputs.md``.
 

@@ -16,7 +16,7 @@ from salt.outputs import (
     SeqClassIndex,
     SeqClassProbs,
 )
-from salt.outputs.sink import collect_manifest_fields
+from salt.outputs.sinks.sink import collect_manifest_fields
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always

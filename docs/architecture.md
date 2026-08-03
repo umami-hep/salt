@@ -7,8 +7,9 @@ statically, and no data file is touched before the run starts.
 
 ## Parity-closure doctrine (v1 vs v2 comparisons)
 
-The v1 stack (`salt.models`, `salt.data`, `salt.utils`, `salt.callbacks`,
-`salt.onnx`, `salt.main`, `salt.modelwrapper`) is being deleted from `main`.
+The v1 stack (the `salt.models`, `salt.data`, `salt.utils`, `salt.callbacks`,
+`salt.onnx`, `salt.main` and `salt.modelwrapper` of pin `29c67a1`) is being
+deleted from `main`.
 All v1↔v2 numerical parity was established and passed at the frozen commit
 **`29c67a1`** (`29c67a186f01`) — the last commit where both stacks coexist and
 the parity gates (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
@@ -708,10 +709,10 @@ How it works (no data file is touched — config + checkpoint only):
   proof the traced graph is correct.
 
 Programmatic surface for gates/tests (no checkpoint needed):
-`salt.onnx.export_graph(modules, export_cfg, variables, path)` — the
+`salt.outputs.sinks.onnx.export_graph(modules, export_cfg, variables, path)` — the
 output set derives from the folded `OnnxExportSink` in `modules`; passing
 a legacy reduce-manifest `outputs=` list is a hard `ConfigError` — plus
-`salt.onnx.check_onnx(adapter, path, ...)`.
+`salt.outputs.sinks.onnx.check_onnx(adapter, path, ...)`.
 
 ## Checkpoints and resume
 

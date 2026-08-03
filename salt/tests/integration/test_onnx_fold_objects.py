@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from salt.model.modules import bind_all, resolve_bind_schema
-from salt.onnx import (
+from salt.outputs.sinks.onnx import (
     ExportConfig,
     ExportInput,
     compile_onnx_plan,

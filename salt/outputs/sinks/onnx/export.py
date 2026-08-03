@@ -27,15 +27,15 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.onnx.adapter import OnnxAdapter
-from salt.onnx.check import CheckResult, check_onnx
-from salt.onnx.config import (
+from salt.outputs.sinks.onnx.adapter import OnnxAdapter
+from salt.outputs.sinks.onnx.check import CheckResult, check_onnx
+from salt.outputs.sinks.onnx.config import (
     ExportConfig,
     reject_declared_outputs,
     resolve_export_config,
     stream_of_input_port,
 )
-from salt.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
+from salt.outputs.sinks.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
 
 __all__ = [
     "ExportResult",

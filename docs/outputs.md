@@ -535,7 +535,7 @@ apptainer: `--env PYTHONPATH=/path/to/dir`).
 ### Worked example: `JSONLOutputSink`
 
 Salt ships a small, tested example of exactly this:
-[`salt/outputs/jsonl_sink.py`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/outputs/jsonl_sink.py).
+[`salt/outputs/sinks/jsonl_sink.py`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/outputs/sinks/jsonl_sink.py).
 `JSONLOutputSink` writes the eval columns as newline-delimited JSON — one JSON
 object per jet — beside the eval H5. It is deliberately minimal, but it is a
 real sink that exercises the whole lifecycle, and it is the file to copy when

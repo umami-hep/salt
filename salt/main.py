@@ -29,9 +29,9 @@ from salt import cli as graph_cli
 from salt.data.datamodule import GraphDataModule
 from salt.graph.errors import ConfigError, GraphError
 from salt.model.saltmodule import SaltModule
-from salt.onnx.config import ExportConfig
 from salt.outputs.run_task_output import OutputSectionWriter
-from salt.outputs.sink import Node
+from salt.outputs.sinks.onnx.config import ExportConfig
+from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
@@ -130,7 +130,7 @@ _CLASS_PATH_REMAP: dict[str, str] = {
     "salt.core.outputs": "salt.outputs",
     "salt.core.graph": "salt.graph",
     "salt.core.callbacks": "salt.callbacks",
-    "salt.core.onnx": "salt.onnx",
+    "salt.core.onnx": "salt.outputs.sinks.onnx",
     "salt.core.utils": "salt.utils",
     "salt.core.testing": "salt.testing",
     "salt.core.optim": "salt.optim",
@@ -922,7 +922,7 @@ class SaltCLI(LightningCLI):
         # runs BEFORE model setup and resolves the sink's writer_demand, which
         # needs them already bound. The model modules bind even with no outputs:
         # section — a conversion producer in model.modules names its own leaves.
-        from salt.outputs.registry import iter_sinks
+        from salt.outputs.sinks.registry import iter_sinks
 
         graph_modules = getattr(model, "_graph_modules", None) if model is not None else None
         for sink in iter_sinks(getattr(self, "trainer", None)):
@@ -961,7 +961,7 @@ class SaltCLI(LightningCLI):
            default that reads as if it were the primary sink.
         """
         from salt.outputs import is_test_persistence_sink, iter_sinks
-        from salt.outputs.sink import RuntimeSink
+        from salt.outputs.sinks.sink import RuntimeSink
 
         trainer = getattr(self, "trainer", None)
         if trainer is None:
@@ -1217,7 +1217,7 @@ def main(args: Sequence[str] | None = None) -> int:
     if argv and argv[0] == _EXPORT_COMMAND:
         # local import: the exporter pulls onnx/onnxruntime — not needed at
         # fit/test/graph startup
-        from salt.onnx import export as onnx_export
+        from salt.outputs.sinks.onnx import export as onnx_export
 
         return onnx_export.main(argv[1:])
     if argv and argv[0] == _INFERENCE_COMMAND:

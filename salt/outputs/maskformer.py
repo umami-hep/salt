@@ -14,11 +14,11 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.model.base import SaltModelModule
-
-# The MaskFormer export math is inlined verbatim in salt.onnx.reduces (the
-# shared math seam); this node reuses that exact copy so the two can never drift.
-from salt.onnx.reduces import get_maskformer_outputs
 from salt.outputs.output_schema import OutputField
+
+# The MaskFormer export math is inlined verbatim in salt.outputs.sinks.onnx.reduces (the
+# shared math seam); this node reuses that exact copy so the two can never drift.
+from salt.outputs.sinks.onnx.reduces import get_maskformer_outputs
 from salt.utils.mask_utils import indices_from_mask
 
 

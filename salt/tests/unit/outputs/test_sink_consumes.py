@@ -7,7 +7,7 @@ import pytest
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode
 from salt.outputs import H5OutputSink, JSONLOutputSink, OnnxExportSink, OutputField
-from salt.outputs.sink import collect_manifest_fields
+from salt.outputs.sinks.sink import collect_manifest_fields
 
 pytestmark = pytest.mark.cpu_always
 
