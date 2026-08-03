@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from lightning import Callback, LightningModule, Trainer
@@ -11,7 +12,67 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, flatten_spec
 
-__all__ = ["OutputSink", "is_test_persistence_sink"]
+__all__ = ["OutputSink", "SinkContext", "is_test_persistence_sink"]
+
+
+@dataclass(frozen=True)
+class SinkContext:
+    """The run facts a sink needs when it opens its output.
+
+    A sink is driven by whichever command is running — the Lightning test
+    loop, or `salt inference`, which runs no Lightning at all. `SinkContext`
+    is the driver-independent handle that carries the few facts a sink
+    actually reads at open time, so a sink never touches a `Trainer` and
+    every driver can supply the context honestly.
+
+    Parameters
+    ----------
+    run_name : str
+        The model's run name, used to prefix output column names.
+    datamodule : Any
+        The datamodule whose ``test_dset`` carries the reader — the source
+        schema, sequence lengths for pad-back, and the source filename the
+        output is named after.
+    ckpt_path : str | None
+        The checkpoint being evaluated. Output paths are templated on it, so
+        a sink that names files rejects None.
+    num_test_batches : Any, optional
+        Lightning's per-dataloader batch counts, used to size a
+        ``limit_test_batches``-capped run. None (the default, and what a
+        non-Lightning driver supplies) means "the whole dataset".
+    world_size : int, optional
+        Devices taking part, by default 1. Multi-device test writing is out
+        of scope, so anything else is refused at wiring time.
+    """
+
+    run_name: str
+    datamodule: Any
+    ckpt_path: str | None
+    num_test_batches: Any = None
+    world_size: int = 1
+
+    @classmethod
+    def from_trainer(cls, trainer: Any) -> SinkContext:
+        """Build the context from a live Lightning `Trainer`.
+
+        Duck-typed on purpose: this reads only the handful of attributes
+        above, which is what lets the same sink run under a driver that has
+        no trainer at all.
+        """  # noqa: DOC201 - one-line constructor contract
+        module = getattr(trainer, "lightning_module", None)
+        ckpt_path = getattr(trainer, "ckpt_path", None)
+        return cls(
+            run_name=getattr(module, "name", None) or "salt",
+            datamodule=getattr(trainer, "datamodule", None),
+            ckpt_path=None if ckpt_path is None else str(ckpt_path),
+            num_test_batches=getattr(trainer, "num_test_batches", None),
+            world_size=int(getattr(trainer, "world_size", 1) or 1),
+        )
+
+    @property
+    def reader(self) -> Any:
+        """The test dataset's reader, or None when no dataset is built."""
+        return getattr(getattr(self.datamodule, "test_dset", None), "reader", None)
 
 
 def is_test_persistence_sink(callback: Any) -> bool:
@@ -62,9 +123,11 @@ class OutputSink(Callback):
         ``meta.rows``) and produces nothing. This single declaration drives
         both the planner (demand-gating keeps exactly the required producers
         alive) and `writer_demand`, so the two can never disagree.
-    ``open_schema(trainer)``
-        Called once before the first test batch — open the file, write the
-        header, resolve the column schema.
+    ``open_schema(ctx)``
+        Called once before the first test batch with a `SinkContext` — open
+        the file, write the header, resolve the column schema. The context,
+        not a `Trainer`, is what carries the run facts, so the same sink
+        works under any driver.
     ``consume(bundle)``
         Called once per test batch with the executed `Bundle`. Read each
         required leaf with ``bundle.get(key)`` and append it.
@@ -120,7 +183,7 @@ class OutputSink(Callback):
             def is_test_sink(self) -> bool:
                 return False  # auxiliary: the H5 sink stays the demand anchor
 
-            def open_schema(self, trainer):
+            def open_schema(self, ctx):
                 self.rows = 0
 
             def consume(self, bundle):
@@ -153,7 +216,7 @@ class OutputSink(Callback):
         del mode
         return IO(requires={}, produces={})
 
-    def open_schema(self, trainer: Trainer) -> None:  # pragma: no cover - overridden
+    def open_schema(self, ctx: SinkContext) -> None:  # pragma: no cover - overridden
         """Open the sink's output schema before the first batch."""
 
     def consume(self, bundle: Bundle) -> None:  # pragma: no cover - overridden
@@ -187,9 +250,9 @@ class OutputSink(Callback):
             )
 
     def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Open the sink schema before the first batch."""
+        """Open the sink schema before the first batch, from a context built off the trainer."""
         del pl_module
-        self.open_schema(trainer)
+        self.open_schema(SinkContext.from_trainer(trainer))
 
     def on_test_batch_end(
         self,

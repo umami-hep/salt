@@ -9,7 +9,6 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -30,6 +29,7 @@ from salt.onnx.export import (
     _run_free_cli,
     compile_onnx_plan,
 )
+from salt.outputs.sink import SinkContext
 
 __all__ = ["INFERENCE_OUTPUT", "build_inference_sink", "inference_demand", "main", "run_inference"]
 
@@ -310,15 +310,15 @@ def run_inference(
     dm.setup("test")
     dset = dm.test_dset
     sink = build_inference_sink(cli.model._output_section, output)  # noqa: SLF001 - section home
-    # the sink's lifecycle is driven directly (no Lightning test loop runs
-    # here); it reads only these trainer facts, duck-typed:
-    trainer = SimpleNamespace(
-        lightning_module=model,
+    # the sink's lifecycle is driven directly — no Lightning test loop runs
+    # here, so the context is built from what this driver genuinely knows.
+    # num_test_batches is None: inference always covers the whole dataset.
+    ctx = SinkContext(
+        run_name=getattr(model, "name", None) or "salt",
         datamodule=dm,
         ckpt_path=str(ckpt_path),
-        num_test_batches=None,
     )
-    sink.open_schema(trainer)
+    sink.open_schema(ctx)
     try:
         column_plan = _column_plan(sink, export_sink)
         total = len(dset)

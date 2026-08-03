@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from salt.outputs import (
     JSONLOutputSink,
     OnnxExportSink,
     OutputSink,
+    SinkContext,
     is_test_persistence_sink,
 )
 from salt.outputs.h5_sink import _SinkCallback  # noqa: PLC2701 - the alias under test
@@ -57,14 +59,14 @@ def _section(tmp_path: Path, tasks: list[str] | None = None) -> dict:
     }
 
 
-def _trainer(tmp_path: Path, src: str = "pp_output_test_ttbar.h5") -> SimpleNamespace:
-    """A stand-in trainer carrying the three things a sink reads at open_schema."""  # noqa: DOC201 - test helper
+def _ctx(tmp_path: Path, src: str = "pp_output_test_ttbar.h5") -> SinkContext:
+    """The open-time context carrying the three things a sink reads."""  # noqa: DOC201 - test helper
     ckpts = tmp_path / "ckpts"
     ckpts.mkdir(parents=True, exist_ok=True)
-    return SimpleNamespace(
-        ckpt_path=str(ckpts / "epoch=009-val_loss=0.64.ckpt"),
-        lightning_module=SimpleNamespace(name=_RUN_NAME),
+    return SinkContext(
+        run_name=_RUN_NAME,
         datamodule=SimpleNamespace(test_dset=SimpleNamespace(reader=SimpleNamespace(filename=src))),
+        ckpt_path=str(ckpts / "epoch=009-val_loss=0.64.ckpt"),
     )
 
 
@@ -147,7 +149,7 @@ class TestJSONLSectionSchema:
         sink = JSONLOutputSink(columns=["GN2v2_pb", "GN2v2_pnonsense"])
         sink.bind_output_section(_section(tmp_path))
         with pytest.raises(ConfigError, match="pnonsense"):
-            sink.open_schema(_trainer(tmp_path))
+            sink.open_schema(_ctx(tmp_path))
 
 
 # (3) the graph-node surface — declare_io drives writer_demand -------------------
@@ -198,8 +200,8 @@ class TestJSONLRoundTrip:
         """open_schema -> consume -> flush writes one strict-JSON object per row."""
         sink = JSONLOutputSink()
         sink.bind_output_section(_section(tmp_path))
-        trainer = _trainer(tmp_path)
-        sink.open_schema(trainer)
+        ctx = _ctx(tmp_path)
+        sink.open_schema(ctx)
         probs = torch.tensor([[0.7, 0.2, 0.1], [0.1, 0.3, 0.6]])
         sink.consume(_bundle(probs))
         sink.flush()
@@ -218,7 +220,7 @@ class TestJSONLRoundTrip:
         """The template renders the eval-H5 name with a .jsonl suffix."""
         sink = JSONLOutputSink()
         sink.bind_output_section(_section(tmp_path))
-        sink.open_schema(_trainer(tmp_path))
+        sink.open_schema(_ctx(tmp_path))
         sink.flush()
         assert sink.output_path.name == "epoch=009-val_loss=0.64__test_ttbar.jsonl"
         assert sink.output_path.parent == tmp_path / "ckpts"
@@ -227,7 +229,7 @@ class TestJSONLRoundTrip:
         """Consecutive batches append rather than truncate."""
         sink = JSONLOutputSink()
         sink.bind_output_section(_section(tmp_path))
-        sink.open_schema(_trainer(tmp_path))
+        sink.open_schema(_ctx(tmp_path))
         sink.consume(_bundle(torch.tensor([[1.0, 0.0, 0.0]]), start=0))
         sink.consume(_bundle(torch.tensor([[0.0, 1.0, 0.0]]), start=1))
         sink.flush()
@@ -238,7 +240,7 @@ class TestJSONLRoundTrip:
         """`columns:` keeps only the named columns (flat name or bare suffix)."""
         sink = JSONLOutputSink(columns=[f"{_RUN_NAME}_pb", "pu"])
         sink.bind_output_section(_section(tmp_path))
-        sink.open_schema(_trainer(tmp_path))
+        sink.open_schema(_ctx(tmp_path))
         sink.consume(_bundle(torch.tensor([[0.7, 0.2, 0.1]])))
         sink.flush()
         assert set(_read(sink.output_path)[0]) == {f"{_RUN_NAME}_pb", f"{_RUN_NAME}_pu"}
@@ -247,7 +249,7 @@ class TestJSONLRoundTrip:
         """NaN/inf map to null — JSON has no NaN literal, and allow_nan=False guards it."""
         sink = JSONLOutputSink()
         sink.bind_output_section(_section(tmp_path))
-        sink.open_schema(_trainer(tmp_path))
+        sink.open_schema(_ctx(tmp_path))
         sink.consume(_bundle(torch.tensor([[float("nan"), float("inf"), 0.5]])))
         sink.flush()
         record = _read(sink.output_path)[0]
@@ -260,27 +262,26 @@ class TestJSONLRoundTrip:
         section = _section(tmp_path)
         first = JSONLOutputSink()
         first.bind_output_section(section)
-        first.open_schema(_trainer(tmp_path))
+        first.open_schema(_ctx(tmp_path))
         first.flush()
         second = JSONLOutputSink(overwrite=False)
         second.bind_output_section(section)
         with pytest.raises(ConfigError, match="refuses to overwrite"):
-            second.open_schema(_trainer(tmp_path))
+            second.open_schema(_ctx(tmp_path))
 
     def test_missing_ckpt_path_is_a_config_error(self, tmp_path):
         """The output name is derived from the checkpoint, so it is required."""
         sink = JSONLOutputSink()
         sink.bind_output_section(_section(tmp_path))
-        trainer = _trainer(tmp_path)
-        trainer.ckpt_path = None
-        with pytest.raises(ConfigError, match=r"needs trainer\.ckpt_path"):
-            sink.open_schema(trainer)
+        ctx = replace(_ctx(tmp_path), ckpt_path=None)
+        with pytest.raises(ConfigError, match=r"needs a checkpoint path"):
+            sink.open_schema(ctx)
 
     def test_close_if_open_is_idempotent(self, tmp_path):
         """Cleanup after an interrupted test closes once and no-ops thereafter."""
         sink = JSONLOutputSink()
         sink.bind_output_section(_section(tmp_path))
-        sink.open_schema(_trainer(tmp_path))
+        sink.open_schema(_ctx(tmp_path))
         sink.close_if_open()
         sink.close_if_open()
         sink.flush()  # also a no-op once closed

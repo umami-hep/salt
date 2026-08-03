@@ -13,7 +13,6 @@ from typing import Any
 import h5py
 import numpy as np
 from ftag.hdf5 import H5Writer
-from lightning import Trainer
 from numpy.lib.recfunctions import unstructured_to_structured as u2s
 
 from salt.graph.bundle import Bundle
@@ -28,7 +27,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
-from salt.outputs.sink import OutputSink
+from salt.outputs.sink import OutputSink, SinkContext
 from salt.utils.array_utils import join_structured_arrays
 
 _SinkCallback = OutputSink
@@ -489,10 +488,10 @@ class H5OutputSink(OutputSink):
 
     # -- node lifecycle (relocated VERBATIM from on_test_*) --------
 
-    def open_schema(self, trainer: Trainer) -> None:
+    def open_schema(self, ctx: SinkContext) -> None:
         """Create the eval H5 with the full schema BEFORE the first batch.
 
-        Resolves the output path + total rows from the trainer/datamodule,
+        Resolves the output path + total rows from the context's datamodule,
         opens the source handle for input copies, merges the output /
         input-copy / pad-mask columns into per-group dtypes/shapes, and
         creates the FIXED-mode `H5Writer`.
@@ -509,8 +508,7 @@ class H5OutputSink(OutputSink):
             pad-mask columns or input-copying, which genuinely need that source
             file — such a reader with neither demand is fine.
         """
-        pl_module = trainer.lightning_module
-        dm = getattr(trainer, "datamodule", None)
+        dm = ctx.datamodule
         dset = getattr(dm, "test_dset", None)
         if dset is None:
             raise ConfigError(
@@ -518,7 +516,7 @@ class H5OutputSink(OutputSink):
                 f"got {type(dm).__name__} (design §5.1)"
             )
         reader = dset.reader
-        self._run_name = getattr(pl_module, "name", "salt")
+        self._run_name = ctx.run_name
         streams = tuple(getattr(reader, "streams", ()) or ())
         groups = getattr(reader, "groups", None)
         self._mask_streams = self._pad_mask_streams()
@@ -571,7 +569,7 @@ class H5OutputSink(OutputSink):
                     f"H5OutputSink: pad-mask stream {stream!r} is not a sequence stream — "
                     f"pad masks exist for {list(sequence_streams)} only (design §6.1)"
                 )
-        total = self._expected_rows(trainer, len(dset), dm.batch_size)
+        total = self._expected_rows(ctx, len(dset), dm.batch_size)
         # resolve the NON-reader object groups' trailing shapes (object_groups).
         # Empty object_groups -> {} so self._object_shapes stays empty and the
         # column merge below is byte-identical to a plain sink (the no-op path).
@@ -581,7 +579,7 @@ class H5OutputSink(OutputSink):
         dtypes, shapes = self._merge_columns(
             streams, sequence_streams, group_datasets, total
         )
-        self.output_path = self._output_path(trainer, dm, reader)
+        self.output_path = self._output_path(ctx, dm, reader)
         self._h5 = H5Writer(
             dst=self.output_path,
             dtypes=dtypes,
@@ -953,13 +951,13 @@ class H5OutputSink(OutputSink):
         return (total,)
 
     @staticmethod
-    def _expected_rows(trainer: Trainer, total: int, batch_size: int) -> int:
+    def _expected_rows(ctx: SinkContext, total: int, batch_size: int) -> int:
         """Rows the (possibly ``limit_test_batches``-capped) loop will write.
 
         ``min(total, num_batches * batch_size)`` — with the sequential
         no-drop sampler only the last batch is partial.
         """
-        num_batches = getattr(trainer, "num_test_batches", None)
+        num_batches = ctx.num_test_batches
         if not num_batches:
             return total
         limit = num_batches[0]
@@ -967,14 +965,14 @@ class H5OutputSink(OutputSink):
             return min(total, int(limit) * batch_size)
         return total
 
-    def _output_path(self, trainer: Trainer, dm: Any, reader: Any) -> Path:
+    def _output_path(self, ctx: SinkContext, dm: Any, reader: Any) -> Path:
         """Render the output template; raises `ConfigError` when ``ckpt_path``
         is unset or the template names an unknown key.
         """
-        ckpt_path = trainer.ckpt_path
+        ckpt_path = ctx.ckpt_path
         if ckpt_path is None:
             raise ConfigError(
-                "H5OutputSink needs trainer.ckpt_path — run salt test with --ckpt_path "
+                "H5OutputSink needs a checkpoint path — run salt test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint, v1 contract)"
             )
         # name the output after the reader's file. A single-file reader exposes

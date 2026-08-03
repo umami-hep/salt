@@ -37,7 +37,7 @@ from salt.model.modules import bind_all, resolve_bind_schema
 from salt.onnx.adapter import OnnxAdapter
 from salt.onnx.config import ExportConfig, ExportInput, resolve_export_config
 from salt.onnx.export import compile_onnx_plan
-from salt.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter
+from salt.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter, SinkContext
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.run_task_output import RunTaskOutput
 from salt.schema import dump_schema, save_schema
@@ -281,13 +281,12 @@ class TestInferenceCoreLoop:
             sinks=inference_demand(resolved),
         )
         sink = build_inference_sink(section, output=str(tmp_path / "inference.h5"))
-        trainer = SimpleNamespace(
-            lightning_module=SimpleNamespace(name="run"),
+        ctx = SinkContext(
+            run_name="run",
             datamodule=SimpleNamespace(test_dset=dset, batch_size=60, test_suff=None),
             ckpt_path="unused.ckpt",
-            num_test_batches=None,
         )
-        sink.open_schema(trainer)
+        sink.open_schema(ctx)
         column_plan = _column_plan(sink, export_sink)
         assert {col.key for col, _, _ in column_plan} == set(export_sink.outputs)
         for start in range(0, self.N, 60):

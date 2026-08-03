@@ -9,13 +9,12 @@ from pathlib import Path
 from typing import Any, TextIO
 
 import numpy as np
-from lightning import Trainer
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.outputs.output_schema import OutputColumn
-from salt.outputs.sink import OutputSink
+from salt.outputs.sink import OutputSink, SinkContext
 
 __all__ = ["JSONLOutputSink"]
 
@@ -94,7 +93,8 @@ class JSONLOutputSink(OutputSink):
     -----
     Nothing is validated in the constructor. `ConfigError` is raised later, at
     run setup, when no ``outputs:`` section is bound, when `columns` names a
-    column the section does not mint, when ``trainer.ckpt_path`` is unset, or
+    column the section does not mint, when the context carries no checkpoint
+    path, or
     when the target exists and `overwrite` is False.
 
     Examples
@@ -251,14 +251,13 @@ class JSONLOutputSink(OutputSink):
 
     # -- lifecycle ---------------------------------------------------------
 
-    def open_schema(self, trainer: Trainer) -> None:
+    def open_schema(self, ctx: SinkContext) -> None:
         """Resolve the output path + column schema and open the file for writing."""  # noqa: DOC501 - raises ConfigError, documented on the class
-        pl_module = trainer.lightning_module
-        self._run_name = getattr(pl_module, "name", "salt")
+        self._run_name = ctx.run_name
         self._resolved = None  # re-resolve: the run name feeds the column names
         self._validate_columns()
         self._ensure_columns()
-        self.output_path = self._output_path(trainer)
+        self.output_path = self._output_path(ctx)
         if self.output_path.exists() and not self.overwrite:
             raise ConfigError(
                 f"JSONLOutputSink refuses to overwrite {self.output_path} — pass "
@@ -307,21 +306,20 @@ class JSONLOutputSink(OutputSink):
 
     # -- helpers -----------------------------------------------------------
 
-    def _output_path(self, trainer: Trainer) -> Path:
+    def _output_path(self, ctx: SinkContext) -> Path:
         """Render the output template against the checkpoint and the test sample.
 
         Mirrors `H5OutputSink`'s template contract (same keys, same sample
         heuristic) so the JSONL lands beside the eval H5; raises `ConfigError`
         when ``ckpt_path`` is unset or the template names an unknown key.
         """  # noqa: DOC201, DOC501 - private helper, raises named in the summary
-        ckpt_path = trainer.ckpt_path
+        ckpt_path = ctx.ckpt_path
         if ckpt_path is None:
             raise ConfigError(
-                "JSONLOutputSink needs trainer.ckpt_path — run salt test with --ckpt_path "
+                "JSONLOutputSink needs a checkpoint path — run salt test with --ckpt_path "
                 "<ckpt> (the output file is named after the checkpoint)"
             )
-        dset = getattr(getattr(trainer, "datamodule", None), "test_dset", None)
-        reader = getattr(dset, "reader", None)
+        reader = ctx.reader
         src = getattr(reader, "filename", None) or getattr(reader, "source_path", None)
         stem = Path(src).stem if src is not None else self._run_name
         keys = {

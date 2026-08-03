@@ -16,6 +16,7 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.outputs.h5_sink import H5OutputSink
 from salt.outputs.output_schema import OutputColumn
+from salt.outputs.sink import SinkContext
 
 pytestmark = pytest.mark.cpu_always
 
@@ -59,20 +60,6 @@ class _DataModule:
         self.test_suff = None
 
 
-class _Module:
-    name = "salt"
-
-
-class _Trainer:
-    """The minimal trainer surface ``open_schema``/``_output_path`` read."""
-
-    def __init__(self, dm: _DataModule, ckpt_path: str) -> None:
-        self.lightning_module = _Module()
-        self.datamodule = dm
-        self.ckpt_path = ckpt_path
-        self.num_test_batches = None  # -> _expected_rows falls back to len(dset)
-
-
 def _source_file(path: Path) -> None:
     """A tiny source H5: float + int jets columns, per-token tracks group."""
     rng = np.random.default_rng(11)
@@ -96,7 +83,7 @@ def _seed_columns(sink: H5OutputSink) -> None:
 
 
 def _run_sink(tmp_path: Path, *, half_precision: bool) -> Path:
-    """Drive open_schema -> consume -> flush over stub trainer/reader plumbing."""  # noqa: DOC201 - test helper, no Returns block per docstring policy
+    """Drive open_schema -> consume -> flush over stub context/reader plumbing."""  # noqa: DOC201 - test helper, no Returns block per docstring policy
     src = tmp_path / "src.h5"
     _source_file(src)
     out = tmp_path / ("half.h5" if half_precision else "full.h5")
@@ -107,8 +94,13 @@ def _run_sink(tmp_path: Path, *, half_precision: bool) -> Path:
         half_precision=half_precision,
     )
     _seed_columns(sink)
-    trainer = _Trainer(_DataModule(_Reader(src)), ckpt_path=str(tmp_path / "e0-loss=0.1.ckpt"))
-    sink.open_schema(trainer)
+    # num_test_batches None -> _expected_rows falls back to len(dset)
+    ctx = SinkContext(
+        run_name="salt",
+        datamodule=_DataModule(_Reader(src)),
+        ckpt_path=str(tmp_path / "e0-loss=0.1.ckpt"),
+    )
+    sink.open_schema(ctx)
     torch.manual_seed(3)
     mask = torch.zeros(_N, _T, dtype=torch.bool)
     mask[:, 3:] = True  # last two positions padded

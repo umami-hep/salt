@@ -29,7 +29,7 @@ from salt.outputs.output_schema import (
 )
 from salt.outputs.pad_mask_writer import PadMaskWriter
 from salt.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
-from salt.outputs.sink import OutputSink, is_test_persistence_sink
+from salt.outputs.sink import OutputSink, SinkContext, is_test_persistence_sink
 from salt.outputs.task_output import (
     ClassProbs,
     SeqClassIndex,
@@ -64,6 +64,7 @@ __all__ = [
     "SeqClassIndexOp",
     "SeqClassProbs",
     "SeqClassProbsOp",
+    "SinkContext",
     "TaskOutput",
     "is_test_persistence_sink",
 ]
