@@ -138,6 +138,11 @@ def paired_data(tmp_path_factory) -> dict[str, dict[str, Path]]:
     )
 
     built: dict[str, dict[str, Path]] = {}
+    if not _root_deps():
+        # writing a ROOT fixture needs uproot; return empty and let _feed skip
+        # the PAIRED configs only. Raising here would error EVERY parametrisation
+        # of both lifecycle tests, including the H5-fed ones this cannot touch.
+        return built
     for config, fragment in PAIRED.items():
         out = tmp_path_factory.mktemp(f"paired_{config}")
         signal, background = write_sample_pair(out)
@@ -157,6 +162,13 @@ def paired_data(tmp_path_factory) -> dict[str, dict[str, Path]]:
     return built
 
 
+def _root_deps() -> bool:
+    """Whether uproot + awkward are importable (the ROOT fixture needs both)."""
+    from importlib.util import find_spec  # noqa: PLC0415
+
+    return all(find_spec(m) is not None for m in ("uproot", "awkward"))
+
+
 def _feed(config: str, datasets: dict, paired_data: dict) -> tuple[list[Path], list[str], Path]:
     """``(config stack, data CLI args, norm_dict)`` for one production config.
 
@@ -165,6 +177,8 @@ def _feed(config: str, datasets: dict, paired_data: dict) -> tuple[list[Path], l
     """
     cfg = CONFIG_DIR / f"{config}.yaml"
     if config in PAIRED:
+        if config not in paired_data:
+            pytest.skip(f"{config} is ROOT-fed; needs `pip install 'salt[root]'`")
         entry = paired_data[config]
         return (
             [cfg, entry["fragment"]],
