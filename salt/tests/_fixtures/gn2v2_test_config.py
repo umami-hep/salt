@@ -76,10 +76,12 @@ GOLDEN_HEADS: dict[str, Any] = {
 SPLIT_OUTPUTS: dict[str, Any] = {
     "outputs": {
         "run_tasks": None,
+        # no `modes:` — the default is test + export, i.e. eval H5 AND ONNX
         "jets_out": {
             "class_path": "salt.outputs.RunTaskOutput",
-            "init_args": {"tasks": ["jets_classification"], "modes": ["test", "onnx"]},
+            "init_args": {"tasks": ["jets_classification"]},
         },
+        # eval H5 only ('export' is the ONNX mode's name, not 'onnx')
         "origin_out": {
             "class_path": "salt.outputs.RunTaskOutput",
             "init_args": {"tasks": ["track_origin"], "modes": ["test"]},
