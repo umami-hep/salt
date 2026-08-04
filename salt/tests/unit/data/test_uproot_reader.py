@@ -648,3 +648,76 @@ def test_link_member_lookup_is_unambiguous() -> None:
     )
     with pytest.raises(SchemaError, match="cannot tell which one"):
         _link_member(links, "m_persIndex")
+
+
+# --------------------------------------------------------------------------- #
+# 6. the hot read path opens each file ONCE per process
+# --------------------------------------------------------------------------- #
+
+
+def _cache_reader(path: Path) -> UprootReader:
+    return UprootReader(
+        groups={
+            "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+            "event": {"branches": dict(_EVENT), "jagged": False},
+        },
+        filename=path,
+        tree="AnalysisMiniTree",
+    )
+
+
+def test_read_reuses_one_open_tree_per_file(ej_file, monkeypatch) -> None:
+    """Many small reads must not re-open (and re-parse) the file each time.
+
+    `MultiSampleReader` decomposes an interleaved window into one contiguous run
+    per few rows, so an uncached `uproot.open` ran once per run per group. Count
+    the opens rather than time them.
+    """
+    path, _ = ej_file
+    reader = _cache_reader(path)
+    reader.prepare()
+
+    opened: list[str] = []
+    real_open = uproot.open
+
+    def counting_open(spec, *args, **kwargs):
+        opened.append(str(spec))
+        return real_open(spec, *args, **kwargs)
+
+    # the reader imports uproot inside its methods, so patching the module
+    # attribute is what the hot path resolves
+    monkeypatch.setattr(uproot, "open", counting_open)
+
+    for lo in range(0, 8, 2):
+        reader.read(slice(lo, lo + 2), Mode.FIT)
+
+    assert len(opened) == 1, f"expected one open for the whole read sequence, got {opened}"
+    assert len(reader._open_trees) == 1
+
+
+def test_read_matches_an_uncached_reader(ej_file) -> None:
+    """The cache is a pure optimisation: same bytes out, read at any granularity."""
+    path, _ = ej_file
+    whole = _cache_reader(path)
+    n = len(whole)
+    reference = whole.read(slice(0, n), Mode.FIT)
+
+    piecewise = _cache_reader(path)
+    chunks = [piecewise.read(slice(lo, min(lo + 3, n)), Mode.FIT) for lo in range(0, n, 3)]
+    for key in ("raw.event",):
+        joined = np.concatenate([c[key] for c in chunks])
+        np.testing.assert_array_equal(joined["eventNumber"], reference[key]["eventNumber"])
+
+
+def test_open_trees_are_dropped_on_pickle(ej_file) -> None:
+    """An open uproot file is not picklable — spawn workers must get a clean reader."""
+    import pickle
+
+    path, _ = ej_file
+    reader = _cache_reader(path)
+    reader.prepare()
+    reader.read(slice(0, 2), Mode.FIT)
+    assert reader._open_trees
+
+    revived = pickle.loads(pickle.dumps(reader))
+    assert revived._open_trees == {}

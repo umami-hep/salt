@@ -278,6 +278,7 @@ class UprootReader(Reader):
         self._num_rows: int | None = None
         self._mult: dict[str, int] = {}  # stream -> served pad_max
         self._read_fields: dict[str, dict[str, str]] = {}
+        self._open_trees: dict[str, Any] = {}  # path -> open TTree (hot read path only)
 
     def _validate_unroll(self) -> None:
         """Enforce the unroll<->group invariants (row group jagged=False; links need unroll)."""
@@ -932,6 +933,32 @@ class UprootReader(Reader):
         names = set(demanded) if demanded else set(served)
         return [f for f in served if f in names]
 
+    def _tree(self, path: str | Path) -> Any:
+        """The open TTree for `path`, cached per process — the HOT read path only.
+
+        ``uproot.open`` re-reads the file header and re-parses the TTree's
+        streamers and branch metadata on every call, which is fine once per file
+        in `prepare` and ruinous per batch: a `MultiSampleReader` decomposes an
+        interleaved window into one contiguous run per few rows, so an uncached
+        open ran once per run PER GROUP — order 1,000 opens for a 1,000-row
+        batch. Measured on a 170-branch easyjet ntuple that is ~40 s per batch,
+        i.e. training through a ROOT reader is not possible without this cache.
+
+        Handles are per (reader instance, path) and live until the process ends
+        (or the reader is pickled — `__getstate__` drops them, since an open
+        uproot file is not picklable). The file count per reader is the stage's
+        source list, so this is a handful of descriptors, not a leak.
+        """
+        self._require_deps()
+        import uproot
+
+        key = str(path)
+        tree = self._open_trees.get(key)
+        if tree is None:
+            tree = uproot.open(f"{key}:{self.tree}")
+            self._open_trees[key] = tree
+        return tree
+
     def _read_stream_columns(
         self, stream: str, fields: list[str], start: int, stop: int
     ) -> dict[str, Any]:
@@ -942,7 +969,6 @@ class UprootReader(Reader):
         """
         self._require_deps()
         import awkward as ak
-        import uproot
 
         assert self._table is not None
         cfg = self.groups[stream]
@@ -967,11 +993,11 @@ class UprootReader(Reader):
                 kept[(kept >= block_flat_start) & (kept < block_flat_stop)] - block_flat_start
             )
             sel = in_block[row_off : row_off + (hi - lo)]
-            with uproot.open(f"{entry.path}:{self.tree}") as t:
-                if cfg.is_linked:
-                    block = self._read_linked_block(t, cfg, fields, e0, e1)
-                else:
-                    block = self._read_group_cols(t, cfg, fields, e0, e1)
+            t = self._tree(entry.path)
+            if cfg.is_linked:
+                block = self._read_linked_block(t, cfg, fields, e0, e1)
+            else:
+                block = self._read_group_cols(t, cfg, fields, e0, e1)
             for f in fields:
                 per_field_chunks[f].append(block[f][sel])
         cols: dict[str, Any] = {}
@@ -1151,6 +1177,7 @@ class UprootReader(Reader):
             "_num_rows": None,
             "_mult": {},
             "_read_fields": {},
+            "_open_trees": {},  # an open uproot file is not picklable
             "schema": None,
         })
         return state
