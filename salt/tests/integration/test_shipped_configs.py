@@ -106,6 +106,17 @@ NO_FIXTURE: dict[str, str] = {
     "legacy/dips": "labels on raw HadronConeExclTruthLabelID; fixture writes PDG-like values",
     "gn2v2-opendata": "sources its files through input_samples, not data.train_file",
     "GN2/gn2v2-cluster-override": "inherits gn2v2-opendata's input_samples sourcing",
+    # measured, not guessed — see the diagnosis in experiment 53
+    "GN3EPCLV01": "no global stream in write_dummy_file",
+    "GN3/GN3_SoftE": "no global stream in write_dummy_file",
+    "GN3/GN3_tracklabel": "no tracks.ftagTruthSourceLabel in write_dummy_file",
+    # the finetune templates need a warm start and a multi-epoch schedule, so
+    # fast_dev_run (which pins max_epochs to 1) cannot drive them. They are
+    # trained through properly by test_finetune_templates.py instead.
+    "finetune/finetune_gn3large": "multi-stage schedule needs max_epochs>=5 "
+    "and a checkpoint — trained by test_finetune_templates.py",
+    "finetune/finetune_gn3large_new_head": "adds a head on jets.large_r_flavour_label, "
+    "absent from write_dummy_file — trained by test_finetune_templates.py",
 }
 
 # Optional extras. Present in the shipped image (setup/Dockerfile installs both
@@ -239,6 +250,10 @@ def test_config_plan_compiles(config, fixtures):
         argv += ["-c", str(path)]
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
+    # a plan compile is static, but the CLI still instantiates the trainer, so a
+    # config shipping accelerator: gpu (gn2v2-cluster-override) would fail on a
+    # CPU runner for a reason that has nothing to do with its graph
+    argv += ["--set", "trainer.accelerator=cpu"]
     for override in _norm_dict_overrides(stack, data["nd"]):
         argv += ["--set", override]
 
