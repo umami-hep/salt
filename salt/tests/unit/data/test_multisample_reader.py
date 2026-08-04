@@ -10,7 +10,7 @@ import pytest
 
 from salt.data.base import Reader, WorkerCtx
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
-from salt.graph.errors import SchemaError
+from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.schema import GroupSchema, Schema
 
@@ -424,6 +424,99 @@ def test_runs_are_contiguous_local_slices() -> None:
     assert runs[-1][3] == 250
     for k in range(1, len(runs)):
         assert runs[k][2] == runs[k - 1][3]
+
+
+def _two_sample_reader(n_sig: int = 300, n_bkg: int = 700, **kwargs) -> MultiSampleReader:
+    """A prepared two-sample reader over stubs, for the segment/interleave tests."""
+    reader = MultiSampleReader(
+        samples=[
+            SampleConfig(name="signal", label=1, reader=StubReader(n=n_sig, seed=1)),
+            SampleConfig(name="background", label=0, reader=StubReader(n=n_bkg, seed=2, offset=99)),
+        ],
+        **kwargs,
+    )
+    reader.prepare()
+    return reader
+
+
+def test_segments_cover_the_window_exactly_once() -> None:
+    # every output position is claimed by exactly one segment, and each segment's
+    # local slice is contiguous and the same length as its position list
+    reader = _two_sample_reader()
+    window = slice(120, 370)
+    segments = reader._segments(window)
+    claimed = np.concatenate([positions for _sid, _sl, positions in segments])
+    np.testing.assert_array_equal(np.sort(claimed), np.arange(window.stop - window.start))
+    for sid, local_slice, positions in segments:
+        assert local_slice.step in (None, 1)
+        assert local_slice.stop - local_slice.start == positions.size
+        # the local rows a segment claims are exactly the index's own mapping
+        np.testing.assert_array_equal(
+            reader._local_of[window.start + positions],
+            np.arange(local_slice.start, local_slice.stop),
+        )
+        np.testing.assert_array_equal(
+            reader._sample_of[window.start + positions], np.full(positions.size, sid)
+        )
+
+
+def test_segments_coalesce_the_row_granular_interleave() -> None:
+    # the whole point: a 1:1 interleave decomposes into ~250 runs but 2 segments
+    reader = _two_sample_reader()
+    window = slice(0, 250)
+    assert len(reader._runs(window)) > 100
+    assert len(reader._segments(window)) == len(reader.samples)
+
+
+def test_segment_reads_match_run_reads_bit_for_bit() -> None:
+    # coalescing must be invisible in the batch: same rows, same values
+    reader = _two_sample_reader()
+    out = reader.read(slice(0, 250), Mode.FIT)
+    sig = reader.samples[0].reader
+    bkg = reader.samples[1].reader
+    truth = {1: sig.read(slice(0, 250), Mode.FIT), 0: bkg.read(slice(0, 250), Mode.FIT)}
+    cursor = {0: 0, 1: 0}
+    for j in range(250):
+        lab = int(out["raw.event"]["process"][j])
+        src = truth[lab]
+        li = cursor[lab]
+        cursor[lab] += 1
+        assert out["raw.event"]["eventNumber"][j] == src["raw.event"]["eventNumber"][li]
+        tb = src["raw.jets"].shape[1]
+        np.testing.assert_array_equal(out["raw.jets"]["pt"][j, :tb], src["raw.jets"]["pt"][li])
+
+
+def test_interleave_block_defaults_to_the_row_granular_index() -> None:
+    # the default must be bit-for-bit the historical index
+    row = _two_sample_reader()
+    explicit = _two_sample_reader(interleave_block=1)
+    np.testing.assert_array_equal(row._sample_of, explicit._sample_of)
+    np.testing.assert_array_equal(row._local_of, explicit._local_of)
+
+
+@pytest.mark.parametrize("block", [1, 16, 64])
+def test_interleave_block_preserves_the_epoch_multiset_and_proportions(block: int) -> None:
+    # a block interleave changes WHICH batch a row lands in, never the epoch's
+    # content nor a batch's sample proportions beyond one block
+    reader = _two_sample_reader(interleave_block=block)
+    assert len(reader) == 1000
+    for sid, expected in ((0, 300), (1, 700)):
+        rows = reader._local_of[reader._sample_of == sid]
+        np.testing.assert_array_equal(np.sort(rows), np.arange(expected))
+    # a window's count is the difference of two prefix counts, and largest
+    # remainder bounds each prefix to one block of ideal — hence 2 * block
+    batch = 250
+    for start in range(0, 1000, batch):
+        n_sig = int((reader._sample_of[start : start + batch] == 0).sum())
+        assert abs(n_sig - batch * 0.3) <= 2 * block
+
+
+def test_interleave_block_below_one_is_refused() -> None:
+    with pytest.raises(ConfigError, match="interleave_block"):
+        MultiSampleReader(
+            samples=[SampleConfig(name="a", label=0, reader=StubReader(n=10))],
+            interleave_block=0,
+        )
 
 
 # --------------------------------------------------------------------------- #
