@@ -416,17 +416,19 @@ def write_dummy_file(
         if make_xbb:
             f["jets"].attrs["flavour_label"] = ["hbb", "hcc", "top", "qcd"]
         elif is_gn3:
+            # the names the shipped GN3 configs declare in class_names; the
+            # schema gate compares the two sets, so they have to agree
             f["jets"].attrs["flavour_label"] = [
-                "ghostsplitbjets",
-                "ghostsplitcjets",
-                "ghostsplitsjets",
-                "ghostsplitudjets",
-                "ghostsplitgjets",
-                "ghostsplittaujets",
+                "ghostbjets",
+                "ghostcjets",
+                "ghostsjets",
+                "ghostudjets",
+                "ghostgjets",
+                "ghosttaujets",
             ]
         else:
             f["jets"].attrs["flavour_label"] = ["bjets", "cjets", "ujets"] + (
-                ["taus"] if inc_taus else []
+                ["taujets"] if inc_taus else []
             )
         f.create_dataset("tracks", data=tracks)
         f.create_dataset("tracks_dr", data=tracks)
