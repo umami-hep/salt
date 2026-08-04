@@ -137,6 +137,10 @@ def write_sourced_fragment(raw: dict, out: Path, files: dict[str, Path]) -> Path
     for sample in samples:
         path = files[sample["name"]]
         sample["sources"] = {stage: str(path) for stage in ("train", "val", "test")}
+        # `sources` binds only at stage-clone time (MultiSampleReader.with_source),
+        # so a run-free path — `salt graph validate`, which calls prepare() on the
+        # PROTOTYPE — still sees a sub-reader with no file. Set filename too.
+        sample["reader"].setdefault("init_args", {})["filename"] = str(path)
     out = Path(out)
     out.write_text(yaml.safe_dump(raw, sort_keys=False))
     return out

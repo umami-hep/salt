@@ -81,9 +81,15 @@ model:
         class_path: salt.model.modules.LossSum
 
 outputs:
-  inputs_copy:
-    class_path: salt.outputs.InputCopyWriter
-    init_args: {streams: [event]}
+  # NO InputCopyWriter. It re-opens the reader's source with h5py to copy input
+  # columns into the eval file, so it needs an H5StructuredReader-style reader
+  # exposing `h5_source`. Both legs of this model are ROOT readers behind a
+  # MultiSampleReader, which advertises no such source — the writer this config
+  # inherited raised
+  #   ConfigError: H5OutputSink: input-copying need an H5StructuredReader-style
+  #   reader ... MultiSampleReader advertises none
+  # on `salt test` (experiment 59). Input-copying is impossible here by
+  # construction, not merely unconfigured.
   run_tasks:
     class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [events_classification], modes: [test]}
