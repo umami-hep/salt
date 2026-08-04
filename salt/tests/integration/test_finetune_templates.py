@@ -105,7 +105,8 @@ def _data_args(h5: Path, schema: Path) -> list[str]:
 def _trainer_args(root: Path, epochs: int) -> list[str]:
     return [
         f"--trainer.default_root_dir={root}",
-        "--trainer.accelerator=cpu",
+        # auto, not cpu: on a GPU runner these must exercise the GPU path
+        "--trainer.accelerator=auto",
         f"--trainer.max_epochs={epochs}",
         # every epoch boundary is still crossed, which is what the multi-stage
         # schedule keys off; only the work inside each epoch shrinks

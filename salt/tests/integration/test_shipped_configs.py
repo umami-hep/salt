@@ -252,8 +252,9 @@ def test_config_plan_compiles(config, fixtures):
         argv += ["--mode", mode]
     # a plan compile is static, but the CLI still instantiates the trainer, so a
     # config shipping accelerator: gpu (gn2v2-cluster-override) would fail on a
-    # CPU runner for a reason that has nothing to do with its graph
-    argv += ["--set", "trainer.accelerator=cpu"]
+    # CPU runner for a reason that has nothing to do with its graph. `auto`
+    # rather than `cpu`: on a GPU runner these must exercise the GPU path.
+    argv += ["--set", "trainer.accelerator=auto"]
     for override in _norm_dict_overrides(stack, data["nd"]):
         argv += ["--set", override]
 
@@ -285,7 +286,8 @@ def test_config_fast_dev_run(config, fixtures, tmp_path, request):
         f"--data.val_file={data['h5']}",
         f"--data.modules.reader.init_args.schema={data['schema']}",
         f"--trainer.default_root_dir={tmp_path}",
-        "--trainer.accelerator=cpu",
+        # auto, not cpu: on a GPU runner these must exercise the GPU path
+        "--trainer.accelerator=auto",
         # base2 ships a default-ON CometLogger; off so the run writes no offline
         # Comet archive (lr_monitor drops with it).
         "--trainer.logger=false",
