@@ -17,7 +17,7 @@ from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardL
 
 # the in-repo test-scale GN2v2 config (16-dim, no machine paths) — the static
 # width resolution needs no data file, only a placeholder norm_dict
-_DUMMY_CFG = str(Path(__file__).parent.parent.parent / "configs" / "gn2v2-dummy.yaml")
+_DUMMY_CFG = str(Path(__file__).parent.parent.parent / "configs" / "GN2/gn2v2-dummy.yaml")
 _NORM_PLACEHOLDER = ["model.modules.norm.init_args.norm_dict=unused.yaml"]
 
 

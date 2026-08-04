@@ -1,8 +1,8 @@
 # Overlay on GN3_baseline -> loose -> flow -> LepID_SMT: adds a 10-class
 # signed track_type head and a 7-class track_source head (no regression task
 # in this variant). Stack with:
-#   salt ... -c GN3_baseline.yaml -c GN3_baseline_loose.yaml -c GN3_flow.yaml \
-#     -c GN3_LepID_SMT.yaml -c GN3_tracklabel.yaml
+#   salt ... -c salt/configs/GN3/GN3_baseline.yaml -c salt/configs/GN3/GN3_baseline_loose.yaml -c salt/configs/GN3/GN3_flow.yaml \
+#     -c salt/configs/GN3/GN3_LepID_SMT.yaml -c salt/configs/GN3/GN3_tracklabel.yaml
 
 name: GN3_tracklabel
 

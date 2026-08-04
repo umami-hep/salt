@@ -5,7 +5,7 @@
 # combination names itself). The eval-H5 side rides the base's outputs: section
 # (test-only); the ONNX tuple is collected from the conversion nodes below.
 # Stack as:
-#   salt graph plot --config gn2v2-dummy.yaml --config gn2v2-dummy-onnx-fold.yaml --mode onnx
+#   salt graph plot --config salt/configs/GN2/gn2v2-dummy.yaml --config salt/configs/GN2/gn2v2-dummy-onnx-fold.yaml --mode onnx
 
 model:
   modules:

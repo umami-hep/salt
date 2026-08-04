@@ -355,7 +355,7 @@ class TestLabelFreePlanCompile:
     @pytest.mark.parametrize(
         ("config", "overrides"),
         [
-            ("gn2v2-dummy.yaml", ["model.modules.norm.init_args.norm_dict=unused.yaml"]),
+            ("GN2/gn2v2-dummy.yaml", ["model.modules.norm.init_args.norm_dict=unused.yaml"]),
             ("gn2v2-opendata.yaml", []),
         ],
     )

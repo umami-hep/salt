@@ -53,7 +53,7 @@ These are defined in the model files, rather than the `base.yaml` config.
     You should _not_ include any truth information (unless you are testing this explicitly),
     but rather specify truth labels for each task in your model config.
 
-For example, in [`GN2.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2.yaml) you will find the following variables:
+For example, in [`gn2v2-opendata.yaml`]({{repo_url}}-/blob/main/salt/configs/gn2v2-opendata.yaml) you will find the following variables:
 
 ```yaml
 data:
@@ -223,7 +223,7 @@ config_s3:
 Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
 
 ```bash
-download_S3 --config configs/GN2/GN2.yaml
+download_S3 --config configs/gn2v2-opendata.yaml
 ```
 
 This will run the downloading script without starting the salt CLI. 
@@ -266,7 +266,7 @@ data:
         ...
 ```
 
-You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2Cat.yaml) config.
+You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) config.
 
 
 #### Edge Features

@@ -197,7 +197,7 @@ pT regression). The strategy is two-stage:
 2. **`full_finetune`** (remaining 10 epochs) — unfreeze everything and fine-tune
    the whole network at a much gentler LR.
 
-The overlay is shipped as **`salt/configs/finetune_gn3large.yaml`** — a template
+The overlay is shipped as **`salt/configs/finetune/finetune_gn3large.yaml`** — a template
 you stack on the saved run config (paths and any data block are yours to fill in):
 
 ```yaml
@@ -238,7 +238,7 @@ warm-start checkpoint:
 ```bash
 salt fit \
   --config <gn3large_config_v2.yaml> \
-  --config salt/configs/finetune_gn3large.yaml \
+  --config salt/configs/finetune/finetune_gn3large.yaml \
   --init_from <gn3large_converted.ckpt>
 ```
 
@@ -250,7 +250,7 @@ export GN3LARGE=<directory holding converted.ckpt and config_v2.yaml>
 
 salt fit \
   --config $GN3LARGE/config_v2.yaml \
-  --config salt/configs/finetune_gn3large.yaml \
+  --config salt/configs/finetune/finetune_gn3large.yaml \
   --init_from $GN3LARGE/converted.ckpt \
   --data.train_file <new_campaign/train.h5> \
   --data.val_file   <new_campaign/val.h5>
@@ -299,7 +299,7 @@ trainer, reading data, or loading a checkpoint:
 ```bash
 salt merge-config \
   --config <gn3large_config_v2.yaml> \
-  --config salt/configs/finetune_gn3large.yaml \
+  --config salt/configs/finetune/finetune_gn3large.yaml \
   --init_from <gn3large_converted.ckpt> \
   --merged.output out/merged.yaml
 ```
@@ -529,7 +529,7 @@ This is where `--init_from`'s per-module accounting earns its keep. You add the
 new module to the config; the warm start finds no checkpoint weights for it and
 reports it as **new** (fresh init), while every inherited module loads normally.
 
-The overlay is shipped as **`salt/configs/finetune_gn3large_new_head.yaml`**. It
+The overlay is shipped as **`salt/configs/finetune/finetune_gn3large_new_head.yaml`**. It
 does two things. First, **module surgery** — deep-merge a new head into the model's
 `modules:` dict (the other modules are inherited untouched):
 
@@ -576,7 +576,7 @@ Same command shape as example A:
 ```bash
 salt fit \
   --config <gn3large_config_v2.yaml> \
-  --config salt/configs/finetune_gn3large_new_head.yaml \
+  --config salt/configs/finetune/finetune_gn3large_new_head.yaml \
   --init_from <gn3large_converted.ckpt>
 ```
 
@@ -604,7 +604,7 @@ the shared encoder — which works on tokens, not streams — stays **loaded**.
 The running example is a GN3-family two-stream body (`tracks` + `flows`) whose
 model wiring names each stream in three places: one `StreamEmbed` per stream, the
 `Concat` that fuses their tokens, and the `Normaliser` that scales each stream's
-raw inputs. (See `salt/configs/GN3V00.yaml` for the full config.)
+raw inputs. (See `salt/configs/GN3/GN3V00.yaml` for the full config.)
 
 ### Adding an input stream
 

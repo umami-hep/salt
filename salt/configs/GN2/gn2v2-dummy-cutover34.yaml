@@ -4,7 +4,7 @@
 # jets_out/origin_out writers with a single all-modes run_tasks. The command
 # wires the implicit H5 + ONNX sinks (no callbacks: sinks).
 # Stack as:
-#   salt test --config gn2v2-dummy.yaml --config gn2v2-dummy-cutover34.yaml ...
+#   salt test --config salt/configs/GN2/gn2v2-dummy.yaml --config salt/configs/GN2/gn2v2-dummy-cutover34.yaml ...
 
 model:
   modules:

@@ -3,7 +3,7 @@
 # dataset. Feeds the encoder attention but has no task, so it is not split
 # out. List-valued init_args (Normaliser/Concat streams) replace rather than
 # merge across configs, so the full lists are re-stated here. Stack as:
-#   salt ... -c GN3_baseline.yaml -c GN3_baseline_loose.yaml -c GN3_flow.yaml
+#   salt ... -c salt/configs/GN3/GN3_baseline.yaml -c salt/configs/GN3/GN3_baseline_loose.yaml -c salt/configs/GN3/GN3_flow.yaml
 
 name: GN3_flow
 

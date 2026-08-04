@@ -1,7 +1,7 @@
 # Data-only overlay on GN3_baseline -> loose -> flow: adds lepton-ID +
 # soft-muon-tagging track variables. The model graph is unchanged (StreamEmbed
 # input width is inferred at bind time). Stack as:
-#   salt ... -c GN3_baseline.yaml -c GN3_baseline_loose.yaml -c GN3_flow.yaml -c GN3_LepID_SMT.yaml
+#   salt ... -c salt/configs/GN3/GN3_baseline.yaml -c salt/configs/GN3/GN3_baseline_loose.yaml -c salt/configs/GN3/GN3_flow.yaml -c salt/configs/GN3/GN3_LepID_SMT.yaml
 
 name: GN3_LepID_SMT
 

@@ -29,7 +29,7 @@ from salt.model.saltmodule import (
 )
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
-DUMMY_CFG = str(CONFIG_DIR / "gn2v2-dummy.yaml")
+DUMMY_CFG = str(CONFIG_DIR / "GN2/gn2v2-dummy.yaml")
 LRS = {"initial": 1e-4, "max": 5e-4, "end": 1e-5, "pct_start": 0.1}
 
 

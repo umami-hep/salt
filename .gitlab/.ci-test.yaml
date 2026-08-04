@@ -109,7 +109,7 @@ gpu-smoke:
       save_schema(dump_schema(h5), base / "schema.yaml")
       EOF
     - salt fit
-      --config salt/configs/gn2v2-dummy.yaml
+      --config salt/configs/GN2/gn2v2-dummy.yaml
       --data.train_file=gpu_smoke_data/pp_output_train.h5
       --data.val_file=gpu_smoke_data/pp_output_train.h5
       --data.modules.reader.init_args.schema=gpu_smoke_data/schema.yaml

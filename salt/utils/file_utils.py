@@ -252,7 +252,7 @@ def require_S3_CLI(config_s3: dict | None) -> bool:
 
 
 def download_from_S3() -> None:
-    """Convenience entry-point: locate ``configs/base.yaml`` relative to this file
+    """Convenience entry-point: locate ``configs/base2.yaml`` relative to this file
     and delegate to :func:`import_data_S3`.
     """
     config_dir = Path(__file__).parent.parent / "configs"

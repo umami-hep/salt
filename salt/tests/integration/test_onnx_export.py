@@ -398,7 +398,7 @@ def cli_run(tmp_path_factory):
     trainer.test(model, datamodule=dm)
     ckpt = run_dir / "checkpoints" / "epoch=000-loss=0.10000.ckpt"
     trainer.save_checkpoint(ckpt)
-    config = yaml.safe_load((CONFIG_DIR / "gn2v2-dummy.yaml").read_text())
+    config = yaml.safe_load((CONFIG_DIR / "GN2/gn2v2-dummy.yaml").read_text())
     config["model"]["init_args"]["modules"]["norm"]["init_args"]["norm_dict"] = str(
         tmp_path / "norm_dict.yaml"
     )
@@ -413,7 +413,7 @@ class TestSaltSurface:
         cli = SaltCLI(
             args=[
                 "--config",
-                str(CONFIG_DIR / "gn2v2-dummy.yaml"),
+                str(CONFIG_DIR / "GN2/gn2v2-dummy.yaml"),
                 "--model.modules.norm.init_args.norm_dict=unused.yaml",
             ],
             run=False,

@@ -13,7 +13,7 @@ def _warm_saltcli_model_resolution():
     try:
         from salt.main import CONFIG_DIR, SaltCLI
 
-        cfg = disable_logger_in_config(str(CONFIG_DIR / "gn2v2-dummy.yaml"))
+        cfg = disable_logger_in_config(str(CONFIG_DIR / "GN2/gn2v2-dummy.yaml"))
         SaltCLI(args=["--config", cfg], run=False)
     except (Exception, SystemExit):  # noqa: BLE001 - warm-up only; never fail the session
         pass

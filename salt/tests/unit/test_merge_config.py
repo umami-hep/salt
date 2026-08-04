@@ -24,7 +24,7 @@ from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
 from salt.testing.inputs import write_dummy_file
 
-DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
+DUMMY_CFG = CONFIG_DIR / "GN2/gn2v2-dummy.yaml"
 
 # a two-stage schedule twin of the fine-tuning example: head_warmup freezes
 # everything but jets_classification (via trainable:), full_finetune frees all.

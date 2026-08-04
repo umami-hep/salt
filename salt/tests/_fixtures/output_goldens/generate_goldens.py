@@ -68,23 +68,22 @@ class ConfigSpec:
 # Standalone configs: own `outputs:` section (or, for the gn2v2-dummy base,
 # an explicit-sink table) + own `data:` block — compile as a single -c.
 _STANDALONE = [
-    "dips",
-    "Dipz",
-    "DL1",
-    "easyjet_flavour",
-    "easyjet_hh4b_ttbar",
+    "legacy/dips",
+    "legacy/Dipz",
+    "legacy/DL1",
+    "readers/easyjet_flavour",
+    "readers/easyjet_hh4b_ttbar",
     "event_classifier",
-    "ftag1lite_empflow",
-    "GN2emu",
-    "GN2_muP",
+    "readers/ftag1lite_empflow",
+    "GN2/GN2emu",
+    "GN2/GN2_muP",
     "gn2v2-opendata",
-    "GN2XE",
-    "GN2X_qcdsplit",
-    "GN3_baseline",
+    "GN2/GN2XE",
+    "GN2/GN2X_qcdsplit",
+    "GN3/GN3_baseline",
     "GN3EPCLV01",
-    "GN3_v00",
-    "GN3V00",
-    "gn3v01",
+    "GN3/GN3_v00",
+    "GN3/GN3V00",
     "GN3X",
     "hitz",
     "MaskFormer",
@@ -93,7 +92,7 @@ _STANDALONE = [
     "regression_multi_target",
     "regression_weighted",
     "regression",
-    "gn2v2-dummy",
+    "GN2/gn2v2-dummy",
 ]
 
 # Overlay configs: no own `data:` block (or a list-replace outputs: override)
@@ -101,38 +100,42 @@ _STANDALONE = [
 _STACKED = [
     ConfigSpec(
         "gn2v2-dummy-cutover",
-        ["gn2v2-dummy.yaml", "gn2v2-dummy-cutover.yaml"],
+        ["GN2/gn2v2-dummy.yaml", "GN2/gn2v2-dummy-cutover.yaml"],
         "explicit-sink table (H5OutputWriter alias), two-layer cutover demo",
     ),
     ConfigSpec(
         "gn2v2-dummy-cutover34",
-        ["gn2v2-dummy.yaml", "gn2v2-dummy-cutover34.yaml"],
+        ["GN2/gn2v2-dummy.yaml", "GN2/gn2v2-dummy-cutover34.yaml"],
         "dumb-section cutover demo (outputs: null base tables)",
     ),
     ConfigSpec(
         "gn2v2-dummy-onnx-fold",
-        ["gn2v2-dummy.yaml", "gn2v2-dummy-onnx-fold.yaml"],
+        ["GN2/gn2v2-dummy.yaml", "GN2/gn2v2-dummy-onnx-fold.yaml"],
         "ONNX-fold demo; H5 side inherited unchanged from gn2v2-dummy.yaml",
     ),
     ConfigSpec(
         "GN3_Charge",
-        ["GN3V00.yaml", "GN3_Charge.yaml"],
+        ["GN3/GN3V00.yaml", "GN3/GN3_Charge.yaml"],
         "overlay on GN3V00 per header comment (run_tasks list replace)",
     ),
     ConfigSpec(
         "GN3_tracklabel",
         [
-            "GN3_baseline.yaml",
-            "GN3_baseline_loose.yaml",
-            "GN3_flow.yaml",
-            "GN3_LepID_SMT.yaml",
-            "GN3_tracklabel.yaml",
+            "GN3/GN3_baseline.yaml",
+            "GN3/GN3_baseline_loose.yaml",
+            "GN3/GN3_flow.yaml",
+            "GN3/GN3_LepID_SMT.yaml",
+            "GN3/GN3_tracklabel.yaml",
         ],
         "5-file overlay chain per header comment",
     ),
 ]
 
-CONFIGS: list[ConfigSpec] = [ConfigSpec(n, [f"{n}.yaml"]) for n in _STANDALONE] + _STACKED
+# The golden file is keyed on the config's stem, so a config moving between
+# family directories does not churn the committed goldens.
+CONFIGS: list[ConfigSpec] = [
+    ConfigSpec(Path(p).name, [f"{p}.yaml"]) for p in _STANDALONE
+] + _STACKED
 
 
 # -- deep-merge (mirrors the jsonargparse cross-config semantics documented

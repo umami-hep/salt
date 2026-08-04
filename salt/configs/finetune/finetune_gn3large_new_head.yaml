@@ -8,7 +8,7 @@
 #
 #   salt fit \
 #     --config <saved_gn3large_config.yaml> \
-#     --config salt/configs/finetune_gn3large_new_head.yaml \
+#     --config salt/configs/finetune/finetune_gn3large_new_head.yaml \
 #     --init_from <pretrained.ckpt> \
 #     --data.train_file <new_campaign/train.h5> \
 #     --data.val_file   <new_campaign/val.h5>
