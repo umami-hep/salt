@@ -688,8 +688,9 @@ def test_read_reuses_one_open_tree_per_file(ej_file, monkeypatch) -> None:
     # attribute is what the hot path resolves
     monkeypatch.setattr(uproot, "open", counting_open)
 
-    for lo in range(0, 8, 2):
-        reader.read(slice(lo, lo + 2), Mode.FIT)
+    n = len(reader)
+    for lo in range(0, n, 2):
+        reader.read(slice(lo, min(lo + 2, n)), Mode.FIT)
 
     assert len(opened) == 1, f"expected one open for the whole read sequence, got {opened}"
     assert len(reader._open_trees) == 1
