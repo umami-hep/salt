@@ -58,6 +58,10 @@ SMALL: dict[str, Any] = {
 # MACHINERY, not for a shipped model, so their subject is pinned here and the
 # shipped config stays free to change.
 GOLDEN_HEADS: dict[str, Any] = {
+    # H5 column prefixes and ONNX output names are both derived from the run
+    # name, so reproducing the goldens means pinning it too.
+    "name": "GN2v2_dummy",
+    "export": {"model_name": "GN2v2dummy"},
     "model": {
         "init_args": {
             "modules": {
