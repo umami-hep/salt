@@ -213,7 +213,6 @@ def test_run_is_deterministic():
         "truth_hadron_regression",
         "flavour_tagger_charged_neutral",
         "lepton_tagger",
-        "event_objects",
         "jets_only",
         "single_constituent_regression",
     ],

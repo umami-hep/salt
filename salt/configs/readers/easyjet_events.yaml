@@ -1,17 +1,30 @@
-# Reader fragment — two easyjet AnalysisMiniTree samples (signal + background)
-# combined by MultiSampleReader with proportional stratification.
+# Reader fragment, EVENT axis — two easyjet AnalysisMiniTree samples (signal +
+# background) combined by MultiSampleReader with proportional stratification.
 #
-# Stackable: `salt fit --config readers/easyjet_hh4b.yaml --config <model>.yaml`.
-# Fill in each sample's per-stage `sources:` (train/val/test file lists) before
-# use — MultiSampleReader sources per sample, so the datamodule train/val/test
-# file keys are placeholders it ignores.
+# The easyjet leg of `ttbar_vs_hh4b_event_tagger.yaml`; the other leg is
+# `readers/physlite_events.yaml`, which serves the SAME stream/field names off
+# the DAOD_PHYSLITE these ntuples are produced from:
+#
+#   salt fit -c ttbar_vs_hh4b_event_tagger.yaml -c readers/easyjet_events.yaml
+#
+# A fragment, not a config: it declares only `data.modules.reader` and has no
+# model, so it is never loaded alone. Fill in each sample's per-stage `sources:`
+# (train/val/test files) before use — MultiSampleReader sources per sample, so
+# the datamodule train/val/test file keys are placeholders it ignores.
 #
 # Schema notes:
 #   - Each sub-reader is a UprootReader with unroll: null (one row per event); the
 #     `recojet_antikt4PFlow_*` collection prefix + `_NOSYS` suffix live verbatim in
 #     `branches` (empty group prefix). Jets are a per-event jagged token sequence.
+#     `_NOSYS` marks the systematics-affected variables — `pt` and `m` carry it,
+#     `eta` and `phi` do not. It is NOT a uniform suffix.
 #   - MultiSampleReader injects a per-event sample label as raw.event.process
-#     (signal=1, background=0). Only branches common to both campaigns are read.
+#     (signal=1, background=0). Only branches common to both samples are read.
+#   - No `constituent_cuts:` here, deliberately. The easyjet bbbb ntupler has
+#     already applied its own jet preselection (pt > 20 GeV, |eta| < 4.5, NNJvt,
+#     overlap removal) before writing, and re-applying it would be a second cut
+#     on an already-cut container. The PHYSLITE fragment DOES carry those cuts,
+#     because there the container is uncut — that asymmetry is the point.
 
 data:
   train_file: train  # placeholders: MultiSampleReader sources per sample below

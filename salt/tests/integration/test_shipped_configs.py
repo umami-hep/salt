@@ -1,13 +1,30 @@
 """Every shipped config is exercised, by construction.
 
 Discovery is a recursive glob of ``salt/configs`` — a config added anywhere in
-the tree is picked up automatically and cannot silently go untested. Two tiers:
+the tree is picked up automatically and cannot silently go untested.
 
-**Tier A** (`test_config_plan_compiles`, every config): all-mode
-``salt graph validate`` on the config's documented stack. Standalone configs
-Every config is passed alone: one that is an overlay declares its own bases in
-its ``include:`` block, so the stack lives in the config rather than in a table
-here that could drift from it.
+A shipped file is one of two things, decided from its own content rather than a
+list here:
+
+- a **config**: it has a ``model:`` and a ``data.modules.reader``, so it is a
+  whole run and stands alone (an overlay declares its bases in its own
+  ``include:`` block, so the stack lives in the config, not in a table that
+  could drift from it);
+- a **fragment**: it has only one half. ``readers/*`` fragments carry a reader
+  and no model; ``ttbar_vs_hh4b_event_tagger`` carries a model and no reader,
+  because pairing it with either reader fragment IS the demonstration.
+
+A fragment has no plan to compile and nothing to fit, so it is NOT passed alone
+to ``graph validate``. Making one validate standalone means giving it a model it
+does not have — that was tried on ``readers/physlite`` and reverted. Fragments
+are gated by `test_event_tagger_readers.py` instead, which instantiates their
+reader (catching every constructor invariant) and holds the cross-format
+contract; the ``ttbar_vs_hh4b_event_tagger`` pairings are additionally driven
+through the full lifecycle by `test_production_configs.py`.
+
+Two tiers, over the whole configs:
+
+**Tier A** (`test_config_plan_compiles`): all-mode ``salt graph validate``.
 
 **Tier B** (`test_config_fast_dev_run`): a real 2-batch fit for every config a
 synthetic fixture can serve. Configs whose streams the shipped dummy writer
@@ -15,9 +32,9 @@ does not produce carry an explicit ``xfail`` naming the missing piece, so the
 gap is visible in the report and shrinks as fixtures are added — never a silent
 skip.
 
-Adding a config to ``salt/configs`` therefore forces one of three explicit
-outcomes: it compiles standalone, it declares its stack, or it declares why it
-cannot yet be fitted.
+Adding a file to ``salt/configs`` therefore forces one of four explicit
+outcomes: it compiles standalone, it declares its stack, it declares why it
+cannot yet be fitted, or it is a fragment and says so by construction.
 """
 
 from __future__ import annotations
@@ -61,7 +78,6 @@ FIXTURE_FLAVOUR: dict[str, str] = {
 NO_FIXTURE: dict[str, str] = {
     "legacy/Dipz": "no super_tracks stream in write_dummy_file",
     "hitz": "no hits stream in write_dummy_file",
-    "event_classifier": "no events/objects streams in write_dummy_file",
     "GN2/GN2emu": "no soft-muon global stream in write_dummy_file",
     "GN2/GN2XE": "config truncates tracks to 100; the fixture writes 40",
     "GN2/GN2X_qcdsplit": "fixture flow stream lacks the flow_* field prefix",
@@ -85,17 +101,17 @@ NO_FIXTURE: dict[str, str] = {
 # --group dev ".[muP]" and ".[root]"), so these skip only on a bare local env.
 EXTRAS: dict[str, tuple[str, str]] = {
     "readers/easyjet_flavour": ("awkward", "salt[root]"),
-    "readers/easyjet_hh4b_ttbar": ("awkward", "salt[root]"),
     "readers/ftag1lite_empflow": ("awkward", "salt[root]"),
-    "readers/easyjet_hh4b": ("awkward", "salt[root]"),
+    "readers/easyjet_events": ("awkward", "salt[root]"),
     "readers/ftag1lite": ("awkward", "salt[root]"),
-    "readers/physlite": ("awkward", "salt[root]"),
+    "readers/physlite_events": ("awkward", "salt[root]"),
+    "readers/physlite_jets": ("awkward", "salt[root]"),
     "GN2/GN2_muP": ("mup", "salt[muP]"),
 }
 
 
 def _discover() -> list[str]:
-    """Every shipped config, as a path relative to CONFIG_DIR without suffix."""
+    """Every shipped file under CONFIG_DIR, relative to it and without suffix."""
     found = sorted(
         p.relative_to(CONFIG_DIR).with_suffix("").as_posix()
         for p in CONFIG_DIR.rglob("*.yaml")
@@ -103,7 +119,24 @@ def _discover() -> list[str]:
     return [c for c in found if c not in MACHINERY]
 
 
-ALL_CONFIGS = _discover()
+def _is_fragment(config: str) -> bool:
+    """Whether the config declares only half a run (a reader, or a model, not both).
+
+    Read from the EXPANDED config: an overlay inherits the missing half from the
+    base it includes, and judging it on its raw text would call a whole config a
+    fragment.
+    """
+    from salt.config_utils import expand_includes  # noqa: PLC0415
+
+    path = CONFIG_DIR / f"{config}.yaml"
+    raw = yaml.safe_load(Path(expand_includes(str(path))).read_text()) or {}
+    modules = ((raw.get("data") or {}).get("modules")) or {}
+    return not ("model" in raw and "reader" in modules)
+
+
+ALL_FILES = _discover()
+FRAGMENTS = [c for c in ALL_FILES if _is_fragment(c)]
+ALL_CONFIGS = [c for c in ALL_FILES if c not in FRAGMENTS]
 
 
 def _require_extra(config: str) -> None:
@@ -195,14 +228,73 @@ def _data_for(config: str, fixtures: dict[str, dict[str, Path]]) -> dict[str, Pa
     return fixtures[FIXTURE_FLAVOUR.get(config, "default")]
 
 
-def test_every_fragment_declares_a_stack():
-    """NO_FIXTURE/EXTRAS/FIXTURE_FLAVOUR name only configs that exist."""
-    unknown = sorted(set(NO_FIXTURE) - set(ALL_CONFIGS))
-    assert not unknown, f"NO_FIXTURE names configs that do not exist: {unknown}"
-    unknown = sorted(set(EXTRAS) - set(ALL_CONFIGS))
-    assert not unknown, f"EXTRAS names configs that do not exist: {unknown}"
-    unknown = sorted(set(FIXTURE_FLAVOUR) - set(ALL_CONFIGS))
-    assert not unknown, f"FIXTURE_FLAVOUR names configs that do not exist: {unknown}"
+def test_tables_name_only_files_that_exist():
+    """NO_FIXTURE/EXTRAS/FIXTURE_FLAVOUR name only shipped files."""
+    for name, table in (
+        ("NO_FIXTURE", NO_FIXTURE),
+        ("EXTRAS", EXTRAS),
+        ("FIXTURE_FLAVOUR", FIXTURE_FLAVOUR),
+    ):
+        unknown = sorted(set(table) - set(ALL_FILES))
+        assert not unknown, f"{name} names files that do not exist: {unknown}"
+    # NO_FIXTURE is a Tier-B statement, and Tier B never runs on a fragment
+    overlap = sorted(set(NO_FIXTURE) & set(FRAGMENTS))
+    assert not overlap, f"NO_FIXTURE names fragments, which Tier B never runs: {overlap}"
+
+
+def _reader_node(config: str) -> dict | None:
+    """The expanded config's ``data.modules.reader`` node, or None."""
+    from salt.config_utils import expand_includes  # noqa: PLC0415
+
+    raw = yaml.safe_load(
+        Path(expand_includes(str(CONFIG_DIR / f"{config}.yaml"))).read_text()
+    )
+    return (((raw or {}).get("data") or {}).get("modules") or {}).get("reader")
+
+
+READER_FRAGMENTS = [c for c in FRAGMENTS if _reader_node(c) is not None]
+MODEL_FRAGMENTS = [c for c in FRAGMENTS if _reader_node(c) is None]
+
+
+@pytest.mark.parametrize("fragment", READER_FRAGMENTS)
+def test_reader_fragment_instantiates(fragment):
+    """A reader fragment's reader builds — the gate it gets instead of Tier A.
+
+    A fragment has no model, so there is no plan to compile, but every invariant
+    a reader enforces (``unroll`` naming a scalar group, link_branch/target_prefix
+    pairing, constituent cuts on a jagged stream naming configured branches, ...)
+    is raised from its constructor and is caught here. This is what a fragment is
+    for: giving it a model so ``graph validate`` accepts it would be
+    reverse-engineering the test rather than modelling the domain.
+    """
+    _require_extra(fragment)
+    from jsonargparse import ArgumentParser  # noqa: PLC0415
+
+    from salt.data.base import Reader  # noqa: PLC0415
+
+    parser = ArgumentParser(exit_on_error=False)
+    parser.add_subclass_arguments(Reader, "reader")
+    cfg = parser.parse_object({"reader": _reader_node(fragment)})
+    assert parser.instantiate_classes(cfg).reader is not None
+
+
+def test_every_model_fragment_is_gated_elsewhere():
+    """A model fragment names no reader, so a pairing has to drive it.
+
+    `test_production_configs.py` runs ``ttbar_vs_hh4b_event_tagger`` through the
+    full lifecycle on each of its reader pairings, and
+    `test_event_tagger_readers.py` holds the cross-format contract. This asserts
+    the set has not silently grown past what those cover.
+    """
+    covered = {"ttbar_vs_hh4b_event_tagger"}
+    uncovered = sorted(set(MODEL_FRAGMENTS) - covered)
+    assert not uncovered, (
+        f"model fragments with no gate: {uncovered}. A config carrying no reader "
+        "cannot be passed alone to graph validate — declare its reader pairings in "
+        "test_production_configs.py PAIRED."
+    )
+    stale = sorted(covered - set(MODEL_FRAGMENTS))
+    assert not stale, f"named as model fragments but are whole configs: {stale}"
 
 
 @pytest.mark.parametrize("config", ALL_CONFIGS)

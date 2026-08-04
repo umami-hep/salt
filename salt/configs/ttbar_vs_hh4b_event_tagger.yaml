@@ -1,24 +1,32 @@
-# Event-level signal-vs-background classifier trained directly on two
-# per-sample easyjet AnalysisMiniTree ROOT ntuples via MultiSampleReader (no
-# UPP/umami pre-resampling). Signal (HH->4b, mc23) and background (ttbar,
-# mc20) are read by their own UprootReader sub-readers (unroll: null, one row
-# per event) and proportionally interleaved, with a per-event sample label
-# injected as raw.event.process. Only branches common to both campaigns are used.
+# Event-level HH->4b (signal) vs ttbar (background) classifier. One event is one
+# row: the event's jets are embedded, encoded, attention-pooled to a single event
+# representation and classified against `raw.event.process`, the per-event sample
+# label a MultiSampleReader injects (signal=1, background=0).
+#
+# THIS CONFIG DECLARES NO READER — it is the model half of a two-part stack, and
+# that is the point. Pair it with exactly one reader fragment:
+#
+#   salt fit -c ttbar_vs_hh4b_event_tagger.yaml -c readers/easyjet_events.yaml
+#   salt fit -c ttbar_vs_hh4b_event_tagger.yaml -c readers/physlite_events.yaml
+#
+# Same model, same physics, two input formats — easyjet AnalysisMiniTree ROOT
+# ntuples, or the DAOD_PHYSLITE the ntuples were themselves produced from. Each
+# fragment carries only `data.modules.reader` and serves the same stream/field
+# names, so the model binds to either without knowing which it got. A reader
+# fragment is a component, not a config: it deliberately does NOT `include:` a
+# model, and this config deliberately does not name a format.
+#
+# The `jets` variables below ARE the model<->reader contract. Note what is absent:
+# `HF_Classification` / `HF_SimpleClassification` exist on the ttbar side only
+# (easyjet writes them for the DSIDs in `DSID_HF_class_samples`, and the ttbar
+# PHYSLITE carries `EventInfoAuxDyn.HF_Classification`), so their mere presence
+# is the class label. They must never enter a feature list here.
 
-include:
-  - easyjet_hh4b.yaml
-
-name: easyjet_hh4b_ttbar
+name: ttbar_vs_hh4b_event_tagger
 
 data:
   batch_size: 1000
   num_workers: 4
-  # placeholder stage keys — ignored by MultiSampleReader, which sources per
-  # sample via `sources:` below; these only satisfy the datamodule's
-  # non-None file check.
-  train_file: train
-  val_file: val
-  test_file: test
   modules:
     features:
       class_path: salt.data.Features

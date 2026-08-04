@@ -59,8 +59,6 @@ _STANDALONE = [
     "legacy/Dipz",
     "legacy/DL1",
     "readers/easyjet_flavour",
-    "readers/easyjet_hh4b_ttbar",
-    "event_classifier",
     "readers/ftag1lite_empflow",
     "GN2/GN2emu",
     "GN2/GN2_muP",
@@ -84,6 +82,11 @@ _STANDALONE = [
 # Overlay configs: no own `data:` block (or a list-replace outputs: override)
 # — must be stacked on their base per the header comment's documented order.
 _STACKED = [
+    ConfigSpec(
+        "ttbar_vs_hh4b_event_tagger",
+        ["ttbar_vs_hh4b_event_tagger.yaml", "readers/easyjet_events.yaml"],
+        "the model declares no reader; paired with the easyjet fragment",
+    ),
     ConfigSpec(
         "GN3_Charge",
         ["GN3/GN3V00.yaml", "GN3/GN3_Charge.yaml"],

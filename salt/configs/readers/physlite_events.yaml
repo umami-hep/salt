@@ -1,0 +1,135 @@
+# Reader fragment, EVENT axis — two DAOD_PHYSLITE samples (signal + background)
+# combined by MultiSampleReader with proportional stratification.
+#
+# The PHYSLITE leg of `ttbar_vs_hh4b_event_tagger.yaml`; the other leg is
+# `readers/easyjet_events.yaml`, which serves the SAME stream/field names off the
+# easyjet AnalysisMiniTree ntuples produced from these very files:
+#
+#   salt fit -c ttbar_vs_hh4b_event_tagger.yaml -c readers/physlite_events.yaml
+#
+# A fragment, not a config: it declares only `data.modules.reader` and has no
+# model, so it is never loaded alone. Fill in each sample's per-stage `sources:`
+# before use.
+#
+# Schema notes:
+#   - unroll: null — one row per event, so the jets are a per-event jagged token
+#     sequence, exactly as on the easyjet side. (`readers/physlite_jets.yaml` is
+#     the JET-axis PHYSLITE reader; same format, different sample axis.)
+#   - PHYSLITE stores calibrated jet kinematics as flat dynamic decorations under
+#     `AnalysisJetsAuxDyn.`, which is why this leg exists and a PHYS one cannot:
+#     PHYS keeps the nominal four-momentum in the unsplit static aux container
+#     `AntiKt4EMPFlowJetsAux.`, from which uproot can read no jet pt/eta/phi/m at
+#     all.
+#   - `EventInfoAuxDyn.` carries the per-event scalars. MultiSampleReader needs a
+#     non-jagged stream to hang its injected `process` label on, and UprootReader
+#     needs every group to name at least one real branch, so the `event` group is
+#     load-bearing even though the model consumes no field from it.
+#
+# Preselection — what is applied here and what is NOT:
+#
+#   easyjet's bbbb resolved analysis writes only events passing
+#   AT_LEAST_FOUR_JETS + AT_LEAST_TWO_BJETS, over a jet container already cut to
+#   pt > 20 GeV, |eta| < 4.5 and NNJvt. PHYSLITE is uncut, so the two legs would
+#   otherwise see different event samples.
+#
+#   The per-jet half of that selection IS expressible and is applied below as
+#   `constituent_cuts` with on_fail: drop — a failing jet is removed and the row
+#   re-padded, which is what "the container was pre-selected" means.
+#
+#   The two EVENT-level multiplicity requirements are NOT expressible in salt's
+#   cut vocabulary today, and are therefore absent:
+#
+#       >= 4 jets passing the per-jet cuts
+#       >= 2 jets with GN2v01 discriminant D > -0.385   (the FixedCutBEff_85 WP,
+#           measured against easyjet's own flag on 99.958% of jets)
+#
+#   `GlobalObjectCuts` cuts whole ROWS using row-axis SCALAR fields, and the
+#   expression evaluator (salt/data/readers/expressions.py) whitelists arithmetic
+#   plus one comparison — it has no aggregation, so "count the jets that pass P
+#   and require >= N" cannot be written. Closing this needs a count-cut surface on
+#   the reader, not a config change.
+#
+#   Two notes for whoever adds it. First, the evaluator also has no `log`, but the
+#   b-tag cut does not need one: D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385 is the
+#   same predicate as
+#
+#       pb / (0.2 * pc + 0.8 * pu) > 0.680451      # exp(-0.385)
+#
+#   which the whitelist accepts verbatim. Second, |eta| has no `abs` either — it
+#   is two cuts, as below.
+#
+#   Measured closure (experiment 58, ttbar 601237, the same 10,000 events easyjet
+#   read): 9,842 events pass ">= 4 jets" and 5,258 pass "+ >= 2 b-tags", against
+#   the 5,003 easyjet wrote — +5.1%. The residual is overlap removal (needs the
+#   lepton collections and the CP OR tool) plus easyjet's own b-jet-energy and
+#   muon-in-jet re-calibration, which shifts jet pt and hence both counts. It is a
+#   real property of the two formats, not a missing cut, and must not be chased by
+#   joining on event number.
+#
+# ⚠ Sample availability: the 603404 HH4b PHYSLITE held at p6697 does NOT carry
+#   `AnalysisJetsAuxDyn.GN2v01_p{b,c,u}`. That derivation keeps the scores in a
+#   separate `BTagging_AntiKt4EMPFlow` container reached by the 1:1 ElementLink
+#   `AnalysisJetsAuxDyn.btaggingLink`, which UprootReader's link machinery (built
+#   for 1:many constituent links like GhostTrack) cannot follow. The ttbar 601237
+#   PHYSLITE at p7017 has the flat decorations this fragment names. Training the
+#   PHYSLITE leg therefore needs an HH4b PHYSLITE at a p-tag that flattens them.
+
+data:
+  train_file: train  # placeholders: MultiSampleReader sources per sample below
+  val_file: val
+  test_file: test
+  modules:
+    reader:
+      class_path: salt.data.MultiSampleReader
+      init_args:
+        label_stream: event
+        label_field: process
+        samples:
+          - name: signal
+            label: 1
+            reader:
+              class_path: salt.data.UprootReader
+              init_args:
+                tree: CollectionTree
+                unroll: null
+                # the reproducible per-jet half of easyjet's preselection; the
+                # two >= N event-level requirements are not expressible (header)
+                constituent_cuts: &physlite_jet_preselection
+                  jets:
+                    on_fail: drop
+                    cuts:
+                      - pt > 20000 # 20 GeV, PHYSLITE stores MeV
+                      - eta < 4.5 # |eta| < 4.5: no abs() in the whitelist,
+                      - eta > -4.5 #   so it is two cuts
+                      - NNJvtPass > 0.5 # stored as int8 0/1
+                groups: &physlite_event_groups
+                  jets:
+                    prefix: AnalysisJetsAuxDyn.
+                    jagged: true
+                    truncate: 20 # matches readers/easyjet_events.yaml
+                    branches:
+                      pt: pt
+                      eta: eta
+                      phi: phi
+                      m: m
+                      GN2v01_pb: GN2v01_pb
+                      GN2v01_pc: GN2v01_pc
+                      GN2v01_pu: GN2v01_pu
+                      NNJvtPass: NNJvtPass # cut variable, not a model feature
+                  event:
+                    prefix: EventInfoAuxDyn.
+                    jagged: false
+                    branches:
+                      eventNumber: eventNumber
+                      mcChannelNumber: mcChannelNumber
+            # sources: {train: [...], val: [...], test: [...]}  # HH4b files
+          - name: background
+            label: 0
+            reader:
+              class_path: salt.data.UprootReader
+              init_args:
+                tree: CollectionTree
+                unroll: null
+                constituent_cuts: *physlite_jet_preselection
+                groups: *physlite_event_groups
+            # sources: {train: [...], val: [...], test: [...]}  # ttbar files

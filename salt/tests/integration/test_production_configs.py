@@ -10,10 +10,20 @@ the four things a user does, in order:
 4. **export** — ``salt export``, which runs ``check_onnx`` internally and so
    proves the exported graph agrees with the eager torch model
 
-Data comes from ``salt.testing.datagen``: schema-driven recipes, one per config
-family, which emit the H5 *and* the matching norm/class dicts. Each config names
-the recipe that feeds it in ``RECIPES``. A config with no recipe entry fails
-rather than skips — adding a production config means providing data for it.
+Most configs are fed from ``salt.testing.datagen``: schema-driven recipes, one
+per config family, which emit the H5 *and* the matching norm/class dicts. Each
+names the recipe that feeds it in ``RECIPES``.
+
+``ttbar_vs_hh4b_event_tagger`` is fed differently, and has to be: it declares no
+reader (pairing it with one of two reader fragments IS the model), and both of
+those fragments read ROOT, which no datagen recipe emits — ``salt.testing.datagen``
+is H5-only. It is listed in ``PAIRED`` instead, giving the reader fragment to
+stack and the ROOT fixture that feeds it. Only the easyjet pairing runs: the
+PHYSLITE xAOD POOL layout is not synthesisable, so that leg is held statically by
+`test_event_tagger_readers.py` and dynamically only against real files.
+
+A production config in neither table fails rather than skips — adding one means
+providing data for it.
 
 This supersedes the older per-config smoke tests, which could only reach the
 handful of configs the fixed-schema ``write_dummy_file`` happened to serve.
@@ -36,12 +46,18 @@ RECIPES_DIR = Path(__file__).resolve().parents[2] / "testing" / "datagen" / "rec
 
 # Production config -> the datagen recipe that feeds it.
 RECIPES: dict[str, str] = {
-    "event_classifier": "event_objects",
     "gn2v2-opendata": "flavour_tagger",
     "GN3EPCLV01": "flavour_tagger_global",
     "GN3X": "flavour_tagger",
     "hitz": "hits_regression",
     "MaskFormer": "maskformer_truth_hadron",
+}
+
+# Production config -> the reader fragment stacked under it for this gate.
+# A config here declares no reader of its own; the fragment supplies one and a
+# ROOT fixture supplies the data (datagen is H5-only and cannot feed either).
+PAIRED: dict[str, str] = {
+    "ttbar_vs_hh4b_event_tagger": "readers/easyjet_events",
 }
 
 # base.yaml is auto-loaded machinery, never a model in its own right.
@@ -58,15 +74,19 @@ def _production_configs() -> list[str]:
 PRODUCTION = _production_configs()
 
 
-def test_every_production_config_has_a_recipe():
+def test_every_production_config_brings_data():
     """A new production config must bring data with it, not slip through."""
-    missing = sorted(set(PRODUCTION) - set(RECIPES))
+    missing = sorted(set(PRODUCTION) - set(RECIPES) - set(PAIRED))
     assert not missing, (
-        f"production configs with no datagen recipe: {missing}. Add an entry to "
-        "RECIPES naming the recipe that feeds it (salt/testing/datagen/recipes)."
+        f"production configs with no data source: {missing}. Add an entry to "
+        "RECIPES naming the datagen recipe that feeds it "
+        "(salt/testing/datagen/recipes), or — for a config that declares no "
+        "reader — to PAIRED naming the reader fragment to stack under it."
     )
-    unknown = sorted(set(RECIPES) - set(PRODUCTION))
-    assert not unknown, f"RECIPES names configs that are not top-level: {unknown}"
+    unknown = sorted((set(RECIPES) | set(PAIRED)) - set(PRODUCTION))
+    assert not unknown, f"RECIPES/PAIRED name configs that are not top-level: {unknown}"
+    both = sorted(set(RECIPES) & set(PAIRED))
+    assert not both, f"configs claiming two data sources: {both}"
 
 
 @pytest.fixture(scope="module")
@@ -91,14 +111,73 @@ def datasets(tmp_path_factory) -> dict[str, dict[str, Path]]:
             path = out / name
             if path.is_file():
                 entry[name.split("_")[0]] = path
-        # not every recipe ships a NormWriter (event_objects does not), but every
-        # config with a Normaliser needs one — derive it from the produced arrays
+        # not every recipe ships a NormWriter, but every config with a
+        # Normaliser needs one — derive it from the produced arrays
         if "norm" not in entry:
             nd = out / "norm_dict.yaml"
             nd.write_text(yaml.dump(compute_norm_dict(data), sort_keys=False))
             entry["norm"] = nd
         built[recipe] = entry
     return built
+
+
+@pytest.fixture(scope="module")
+def paired_data(tmp_path_factory) -> dict[str, dict[str, Path]]:
+    """Synthetic ROOT data + a sourced copy of each PAIRED config's fragment.
+
+    The fragment copy is derived from the shipped file with only the per-sample
+    ``sources:`` filled in, so the groups under test are the shipped groups.
+    """
+    import yaml  # noqa: PLC0415
+
+    from salt.config_utils import expand_includes  # noqa: PLC0415
+    from salt.tests._fixtures.easyjet_minitree import (  # noqa: PLC0415
+        write_jets_norm_dict,
+        write_sample_pair,
+        write_sourced_fragment,
+    )
+
+    built: dict[str, dict[str, Path]] = {}
+    for config, fragment in PAIRED.items():
+        out = tmp_path_factory.mktemp(f"paired_{config}")
+        signal, background = write_sample_pair(out)
+        raw = yaml.safe_load(
+            Path(expand_includes(str(CONFIG_DIR / f"{fragment}.yaml"))).read_text()
+        )
+        sourced = write_sourced_fragment(
+            raw, out / "reader.yaml", {"signal": signal, "background": background}
+        )
+        model = yaml.safe_load((CONFIG_DIR / f"{config}.yaml").read_text())
+        variables = model["data"]["modules"]["features"]["init_args"]["variables"]["jets"]
+        built[config] = {
+            "fragment": sourced,
+            "norm": write_jets_norm_dict(out / "norm_dict.yaml", variables),
+            "dir": out,
+        }
+    return built
+
+
+def _feed(config: str, datasets: dict, paired_data: dict) -> tuple[list[Path], list[str], Path]:
+    """``(config stack, data CLI args, norm_dict)`` for one production config.
+
+    Two feeders: a datagen H5 recipe, or a reader fragment + ROOT fixture. The
+    ``schema=`` override is H5-reader-only and must not reach a uproot reader.
+    """
+    cfg = CONFIG_DIR / f"{config}.yaml"
+    if config in PAIRED:
+        entry = paired_data[config]
+        return (
+            [cfg, entry["fragment"]],
+            [
+                "--data.num_workers=0",
+                # the minitree fixture holds 6 events per sample
+                "--data.batch_size=2",
+                *(f"--{o}" for o in _norm_dict_overrides(cfg, entry["norm"])),
+            ],
+            entry["norm"],
+        )
+    data = datasets[RECIPES[config]]
+    return [cfg], _data_args(cfg, data), data["norm"]
 
 
 def _norm_dict_overrides(cfg: Path, norm_dict: Path) -> list[str]:
@@ -174,23 +253,28 @@ def _trainer_args(root: Path) -> list[str]:
 
 
 @pytest.mark.parametrize("config", PRODUCTION)
-def test_config_merges_and_plots(config, datasets, tmp_path):
+def test_config_merges_and_plots(config, datasets, paired_data, tmp_path):
     """Leg 1 — the config stack merges and its graph renders."""
-    data = datasets[RECIPES[config]]
-    cfg = CONFIG_DIR / f"{config}.yaml"
+    stack, _, norm = _feed(config, datasets, paired_data)
+    cfg = stack[0]
 
     sets: list[str] = []
-    for override in ["trainer.accelerator=auto", *_norm_dict_overrides(cfg, data["norm"])]:
+    for override in ["trainer.accelerator=auto", *_norm_dict_overrides(cfg, norm)]:
         sets += ["--set", override]
 
-    argv = ["graph", "validate", "-c", str(cfg)]
+    argv = ["graph", "validate"]
+    for path in stack:
+        argv += ["-c", str(path)]
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
     assert salt_main([*argv, *sets]) == 0, f"{config}: config merge / plan compile failed"
 
     # `graph plot` renders one mode to one file
     out_path = tmp_path / f"{config}.dot"
-    plot_argv = ["graph", "plot", "-c", str(cfg), "--mode", "fit", "-o", str(out_path)]
+    plot_argv = ["graph", "plot"]
+    for path in stack:
+        plot_argv += ["-c", str(path)]
+    plot_argv += ["--mode", "fit", "-o", str(out_path)]
     assert salt_main([*plot_argv, *sets]) == 0, f"{config}: graph plot failed"
     assert out_path.is_file() or any(tmp_path.iterdir()), (
         f"{config}: graph plot wrote nothing to {tmp_path}"
@@ -198,17 +282,20 @@ def test_config_merges_and_plots(config, datasets, tmp_path):
 
 
 @pytest.mark.parametrize("config", PRODUCTION)
-def test_config_trains_evaluates_and_exports(config, datasets, tmp_path):
+def test_config_trains_evaluates_and_exports(config, datasets, paired_data, tmp_path):
     """Legs 2-4 — train, evaluate, then export with torch<->ONNX parity.
 
     One test because the legs chain: eval and export both need the checkpoint
     training produced, and the saved config that came with it.
     """
-    data = datasets[RECIPES[config]]
-    cfg = CONFIG_DIR / f"{config}.yaml"
+    stack, data_args, _ = _feed(config, datasets, paired_data)
+    cfg = stack[0]
 
     # -- leg 2: train
-    rc = salt_main(["fit", "--config", str(cfg), *_data_args(cfg, data), *_trainer_args(tmp_path)])
+    fit_argv = ["fit"]
+    for path in stack:
+        fit_argv += ["--config", str(path)]
+    rc = salt_main([*fit_argv, *data_args, *_trainer_args(tmp_path)])
     assert rc == 0, f"{config}: salt fit failed"
 
     ckpts = sorted(tmp_path.rglob("*.ckpt"))
@@ -217,28 +304,29 @@ def test_config_trains_evaluates_and_exports(config, datasets, tmp_path):
     saved = sorted(tmp_path.rglob("config.yaml"))
     assert saved, f"{config}: training saved no config.yaml"
 
-    # -- leg 3: evaluate
-    rc = salt_main([
+    # -- leg 3: evaluate. `salt test` takes ONE config, so this is the saved run
+    # config — which already carries the merged reader, sources and all.
+    # A PAIRED config's reader sources per sample, so test_file is a placeholder
+    # it ignores and is left as the saved config has it.
+    test_argv = [
         "test",
         "--config",
         str(saved[0]),
         f"--ckpt_path={ckpt}",
-        f"--data.test_file={data['h5']}",
         "--data.num_workers=0",
         "--trainer.accelerator=auto",
         "--trainer.logger=false",
         "--callbacks.progress=null",
-    ])
+    ]
+    if config not in PAIRED:
+        test_argv.insert(4, f"--data.test_file={datasets[RECIPES[config]]['h5']}")
+    rc = salt_main(test_argv)
     assert rc == 0, f"{config}: salt test failed"
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"{config}: eval wrote no H5 next to {ckpt}"
 
     # -- leg 4: export. Skipped only for a config that wires no ONNX sink at
-    # all, read from the config rather than a hardcoded list. Today that is
-    # event_classifier alone: its mHH_regression divides by a quantity it takes
-    # from labels rather than inputs, so there is no export-time source for the
-    # de-scaling. Declaring mHH an input feature would make it exportable, but
-    # that changes what the network consumes and is a modelling decision.
+    # all, read from the config rather than a hardcoded list.
     if not _declares_onnx_export(cfg):
         pytest.skip(f"{config} wires no ONNX sink — fit/test only by design")
 
