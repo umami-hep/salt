@@ -420,10 +420,13 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     data touched). Raises `ConfigError` when the parse fails (with the
     ``--set`` hint, mirroring ``salt graph``).
     """
-    from salt.config_utils import disable_logger_in_config
+    from salt.config_utils import disable_logger_in_config, expand_includes
     from salt.main import SaltCLI
 
     args: list[str] = []
+    # a config may declare the configs it stacks on; resolve those first, so the
+    # logger strip below operates on the fully merged result
+    config_paths = [Path(expand_includes(str(p))) for p in config_paths]
     for path in config_paths:
         # a saved run config.yaml carries fit/test-only top-level keys (`ckpt_path`,
         # lightning 2.6.5+ `weights_only`) the top-level parser rejects, plus a

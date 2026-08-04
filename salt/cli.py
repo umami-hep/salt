@@ -163,7 +163,11 @@ def load_config(
         On unreadable files or structurally invalid configs, or a config
         stack with no trainer-format member.
     """
+    from salt.config_utils import expand_includes  # local import: avoids a cli<->config_utils cycle
+
     paths = [Path(p) for p in (path if isinstance(path, (list, tuple)) else [path])]
+    # a config may declare the configs it stacks on; resolve those before reading
+    paths = [Path(expand_includes(str(p))) if p.is_file() else p for p in paths]
     raws: list[dict[str, Any]] = []
     for one in paths:
         if not one.is_file():
