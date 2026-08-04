@@ -26,7 +26,7 @@ def _tracks() -> np.ndarray:
 @pytest.mark.parametrize(
     "src",
     [
-        "abs(d0) < 3.5",  # call
+        "sorted(d0) < 3.5",  # call to a non-whitelisted function
         "d0[0] < 3.5",  # subscript
         "(lambda x: x)(d0) < 1",  # lambda
         "[x for x in d0] < 1",  # comprehension

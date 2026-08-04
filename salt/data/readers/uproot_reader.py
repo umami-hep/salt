@@ -1156,22 +1156,39 @@ class UprootReader(Reader):
         return state
 
 
+def _link_member(links: Any, member: str) -> Any | None:
+    """One member of an ElementLink array, or None when the array carries no records.
+
+    uproot names an ElementLink's members after the WHOLE branch path
+    (``AnalysisJetsAuxDyn.btaggingLink.m_persIndex``), not bare — real POOL files
+    and hand-zipped fixtures therefore spell the same member differently, so match
+    the exact name first and fall back to the dotted suffix.
+    """
+    fields = getattr(links, "fields", []) or []
+    if member in fields:
+        return links[member]
+    matches = [f for f in fields if f.rsplit(".", 1)[-1] == member]
+    if len(matches) > 1:
+        raise SchemaError(
+            f"ElementLink array carries {len(matches)} members ending in {member!r} "
+            f"({matches}) — cannot tell which one addresses the target container"
+        )
+    return links[matches[0]] if matches else None
+
+
 def _pers_index(links: Any) -> Any:
     """The ``m_persIndex`` (target-container index) of an ElementLink array, or the array
     itself when it is already a plain integer index (synthetic fixtures).
     """
-    fields = getattr(links, "fields", []) or []
-    if "m_persIndex" in fields:
-        return links["m_persIndex"]
-    return links
+    member = _link_member(links, "m_persIndex")
+    return links if member is None else member
 
 
 def _pers_key(links: Any) -> Any | None:
     """The ``m_persKey`` (target-container key) of an ElementLink array, or None when the
     array is a plain integer index (synthetic fixtures — no key to validate).
     """
-    fields = getattr(links, "fields", []) or []
-    return links["m_persKey"] if "m_persKey" in fields else None
+    return _link_member(links, "m_persKey")
 
 
 def _check_single_pers_key(pers_key: Any | None, link_branch: str) -> None:

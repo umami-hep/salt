@@ -53,7 +53,9 @@ def test_event_rows_len_and_streams(ej_file) -> None:
             "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
-        filename=path, tree="AnalysisMiniTree", unroll=None,
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll=None,
     )
     assert len(reader) == arrays["n_events"]
     assert reader.streams == ("jets", "event")
@@ -66,7 +68,8 @@ def test_event_rows_jagged_and_scalar(ej_file) -> None:
             "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
-        filename=path, tree="AnalysisMiniTree",
+        filename=path,
+        tree="AnalysisMiniTree",
     )
     n = len(reader)
     out = reader.read(slice(0, n), Mode.FIT)
@@ -87,7 +90,9 @@ def test_jet_rows_flattens_events_to_jets(ej_file) -> None:
     path, arrays = ej_file
     reader = UprootReader(
         groups={"jets": {"branches": dict(_JET), "jagged": False}},
-        filename=path, tree="AnalysisMiniTree", unroll="jets",
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
     )
     njets = np.array(arrays["njets"])
     assert len(reader) == int(njets.sum())  # one row per jet, events flattened away
@@ -96,9 +101,9 @@ def test_jet_rows_flattens_events_to_jets(ej_file) -> None:
     assert raw.shape == (int(njets.sum()),)
     assert "masks.jets" not in out  # jagged=False row-carrier -> no pad mask
     # values == the flattened per-event fixture arrays
-    expected_pt = np.concatenate(
-        [arrays["recojet_antikt4PFlow_pt_NOSYS"][ev] for ev in range(len(njets))]
-    ).astype(raw["pt"].dtype)
+    expected_pt = np.concatenate([
+        arrays["recojet_antikt4PFlow_pt_NOSYS"][ev] for ev in range(len(njets))
+    ]).astype(raw["pt"].dtype)
     np.testing.assert_array_equal(raw["pt"], expected_pt)
 
 
@@ -109,12 +114,14 @@ def test_jet_rows_cut_on_pt(ej_file) -> None:
     thresh = 100_000.0
     reader = UprootReader(
         groups={"jets": {"branches": dict(_JET), "jagged": False}},
-        filename=path, tree="AnalysisMiniTree", unroll="jets",
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
         cuts=CutSpec(global_cuts=(Cut("pt", ">", thresh),)),
     )
-    all_pt = np.concatenate(
-        [arrays["recojet_antikt4PFlow_pt_NOSYS"][ev] for ev in range(arrays["n_events"])]
-    )
+    all_pt = np.concatenate([
+        arrays["recojet_antikt4PFlow_pt_NOSYS"][ev] for ev in range(arrays["n_events"])
+    ])
     assert len(reader) == int((all_pt > thresh).sum())
     served = reader.read(slice(0, len(reader)), Mode.FIT)["raw.jets"]
     assert np.all(served["pt"] > thresh)
@@ -125,7 +132,9 @@ def test_pre_flattened_entry_is_jet(ej_file) -> None:
     path, arrays = ej_file
     reader = UprootReader(
         groups={"event": {"branches": dict(_EVENT), "jagged": False}},
-        filename=path, tree="AnalysisMiniTree", unroll=None,
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll=None,
     )
     assert len(reader) == arrays["n_events"]
     raw = reader.read(slice(0, len(reader)), Mode.FIT)["raw.event"]
@@ -144,14 +153,16 @@ def test_group_order_independent(ej_file) -> None:
             "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
-        filename=path, tree="AnalysisMiniTree",
+        filename=path,
+        tree="AnalysisMiniTree",
     )
     b = UprootReader(
         groups={
             "event": {"branches": dict(_EVENT), "jagged": False},
             "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
         },
-        filename=path, tree="AnalysisMiniTree",
+        filename=path,
+        tree="AnalysisMiniTree",
     )
     assert len(a) == len(b)
     ra = a.read(slice(0, len(a)), Mode.FIT)
@@ -173,8 +184,12 @@ def test_truncate_alias_maps_to_pad_max() -> None:
 def test_target_collection_alias_maps_to_target_prefix() -> None:
     g = UprootReader._parse_group(
         "tracks",
-        {"branches": {"d0": "d0"}, "jagged": True, "link_branch": "GhostTrack",
-         "target_collection": "InDetTrackParticles"},
+        {
+            "branches": {"d0": "d0"},
+            "jagged": True,
+            "link_branch": "GhostTrack",
+            "target_collection": "InDetTrackParticles",
+        },
     )
     assert g.target_prefix == "InDetTrackParticlesAuxDyn."
 
@@ -194,7 +209,9 @@ def test_link_without_unroll_raises() -> None:
         UprootReader(
             groups={
                 "tracks": {
-                    "branches": {"d0": "d0"}, "jagged": True, "link_branch": "GhostTrack",
+                    "branches": {"d0": "d0"},
+                    "jagged": True,
+                    "link_branch": "GhostTrack",
                     "target_prefix": "InDetTrackParticlesAuxDyn.",
                 }
             },
@@ -210,7 +227,9 @@ def test_group_link_target_must_be_set_together() -> None:
 def test_group_link_only_on_jagged() -> None:
     with pytest.raises(ConfigError, match="only valid for jagged"):
         UprootGroupConfig(
-            branches={"pt": "pt"}, jagged=False, link_branch="GhostTrack",
+            branches={"pt": "pt"},
+            jagged=False,
+            link_branch="GhostTrack",
             target_prefix="InDetTrackParticlesAuxDyn.",
         )
 
@@ -224,7 +243,8 @@ def test_missing_branch_raises(ej_file) -> None:
     path, _ = ej_file
     reader = UprootReader(
         groups={"jets": {"branches": {"pt": "NOT_A_BRANCH"}, "jagged": True, "truncate": 4}},
-        filename=path, tree="AnalysisMiniTree",
+        filename=path,
+        tree="AnalysisMiniTree",
     )
     with pytest.raises(SchemaError):
         reader.prepare()
@@ -260,11 +280,15 @@ def _linked_reader():
         groups={
             "jets": {"branches": {"pt": "pt"}, "prefix": "AnalysisJetsAuxDyn.", "jagged": False},
             "tracks": {
-                "branches": {"d0": "d0", "z0": "z0"}, "jagged": True, "pad_max": 4,
-                "link_branch": "GhostTrack", "target_prefix": "InDetTrackParticlesAuxDyn.",
+                "branches": {"d0": "d0", "z0": "z0"},
+                "jagged": True,
+                "pad_max": 4,
+                "link_branch": "GhostTrack",
+                "target_prefix": "InDetTrackParticlesAuxDyn.",
             },
         },
-        tree="CollectionTree", unroll="jets",
+        tree="CollectionTree",
+        unroll="jets",
     )
 
 
@@ -280,13 +304,11 @@ def test_linked_deref_plain_index() -> None:
     import awkward as ak
 
     reader = _linked_reader()
-    t = _FakeTree(
-        {
-            "AnalysisJetsAuxDyn.GhostTrack": ak.Array(_GHOST_IDX),
-            "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
-            "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
-        }
-    )
+    t = _FakeTree({
+        "AnalysisJetsAuxDyn.GhostTrack": ak.Array(_GHOST_IDX),
+        "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
+        "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
+    })
     block = reader._read_linked_block(t, reader.groups["tracks"], ["d0", "z0"], 0, 3)
     assert block["d0"].tolist() == _expected(_TRK_D0)
     assert block["z0"].tolist() == _expected(_TRK_Z0)
@@ -299,13 +321,11 @@ def test_linked_deref_struct_and_null_links() -> None:
     key = [[[0, 490, 0], [490]], [[490]], [[490, 490, 490], [], [490]]]  # 0 == null
     links = ak.zip({"m_persKey": ak.Array(key), "m_persIndex": ak.Array(idx)}, depth_limit=None)
     reader = _linked_reader()
-    t = _FakeTree(
-        {
-            "AnalysisJetsAuxDyn.GhostTrack": links,
-            "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
-            "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
-        }
-    )
+    t = _FakeTree({
+        "AnalysisJetsAuxDyn.GhostTrack": links,
+        "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
+        "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
+    })
     block = reader._read_linked_block(t, reader.groups["tracks"], ["d0", "z0"], 0, 3)
     assert block["d0"][0].tolist() == [12.0]  # e0j0: nulls dropped, keep persIndex 2
     assert block["d0"][3].tolist() == [32.0, 30.0, 31.0]  # e2j0: {2,0,1}
@@ -315,16 +335,15 @@ def test_linked_deref_multi_container_raises() -> None:
     import awkward as ak
 
     key = [[[1, 2], [1]], [[1]], [[1, 1, 1], [], [1]]]  # jet0/ev0 spans keys {1,2}
-    links = ak.zip({"m_persKey": ak.Array(key), "m_persIndex": ak.Array(_GHOST_IDX)},
-                   depth_limit=None)
-    reader = _linked_reader()
-    t = _FakeTree(
-        {
-            "AnalysisJetsAuxDyn.GhostTrack": links,
-            "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
-            "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
-        }
+    links = ak.zip(
+        {"m_persKey": ak.Array(key), "m_persIndex": ak.Array(_GHOST_IDX)}, depth_limit=None
     )
+    reader = _linked_reader()
+    t = _FakeTree({
+        "AnalysisJetsAuxDyn.GhostTrack": links,
+        "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
+        "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
+    })
     with pytest.raises(SchemaError, match="multiple target containers"):
         reader._read_linked_block(t, reader.groups["tracks"], ["d0", "z0"], 0, 3)
 
@@ -553,8 +572,7 @@ def test_a_reduction_sees_the_constituent_cuts(ej_file) -> None:
         cuts=GlobalObjectCuts(global_cuts=("sum(jets.valid) >= 2",)),
     )
     n_pass = np.array([
-        int((np.asarray(ev) > thresh).sum())
-        for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
+        int((np.asarray(ev) > thresh).sum()) for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
     ])
     assert len(reader) == int((n_pass >= 2).sum())
     served = reader.read(slice(0, len(reader)), Mode.FIT)["raw.jets"]
@@ -565,8 +583,7 @@ def test_a_predicate_reduction_counts_passing_constituents(ej_file) -> None:
     path, arrays = ej_file
     reader = _agg_reader(path, "sum(jets.pt > 100000.0) >= 2")
     n_pass = np.array([
-        int((np.asarray(ev) > 100_000.0).sum())
-        for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
+        int((np.asarray(ev) > 100_000.0).sum()) for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
     ])
     assert len(reader) == int((n_pass >= 2).sum())
 
@@ -592,3 +609,42 @@ def test_reduction_config_errors(cut: str, match: str) -> None:
             unroll=None,
             cuts=GlobalObjectCuts(global_cuts=(cut,)),
         )
+
+
+def test_join_reads_uproot_qualified_link_members() -> None:
+    """A real POOL file names the members after the whole branch path, not bare.
+
+    ``t['AnalysisJetsAuxDyn.btaggingLink'].array()`` comes back with fields
+    ``AnalysisJetsAuxDyn.btaggingLink.m_persKey`` / ``...m_persIndex``. Matching
+    only the bare name silently falls through to the "plain integer index"
+    fixture path and hands the gather a record array.
+    """
+    import awkward as ak
+
+    pre = "AnalysisJetsAuxDyn.btaggingLink"
+    links = ak.zip(
+        {
+            f"{pre}.m_persKey": ak.Array([[490, 490, 490], [490], [490, 490]]),
+            f"{pre}.m_persIndex": ak.Array(_BTAG_IDX),
+        },
+        depth_limit=1,  # record at the OUTER level, as uproot delivers it
+    )
+    reader = _joined_reader()
+    tree = _FakeTree({
+        pre: links,
+        "BTagging_AntiKt4EMPFlowAuxDyn.GN2v01_pb": ak.Array(_BTAG_PB),
+    })
+    block = reader._read_joined_cols(tree, reader.groups["jets"], ["GN2v01_pb"], 0, 3)
+    assert block["GN2v01_pb"].tolist() == [[0.3, 0.1, 0.2], [0.4], [0.6, 0.5]]
+
+
+def test_link_member_lookup_is_unambiguous() -> None:
+    import awkward as ak
+
+    from salt.data.readers.uproot_reader import _link_member
+
+    links = ak.zip(
+        {"a.m_persIndex": ak.Array([[0]]), "b.m_persIndex": ak.Array([[1]])}, depth_limit=1
+    )
+    with pytest.raises(SchemaError, match="cannot tell which one"):
+        _link_member(links, "m_persIndex")
