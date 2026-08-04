@@ -658,7 +658,7 @@ class SaltCLI(LightningCLI):
             default=None,
             help="REMOVED — migrate to an ``outputs:``/``callbacks:`` sink; "
             "a non-null entry here raises ConfigError at instantiate_classes "
-            "(see gn2v2-dummy.yaml)",
+            "(see gn2v2-opendata.yaml)",
         )
         parser.add_argument(
             "--outputs",
@@ -875,7 +875,7 @@ class SaltCLI(LightningCLI):
         if live_writer_modules:
             raise ConfigError(
                 "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
-                "sink — see gn2v2-dummy.yaml"
+                "sink — see gn2v2-opendata.yaml"
             )
         # Defer the fit-stage experiment logger past the racy validation pass.
         # jsonargparse's instantiate_classes pass validates the model: block

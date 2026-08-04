@@ -178,7 +178,7 @@ def test_declared_export_outputs_stays_a_hard_error():
 
 
 # ---------------------------------------------------------------------------
-# the shipped configs: MaskFormer migrated, gn2v2-dummy on the alias
+# the shipped configs: MaskFormer migrated, gn2v2-opendata on the alias
 # ---------------------------------------------------------------------------
 
 
@@ -192,7 +192,7 @@ def test_maskformer_carries_the_contract_on_the_sink():
 
 
 def test_gn2v2_dummy_keeps_the_deprecated_block():
-    """`gn2v2-dummy.yaml` stays on the alias — the live proof the window is open."""
+    """`gn2v2-opendata.yaml` stays on the alias — the live proof the window is open."""
     raw = yaml.safe_load(_DUMMY.read_text())
     assert raw["export"]["model_name"] == "GN2v2dummy"
     assert "onnx_export" not in raw["outputs"]  # the sink is INJECTED, not declared

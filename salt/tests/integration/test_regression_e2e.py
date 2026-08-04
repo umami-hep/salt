@@ -31,7 +31,7 @@ from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always
 
-REGRESSION_CFG = CONFIG_DIR / "regression.yaml"
+REGRESSION_CFG = CONFIG_DIR / "regression/regression.yaml"
 N_TEST = 200
 
 

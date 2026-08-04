@@ -198,7 +198,7 @@ multi_target:
       custom_target: pt_label_handle
       source: pt_visFromTruthTaus
 ```
-`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config]({{repo_url}}-/blob/main/salt/configs/regression_multi_target.yaml).
+`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config]({{repo_url}}-/blob/main/salt/configs/regression/regression_multi_target.yaml).
 
 The allowed values of `opp` are: `"=="`, `"!="`, `">="`, `"<="`, `">"`, `"<"`.
 

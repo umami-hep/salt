@@ -43,7 +43,7 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # gn2v2-dummy.yaml declares its eval outputs as an outputs:
+    # gn2v2-opendata.yaml declares its eval outputs as an outputs:
     # section (composed onto model.net). The graph-folded section writers appear
     # in model.net (inputs_copy is manifest-only, not folded); the standalone
     # conversion producers (jet_probs/track_origin_probs/...) are retired.
@@ -89,7 +89,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
 
 
 def required_overrides(data) -> list[str]:
-    """The gn2v2-dummy.yaml documented required overrides (its header)."""
+    """The gn2v2-opendata.yaml documented required overrides (its header)."""
     return [
         f"--data.train_file={data['h5']}",
         f"--data.val_file={data['h5']}",
@@ -113,7 +113,7 @@ def write_yaml(tmp_path: Path, name: str, text: str) -> str:
     return str(path)
 
 
-# parse + instantiate (gn2v2-dummy.yaml is the shipped worked config)
+# parse + instantiate (gn2v2-opendata.yaml is the shipped worked config)
 
 
 class TestParseAndInstantiate:
@@ -848,7 +848,7 @@ class TestGraphFitConfigAdapter:
 # ===========================================================================
 
 
-# the two classification tasks in gn2v2-dummy.yaml, both with weight_source unset
+# the two classification tasks in gn2v2-opendata.yaml, both with weight_source unset
 CLS_TASKS = ("jets_classification", "track_origin")
 NORM_MODULE = "norm"
 
@@ -877,7 +877,7 @@ def wave1_data(tmp_path_factory) -> dict[str, Path]:
 
 
 def wave1_base_overrides(wave1_data) -> list[str]:
-    """The gn2v2-dummy.yaml required path overrides MINUS the per-task weight_source."""
+    """The gn2v2-opendata.yaml required path overrides MINUS the per-task weight_source."""
     return [
         "--config",
         str(DUMMY_CFG),

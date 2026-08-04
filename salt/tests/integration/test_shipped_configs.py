@@ -40,10 +40,6 @@ MACHINERY = {"base2"}
 # Overlay fragments -> the stack that precedes them, from each config's own
 # header comment. Paths are relative to salt/configs.
 STACKS: dict[str, list[str]] = {
-    "GN2/gn2v2-dummy-cutover": ["GN2/gn2v2-dummy"],
-    "GN2/gn2v2-dummy-cutover34": ["GN2/gn2v2-dummy"],
-    "GN2/gn2v2-dummy-onnx-fold": ["GN2/gn2v2-dummy"],
-    "GN2/gn2v2-cluster-override": ["gn2v2-opendata"],
     "GN3/GN3_baseline_loose": ["GN3/GN3_baseline"],
     "GN3/GN3_dR": ["GN3/GN3_baseline"],
     "GN3/GN3_flow": ["GN3/GN3_baseline", "GN3/GN3_baseline_loose"],
@@ -105,7 +101,6 @@ NO_FIXTURE: dict[str, str] = {
     "GN3X": "fixture flow stream lacks the flow_* field prefix",
     "legacy/dips": "labels on raw HadronConeExclTruthLabelID; fixture writes PDG-like values",
     "gn2v2-opendata": "sources its files through input_samples, not data.train_file",
-    "GN2/gn2v2-cluster-override": "inherits gn2v2-opendata's input_samples sourcing",
     # measured, not guessed — see the diagnosis in experiment 53
     "GN3EPCLV01": "no global stream in write_dummy_file",
     "GN3/GN3_SoftE": "no global stream in write_dummy_file",
@@ -251,7 +246,7 @@ def test_config_plan_compiles(config, fixtures):
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
     # a plan compile is static, but the CLI still instantiates the trainer, so a
-    # config shipping accelerator: gpu (gn2v2-cluster-override) would fail on a
+    # config shipping accelerator: gpu (a config declaring accelerator: gpu) would fail on a
     # CPU runner for a reason that has nothing to do with its graph. `auto`
     # rather than `cpu`: on a GPU runner these must exercise the GPU path.
     argv += ["--set", "trainer.accelerator=auto"]

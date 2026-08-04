@@ -4,7 +4,7 @@ The three-part gate:
 
 (a) on a labelled file, the inference H5 columns correspond ONE-TO-ONE to the
     export-mode `OutputField` selection and the ONNX tuple order/names
-    (anchored on the committed ``gn2v2-dummy-cutover34`` golden);
+    (anchored on the committed ``gn2v2-opendata`` golden);
 (b) the H5 values match the ONNXRuntime outputs of the exported model on the
     same per-jet inputs (the ``check_onnx`` comparison style + tolerance);
 (c) on a label-stripped copy of the same file the command runs green and

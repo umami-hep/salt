@@ -77,7 +77,7 @@ pin (redundant by construction):
 from `provenance.json` and the retired oracle test, both in git history at
 `93a29ed^` (`salt/tests/_fixtures/gn2v2_dummy_oracle/provenance.json`,
 `salt/tests/integration/test_outputs_h5_parity.py`). Parameters recorded there:
-commit `a9e2ac2`, salt-py314 container, `salt/configs/GN2/gn2v2-dummy.yaml`;
+commit `a9e2ac2`, salt-py314 container, `salt/configs/gn2v2-opendata.yaml`;
 synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
 `np.random.default_rng(42)`); training `max_epochs=1`, `limit_train_batches=2`,
 `limit_val_batches=2`, `batch_size=100`, `seed_everything=42`; `N_TEST=300`.
@@ -101,7 +101,7 @@ write_parity_norm_dict('/tmp/v2/norm_dict.yaml', '/tmp/v2/class_dict.yaml')
 write_dummy_file('/tmp/v2/train.h5', '/tmp/v2/norm_dict.yaml')
 "
 
-salt fit --config salt/configs/GN2/gn2v2-dummy.yaml \
+salt fit --config salt/configs/gn2v2-opendata.yaml \
   --data.train_file /tmp/v2/train.h5 \
   --data.val_file   /tmp/v2/train.h5 \
   --model.modules.norm.init_args.norm_dict /tmp/v2/norm_dict.yaml \
@@ -140,7 +140,7 @@ next to the checkpoint, with the eval H5 (see below).
 ### Worked example: add an aux task from an override file
 
 ```yaml
-# my_aux_task.yaml — stack with: --config salt/configs/GN2/gn2v2-dummy.yaml --config my_aux_task.yaml
+# my_aux_task.yaml — stack with: --config salt/configs/gn2v2-opendata.yaml --config my_aux_task.yaml
 model:
   init_args:
     modules:
@@ -247,7 +247,7 @@ Per-writer mode participation is the `modes:` list: each
 section writer declares the modes it runs in — `test` (eval H5) and/or
 `export` (ONNX); omitted = both. A `modes: [test]` writer mints no ONNX
 leaves; an export-only writer contributes no eval columns.
-`gn2v2-dummy.yaml` splits its tasks across two writers to keep
+`gn2v2-opendata.yaml` splits its tasks across two writers to keep
 `track_origin` H5-only:
 
 ```yaml
@@ -480,7 +480,7 @@ leaf (e.g. `preds.jets.classification` as `kind=label` where the task
 publishes `data`) — data-free, not only at `salt test` setup:
 
 ```bash
-salt graph validate -c salt/configs/GN2/gn2v2-dummy.yaml \
+salt graph validate -c salt/configs/gn2v2-opendata.yaml \
   --set model.modules.norm.init_args.norm_dict=unused.yaml
 salt graph plan -c <cfg> --mode fit
 salt graph plot -c <cfg> --mode fit -o graph.svg
@@ -650,7 +650,7 @@ outputs:
    alias, kept for one release window (`DeprecationWarning` on use): each key
    it sets fills a field the sink itself left unset, and a key carried by
    both homes is a `ConfigError` naming the key and both homes.
-   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/GN2/gn2v2-dummy.yaml`
+   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/gn2v2-opendata.yaml`
    still ships the deprecated block, deliberately, as the alias-window proof.
 
 How it works (no data file is touched — config + checkpoint only):

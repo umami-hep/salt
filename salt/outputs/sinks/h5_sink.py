@@ -1006,7 +1006,7 @@ class H5OutputSink(RuntimeSink):
 
 # DEPRECATED one-window alias (design Q4): the node-shaped sink was renamed
 # H5OutputWriter -> H5OutputSink. Downstream configs that wire
-# `salt.outputs.H5OutputWriter` (incl. gn2v2-dummy-cutover.yaml) keep
+# `salt.outputs.H5OutputWriter` (incl. the H5-only overlay fixture) keep
 # working — the alias resolves to the promoted node. Remove after the migration
 # window.
 H5OutputWriter = H5OutputSink

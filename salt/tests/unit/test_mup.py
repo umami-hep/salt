@@ -43,7 +43,7 @@ def norm_dict(tmp_path) -> Path:
 
 @pytest.fixture
 def mup_override(tmp_path) -> Path:
-    """A GN2_muP-routing override stacked on gn2v2-dummy.yaml (mup flags + routing)."""
+    """A GN2_muP-routing override stacked on gn2v2-opendata.yaml (mup flags + routing)."""
     override = {
         "name": "GN2muP_test",
         "model": {

@@ -31,7 +31,7 @@ from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always
 
-GAUSSIAN_CFG = CONFIG_DIR / "regression_gaussian.yaml"
+GAUSSIAN_CFG = CONFIG_DIR / "regression/regression_gaussian.yaml"
 N_TEST = 200
 
 

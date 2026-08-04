@@ -1130,7 +1130,7 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
         "salt graph resolve is no longer supported: the writers.modules "
         "manifest block was removed; the eval columns and ONNX outputs are now declared "
         "by the outputs: section + OnnxExportSink — inspect those directly "
-        "(see gn2v2-dummy.yaml for the canonical config pattern)"
+        "(see gn2v2-opendata.yaml for the canonical config pattern)"
     )
 
 

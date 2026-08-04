@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Golden H5/ONNX output-schema capture.
 
-For every shipped config that declares an ``outputs:`` section (or wires an
-explicit-sink table, the 4 ``gn2v2-dummy*`` configs), statically compiles the
+For every shipped config that declares an ``outputs:`` section, statically compiles the
 TEST-mode and ONNX-mode plans through the real ``salt`` surface (run-free,
 no data touched) and dumps the literal H5 column table + ONNX output tuple to
 one JSON file. These literals are the schema re-anchoring oracle — do
@@ -37,18 +36,7 @@ column + TEST-manifest entries, plus TEST plan hashes where labels are newly
 demanded); every ``onnx`` block and ONNX plan hash is byte-identical (verified
 programmatically 2026-07-14, all 30 capturable configs; GN2_muP exempt — mup
 not in salt-py314.sif).
-
-vs the committed Phase-A capture (3031dfb @ 96d88d8) the diff is NOT
-labels-only: Phase B (95d2934) rewrote the four gn2v2-dummy* configs (explicit
-sinks -> implicit dumb-section) WITHOUT regenerating goldens, so this regen
-also folds in that Phase-B re-anchoring — gn2v2-dummy{,-cutover,-onnx-fold}
-flip ``is_dumb_section`` false->true and re-key grouped OutputColumns to
-per-leaf entries (2->13 columns), and gn2v2-dummy's ONNX ``plan_hash`` changed
-(63a88656... -> 2e4171e3...) with the exported ONNX output tuple
-(names/dtypes/dynamic_axes) and flat H5 column names unchanged. To audit the
-Phase-C label delta in isolation, regen at d848b61 (``git archive d848b61 |
-tar -x`` into a scratch dir, run this script there with PYTHONPATH pointing at
-the extraction) and diff those files against these."""
+"""
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../worktrees/one-class-per-file/salt
 CONFIG_DIR = REPO_ROOT / "configs"
@@ -65,8 +53,7 @@ class ConfigSpec:
 
 
 # -- config inventory -------------------------------------------------------
-# Standalone configs: own `outputs:` section (or, for the gn2v2-dummy base,
-# an explicit-sink table) + own `data:` block — compile as a single -c.
+# Standalone configs: own `outputs:` section + own `data:` block — one -c each.
 _STANDALONE = [
     "legacy/dips",
     "legacy/Dipz",
@@ -87,32 +74,16 @@ _STANDALONE = [
     "GN3X",
     "hitz",
     "MaskFormer",
-    "nan_regression",
-    "regression_gaussian",
-    "regression_multi_target",
-    "regression_weighted",
-    "regression",
-    "GN2/gn2v2-dummy",
+    "regression/nan_regression",
+    "regression/regression_gaussian",
+    "regression/regression_multi_target",
+    "regression/regression_weighted",
+    "regression/regression",
 ]
 
 # Overlay configs: no own `data:` block (or a list-replace outputs: override)
 # — must be stacked on their base per the header comment's documented order.
 _STACKED = [
-    ConfigSpec(
-        "gn2v2-dummy-cutover",
-        ["gn2v2-opendata.yaml", "GN2/gn2v2-dummy-cutover.yaml"],
-        "explicit-sink table (H5OutputWriter alias), two-layer cutover demo",
-    ),
-    ConfigSpec(
-        "gn2v2-dummy-cutover34",
-        ["gn2v2-opendata.yaml", "GN2/gn2v2-dummy-cutover34.yaml"],
-        "dumb-section cutover demo (outputs: null base tables)",
-    ),
-    ConfigSpec(
-        "gn2v2-dummy-onnx-fold",
-        ["gn2v2-opendata.yaml", "GN2/gn2v2-dummy-onnx-fold.yaml"],
-        "ONNX-fold demo; H5 side inherited unchanged from gn2v2-dummy.yaml",
-    ),
     ConfigSpec(
         "GN3_Charge",
         ["GN3/GN3V00.yaml", "GN3/GN3_Charge.yaml"],

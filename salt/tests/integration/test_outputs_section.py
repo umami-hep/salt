@@ -315,7 +315,7 @@ class TestColumnOrderDrivenBySection:
 
 
 class TestSectionOverlayConfigContent:
-    """The gn2v2-dummy-cutover34.yaml overlay wires the full-family outputs: section.
+    """The gn2v2-opendata.yaml config wires the full-family outputs: section.
 
     The overlay replaces the base's mode-split jets_out/origin_out
     writers with ONE all-modes RunTaskOutput, and declares NO callbacks: sinks —

@@ -42,11 +42,6 @@ RECIPES: dict[str, str] = {
     "GN3X": "flavour_tagger",
     "hitz": "hits_regression",
     "MaskFormer": "maskformer_truth_hadron",
-    "nan_regression": "flavour_tagger",
-    "regression": "flavour_tagger",
-    "regression_gaussian": "flavour_tagger",
-    "regression_multi_target": "flavour_tagger",
-    "regression_weighted": "flavour_tagger",
 }
 
 # base2.yaml is auto-loaded machinery, never a model in its own right.

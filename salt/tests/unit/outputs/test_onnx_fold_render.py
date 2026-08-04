@@ -25,7 +25,7 @@ _FOLDED_NODES = ("jet_probs", "track_origin_index", "pbc")
 
 @pytest.fixture(scope="module")
 def fold_cfg():
-    """The folded-ONNX config (gn2v2-dummy + the onnx-fold override)."""
+    """The folded-ONNX config (gn2v2-opendata + the onnx-fold overlay fixture)."""
     return load_config([_DUMMY, _FOLD], _OVERRIDES)
 
 
