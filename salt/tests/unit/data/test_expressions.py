@@ -253,7 +253,9 @@ def test_predicates_combine_inside_a_reduction() -> None:
         ("sum(jets.pt > 15.0 & jets.eta < 2.5) >= 2", "chained comparisons"),
         # a conjunction is only legal where a comparison is
         ("(d0 > 1) & (npix < 2) > 0", "only appear once"),
-        ("d0 < 3.5 and npix > 1", "not allowed"),
+        # `and` is a BoolOp, so it is not even a comparison at the root
+        ("d0 < 3.5 and npix > 1", "must be a comparison"),
+        ("sum((jets.pt > 1) and (jets.eta < 1)) >= 2", "not allowed"),
     ],
 )
 def test_rejected_combinator_forms(src: str, match: str) -> None:
