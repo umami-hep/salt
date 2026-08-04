@@ -47,7 +47,14 @@ SMALL: dict[str, Any] = {
             }
         }
     },
-    "data": {"batch_size": 100},
+    "data": {
+        "batch_size": 100,
+        # The shipped config sources its files through an InputSamples module
+        # pointing at ${DATA_*_PATH}. Tests hand over a single fixture file via
+        # --data.train_file, so the module is deleted and the plain file path is
+        # used instead. Without this the derived config ignores the fixture.
+        "modules": {"input_samples": None},
+    },
 }
 
 # The head shape the committed output goldens are anchored to: a 3-class
@@ -202,11 +209,10 @@ def h5_only_config() -> Path:
 
 
 def data_overrides(h5: Path, schema: Path, norm_dict: Path) -> list[str]:
-    """CLI overrides pointing the shipped InputSamples sourcing at a fixture file."""
+    """CLI overrides pointing a derived config at a fixture file."""
     return [
-        f"--data.modules.input_samples.init_args.files.train={h5}",
-        f"--data.modules.input_samples.init_args.files.val={h5}",
-        f"--data.modules.input_samples.init_args.files.test={h5}",
+        f"--data.train_file={h5}",
+        f"--data.val_file={h5}",
         f"--data.modules.reader.init_args.schema={schema}",
         f"--model.modules.norm.init_args.norm_dict={norm_dict}",
         # shipped configs assume large training machines
