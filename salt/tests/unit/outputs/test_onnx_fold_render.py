@@ -13,8 +13,8 @@ from salt.graph.spec import Mode
 from salt.graph.render import dot_source
 
 _CONFIGS = Path(__file__).parents[3] / "configs"
-_DUMMY = str(_CONFIGS / "GN2/gn2v2-dummy.yaml")
-_FOLD = str(_CONFIGS / "GN2/gn2v2-dummy-onnx-fold.yaml")
+_DUMMY = str(_CONFIGS / "gn2v2-opendata.yaml")
+_FOLD = str(Path(__file__).resolve().parents[2] / "_fixtures/configs/onnx_fold_overlay.yaml")
 _OVERRIDES = [
     "model.modules.norm.init_args.norm_dict=unused.yaml",
     "trainer.logger=false",

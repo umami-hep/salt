@@ -100,17 +100,17 @@ _STANDALONE = [
 _STACKED = [
     ConfigSpec(
         "gn2v2-dummy-cutover",
-        ["GN2/gn2v2-dummy.yaml", "GN2/gn2v2-dummy-cutover.yaml"],
+        ["gn2v2-opendata.yaml", "GN2/gn2v2-dummy-cutover.yaml"],
         "explicit-sink table (H5OutputWriter alias), two-layer cutover demo",
     ),
     ConfigSpec(
         "gn2v2-dummy-cutover34",
-        ["GN2/gn2v2-dummy.yaml", "GN2/gn2v2-dummy-cutover34.yaml"],
+        ["gn2v2-opendata.yaml", "GN2/gn2v2-dummy-cutover34.yaml"],
         "dumb-section cutover demo (outputs: null base tables)",
     ),
     ConfigSpec(
         "gn2v2-dummy-onnx-fold",
-        ["GN2/gn2v2-dummy.yaml", "GN2/gn2v2-dummy-onnx-fold.yaml"],
+        ["gn2v2-opendata.yaml", "GN2/gn2v2-dummy-onnx-fold.yaml"],
         "ONNX-fold demo; H5 side inherited unchanged from gn2v2-dummy.yaml",
     ),
     ConfigSpec(

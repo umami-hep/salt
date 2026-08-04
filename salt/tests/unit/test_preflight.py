@@ -128,7 +128,7 @@ class TestSaltModulePreflights:
             "graph",
             "validate",
             "-c",
-            str(CONFIG_DIR / "GN2/gn2v2-dummy.yaml"),
+            str(CONFIG_DIR / "gn2v2-opendata.yaml"),
             "--mode",
             "fit",
             "--set",

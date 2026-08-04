@@ -29,7 +29,7 @@ from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.testing.inputs import write_dummy_file
 
-DUMMY_CFG = CONFIG_DIR / "GN2/gn2v2-dummy.yaml"
+DUMMY_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
 TOY_GRAPH_CFG = Path(__file__).parent.parent / "_fixtures" / "configs" / "toy.yaml"
 GN2V2_MODULES = {

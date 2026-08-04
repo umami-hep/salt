@@ -29,9 +29,9 @@ from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict  # noqa: PLC2701
 
-DUMMY_CFG = CONFIG_DIR / "GN2/gn2v2-dummy.yaml"
-CUTOVER34_CFG = CONFIG_DIR / "GN2/gn2v2-dummy-cutover34.yaml"
-GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
+DUMMY_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
+CUTOVER34_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
+GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-opendata.json"
 
 RUN_NAME = "GN2v2_dummy"  # the config `name:` — the H5 column prefix
 MODEL_NAME = "GN2v2dummy"  # export.model_name — the ONNX tuple prefix

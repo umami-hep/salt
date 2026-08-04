@@ -25,8 +25,8 @@ from salt.model.saltmodule import SaltModule
 
 # this file is at salt/tests/unit/outputs/ — the configs live at salt/configs/
 _CONFIGS = Path(__file__).parents[3] / "configs"
-_DUMMY = str(_CONFIGS / "GN2/gn2v2-dummy.yaml")
-_CUTOVER = str(_CONFIGS / "GN2/gn2v2-dummy-cutover.yaml")
+_DUMMY = str(_CONFIGS / "gn2v2-opendata.yaml")
+_CUTOVER = str(Path(__file__).resolve().parents[2] / "_fixtures/configs/h5_only_overlay.yaml")
 _OVERRIDES = [
     "model.modules.norm.init_args.norm_dict=unused.yaml",
     "trainer.logger=false",

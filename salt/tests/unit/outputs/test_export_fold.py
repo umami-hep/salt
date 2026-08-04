@@ -25,7 +25,7 @@ from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 pytestmark = pytest.mark.cpu_always
 
 _CONFIGS = Path(__file__).parents[3] / "configs"
-_DUMMY = _CONFIGS / "GN2/gn2v2-dummy.yaml"
+_DUMMY = _CONFIGS / "gn2v2-opendata.yaml"
 _MASKFORMER = _CONFIGS / "MaskFormer.yaml"
 
 _INPUTS = [

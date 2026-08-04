@@ -24,8 +24,8 @@ from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 
-DUMMY_CFG = CONFIG_DIR / "GN2/gn2v2-dummy.yaml"
-GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy.json"
+DUMMY_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
+GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-opendata.json"
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`
 N_TEST = 300
 
