@@ -38,9 +38,9 @@ RECIPES_DIR = Path(__file__).resolve().parents[2] / "testing" / "datagen" / "rec
 RECIPES: dict[str, str] = {
     "event_classifier": "event_objects",
     "gn2v2-opendata": "flavour_tagger",
-    "GN3EPCLV01": "flavour_tagger",
+    "GN3EPCLV01": "flavour_tagger_global",
     "GN3X": "flavour_tagger",
-    "hitz": "single_constituent_regression",
+    "hitz": "hits_regression",
     "MaskFormer": "maskformer_truth_hadron",
     "nan_regression": "flavour_tagger",
     "regression": "flavour_tagger",
@@ -247,15 +247,18 @@ def test_config_trains_evaluates_and_exports(config, datasets, tmp_path):
 
     # `salt export` runs check_onnx itself, so a zero return code IS the
     # torch<->ONNX equivalence assertion.
+    # deliberately NOT --no-check: the parity check is the point of this leg
+    onnx_path = tmp_path / "onnx" / f"{config}.onnx"
+    onnx_path.parent.mkdir(parents=True, exist_ok=True)
     rc = salt_main([
         "export",
         "--config",
         str(saved[0]),
         f"--ckpt_path={ckpt}",
-        f"--outdir={tmp_path / 'onnx'}",
+        f"--output={onnx_path}",
     ])
     assert rc == 0, (
         f"{config}: salt export failed. The CLI runs check_onnx by default, so "
         "this covers both the export itself and its agreement with eager torch."
     )
-    assert sorted((tmp_path / "onnx").glob("*.onnx")), f"{config}: no ONNX written"
+    assert sorted(onnx_path.parent.glob("*.onnx")), f"{config}: no ONNX written"
