@@ -5,9 +5,9 @@ the tree is picked up automatically and cannot silently go untested. Two tiers:
 
 **Tier A** (`test_config_plan_compiles`, every config): all-mode
 ``salt graph validate`` on the config's documented stack. Standalone configs
-compile alone; overlay fragments compile stacked on their base per ``STACKS``.
-A config that is neither standalone nor in ``STACKS`` fails — that is the check
-that stops a new fragment sliding in ungated.
+Every config is passed alone: one that is an overlay declares its own bases in
+its ``include:`` block, so the stack lives in the config rather than in a table
+here that could drift from it.
 
 **Tier B** (`test_config_fast_dev_run`): a real 2-batch fit for every config a
 synthetic fixture can serve. Configs whose streams the shipped dummy writer
@@ -36,39 +36,6 @@ pytestmark = pytest.mark.cpu_always
 
 # Auto-loaded by SaltCLI for every fit/test, never stacked by a user.
 MACHINERY = {"base"}
-
-# Overlay fragments -> the stack that precedes them, from each config's own
-# header comment. Paths are relative to salt/configs.
-STACKS: dict[str, list[str]] = {
-    "GN3/GN3_baseline_loose": ["GN3/GN3_baseline"],
-    "GN3/GN3_dR": ["GN3/GN3_baseline"],
-    "GN3/GN3_flow": ["GN3/GN3_baseline", "GN3/GN3_baseline_loose"],
-    "GN3/GN3_LepID_SMT": [
-        "GN3/GN3_baseline",
-        "GN3/GN3_baseline_loose",
-        "GN3/GN3_flow",
-    ],
-    "GN3/GN3_tracklabel": [
-        "GN3/GN3_baseline",
-        "GN3/GN3_baseline_loose",
-        "GN3/GN3_flow",
-        "GN3/GN3_LepID_SMT",
-    ],
-    "GN3/GN3_Charge": ["GN3/GN3V00"],
-    "GN3/GN3_Hybrid": ["GN3/GN3V00"],
-    "GN3/GN3_SoftE": ["GN3/GN3V00"],
-    # GN3V00 is the in-repo, production-faithful GN3Large stand-in these
-    # templates target — the same base salt/tests/unit/test_finetune_configs.py
-    # validates their freeze specs against.
-    "finetune/finetune_gn3large": ["GN3/GN3V00"],
-    "finetune/finetune_gn3large_new_head": ["GN3/GN3V00"],
-    # Reader fragments carry no model: block; each is stacked under the model
-    # whose inputs it serves, reader first so the model's data: block wins on
-    # everything but the reader itself.
-    "readers/easyjet_hh4b": ["readers/easyjet_hh4b_ttbar"],
-    "readers/ftag1lite": ["readers/ftag1lite_empflow"],
-    "readers/physlite": ["readers/ftag1lite_empflow"],
-}
 
 # Which synthetic fixture flavour a config's jets_classification head needs.
 # Unlisted configs take the default 3-class (bjets/cjets/ujets) file.
@@ -147,7 +114,8 @@ def _require_extra(config: str) -> None:
 
 
 def _stack(config: str) -> list[Path]:
-    return [CONFIG_DIR / f"{c}.yaml" for c in [*STACKS.get(config, []), config]]
+    """Just the config: it declares any bases it needs in its own ``include:``."""
+    return [CONFIG_DIR / f"{config}.yaml"]
 
 
 def _norm_dict_overrides(stack: list[Path], nd_path: Path) -> list[str]:
@@ -223,9 +191,7 @@ def _data_for(config: str, fixtures: dict[str, dict[str, Path]]) -> dict[str, Pa
 
 
 def test_every_fragment_declares_a_stack():
-    """STACKS and NO_FIXTURE name only configs that exist — no stale entries."""
-    unknown = sorted(set(STACKS) - set(ALL_CONFIGS))
-    assert not unknown, f"STACKS names configs that do not exist: {unknown}"
+    """NO_FIXTURE/EXTRAS/FIXTURE_FLAVOUR name only configs that exist."""
     unknown = sorted(set(NO_FIXTURE) - set(ALL_CONFIGS))
     assert not unknown, f"NO_FIXTURE names configs that do not exist: {unknown}"
     unknown = sorted(set(EXTRAS) - set(ALL_CONFIGS))
@@ -256,9 +222,8 @@ def test_config_plan_compiles(config, fixtures):
     rc = salt_main(argv)
     assert rc == 0, (
         f"{config} failed graph validate.\n"
-        f"  stack: {[p.name for p in stack]}\n"
-        "  If this is an overlay fragment, add its documented base stack to "
-        "STACKS in this file."
+        "  If this is an overlay, declare its bases in the config's own "
+        "include: block."
     )
 
 

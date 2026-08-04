@@ -14,6 +14,9 @@
 #   - GhostTrack links are ~88% null (m_persKey==0, thinned tracks) and are
 #     dropped by the reader — served track multiplicity is the non-null count.
 
+include:
+  - ftag1lite_empflow.yaml
+
 data:
   modules:
     reader:

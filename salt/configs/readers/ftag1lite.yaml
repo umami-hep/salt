@@ -15,6 +15,9 @@
 #     derivation holds (VertexingTaskModule derives the origin key by replacing
 #     'VertexIndex' -> 'OriginLabel').
 
+include:
+  - ftag1lite_empflow.yaml
+
 data:
   modules:
     reader:
