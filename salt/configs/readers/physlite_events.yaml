@@ -25,6 +25,27 @@
 #     needs every group to name at least one real branch, so the `event` group is
 #     load-bearing even though the model consumes no field from it.
 #
+# ⚠ THE TWO SAMPLES REACH THE TAGGER SCORES DIFFERENTLY — and that is the point.
+#
+#   Where a derivation puts the b-tagging output is a property of its p-tag, not
+#   of the physics. The ttbar 601237 PHYSLITE at p7017 has the scores flattened
+#   onto the jet as `AnalysisJetsAuxDyn.GN2v01_p{b,c,u}`. The HH4b 603404
+#   PHYSLITE is only ever produced at p6026/p6187/p6697 (AMI: never at the
+#   p7128/p7344 where PHYS exists), and those keep the scores in a separate
+#   `BTagging_AntiKt4EMPFlow` container reached from each jet by the 1:1
+#   ElementLink `AnalysisJetsAuxDyn.btaggingLink`.
+#
+#   So the signal sub-reader adds `join_branch`/`join_prefix`/`join_branches` and
+#   the background one does not, and both serve `GN2v01_p{b,c,u}` as ordinary
+#   fields of the `jets` stream in the same order. One model, one field contract,
+#   two on-disk layouts — resolved in config, with no branch in the model.
+#
+#   (`join_*` is NOT `link_branch`/`target_prefix`. That pair is the 1:many case:
+#   it BUILDS a constituent stream by dereferencing a link vector — PHYSLITE
+#   `GhostTrack` -> `InDetTrackParticles`, see `readers/physlite_jets.yaml` — and
+#   needs `unroll` to name a row object. A join augments elements that already
+#   exist, so it is at home on the entry axis.)
+#
 # Preselection — what is applied here and what is NOT:
 #
 #   easyjet's bbbb resolved analysis writes only events passing
@@ -32,31 +53,21 @@
 #   pt > 20 GeV, |eta| < 4.5 and NNJvt. PHYSLITE is uncut, so the two legs would
 #   otherwise see different event samples.
 #
-#   The per-jet half of that selection IS expressible and is applied below as
-#   `constituent_cuts` with on_fail: drop — a failing jet is removed and the row
-#   re-padded, which is what "the container was pre-selected" means.
+#   The per-jet half of that selection is `constituent_cuts` with on_fail: drop —
+#   a failing jet is removed and the row re-padded, which is what "the container
+#   was pre-selected" means. The two EVENT-level multiplicity requirements are
+#   the reader's row-level `cuts:`, written as reductions of the jets stream's
+#   constituent axis:
 #
-#   The two EVENT-level multiplicity requirements are NOT expressible in salt's
-#   cut vocabulary today, and are therefore absent:
+#       sum(jets.valid) >= 4                          # >= 4 jets, post-jet-cuts
+#       sum(log(...) > -0.385) >= 2                   # >= 2 at FixedCutBEff_85
 #
-#       >= 4 jets passing the per-jet cuts
-#       >= 2 jets with GN2v01 discriminant D > -0.385   (the FixedCutBEff_85 WP,
-#           measured against easyjet's own flag on 99.958% of jets)
-#
-#   `GlobalObjectCuts` cuts whole ROWS using row-axis SCALAR fields, and the
-#   expression evaluator (salt/data/readers/expressions.py) whitelists arithmetic
-#   plus one comparison — it has no aggregation, so "count the jets that pass P
-#   and require >= N" cannot be written. Closing this needs a count-cut surface on
-#   the reader, not a config change.
-#
-#   Two notes for whoever adds it. First, the evaluator also has no `log`, but the
-#   b-tag cut does not need one: D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385 is the
-#   same predicate as
-#
-#       pb / (0.2 * pc + 0.8 * pu) > 0.680451      # exp(-0.385)
-#
-#   which the whitelist accepts verbatim. Second, |eta| has no `abs` either — it
-#   is two cuts, as below.
+#   `sum()` reduces AFTER the constituent cuts and AFTER truncation to
+#   `truncate: 20`, so it counts the jets the model is actually handed. `log` and
+#   `abs` are whitelisted too, so the b-tag discriminant is spelled the way ATLAS
+#   defines it, D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385, rather than as the
+#   equivalent ratio > exp(-0.385); |eta| < 4.5 is still two cuts because
+#   `abs` cannot help a cut that has to stay a single comparison.
 #
 #   Measured closure (experiment 58, ttbar 601237, the same 10,000 events easyjet
 #   read): 9,842 events pass ">= 4 jets" and 5,258 pass "+ >= 2 b-tags", against
@@ -65,14 +76,6 @@
 #   muon-in-jet re-calibration, which shifts jet pt and hence both counts. It is a
 #   real property of the two formats, not a missing cut, and must not be chased by
 #   joining on event number.
-#
-# ⚠ Sample availability: the 603404 HH4b PHYSLITE held at p6697 does NOT carry
-#   `AnalysisJetsAuxDyn.GN2v01_p{b,c,u}`. That derivation keeps the scores in a
-#   separate `BTagging_AntiKt4EMPFlow` container reached by the 1:1 ElementLink
-#   `AnalysisJetsAuxDyn.btaggingLink`, which UprootReader's link machinery (built
-#   for 1:many constituent links like GhostTrack) cannot follow. The ttbar 601237
-#   PHYSLITE at p7017 has the flat decorations this fragment names. Training the
-#   PHYSLITE leg therefore needs an HH4b PHYSLITE at a p-tag that flattens them.
 
 data:
   train_file: train  # placeholders: MultiSampleReader sources per sample below
@@ -92,17 +95,25 @@ data:
               init_args:
                 tree: CollectionTree
                 unroll: null
-                # the reproducible per-jet half of easyjet's preselection; the
-                # two >= N event-level requirements are not expressible (header)
+                # the reproducible per-jet half of easyjet's preselection
                 constituent_cuts: &physlite_jet_preselection
                   jets:
                     on_fail: drop
                     cuts:
                       - pt > 20000 # 20 GeV, PHYSLITE stores MeV
-                      - eta < 4.5 # |eta| < 4.5: no abs() in the whitelist,
+                      - eta < 4.5 # |eta| < 4.5: a cut is one comparison,
                       - eta > -4.5 #   so it is two cuts
                       - NNJvtPass > 0.5 # stored as int8 0/1
-                groups: &physlite_event_groups
+                # its two event-level halves, over the jets that survive above
+                cuts: &physlite_event_preselection
+                  global_cuts:
+                    - expr: sum(jets.valid) >= 4
+                      comment: easyjet AT_LEAST_FOUR_JETS
+                    - expr: >-
+                        sum(log(jets.GN2v01_pb / (0.2 * jets.GN2v01_pc
+                        + 0.8 * jets.GN2v01_pu)) > -0.385) >= 2
+                      comment: easyjet AT_LEAST_TWO_BJETS, GN2v01 FixedCutBEff_85
+                groups:
                   jets:
                     prefix: AnalysisJetsAuxDyn.
                     jagged: true
@@ -112,11 +123,15 @@ data:
                       eta: eta
                       phi: phi
                       m: m
+                      NNJvtPass: NNJvtPass # cut variable, not a model feature
+                    # p6697 keeps the scores one ElementLink away (header)
+                    join_branch: btaggingLink # -> AnalysisJetsAuxDyn.btaggingLink
+                    join_prefix: BTagging_AntiKt4EMPFlowAuxDyn.
+                    join_branches:
                       GN2v01_pb: GN2v01_pb
                       GN2v01_pc: GN2v01_pc
                       GN2v01_pu: GN2v01_pu
-                      NNJvtPass: NNJvtPass # cut variable, not a model feature
-                  event:
+                  event: &physlite_event_group
                     prefix: EventInfoAuxDyn.
                     jagged: false
                     branches:
@@ -131,5 +146,22 @@ data:
                 tree: CollectionTree
                 unroll: null
                 constituent_cuts: *physlite_jet_preselection
-                groups: *physlite_event_groups
+                cuts: *physlite_event_preselection
+                groups:
+                  jets:
+                    prefix: AnalysisJetsAuxDyn.
+                    jagged: true
+                    truncate: 20
+                    # p7017 flattens the scores onto the jet, so no join — the
+                    # field names and their ORDER still match the signal leg
+                    branches:
+                      pt: pt
+                      eta: eta
+                      phi: phi
+                      m: m
+                      NNJvtPass: NNJvtPass
+                      GN2v01_pb: GN2v01_pb
+                      GN2v01_pc: GN2v01_pc
+                      GN2v01_pu: GN2v01_pu
+                  event: *physlite_event_group
             # sources: {train: [...], val: [...], test: [...]}  # ttbar files

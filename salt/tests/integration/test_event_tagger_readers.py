@@ -76,11 +76,15 @@ def _served(reader) -> dict[str, tuple[tuple[str, ...], bool]]:
     """``{stream: (field names, jagged)}`` for a MultiSampleReader's sub-readers.
 
     Every sub-reader must agree (``MultiSampleReader.prepare`` enforces it on real
-    data); asserted here so a mismatch is caught with no file present.
+    data); asserted here so a mismatch is caught with no file present. Reads
+    ``served_branches``, not ``branches``, so a sub-reader that reaches some of
+    its fields through a 1:1 ElementLink join still has to serve the same names
+    in the same order as one that reads them flat — that equivalence is the whole
+    reason the join exists.
     """
     per_sample = [
         {
-            stream: (tuple(cfg.branches), cfg.jagged)
+            stream: (tuple(cfg.served_branches), cfg.jagged)
             for stream, cfg in sample.reader.groups.items()
         }
         for sample in reader.samples
@@ -135,8 +139,7 @@ def test_both_fragments_serve_the_same_contract():
         ej_fields, ej_jagged = easyjet[stream]
         pl_fields, pl_jagged = physlite[stream]
         assert ej_jagged == pl_jagged, (
-            f"stream {stream!r}: jaggedness differs (easyjet={ej_jagged}, "
-            f"physlite={pl_jagged})"
+            f"stream {stream!r}: jaggedness differs (easyjet={ej_jagged}, physlite={pl_jagged})"
         )
         # PHYSLITE additionally reads its cut variables (NNJvtPass), which easyjet
         # does not need because the ntupler already applied that selection. So the

@@ -317,3 +317,42 @@ def test_constituent_cuts_need_the_valid_field() -> None:
     rec = np.zeros((1, 2), dtype=[("d0", "f4")])
     with pytest.raises(KeyError):
         _cc(("d0 < 1",), "mask").apply(rec)
+
+
+# --------------------------------------------------------------------------- #
+# constituent-axis reductions on the row-cut surface
+# --------------------------------------------------------------------------- #
+
+
+def test_global_cuts_expose_their_reductions() -> None:
+    cuts = GlobalObjectCuts(global_cuts=("sum(jets.valid) >= 4",))
+    (agg,) = cuts.aggregations()
+    assert (agg.func, agg.stream, agg.fields) == ("sum", "jets", ("valid",))
+    assert cuts.fields() == ()  # nothing to read on the row axis
+
+
+def test_reductions_deduplicate_across_cuts_and_splits() -> None:
+    cuts = GlobalObjectCuts(
+        global_cuts=("sum(jets.valid) >= 4",),
+        per_split={"train": ("sum(jets.valid) >= 6", "count(jets.pt) >= 1")},
+    )
+    assert [a.source for a in cuts.aggregations()] == ["sum(jets.valid)", "count(jets.pt)"]
+    assert [a.source for a in cuts.aggregations("val")] == ["sum(jets.valid)"]
+
+
+def test_a_reduction_cut_evaluates_off_its_precomputed_column() -> None:
+    cuts = GlobalObjectCuts(global_cuts=("sum(jets.valid) >= 4",))
+    (agg,) = cuts.aggregations()
+    rows = np.empty(3, dtype=[(agg.key, "i8")])
+    rows[agg.key] = [3, 4, 5]
+    np.testing.assert_array_equal(cuts.eligible(rows, None), [False, True, True])
+
+
+def test_simple_cuts_have_no_reductions() -> None:
+    assert Cut("pt", ">", 20).aggregations == ()
+    assert Cut(expr="pt > 20").aggregations == ()
+
+
+def test_constituent_cuts_refuse_a_reduction() -> None:
+    with pytest.raises(ConfigError, match="reduce the constituent axis"):
+        _cc(("sum(jets.valid) >= 4",), "drop")

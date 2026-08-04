@@ -346,3 +346,249 @@ def test_no_top_level_uproot_awkward_import() -> None:
             top.add(node.module.split(".")[0])
     assert "uproot" not in top
     assert "awkward" not in top
+
+
+# --------------------------------------------------------------------------- #
+# 7. 1:1 ElementLink JOIN — extra fields merged onto an existing group
+# --------------------------------------------------------------------------- #
+#
+# Distinct from section 5: `link_branch` BUILDS a constituent stream out of a
+# target container (1:many), while a join augments elements the group already
+# serves (1:1) and leaves the group's shape alone. The physical case is the HH4b
+# PHYSLITE p6697, whose jets reach GN2v01 through `AnalysisJetsAuxDyn.btaggingLink`.
+
+_JOIN_GROUP = {
+    "branches": {"pt": "pt"},
+    "prefix": "AnalysisJetsAuxDyn.",
+    "jagged": True,
+    "pad_max": 4,
+    "join_branch": "btaggingLink",
+    "join_prefix": "BTagging_AntiKt4EMPFlowAuxDyn.",
+    "join_branches": {"GN2v01_pb": "GN2v01_pb", "GN2v01_pc": "GN2v01_pc"},
+}
+# 3 entries; jet -> b-tagging object is a permutation within each entry
+_BTAG_IDX = [[2, 0, 1], [0], [1, 0]]
+_BTAG_PB = [[0.1, 0.2, 0.3], [0.4], [0.5, 0.6]]
+_BTAG_PC = [[10.0, 20.0, 30.0], [40.0], [50.0, 60.0]]
+
+
+def _joined_reader(**over):
+    group = {**_JOIN_GROUP, **over}
+    return UprootReader(groups={"jets": group}, tree="CollectionTree", unroll=None)
+
+
+def _join_tree(idx=None, key=None, pb=None, pc=None):
+    import awkward as ak
+
+    idx = _BTAG_IDX if idx is None else idx
+    links = (
+        ak.Array(idx)
+        if key is None
+        else ak.zip({"m_persKey": ak.Array(key), "m_persIndex": ak.Array(idx)}, depth_limit=None)
+    )
+    return _FakeTree({
+        "AnalysisJetsAuxDyn.btaggingLink": links,
+        "BTagging_AntiKt4EMPFlowAuxDyn.GN2v01_pb": ak.Array(_BTAG_PB if pb is None else pb),
+        "BTagging_AntiKt4EMPFlowAuxDyn.GN2v01_pc": ak.Array(_BTAG_PC if pc is None else pc),
+    })
+
+
+def test_join_serves_direct_then_joined_fields_in_order() -> None:
+    cfg = UprootReader._parse_group("jets", dict(_JOIN_GROUP))
+    assert tuple(cfg.served_branches) == ("pt", "GN2v01_pb", "GN2v01_pc")
+    assert cfg.is_joined and not cfg.is_linked
+
+
+def test_join_gathers_by_pers_index() -> None:
+    reader = _joined_reader()
+    block = reader._read_joined_cols(
+        _join_tree(), reader.groups["jets"], ["GN2v01_pb", "GN2v01_pc"], 0, 3
+    )
+    # entry 0 jets point at btagging objects 2,0,1 -> 0.3, 0.1, 0.2
+    assert block["GN2v01_pb"].tolist() == [[0.3, 0.1, 0.2], [0.4], [0.6, 0.5]]
+    assert block["GN2v01_pc"].tolist() == [[30.0, 10.0, 20.0], [40.0], [60.0, 50.0]]
+
+
+def test_join_shape_matches_the_groups_own_branches() -> None:
+    reader = _joined_reader()
+    block = reader._read_joined_cols(_join_tree(), reader.groups["jets"], ["GN2v01_pb"], 0, 3)
+    import awkward as ak
+
+    assert ak.num(block["GN2v01_pb"], axis=1).tolist() == [len(e) for e in _BTAG_IDX]
+
+
+def test_join_honours_a_struct_link_with_a_single_container_key() -> None:
+    key = [[490, 490, 490], [490], [490, 490]]
+    reader = _joined_reader()
+    block = reader._read_joined_cols(
+        _join_tree(key=key), reader.groups["jets"], ["GN2v01_pb"], 0, 3
+    )
+    assert block["GN2v01_pb"].tolist() == [[0.3, 0.1, 0.2], [0.4], [0.6, 0.5]]
+
+
+def test_join_refuses_a_null_link() -> None:
+    key = [[490, 0, 490], [490], [490, 490]]  # one thinned/absent b-tagging object
+    reader = _joined_reader()
+    with pytest.raises(SchemaError, match="null ElementLink"):
+        reader._read_joined_cols(_join_tree(key=key), reader.groups["jets"], ["GN2v01_pb"], 0, 3)
+
+
+def test_join_refuses_multiple_target_containers() -> None:
+    key = [[490, 491, 490], [490], [490, 490]]
+    reader = _joined_reader()
+    with pytest.raises(SchemaError, match="multiple target containers"):
+        reader._read_joined_cols(_join_tree(key=key), reader.groups["jets"], ["GN2v01_pb"], 0, 3)
+
+
+def test_join_refuses_an_index_past_the_target() -> None:
+    reader = _joined_reader()
+    tree = _join_tree(idx=[[2, 0, 3], [0], [1, 0]])  # 3 is past entry 0's 3 objects
+    with pytest.raises(SchemaError, match="out of range"):
+        reader._read_joined_cols(tree, reader.groups["jets"], ["GN2v01_pb"], 0, 3)
+
+
+def test_join_refuses_a_misaligned_target_container() -> None:
+    reader = _joined_reader()
+    tree = _join_tree(pb=[[0.1, 0.2, 0.3], [0.4]])  # 2 entries vs the link's 3
+    with pytest.raises(SchemaError, match="not aligned"):
+        reader._read_joined_cols(tree, reader.groups["jets"], ["GN2v01_pb"], 0, 3)
+
+
+def test_join_config_needs_all_three_keys() -> None:
+    with pytest.raises(ConfigError, match="needs 'join_branch'"):
+        UprootGroupConfig(branches={"pt": "pt"}, join_branch="btaggingLink")
+
+
+def test_join_config_refuses_a_field_declared_twice() -> None:
+    with pytest.raises(ConfigError, match="declared in both"):
+        UprootGroupConfig(
+            branches={"pt": "pt", "GN2v01_pb": "GN2v01_pb"},
+            join_branch="btaggingLink",
+            join_prefix="BTagging_AntiKt4EMPFlowAuxDyn.",
+            join_branches={"GN2v01_pb": "GN2v01_pb"},
+        )
+
+
+def test_join_config_refuses_a_link_and_a_join_on_one_group() -> None:
+    with pytest.raises(ConfigError, match="already sets 'link_branch'"):
+        UprootGroupConfig(
+            branches={"d0": "d0"},
+            link_branch="GhostTrack",
+            target_prefix="InDetTrackParticlesAuxDyn.",
+            join_branch="btaggingLink",
+            join_prefix="BTagging_AntiKt4EMPFlowAuxDyn.",
+            join_branches={"GN2v01_pb": "GN2v01_pb"},
+        )
+
+
+def test_join_on_a_jagged_group_under_unroll_is_refused() -> None:
+    with pytest.raises(ConfigError, match="two levels below the entry axis"):
+        UprootReader(
+            groups={
+                "rows": {"branches": {"pt": "pt"}, "jagged": False},
+                "jets": dict(_JOIN_GROUP),
+            },
+            unroll="rows",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 8. row cuts that reduce a constituent axis (sum/count)
+# --------------------------------------------------------------------------- #
+
+
+def _agg_reader(path, cut: str, truncate: int = 8):
+    from salt.data import GlobalObjectCuts
+
+    return UprootReader(
+        groups={
+            "jets": {"branches": dict(_JET), "jagged": True, "truncate": truncate},
+            "event": {"branches": dict(_EVENT), "jagged": False},
+        },
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll=None,
+        cuts=GlobalObjectCuts(global_cuts=(cut,)),
+    )
+
+
+def test_sum_valid_cuts_events_on_jet_multiplicity(ej_file) -> None:
+    path, arrays = ej_file
+    njets = np.array(arrays["njets"])  # [3, 1, 5, 0, 2, 4]
+    reader = _agg_reader(path, "sum(jets.valid) >= 3")
+    assert len(reader) == int((njets >= 3).sum())
+    served = reader.read(slice(0, len(reader)), Mode.FIT)
+    assert np.all(served["raw.jets"]["valid"].sum(axis=1) >= 3)
+    np.testing.assert_array_equal(
+        served["raw.event"]["eventNumber"], np.asarray(arrays["eventNumber"])[njets >= 3]
+    )
+
+
+def test_sum_valid_counts_what_is_served_not_what_is_on_disk(ej_file) -> None:
+    """`truncate` caps the served multiplicity, so the reduction has to see the cap."""
+    path, arrays = ej_file
+    njets = np.array(arrays["njets"])
+    reader = _agg_reader(path, "sum(jets.valid) >= 2", truncate=2)
+    assert len(reader) == int((np.minimum(njets, 2) >= 2).sum())  # 4, not 3
+
+
+def test_count_is_the_multiplicity(ej_file) -> None:
+    path, arrays = ej_file
+    njets = np.array(arrays["njets"])
+    reader = _agg_reader(path, "count(jets.pt) >= 4")
+    assert len(reader) == int((njets >= 4).sum())
+
+
+def test_a_reduction_sees_the_constituent_cuts(ej_file) -> None:
+    from salt.data import GlobalObjectCuts
+
+    path, arrays = ej_file
+    thresh = 100_000.0
+    reader = UprootReader(
+        groups={"jets": {"branches": dict(_JET), "jagged": True, "truncate": 8}},
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll=None,
+        constituent_cuts={"jets": {"on_fail": "drop", "cuts": [f"pt > {thresh}"]}},
+        cuts=GlobalObjectCuts(global_cuts=("sum(jets.valid) >= 2",)),
+    )
+    n_pass = np.array([
+        int((np.asarray(ev) > thresh).sum())
+        for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
+    ])
+    assert len(reader) == int((n_pass >= 2).sum())
+    served = reader.read(slice(0, len(reader)), Mode.FIT)["raw.jets"]
+    assert np.all(served["valid"].sum(axis=1) >= 2)
+
+
+def test_a_predicate_reduction_counts_passing_constituents(ej_file) -> None:
+    path, arrays = ej_file
+    reader = _agg_reader(path, "sum(jets.pt > 100000.0) >= 2")
+    n_pass = np.array([
+        int((np.asarray(ev) > 100_000.0).sum())
+        for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
+    ])
+    assert len(reader) == int((n_pass >= 2).sum())
+
+
+@pytest.mark.parametrize(
+    ("cut", "match"),
+    [
+        ("sum(tracks.valid) >= 4", "not a configured group"),
+        ("sum(event.eventNumber) >= 4", "declared jagged=False"),
+        ("sum(jets.nope) >= 4", "not configured branches"),
+    ],
+)
+def test_reduction_config_errors(cut: str, match: str) -> None:
+    from salt.data import GlobalObjectCuts
+
+    with pytest.raises(ConfigError, match=match):
+        UprootReader(
+            groups={
+                "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+                "event": {"branches": dict(_EVENT), "jagged": False},
+            },
+            tree="AnalysisMiniTree",
+            unroll=None,
+            cuts=GlobalObjectCuts(global_cuts=(cut,)),
+        )

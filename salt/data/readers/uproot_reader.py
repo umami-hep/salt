@@ -17,7 +17,8 @@ from typing import Any
 import numpy as np
 
 from salt.data.base import Reader, WorkerCtx, _require_root_deps
-from salt.data.readers.cuts import GlobalObjectCuts
+from salt.data.readers.cuts import VALID_FIELD, GlobalObjectCuts
+from salt.data.readers.expressions import Aggregation
 from salt.data.readers.stream import OffsetIndex, StreamConfig
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
@@ -34,6 +35,9 @@ _GROUP_KEYS = {
     "link_branch",
     "target_prefix",
     "target_collection",
+    "join_branch",
+    "join_prefix",
+    "join_branches",
 }
 
 
@@ -68,6 +72,19 @@ class UprootGroupConfig:
         (``InDetTrackParticlesAuxDyn.``); this group's ``branches`` map onto it.
         Set together with ``link_branch``. (``target_collection`` is a deprecated
         alias meaning ``f"{target_collection}AuxDyn."``.)
+    join_branch : str | None, optional
+        A **1:1** ElementLink carried by this group's own elements
+        (``btaggingLink``, resolved with this group's ``prefix``), used to JOIN
+        extra fields onto the elements this group already serves — as opposed to
+        ``link_branch``, which is 1:many and *creates* a constituent stream. One
+        link per element, so the joined fields line up with ``branches``
+        one-for-one and the group's shape is unchanged.
+    join_prefix : str | None, optional
+        The aux-store prefix of the join target container
+        (``BTagging_AntiKt4EMPFlowAuxDyn.``). Set together with ``join_branch``.
+    join_branches : dict[str, str], optional
+        Field name -> *bare* branch in the join target, appended to ``branches``
+        in the served field order. Required (and only valid) with ``join_branch``.
     """
 
     branches: dict[str, str]
@@ -76,6 +93,9 @@ class UprootGroupConfig:
     pad_max: int | None = None
     link_branch: str | None = None
     target_prefix: str | None = None
+    join_branch: str | None = None
+    join_prefix: str | None = None
+    join_branches: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.branches:
@@ -94,11 +114,58 @@ class UprootGroupConfig:
                 "group config: 'link_branch'/'target_prefix' are only valid for jagged "
                 "(constituent) streams"
             )
+        self._validate_join()
+
+    def _validate_join(self) -> None:
+        """Enforce the 1:1-join invariants (all three keys together, no overlap, not on a link).
+
+        Raises
+        ------
+        ConfigError
+            When the join keys are partially set, the joined field names collide
+            with the direct ones, or the group is already an ElementLink
+            (1:many) constituent stream.
+        """
+        given = {
+            "join_branch": self.join_branch is not None,
+            "join_prefix": self.join_prefix is not None,
+            "join_branches": bool(self.join_branches),
+        }
+        if any(given.values()) and not all(given.values()):
+            missing = sorted(k for k, v in given.items() if not v)
+            raise ConfigError(
+                f"group config: a 1:1 join needs 'join_branch', 'join_prefix' and a non-empty "
+                f"'join_branches' together — missing {missing}"
+            )
+        if not self.is_joined:
+            return
+        if self.is_linked:
+            raise ConfigError(
+                "group config: 'join_branch' on a group that already sets 'link_branch' — "
+                "the 1:many link BUILDS this stream out of a target container, so there is "
+                "no element of this group left to join a second container onto"
+            )
+        clash = sorted(set(self.branches) & set(self.join_branches))
+        if clash:
+            raise ConfigError(
+                f"group config: field(s) {clash} are declared in both 'branches' and "
+                "'join_branches' — a served field has exactly one source"
+            )
 
     @property
     def is_linked(self) -> bool:
         """Whether this stream reads constituents via an ElementLink dereference."""
         return self.link_branch is not None
+
+    @property
+    def is_joined(self) -> bool:
+        """Whether this stream joins extra fields on via a 1:1 ElementLink."""
+        return self.join_branch is not None
+
+    @property
+    def served_branches(self) -> dict[str, str]:
+        """Every field this group serves -> its bare branch: ``branches`` then ``join_branches``."""
+        return {**self.branches, **self.join_branches}
 
 
 @dataclass
@@ -151,7 +218,10 @@ class UprootReader(Reader):
         Number of rows to serve (post-cut); ``-1`` = all.
     cuts : GlobalObjectCuts | None, optional
         Row-level eligibility evaluated in `prepare` over the row-axis scalars;
-        only passing rows enter the index (available on either axis).
+        only passing rows enter the index (available on either axis). A cut may
+        also reduce a jagged stream's constituent axis (``sum(jets.valid) >= 4``);
+        the reduction is evaluated over what the reader will SERVE — constituent
+        cuts applied, truncated to ``pad_max`` — and then compared per row.
     constituent_cuts : Mapping[str, Any] | None, optional
         Per-stream `ConstituentCuts` (or the equivalent mapping
         ``{cuts: [...], on_fail: drop}``) applied WITHIN each jagged row by the
@@ -165,11 +235,14 @@ class UprootReader(Reader):
     ConfigError
         On an empty/malformed group config; an ``unroll`` that names no group or
         names a ``jagged=True`` group; a linked group while ``unroll is None``;
-        constituent cuts on a scalar stream, referencing an unconfigured branch,
-        or requesting ``on_fail: mask``.
+        a joined jagged group while ``unroll`` names a group; constituent cuts on
+        a scalar stream, referencing an unconfigured branch, or requesting
+        ``on_fail: mask``; a row-cut reduction over an unknown/scalar stream or
+        an unconfigured field.
     SchemaError
-        When a configured branch is missing, or a stream's jaggedness disagrees
-        with the config.
+        When a configured branch is missing, a stream's jaggedness disagrees with
+        the config, or a 1:1 join hits a null link / an out-of-range index /
+        a misaligned target container.
     """
 
     def __init__(
@@ -198,6 +271,7 @@ class UprootReader(Reader):
         self._validate_unroll()
         self.constituent_cuts = self._parse_constituent_cuts(constituent_cuts, tuple(self.groups))
         self._validate_constituent_cuts()
+        self._validate_cut_aggregations()
         self.schema: Schema | None = None
         # transient per-process state (never pickled, see base __getstate__)
         self._table: list[_FileEntry] | None = None
@@ -223,6 +297,55 @@ class UprootReader(Reader):
                 f"linked groups {linked} (link_branch/target_prefix) require unroll to name a "
                 "group — ElementLink dereference is per-row-object, no meaning on the entry axis"
             )
+        # A join reads one link per element of the group's OWN axis, so the link
+        # column has the same on-disk shape as the group's own branches:
+        # [entry][element]. That holds for a jagged group on the entry axis, and
+        # for the (jagged=False) group the unroll flattens. A jagged group UNDER
+        # an unroll is [entry][row-object][constituent] — a third level the
+        # by-index gather has no per-entry offset for.
+        deep = [
+            s
+            for s, c in self.groups.items()
+            if c.is_joined and c.jagged and self.unroll is not None
+        ]
+        if deep:
+            raise ConfigError(
+                f"joined groups {deep} (join_branch/join_prefix) are jagged while unroll="
+                f"{self.unroll!r} — that nests the join two levels below the entry axis, which "
+                "the 1:1 by-index dereference does not implement. Join on the unroll group "
+                "itself, or read this group on the entry axis (unroll: null)"
+            )
+
+    def _validate_cut_aggregations(self) -> None:
+        """Check every row-cut reduction names a configured jagged stream and its fields.
+
+        Raises
+        ------
+        ConfigError
+            On a reduction over an unknown stream, over a ``jagged=False``
+            stream (no constituent axis to collapse), or naming a field the
+            stream does not serve.
+        """
+        for agg in self.cuts.aggregations() if self.cuts is not None else ():
+            if agg.stream not in self.groups:
+                raise ConfigError(
+                    f"row cut {agg.source!r} reduces stream {agg.stream!r}, which is not a "
+                    f"configured group (have {sorted(self.groups)})"
+                )
+            cfg = self.groups[agg.stream]
+            if not cfg.jagged:
+                raise ConfigError(
+                    f"row cut {agg.source!r} reduces stream {agg.stream!r}, which is declared "
+                    "jagged=False — it has no constituent axis to collapse; cut on its "
+                    "scalar fields directly"
+                )
+            missing = [f for f in agg.fields if f != VALID_FIELD and f not in cfg.served_branches]
+            if missing:
+                raise ConfigError(
+                    f"row cut {agg.source!r}: field(s) {missing} are not configured branches "
+                    f"of group {agg.stream!r} (configured: {sorted(cfg.served_branches)}, "
+                    f"plus the implicit {VALID_FIELD!r})"
+                )
 
     def _validate_constituent_cuts(self) -> None:
         """Enforce jagged-only, drop-only, configured-branch invariants for constituent cuts.
@@ -244,7 +367,7 @@ class UprootReader(Reader):
                     f"constituent_cuts[{stream!r}]: UprootReader implements on_fail: drop "
                     f"only, got {cc.on_fail!r} — in-place masking is H5-first"
                 )
-            branches = self.groups[stream].branches
+            branches = self.groups[stream].served_branches
             missing = [f for f in cc.fields if f not in branches]
             if missing:
                 raise ConfigError(
@@ -285,6 +408,7 @@ class UprootReader(Reader):
         target_prefix = cfg.get("target_prefix")
         if target_prefix is None and cfg.get("target_collection") is not None:
             target_prefix = f"{cfg['target_collection']}AuxDyn."
+        join_branches = dict(cfg.get("join_branches") or {})
         return UprootGroupConfig(
             branches={str(k): str(v) for k, v in dict(cfg["branches"]).items()},
             prefix=str(cfg.get("prefix", "")),
@@ -292,6 +416,9 @@ class UprootReader(Reader):
             pad_max=cfg.get("pad_max", cfg.get("truncate")),
             link_branch=cfg.get("link_branch"),
             target_prefix=target_prefix,
+            join_branch=cfg.get("join_branch"),
+            join_prefix=cfg.get("join_prefix"),
+            join_branches={str(k): str(v) for k, v in join_branches.items()},
         )
 
     # -- branch-name resolution ----------------------------------------------
@@ -310,6 +437,11 @@ class UprootReader(Reader):
     def _target_branch(cfg: UprootGroupConfig, bare: str) -> str:
         """The on-disk target-container branch for an ElementLink constituent field."""
         return f"{cfg.target_prefix}{bare}"
+
+    @staticmethod
+    def _join_branch(cfg: UprootGroupConfig, bare: str) -> str:
+        """The on-disk join-target branch for a 1:1-joined field."""
+        return f"{cfg.join_prefix}{bare}"
 
     # -- config-surface views -------------------------------------------------
 
@@ -472,6 +604,7 @@ class UprootReader(Reader):
 
         files = self._resolve_files()
         cut_fields = self.cuts.fields() if self.cuts is not None else ()
+        cut_aggs = self.cuts.aggregations() if self.cuts is not None else ()
         table: list[_FileEntry] = []
         event_offset = 0
         row_offset = 0
@@ -487,7 +620,9 @@ class UprootReader(Reader):
                 )
                 for stream, cfg in self.groups.items():
                     entry.fields[stream] = self._probe_stream_fields(t, avail, path, stream, cfg)
-                row_scalars, orig_counts = self._read_index_scalars(t, avail, path, cut_fields)
+                row_scalars, orig_counts = self._read_index_scalars(
+                    t, avail, path, cut_fields, cut_aggs
+                )
 
             kept, per_row_kept = self._apply_cuts(row_scalars, orig_counts)
             entry.kept = kept
@@ -568,12 +703,45 @@ class UprootReader(Reader):
                     f"{arr.ndim}) but config says jagged={cfg.jagged}"
                 )
             fdtypes[fieldname] = self._array_dtype_name(arr)
+        if cfg.is_joined:
+            fdtypes.update(self._probe_join_fields(t, avail, path, stream, cfg))
         if cfg.jagged:
             fdtypes["valid"] = "bool"
         return fdtypes
 
+    def _probe_join_fields(
+        self, t: Any, avail: set[str], path: Path, stream: str, cfg: UprootGroupConfig
+    ) -> dict[str, str]:
+        """Validate a 1:1 join's link + target branches and capture the joined field dtypes.
+
+        No jaggedness check on the target columns: they live in a different
+        container with its own multiplicity, and the join's whole job is to
+        re-shape them onto this group's axis.
+        """
+        link = self._on_disk(cfg, cfg.join_branch or "")
+        if link not in avail:
+            raise SchemaError(
+                f"group {stream!r}: join link branch {link!r} not in {path.name!r} "
+                f"(the 1:1 join needs one ElementLink per {stream!r} element)"
+            )
+        fdtypes: dict[str, str] = {}
+        for fieldname, bare in cfg.join_branches.items():
+            branch = self._join_branch(cfg, bare)
+            if branch not in avail:
+                raise SchemaError(
+                    f"group {stream!r}: join target branch {branch!r} (field {fieldname!r}) "
+                    f"not in {path.name!r}; joined fields live under {cfg.join_prefix!r}"
+                )
+            fdtypes[fieldname] = self._array_dtype_name(t[branch].array(library="ak"))
+        return fdtypes
+
     def _read_index_scalars(
-        self, t: Any, avail: set[str], path: Path, cut_fields: tuple[str, ...]
+        self,
+        t: Any,
+        avail: set[str],
+        path: Path,
+        cut_fields: tuple[str, ...],
+        cut_aggs: tuple[Aggregation, ...] = (),
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
         """Read the row-axis scalar columns (for cuts) + the per-entry pre-cut row count.
 
@@ -581,6 +749,10 @@ class UprootReader(Reader):
         scalars come from ``jagged=False`` streams read per entry. ``unroll=group``:
         ``orig_counts`` is the unroll group's per-entry object count, and the row
         scalars are that group's branches flattened ``[entry][obj] -> [obj]``.
+
+        Each `Aggregation` in `cut_aggs` is reduced onto the row axis here and
+        joins the record under its own key — that is what lets a row cut say
+        ``sum(jets.valid) >= 4``.
         """
         import awkward as ak
 
@@ -624,7 +796,39 @@ class UprootReader(Reader):
             row_scalars[cf] = (
                 ak.to_numpy(arr) if self.unroll is None else ak.to_numpy(ak.flatten(arr, axis=1))
             )
+        for agg in cut_aggs:
+            row_scalars[agg.key] = self._reduce_stream(t, agg)
         return row_scalars, orig_counts
+
+    def _reduce_stream(self, t: Any, agg: Aggregation) -> np.ndarray:
+        """Reduce one jagged stream's constituent axis onto the row axis for a row cut.
+
+        Reads exactly what the reduction (and that stream's constituent cuts)
+        reference, then reproduces what the reader will actually SERVE before
+        reducing: constituent cuts dropped, then truncated to the served
+        ``pad_max``. So ``sum(jets.valid)`` is the number of jets the model sees,
+        not the number on disk — a cut written against ``valid`` and a batch read
+        back cannot disagree.
+        """
+        import awkward as ak
+
+        cfg = self.groups[agg.stream]
+        cc = self.constituent_cuts.get(agg.stream)
+        needed = [f for f in agg.fields if f != VALID_FIELD]
+        if cc is not None:
+            needed += list(cc.fields)
+        needed = list(dict.fromkeys(needed))
+        if not needed:  # `sum(jets.valid)` alone: still needs one column for the shape
+            needed = [next(iter(cfg.branches))]
+        cols = self._read_group_cols(t, cfg, needed, 0, int(t.num_entries))
+        if cc is not None and cc.cuts:
+            keep = cc.keep(cols)
+            cols = {f: c[keep] for f, c in cols.items()}
+        if cfg.pad_max is not None:
+            cols = {f: c[:, : cfg.pad_max] for f, c in cols.items()}
+        if VALID_FIELD in agg.fields:
+            cols[VALID_FIELD] = ak.full_like(cols[needed[0]], True, dtype=bool)
+        return agg.evaluate(cols)
 
     def _apply_cuts(
         self, row_scalars: dict[str, np.ndarray], orig_counts: np.ndarray
@@ -688,10 +892,10 @@ class UprootReader(Reader):
         for stream, cfg in self.groups.items():
             demanded = dict(ctx.read_fields.get(stream, {}))
             for fieldname, who in demanded.items():
-                if fieldname not in cfg.branches:
+                if fieldname not in cfg.served_branches:
                     raise SchemaError(
                         f"field {fieldname!r} demanded by {who!r} not a configured branch in "
-                        f"group {stream!r} (configured: {sorted(cfg.branches)})"
+                        f"group {stream!r} (configured: {sorted(cfg.served_branches)})"
                     )
             if demanded and (cc := self.constituent_cuts.get(stream)) is not None:
                 for fieldname in cc.fields:
@@ -723,9 +927,10 @@ class UprootReader(Reader):
     def _served_fields(self, stream: str) -> list[str]:
         """The field names served for a stream (demanded subset or all configured)."""
         cfg = self.groups[stream]
+        served = cfg.served_branches
         demanded = self._read_fields.get(stream, {})
-        names = set(demanded) if demanded else set(cfg.branches)
-        return [f for f in cfg.branches if f in names]
+        names = set(demanded) if demanded else set(served)
+        return [f for f in served if f in names]
 
     def _read_stream_columns(
         self, stream: str, fields: list[str], start: int, stop: int
@@ -766,7 +971,7 @@ class UprootReader(Reader):
                 if cfg.is_linked:
                     block = self._read_linked_block(t, cfg, fields, e0, e1)
                 else:
-                    block = {f: self._read_col(t, cfg, f, e0, e1) for f in fields}
+                    block = self._read_group_cols(t, cfg, fields, e0, e1)
             for f in fields:
                 per_field_chunks[f].append(block[f][sel])
         cols: dict[str, Any] = {}
@@ -774,6 +979,21 @@ class UprootReader(Reader):
             chunks = per_field_chunks[f]
             cols[f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         return cols
+
+    def _read_group_cols(
+        self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int
+    ) -> dict[str, Any]:
+        """Read a (non-ElementLink) group's fields over entry block ``[e0, e1)``.
+
+        Direct fields come off the group's own prefix; joined fields are gathered
+        through the group's 1:1 link. Both come back on the same axis.
+        """
+        direct = [f for f in fields if f in cfg.branches]
+        joined = [f for f in fields if f in cfg.join_branches]
+        block = {f: self._read_col(t, cfg, f, e0, e1) for f in direct}
+        if joined:
+            block.update(self._read_joined_cols(t, cfg, joined, e0, e1))
+        return block
 
     def _read_col(self, t: Any, cfg: UprootGroupConfig, f: str, e0: int, e1: int) -> Any:
         """Read one normal branch over entry block ``[e0, e1)`` as ``[row]`` / ``[row][const]``
@@ -785,6 +1005,63 @@ class UprootReader(Reader):
             entry_start=e0, entry_stop=e1, library="ak"
         )
         return ak.flatten(arr, axis=1) if self.unroll is not None else arr
+
+    def _read_joined_cols(
+        self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int
+    ) -> dict[str, Any]:
+        """Gather 1:1-joined fields over entry block ``[e0, e1)`` onto this group's axis.
+
+        One ElementLink per element, so ``m_persIndex`` is a straight per-element
+        gather from the join target's per-entry arrays — no ragged re-grouping,
+        and the result has exactly the shape the group's own branches have. Every
+        failure mode is loud: a null link (``m_persKey == 0``) would silently
+        break the 1:1 pairing, an index outside the target is a wrong-container
+        read, and a target with a different entry count is not this file's.
+        """
+        import awkward as ak
+
+        link_branch = self._on_disk(cfg, cfg.join_branch or "")
+        links = t[link_branch].array(entry_start=e0, entry_stop=e1, library="ak")  # [entry][elem]
+        pidx = _pers_index(links)
+        pkey = _pers_key(links)
+        _check_single_pers_key(pkey, link_branch)
+        if pkey is not None:
+            n_null = int(ak.sum(ak.flatten(pkey, axis=None) == 0))
+            if n_null:
+                raise SchemaError(
+                    f"1:1 join {link_branch!r}: {n_null:,} null ElementLink(s) (m_persKey == 0) "
+                    f"in entries [{e0}, {e1}) — the joined fields have no value for those "
+                    "elements. A 1:1 join cannot drop or pad them without silently "
+                    "desynchronising the joined fields from the group's own"
+                )
+        per_elem = ak.to_numpy(ak.num(pidx, axis=1)).astype(np.int64)  # elements per entry
+        idx_flat = ak.to_numpy(ak.flatten(pidx, axis=1)).astype(np.int64)
+
+        block: dict[str, Any] = {}
+        for f in fields:
+            branch = self._join_branch(cfg, cfg.join_branches[f])
+            tgt = t[branch].array(entry_start=e0, entry_stop=e1, library="ak")  # [entry][target]
+            counts = ak.to_numpy(ak.num(tgt, axis=1)).astype(np.int64)
+            if counts.size != per_elem.size:
+                raise SchemaError(
+                    f"1:1 join {link_branch!r} -> {branch!r}: the join target has "
+                    f"{counts.size} entries but the link has {per_elem.size} over the same "
+                    "entry range — the two branches are not aligned"
+                )
+            limits = np.repeat(counts, per_elem)
+            bad = (idx_flat < 0) | (idx_flat >= limits)
+            if bad.any():
+                first = int(np.flatnonzero(bad)[0])
+                raise SchemaError(
+                    f"1:1 join {link_branch!r} -> {branch!r}: m_persIndex out of range for "
+                    f"{int(bad.sum()):,} element(s) (first: index {idx_flat[first]} into a "
+                    f"container of {limits[first]}) — the link does not address this container"
+                )
+            starts = np.concatenate([[0], np.cumsum(counts)])[:-1]
+            gathered = np.asarray(ak.flatten(tgt, axis=1))[idx_flat + np.repeat(starts, per_elem)]
+            arr = ak.unflatten(gathered, per_elem)  # [entry][elem]
+            block[f] = ak.flatten(arr, axis=1) if self.unroll is not None else arr
+        return block
 
     def _read_linked_block(
         self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int

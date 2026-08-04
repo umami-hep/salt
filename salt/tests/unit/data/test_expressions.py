@@ -140,3 +140,95 @@ def test_not_simple(src: str) -> None:
 
 def test_parse_expression_is_cached() -> None:
     assert parse_expression("d0 < 3.5") is parse_expression("d0 < 3.5")
+
+
+# --------------------------------------------------------------------------- #
+# whitelisted functions: abs/log elementwise, sum/count reducing a constituent axis
+# --------------------------------------------------------------------------- #
+
+
+def test_abs_and_log_are_elementwise() -> None:
+    src = {"eta": np.array([-4.6, -1.0, 2.0]), "r": np.array([0.5, 1.0, 2.0])}
+    np.testing.assert_array_equal(
+        Expression("abs(eta) < 4.5").evaluate(src), [False, True, True]
+    )
+    np.testing.assert_array_equal(
+        Expression("log(r) > -0.385").evaluate(src), np.log(src["r"]) > -0.385
+    )
+
+
+def test_elementwise_call_keeps_its_fields_on_the_row_axis() -> None:
+    expr = Expression("abs(eta) < 4.5")
+    assert expr.fields == ("eta",)
+    assert expr.aggregations == ()
+
+
+def test_aggregation_is_not_a_row_field() -> None:
+    expr = Expression("sum(jets.valid) >= 4")
+    assert expr.fields == ()  # `valid` lives on the constituent axis, not the row
+    (agg,) = expr.aggregations
+    assert (agg.func, agg.stream, agg.fields) == ("sum", "jets", ("valid",))
+    assert agg.source == "sum(jets.valid)"
+
+
+def test_aggregation_key_is_a_legal_structured_dtype_name() -> None:
+    (agg,) = Expression("sum(jets.valid) >= 4").aggregations
+    rec = np.zeros(3, dtype=[(agg.key, "i8")])  # must not raise
+    assert rec.dtype.names == (agg.key,)
+
+
+def test_aggregation_reads_its_value_from_the_precomputed_column() -> None:
+    (agg,) = Expression("sum(jets.valid) >= 4").aggregations
+    src = {agg.key: np.array([3, 4, 5])}
+    np.testing.assert_array_equal(
+        Expression("sum(jets.valid) >= 4").evaluate(src), [False, True, True]
+    )
+
+
+def test_aggregations_deduplicate_within_one_expression() -> None:
+    expr = Expression("sum(jets.valid) + sum(jets.valid) >= 8")
+    assert len(expr.aggregations) == 1
+
+
+def test_two_spellings_of_one_reduction_share_a_key() -> None:
+    a = Expression("sum( jets.valid ) >= 4").aggregations[0]
+    b = Expression("sum(jets.valid) >= 2").aggregations[0]
+    assert a.key == b.key
+
+
+@pytest.mark.parametrize(
+    ("src", "match"),
+    [
+        ("foo(d0) < 1", "not a whitelisted function"),
+        ("np.log(d0) < 1", "not a whitelisted function"),
+        ("sum(jets.pt, 1) >= 2", "exactly one positional"),
+        ("sum(jets.pt, axis=1) >= 2", "exactly one positional"),
+        ("sum(sum(jets.pt)) >= 2", "collapsed once"),
+        ("sum(jets.pt) + count(sum(jets.pt)) >= 2", "collapsed once"),
+        ("sum(valid) >= 4", "qualifier"),
+        ("sum(a.b.c) >= 4", "qualifier"),
+        ("sum(jets.pt + tracks.pt) >= 4", "mixes streams"),
+        ("sum(4) >= 4", "references no field"),
+        ("(d0 < 1) < 1", "only appear once"),
+        ("abs(d0 < 1) < 1", "only appear once"),
+    ],
+)
+def test_rejected_call_forms(src: str, match: str) -> None:
+    with pytest.raises(ConfigError, match=match):
+        Expression(src)
+
+
+def test_aggregation_evaluate_reduces_the_constituent_axis() -> None:
+    ak = pytest.importorskip("awkward")
+    cols = {"pt": ak.Array([[10.0, 20.0, 30.0], [], [40.0]])}
+    (agg,) = Expression("sum(jets.pt) > 1").aggregations
+    np.testing.assert_array_equal(agg.evaluate(cols), [60.0, 0.0, 40.0])
+    (cnt,) = Expression("count(jets.pt) > 1").aggregations
+    np.testing.assert_array_equal(cnt.evaluate(cols), [3, 0, 1])
+
+
+def test_aggregation_evaluate_counts_a_predicate() -> None:
+    ak = pytest.importorskip("awkward")
+    cols = {"pt": ak.Array([[10.0, 20.0, 30.0], [], [40.0]])}
+    (agg,) = Expression("sum(jets.pt > 15.0) >= 2").aggregations
+    np.testing.assert_array_equal(agg.evaluate(cols), [2, 0, 1])
