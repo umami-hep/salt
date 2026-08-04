@@ -13,9 +13,6 @@
 #   - MultiSampleReader injects a per-event sample label as raw.event.process
 #     (signal=1, background=0). Only branches common to both campaigns are read.
 
-include:
-  - easyjet_hh4b_ttbar.yaml
-
 data:
   train_file: train  # placeholders: MultiSampleReader sources per sample below
   val_file: val

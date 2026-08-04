@@ -5,6 +5,9 @@
 # per event) and proportionally interleaved, with a per-event sample label
 # injected as raw.event.process. Only branches common to both campaigns are used.
 
+include:
+  - easyjet_hh4b.yaml
+
 name: easyjet_hh4b_ttbar
 
 data:
@@ -17,46 +20,6 @@ data:
   val_file: val
   test_file: test
   modules:
-    reader:
-      class_path: salt.data.MultiSampleReader
-      init_args:
-        label_stream: event
-        label_field: process
-        samples:
-          - name: signal
-            label: 1
-            reader:
-              class_path: salt.data.UprootReader
-              init_args:
-                tree: AnalysisMiniTree
-                unroll: null
-                groups: &ej_groups
-                  jets:
-                    jagged: true
-                    truncate: 20
-                    branches:
-                      pt: recojet_antikt4PFlow_pt_NOSYS
-                      eta: recojet_antikt4PFlow_eta
-                      phi: recojet_antikt4PFlow_phi
-                      m: recojet_antikt4PFlow_m_NOSYS
-                      GN2v01_pb: recojet_antikt4PFlow_GN2v01_pb
-                      GN2v01_pc: recojet_antikt4PFlow_GN2v01_pc
-                      GN2v01_pu: recojet_antikt4PFlow_GN2v01_pu
-                  event:
-                    jagged: false
-                    branches:
-                      eventNumber: eventNumber
-                      mcChannelNumber: mcChannelNumber
-            # sources: REQUIRED override per stage — signal files
-          - name: background
-            label: 0
-            reader:
-              class_path: salt.data.UprootReader
-              init_args:
-                tree: AnalysisMiniTree
-                unroll: null
-                groups: *ej_groups
-            # sources: REQUIRED override per stage — ttbar files
     features:
       class_path: salt.data.Features
       init_args:

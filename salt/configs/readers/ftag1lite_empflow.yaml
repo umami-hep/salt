@@ -7,48 +7,15 @@
 # unroll: jets serves one row per jet (`[event][jet] -> jet`); the jets/tracks
 # `prefix` is the jet-collection aux store `AntiKt4EMPFlowJetsAuxDyn.`.
 
+include:
+  - ftag1lite.yaml
+
 name: ftag1lite_empflow
 
 data:
   batch_size: 1000
   num_workers: 4
   modules:
-    reader:
-      class_path: salt.data.UprootReader
-      init_args:
-        tree: CollectionTree
-        unroll: jets
-        groups:
-          jets:
-            prefix: AntiKt4EMPFlowJetsAuxDyn.
-            jagged: false
-            branches:
-              pt: pt
-              eta: eta_calibrated
-              phi: phi_calibrated
-              mass: mass_calibrated
-              flavour_label: HadronConeExclTruthLabelID
-          tracks:
-            prefix: AntiKt4EMPFlowJetsAuxDyn.
-            jagged: true
-            pad_max: 40
-            branches:
-              d0: ft1l_trk_d0_bf16
-              z0SinTheta: ft1l_trk_z0SinTheta_bf16
-              d0Uncertainty: ft1l_trk_d0Uncertainty_bf16
-              z0SinThetaUncertainty: ft1l_trk_z0SinThetaUncertainty_bf16
-              lifetimeSignedD0Significance: ft1l_trk_lifetimeSignedD0Significance_bf16
-              lifetimeSignedZ0SinThetaSignificance: ft1l_trk_lifetimeSignedZ0SinThetaSignificance_bf16
-              pt: ft1l_trk_pt_bf16
-              deta: ft1l_trk_deta_bf16
-              dphi: ft1l_trk_dphi_bf16
-              numberOfPixelHits: ft1l_trk_numberOfPixelHits
-              numberOfSCTHits: ft1l_trk_numberOfSCTHits
-              # kept under v1 field names so the task heads' label-derivation
-              # contracts hold (VertexingTaskModule derives the origin key via
-              # label.replace('VertexIndex', 'OriginLabel'))
-              ftagTruthOriginLabel: ft1l_trk_ftagTruthOriginLabel
-              ftagTruthVertexIndex: ft1l_trk_ftagTruthVertexIndex
     features:
       class_path: salt.data.Features
       init_args:
