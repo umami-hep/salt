@@ -60,22 +60,25 @@
 #   constituent axis:
 #
 #       sum(jets.valid) >= 4                          # >= 4 jets, post-jet-cuts
-#       sum(log(...) > -0.385) >= 2                   # >= 2 at FixedCutBEff_85
+#       sum((log(...) > -0.385) & (abs(eta) < 2.5)) >= 2   # >= 2 at FixedCutBEff_85
 #
 #   `sum()` reduces AFTER the constituent cuts and AFTER truncation to
 #   `truncate: 20`, so it counts the jets the model is actually handed. `log` and
-#   `abs` are whitelisted too, so the b-tag discriminant is spelled the way ATLAS
+#   `abs` are whitelisted, so the b-tag discriminant is spelled the way ATLAS
 #   defines it, D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385, rather than as the
-#   equivalent ratio > exp(-0.385); |eta| < 4.5 is still two cuts because
-#   `abs` cannot help a cut that has to stay a single comparison.
+#   equivalent ratio > exp(-0.385); `&` joins that to the |eta| < 2.5 b-tagging
+#   ACCEPTANCE, which is tighter than the |eta| < 4.5 jet cut because GN2 needs
+#   tracks. (The per-jet |eta| < 4.5 above is still two cuts: a constituent cut
+#   has to stay a single comparison, and `&` is only legal where a comparison is
+#   — inside a reduction.)
 #
 #   Measured closure (experiment 58, ttbar 601237, the same 10,000 events easyjet
-#   read): 9,842 events pass ">= 4 jets" and 5,258 pass "+ >= 2 b-tags", against
-#   the 5,003 easyjet wrote — +5.1%. The residual is overlap removal (needs the
-#   lepton collections and the CP OR tool) plus easyjet's own b-jet-energy and
-#   muon-in-jet re-calibration, which shifts jet pt and hence both counts. It is a
-#   real property of the two formats, not a missing cut, and must not be chased by
-#   joining on event number.
+#   read; reproduced from these very cuts in experiment 63): 9,842 events pass
+#   ">= 4 jets" and 5,258 pass "+ >= 2 b-tags", against the 5,003 easyjet wrote —
+#   +5.1%. The residual is overlap removal (needs the lepton collections and the
+#   CP OR tool) plus easyjet's own b-jet-energy and muon-in-jet re-calibration,
+#   which shifts jet pt and hence both counts. It is a real property of the two
+#   formats, not a missing cut, and must not be chased by joining on event number.
 
 data:
   train_file: train  # placeholders: MultiSampleReader sources per sample below
@@ -110,8 +113,9 @@ data:
                     - expr: sum(jets.valid) >= 4
                       comment: easyjet AT_LEAST_FOUR_JETS
                     - expr: >-
-                        sum(log(jets.GN2v01_pb / (0.2 * jets.GN2v01_pc
-                        + 0.8 * jets.GN2v01_pu)) > -0.385) >= 2
+                        sum((log(jets.GN2v01_pb / (0.2 * jets.GN2v01_pc
+                        + 0.8 * jets.GN2v01_pu)) > -0.385)
+                        & (abs(jets.eta) < 2.5)) >= 2
                       comment: easyjet AT_LEAST_TWO_BJETS, GN2v01 FixedCutBEff_85
                 groups:
                   jets:

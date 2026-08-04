@@ -1,7 +1,8 @@
 """`Expression` — an ``ast``-whitelist evaluator for cut predicates: numeric
 arithmetic over stream fields, a small function whitelist (``abs``/``log``
-elementwise, ``sum``/``count`` reducing a constituent axis) plus exactly one
-comparison, evaluated vectorised with numpy. No ``eval``, no new dependency.
+elementwise, ``sum``/``count`` reducing a constituent axis), ``&``/``|`` between
+predicates inside a reduction, and exactly one top-level comparison, evaluated
+vectorised with numpy. No ``eval``, no new dependency.
 """
 
 from __future__ import annotations
@@ -25,6 +26,17 @@ _BINOPS: dict[type[ast.operator], Any] = {
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
 }
+_COMBINATORS: dict[type[ast.operator], Any] = {
+    ast.BitAnd: operator.and_,
+    ast.BitOr: operator.or_,
+}
+"""``&`` / ``|`` — the only operators that may join two comparisons, and only
+where a comparison is legal in the first place (inside a reduction). NOT ``and``
+/ ``or``: those call ``__bool__`` and would collapse an array to one truth value.
+Python binds ``&`` TIGHTER than a comparison, so the operands must be
+parenthesised — ``a > 1 & b < 2`` parses as ``a > (1 & b) < 2`` and is rejected as
+a chained comparison."""
+
 _UNARYOPS: dict[type[ast.unaryop], Any] = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _COMPARES: dict[type[ast.cmpop], Any] = {
     ast.Eq: operator.eq,
@@ -152,13 +164,16 @@ def _check(node: ast.expr, source: str, *, allow_compare: bool, in_agg: bool) ->
         _check(node.left, source, allow_compare=False, in_agg=in_agg)
         _check(node.comparators[0], source, allow_compare=False, in_agg=in_agg)
     elif isinstance(node, ast.BinOp):
-        if type(node.op) not in _BINOPS:
+        combines = type(node.op) in _COMBINATORS
+        if not combines and type(node.op) not in _BINOPS:
             raise ConfigError(
                 f"cut expression {source!r}: unsupported operator {type(node.op).__name__} — "
-                "only + - * / are allowed"
+                "only + - * / are allowed (and & | to combine two predicates)"
             )
-        _check(node.left, source, allow_compare=False, in_agg=in_agg)
-        _check(node.right, source, allow_compare=False, in_agg=in_agg)
+        # only & / | pass the right to hold a comparison through to their operands
+        sub = allow_compare if combines else False
+        _check(node.left, source, allow_compare=sub, in_agg=in_agg)
+        _check(node.right, source, allow_compare=sub, in_agg=in_agg)
     elif isinstance(node, ast.UnaryOp):
         if type(node.op) not in _UNARYOPS:
             raise ConfigError(
@@ -188,7 +203,8 @@ def _check(node: ast.expr, source: str, *, allow_compare: bool, in_agg: bool) ->
         raise ConfigError(
             f"cut expression {source!r}: {type(node).__name__} is not allowed — cut "
             f"expressions may only use field names, numbers, + - * /, parentheses, "
-            f"{sorted([*_ELEMENTWISE, *_AGGREGATIONS])} and one comparison"
+            f"{sorted([*_ELEMENTWISE, *_AGGREGATIONS])}, & | between predicates, and "
+            "one comparison"
         )
 
 
@@ -310,7 +326,8 @@ def _evaluate(node: ast.expr, source: Mapping[str, Any] | np.ndarray) -> Any:
             _evaluate(node.left, source), _evaluate(node.comparators[0], source)
         )
     if isinstance(node, ast.BinOp):
-        return _BINOPS[type(node.op)](_evaluate(node.left, source), _evaluate(node.right, source))
+        op = _BINOPS.get(type(node.op)) or _COMBINATORS[type(node.op)]
+        return op(_evaluate(node.left, source), _evaluate(node.right, source))
     if isinstance(node, ast.UnaryOp):
         return _UNARYOPS[type(node.op)](_evaluate(node.operand, source))
     if isinstance(node, ast.Call):
@@ -458,10 +475,11 @@ class Expression:
         prefix, which is stripped (and is REQUIRED inside a reduction). Only
         field names, numeric constants, ``+ - * /``, parentheses, unary
         ``+``/``-``, the whitelisted functions ``abs``/``log`` (elementwise) and
-        ``sum``/``count`` (reducing a constituent axis), and exactly one
-        top-level comparison (``== != < <= > >=``) are accepted; everything else
-        (other calls, attributes on non-names, subscripts, lambdas,
-        comprehensions, boolean operators, ...) is rejected.
+        ``sum``/``count`` (reducing a constituent axis), ``&``/``|`` joining two
+        predicates where a comparison is legal, and exactly one top-level
+        comparison (``== != < <= > >=``) are accepted; everything else (other
+        calls, attributes on non-names, subscripts, lambdas, comprehensions,
+        ``and``/``or``, ...) is rejected.
 
     Attributes
     ----------

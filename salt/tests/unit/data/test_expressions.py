@@ -149,9 +149,7 @@ def test_parse_expression_is_cached() -> None:
 
 def test_abs_and_log_are_elementwise() -> None:
     src = {"eta": np.array([-4.6, -1.0, 2.0]), "r": np.array([0.5, 1.0, 2.0])}
-    np.testing.assert_array_equal(
-        Expression("abs(eta) < 4.5").evaluate(src), [False, True, True]
-    )
+    np.testing.assert_array_equal(Expression("abs(eta) < 4.5").evaluate(src), [False, True, True])
     np.testing.assert_array_equal(
         Expression("log(r) > -0.385").evaluate(src), np.log(src["r"]) > -0.385
     )
@@ -232,3 +230,32 @@ def test_aggregation_evaluate_counts_a_predicate() -> None:
     cols = {"pt": ak.Array([[10.0, 20.0, 30.0], [], [40.0]])}
     (agg,) = Expression("sum(jets.pt > 15.0) >= 2").aggregations
     np.testing.assert_array_equal(agg.evaluate(cols), [2, 0, 1])
+
+
+def test_predicates_combine_inside_a_reduction() -> None:
+    ak = pytest.importorskip("awkward")
+    cols = {
+        "pt": ak.Array([[10.0, 20.0, 30.0], [], [40.0]]),
+        "eta": ak.Array([[0.5, 3.0, 1.0], [], [0.1]]),
+    }
+    (agg,) = Expression("sum((jets.pt > 15.0) & (abs(jets.eta) < 2.5)) >= 2").aggregations
+    np.testing.assert_array_equal(agg.evaluate(cols), [1, 0, 1])  # jet 1 fails |eta|
+    (either,) = Expression("sum((jets.pt > 35.0) | (abs(jets.eta) < 0.6)) >= 1").aggregations
+    np.testing.assert_array_equal(either.evaluate(cols), [1, 0, 1])
+    assert agg.fields == ("pt", "eta")
+
+
+@pytest.mark.parametrize(
+    ("src", "match"),
+    [
+        # & binds tighter than a comparison, so unparenthesised operands are a
+        # chained comparison, not a conjunction
+        ("sum(jets.pt > 15.0 & jets.eta < 2.5) >= 2", "chained comparisons"),
+        # a conjunction is only legal where a comparison is
+        ("(d0 > 1) & (npix < 2) > 0", "only appear once"),
+        ("d0 < 3.5 and npix > 1", "not allowed"),
+    ],
+)
+def test_rejected_combinator_forms(src: str, match: str) -> None:
+    with pytest.raises(ConfigError, match=match):
+        Expression(src)
