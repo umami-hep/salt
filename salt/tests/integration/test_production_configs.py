@@ -77,12 +77,16 @@ def test_every_production_config_has_a_recipe():
 @pytest.fixture(scope="module")
 def datasets(tmp_path_factory) -> dict[str, dict[str, Path]]:
     """Run each recipe once; every config using it shares the result."""
+    import yaml  # noqa: PLC0415
+
+    from salt.testing.datagen import compute_norm_dict  # noqa: PLC0415
+
     built: dict[str, dict[str, Path]] = {}
     for recipe in sorted(set(RECIPES.values())):
         out = tmp_path_factory.mktemp(f"datagen_{recipe}")
         pipe = load_pipeline(str(RECIPES_DIR / f"{recipe}.yaml"))
         pipe.set_output_dir(out)
-        pipe.run()
+        data = pipe.run()
         h5 = out / f"{recipe}.h5"
         assert h5.is_file(), f"recipe {recipe} wrote no H5"
         schema = out / "schema.yaml"
@@ -92,8 +96,36 @@ def datasets(tmp_path_factory) -> dict[str, dict[str, Path]]:
             path = out / name
             if path.is_file():
                 entry[name.split("_")[0]] = path
+        # not every recipe ships a NormWriter (event_objects does not), but every
+        # config with a Normaliser needs one — derive it from the produced arrays
+        if "norm" not in entry:
+            nd = out / "norm_dict.yaml"
+            nd.write_text(yaml.dump(compute_norm_dict(data), sort_keys=False))
+            entry["norm"] = nd
         built[recipe] = entry
     return built
+
+
+def _norm_dict_overrides(cfg: Path, norm_dict: Path) -> list[str]:
+    """``model.modules.<name>.init_args.norm_dict`` for every Normaliser.
+
+    The modules live under ``model.init_args.modules``; reading ``model.modules``
+    instead silently yields no overrides and turns healthy configs into failures.
+    Several configs carry more than one Normaliser (``norm`` plus
+    ``norm_global``), so overriding only ``norm`` is not enough.
+    """
+    import yaml  # noqa: PLC0415
+
+    raw = yaml.safe_load(cfg.read_text()) or {}
+    model = raw.get("model")
+    modules = (model or {}).get("init_args", {}).get("modules") if isinstance(model, dict) else None
+    return [
+        f"model.modules.{name}.init_args.norm_dict={norm_dict}"
+        for name, node in (modules or {}).items()
+        if isinstance(node, dict)
+        and "Normaliser" in str(node.get("class_path", ""))
+        and "norm_dict" not in (node.get("init_args") or {})
+    ]
 
 
 def _declares_onnx_export(cfg: Path) -> bool:
@@ -113,8 +145,8 @@ def _declares_onnx_export(cfg: Path) -> bool:
     )
 
 
-def _data_args(data: dict[str, Path]) -> list[str]:
-    args = [
+def _data_args(cfg: Path, data: dict[str, Path]) -> list[str]:
+    return [
         f"--data.train_file={data['h5']}",
         f"--data.val_file={data['h5']}",
         f"--data.modules.reader.init_args.schema={data['schema']}",
@@ -122,10 +154,8 @@ def _data_args(data: dict[str, Path]) -> list[str]:
         "--data.num_workers=0",
         # the recipes emit 1000 rows; shipped batch sizes run to 4000
         "--data.batch_size=50",
+        *(f"--{o}" for o in _norm_dict_overrides(cfg, data["norm"])),
     ]
-    if "norm" in data:
-        args.append(f"--model.modules.norm.init_args.norm_dict={data['norm']}")
-    return args
 
 
 def _trainer_args(root: Path) -> list[str]:
@@ -152,20 +182,22 @@ def test_config_merges_and_plots(config, datasets, tmp_path):
     data = datasets[RECIPES[config]]
     cfg = CONFIG_DIR / f"{config}.yaml"
 
+    sets: list[str] = []
+    for override in ["trainer.accelerator=auto", *_norm_dict_overrides(cfg, data["norm"])]:
+        sets += ["--set", override]
+
     argv = ["graph", "validate", "-c", str(cfg)]
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
-    argv += ["--set", "trainer.accelerator=auto"]
-    if "norm" in data:
-        argv += ["--set", f"model.modules.norm.init_args.norm_dict={data['norm']}"]
-    assert salt_main(argv) == 0, f"{config}: config merge / plan compile failed"
+    assert salt_main([*argv, *sets]) == 0, f"{config}: config merge / plan compile failed"
 
-    plot_argv = ["graph", "plot", "-c", str(cfg), "--outdir", str(tmp_path)]
-    plot_argv += ["--set", "trainer.accelerator=auto"]
-    if "norm" in data:
-        plot_argv += ["--set", f"model.modules.norm.init_args.norm_dict={data['norm']}"]
-    assert salt_main(plot_argv) == 0, f"{config}: graph plot failed"
-    assert any(tmp_path.iterdir()), f"{config}: graph plot wrote nothing"
+    # `graph plot` renders one mode to one file
+    out_path = tmp_path / f"{config}.dot"
+    plot_argv = ["graph", "plot", "-c", str(cfg), "--mode", "fit", "-o", str(out_path)]
+    assert salt_main([*plot_argv, *sets]) == 0, f"{config}: graph plot failed"
+    assert out_path.is_file() or any(tmp_path.iterdir()), (
+        f"{config}: graph plot wrote nothing to {tmp_path}"
+    )
 
 
 @pytest.mark.parametrize("config", PRODUCTION)
@@ -179,7 +211,7 @@ def test_config_trains_evaluates_and_exports(config, datasets, tmp_path):
     cfg = CONFIG_DIR / f"{config}.yaml"
 
     # -- leg 2: train
-    rc = salt_main(["fit", "--config", str(cfg), *_data_args(data), *_trainer_args(tmp_path)])
+    rc = salt_main(["fit", "--config", str(cfg), *_data_args(cfg, data), *_trainer_args(tmp_path)])
     assert rc == 0, f"{config}: salt fit failed"
 
     ckpts = sorted(tmp_path.rglob("*.ckpt"))
