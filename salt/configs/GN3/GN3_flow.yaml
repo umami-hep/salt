@@ -2,8 +2,11 @@
 # stream. Note the served stream is `flow`, mapped from the `flows` H5
 # dataset. Feeds the encoder attention but has no task, so it is not split
 # out. List-valued init_args (Normaliser/Concat streams) replace rather than
-# merge across configs, so the full lists are re-stated here. Stack as:
-#   salt ... -c salt/configs/GN3/GN3_baseline.yaml -c salt/configs/GN3/GN3_baseline_loose.yaml -c salt/configs/GN3/GN3_flow.yaml
+# merge across configs, so the full lists are re-stated here.
+
+include:
+  - GN3_baseline.yaml
+  - GN3_baseline_loose.yaml
 
 name: GN3_flow
 

@@ -1,7 +1,9 @@
 # Thin overlay on GN3_baseline.yaml: retargets the `tracks` stream from the
 # ghost-associated tracks to the dR-matched tracks (served stream name stays
-# `tracks`, so downstream modules/tasks are untouched). Stack GN3_baseline.yaml
-# first, then this overlay.
+# `tracks`, so downstream modules/tasks are untouched).
+
+include:
+  - GN3_baseline.yaml
 
 name: GN3_dR
 

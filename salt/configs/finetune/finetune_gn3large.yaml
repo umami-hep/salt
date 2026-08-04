@@ -19,6 +19,9 @@
 #
 # Walk-through: docs/tutorials/finetuning.md (worked example A).
 
+include:
+  - GN3/GN3V00.yaml
+
 training_schedule:
   stages:
     head_warmup:

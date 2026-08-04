@@ -1,6 +1,9 @@
 # Thin overlay on GN3V00.yaml: switches the encoder to RMSNorm + hybrid norm
 # placement (deep-merged onto GN3V00's encoder block; everything else
-# inherited). Stack GN3V00.yaml first, then this overlay.
+# inherited).
+
+include:
+  - GN3V00.yaml
 
 name: GN3_Hybrid
 

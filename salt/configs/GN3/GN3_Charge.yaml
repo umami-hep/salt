@@ -1,7 +1,10 @@
 # Overlay on GN3V00.yaml: adds a 3-class b-jet charge head (raw PdgId folded
-# through a ~300-entry label_map). Stack GN3V00.yaml first, then this overlay.
+# through a ~300-entry label_map).
 # run_tasks is a list, so cross-config merge REPLACES it — this overlay must
 # restate the full 6-task list, not just the head it adds.
+
+include:
+  - GN3V00.yaml
 
 name: GN3_Charge
 

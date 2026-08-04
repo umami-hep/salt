@@ -1,5 +1,8 @@
 # Thin overlay on GN3_baseline.yaml: removes its track constituent cuts (loose
-# tracks) via null-deletion. Stack GN3_baseline.yaml first, then this overlay.
+# tracks) via null-deletion.
+
+include:
+  - GN3_baseline.yaml
 
 name: GN3_baseline_loose
 
