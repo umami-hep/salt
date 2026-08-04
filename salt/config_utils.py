@@ -23,6 +23,10 @@ def disable_logger_in_config(config_path: str) -> str:
     same ``TMPDIR`` — the config you edited is not the config that is parsed,
     and the failure surfaces far from its cause.
     """
+    # expand any include: chain FIRST: this writes a /tmp copy, and a relative
+    # include resolved from there would look in /tmp rather than beside the
+    # original config
+    config_path = expand_includes(config_path)
     raw = Path(config_path).read_bytes()
     digest = hashlib.md5(config_path.encode() + b"\0" + raw, usedforsecurity=False)
     cache_key = digest.hexdigest()[:12]
