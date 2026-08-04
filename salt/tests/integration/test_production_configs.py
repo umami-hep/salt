@@ -111,7 +111,9 @@ def _norm_dict_overrides(cfg: Path, norm_dict: Path) -> list[str]:
     """
     import yaml  # noqa: PLC0415
 
-    raw = yaml.safe_load(cfg.read_text()) or {}
+    from salt.config_utils import expand_includes  # noqa: PLC0415
+
+    raw = yaml.safe_load(Path(expand_includes(str(cfg))).read_text()) or {}
     model = raw.get("model")
     modules = (model or {}).get("init_args", {}).get("modules") if isinstance(model, dict) else None
     return [

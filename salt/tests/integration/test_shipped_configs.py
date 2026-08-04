@@ -124,9 +124,14 @@ def _norm_dict_overrides(stack: list[Path], nd_path: Path) -> list[str]:
     The modules live at ``model.init_args.modules``; reading ``model.modules``
     instead yields zero overrides and turns healthy configs into false failures.
     """
+    from salt.config_utils import expand_includes  # noqa: PLC0415
+
     merged: dict = {}
     for path in stack:
-        raw = yaml.safe_load(path.read_text())
+        # scan the EXPANDED config: an overlay inherits its Normaliser from the
+        # base it includes, so reading the raw file finds nothing and the parse
+        # then dies on a required norm_dict
+        raw = yaml.safe_load(Path(expand_includes(str(path))).read_text())
         merged = _deep_merge(merged, raw if isinstance(raw, dict) else {})
     model = merged.get("model")
     modules = (model or {}).get("init_args", {}).get("modules") if isinstance(model, dict) else None
