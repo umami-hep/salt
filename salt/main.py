@@ -194,7 +194,7 @@ def _patch_jsonargparse_class_path_remap() -> None:
 _patch_jsonargparse_class_path_remap()
 
 CONFIG_DIR = Path(__file__).parent / "configs"
-"""Directory shipping ``base2.yaml`` and the worked GN2v2 configs."""
+"""Directory shipping ``base.yaml`` and the worked GN2v2 configs."""
 
 _GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
 _EXPORT_COMMAND = "export"
@@ -266,7 +266,7 @@ def _best_checkpoint(config_path: Path) -> str:
         raise ConfigError(
             f"no 'loss='-named checkpoints under {config_path.parent}/{{ckpts,checkpoints}} — "
             "pass --ckpt_path explicitly (v1 best-epoch contract, utils/cli.py:71-78; "
-            "base2.yaml names checkpoints 'epoch=NNN-loss=<val/loss>.ckpt' to match)"
+            "base.yaml names checkpoints 'epoch=NNN-loss=<val/loss>.ckpt' to match)"
         )
     best = min(scored)[1]
     print(f"salt test: using checkpoint {best}")
@@ -569,7 +569,7 @@ class SaltCLI(LightningCLI):
     """The salt v2 `LightningCLI`.
 
     Wires `SaltModule` (subclass mode) and `GraphDataModule` through
-    `DeepMergeParser`, auto-loads ``configs/base2.yaml``, and adds the salt
+    `DeepMergeParser`, auto-loads ``configs/base.yaml``, and adds the salt
     top-level namespaces:
 
     - ``name:`` — run name, linked to ``model.init_args.name``.
@@ -590,7 +590,7 @@ class SaltCLI(LightningCLI):
         # before super().__init__: add_arguments_to_parser runs inside it and
         # needs to know whether this is the run-free parse surface
         self._run_mode = bool(run)
-        default_config = [str(CONFIG_DIR / "base2.yaml")]
+        default_config = [str(CONFIG_DIR / "base.yaml")]
         parser_kwargs: dict[str, Any] = {"default_env": True}
         if run:
             parser_kwargs.update({

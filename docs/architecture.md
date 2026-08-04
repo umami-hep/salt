@@ -125,7 +125,7 @@ next to the checkpoint, with the eval H5 (see below).
 
 ## Config model
 
-- `base2.yaml` is auto-loaded; your config stacks on top.
+- `base.yaml` is auto-loaded; your config stacks on top.
 - `model.init_args.modules` and `data.modules` are **dicts of named
   modules** (`{name: {class_path, init_args}}`). The dict key is the
   instance name and the config address.
@@ -181,7 +181,7 @@ base — further `--config` override files and CLI flags stack on top of it
 exactly as for `fit` (the custom-output journey below relies on this); one
 test file per call; logger off; single device forced. Without `--ckpt_path`
 the v1 best-epoch glob picks the lowest `loss=` checkpoint from `ckpts/`
-(v1 runs) or `checkpoints/` (v2 runs — `base2.yaml` names files
+(v1 runs) or `checkpoints/` (v2 runs — `base.yaml` names files
 `epoch=NNN-loss=<val/loss>.ckpt` so the glob matches by construction) next
 to the single `--config` — when stacking a second `--config`, pass
 `--ckpt_path` explicitly (the glob needs exactly one config to anchor on). The output is ONE H5 next to the checkpoint:
@@ -207,7 +207,7 @@ only when it carries a manifest the command cannot guess (`MaskFormer.yaml`)
 or when it is a third-party one; the implicit wiring then leaves it alone.
 A sink declared under `callbacks:` is accepted for one deprecation window.
 
-Every model config defines its own section (`base2.yaml` ships none) —
+Every model config defines its own section (`base.yaml` ships none) —
 **writer dict order = per-group column order**, the v1 layout being:
 
 ```yaml
@@ -547,7 +547,7 @@ every module's flattened requires/produces with resolved specs) and
 `graph_<stage>.{dot,svg}` (+ `graph_<stage>_dataset.{dot,svg}`). Fit
 artifacts go into the trainer log dir; test artifacts go NEXT TO THE
 CHECKPOINT, with the eval H5. Default-on via the `artifacts:` entry in
-`base2.yaml` (`salt.callbacks.GraphArtifacts`); delete with
+`base.yaml` (`salt.callbacks.GraphArtifacts`); delete with
 `--callbacks.artifacts=null`, retarget with
 `--callbacks.artifacts.init_args.output_dir=...`. (Writer nodes are not
 rendered in the `graph plot` output itself — the plan-table writer-sinks

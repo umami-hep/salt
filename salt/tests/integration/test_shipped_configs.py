@@ -35,7 +35,7 @@ from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 pytestmark = pytest.mark.cpu_always
 
 # Auto-loaded by SaltCLI for every fit/test, never stacked by a user.
-MACHINERY = {"base2"}
+MACHINERY = {"base"}
 
 # Overlay fragments -> the stack that precedes them, from each config's own
 # header comment. Paths are relative to salt/configs.
@@ -283,7 +283,7 @@ def test_config_fast_dev_run(config, fixtures, tmp_path, request):
         f"--trainer.default_root_dir={tmp_path}",
         # auto, not cpu: on a GPU runner these must exercise the GPU path
         "--trainer.accelerator=auto",
-        # base2 ships a default-ON CometLogger; off so the run writes no offline
+        # base ships a default-ON CometLogger; off so the run writes no offline
         # Comet archive (lr_monitor drops with it).
         "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
@@ -293,7 +293,7 @@ def test_config_fast_dev_run(config, fixtures, tmp_path, request):
         "--data.batch_size=50",
         # shipped configs assume large training machines
         "--data.num_workers=0",
-        # null-delete the base2 ProgressBar: the stock enable_progress_bar=false
+        # null-delete the base ProgressBar: the stock enable_progress_bar=false
         # cannot coexist with a configured bar.
         "--callbacks.progress=null",
     ]

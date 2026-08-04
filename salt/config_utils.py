@@ -13,7 +13,7 @@ def disable_logger_in_config(config_path: str) -> str:
     """Load a config, disable trainer.logger, and write to /tmp.
 
     For keyless environments (no COMET_API_KEY), the default-ON CometLogger
-    in base2.yaml fails during instantiate_classes with "Comet.ml requires
+    in base.yaml fails during instantiate_classes with "Comet.ml requires
     an API key".
 
     The cache key covers the config's PATH **and its CONTENT**, so parallel

@@ -4,7 +4,7 @@ and render one static model-graph plot per ``training_schedule`` stage with the
 stage's frozen modules visually distinguished.
 
 Trainer-free and data-free: the merged YAML is the ``salt fit --print_config``
-dump (same `DeepMergeParser` surface, `base2.yaml` defaults, fan-out + schedule
+dump (same `DeepMergeParser` surface, `base.yaml` defaults, fan-out + schedule
 relocation), and the per-stage graphs are the FIT-mode plan overlaid with each
 stage's freeze mask. ``--init_from``/``ckpt_path`` are accepted for fit-parity
 but only echoed into the merged YAML — no checkpoint is read.

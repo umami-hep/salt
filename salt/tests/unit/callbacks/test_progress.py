@@ -14,8 +14,8 @@ class TestProgressBar:
         assert isinstance(bar, TQDMProgressBar)  # the stock bar (v1 base.yaml:38-39)
         assert bar.refresh_rate == 50  # init args pass straight through
 
-    def test_registered_by_default_in_base2(self, tmp_path):
-        # base2.yaml ships checkpoint (Checkpoint) + progress (ProgressBar); the
+    def test_registered_by_default_in_base(self, tmp_path):
+        # base.yaml ships checkpoint (Checkpoint) + progress (ProgressBar); the
         # CLI assembles both into trainer.callbacks (run=False, no fit)
         from salt.schema import dump_schema, save_schema
         from salt.tests.unit.test_main import make_cli

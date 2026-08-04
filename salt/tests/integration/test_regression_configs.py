@@ -76,11 +76,11 @@ def test_config_fast_dev_run_fit(config, data, tmp_path):
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
-        # base2 default-ON CometLogger → off for the fast_dev_run
+        # base default-ON CometLogger → off for the fast_dev_run
         # fit so no offline Comet archive is written (and lr_monitor drops)
         "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
-        # null-delete the base2 ProgressBar (D2 default-on); the stock
+        # null-delete the base ProgressBar (D2 default-on); the stock
         # enable_progress_bar=false cannot coexist with a configured bar
         "--callbacks.progress=null",
     ])
@@ -114,7 +114,7 @@ def test_dl1_config_fast_dev_run_fit(data, tmp_path):
         f"--model.modules.norm.init_args.norm_dict={data['nd']}",
         f"--trainer.default_root_dir={tmp_path}",
         "--trainer.accelerator=cpu",
-        # base2 default-ON CometLogger → off for the fast_dev_run
+        # base default-ON CometLogger → off for the fast_dev_run
         # fit so no offline Comet archive is written (and lr_monitor drops)
         "--trainer.logger=false",
         "--trainer.fast_dev_run=2",
@@ -123,7 +123,7 @@ def test_dl1_config_fast_dev_run_fit(data, tmp_path):
         # (the regression-family configs ship batch_size: 100, so need no
         # override); the graph wiring this test exercises is batch-size invariant
         "--data.batch_size=50",
-        # null-delete the base2 ProgressBar (D2 default-on); the stock
+        # null-delete the base ProgressBar (D2 default-on); the stock
         # enable_progress_bar=false cannot coexist with a configured bar
         "--callbacks.progress=null",
     ])

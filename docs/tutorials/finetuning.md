@@ -305,7 +305,7 @@ salt merge-config \
 ```
 
 1. **`out/merged.yaml`** — the fully-merged config, produced through the same salt
-   config surface as `--print_config` (the same deep-merge, the same `base2.yaml`
+   config surface as `--print_config` (the same deep-merge, the same `base.yaml`
    defaults, the same schedule relocation). This is the single source of truth for
    what will actually run: every default made explicit, every overlay applied. When a
    config declares no `training_schedule:`, the merged YAML makes the effective one

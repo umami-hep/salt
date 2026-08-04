@@ -186,7 +186,7 @@ configs put them last.
 Setting an entry to `null` deletes it, which is how a stacked config drops a
 writer or a sink it inherited.
 
-Every model config declares its own section; `base2.yaml` ships none. A
+Every model config declares its own section; `base.yaml` ships none. A
 `salt test` config with no `outputs:` section is refused, and a config still
 carrying the retired top-level `writers:` block fails with a migration error
 pointing here.

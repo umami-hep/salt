@@ -261,15 +261,15 @@ class TestDottedOverrides:
 
 
 class TestCallbacksDict:
-    def test_base2_defaults_assembled(self, data):
-        # base2.yaml ships the salt.callbacks.Checkpoint port (a
+    def test_base_defaults_assembled(self, data):
+        # base.yaml ships the salt.callbacks.Checkpoint port (a
         # ModelCheckpoint subclass) + ProgressBar + ModelSummary
         cli = make_cli(data)
         assert any(isinstance(cb, Checkpoint) for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ProgressBar) for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
         ckpt = next(cb for cb in cli.trainer.callbacks if isinstance(cb, ModelCheckpoint))
-        assert ckpt.monitor == "val/loss"  # base2.yaml monitor_loss default
+        assert ckpt.monitor == "val/loss"  # base.yaml monitor_loss default
         assert ckpt.save_top_k == -1  # the v1 Checkpoint keeps every epoch
 
     def test_one_key_override(self, data):
@@ -367,7 +367,7 @@ class TestFitSmoke:
             *required_overrides(data),
             f"--trainer.default_root_dir={tmp_path}",
             "--trainer.accelerator=cpu",
-            # base2 ships a default-ON CometLogger; turn it off so
+            # base ships a default-ON CometLogger; turn it off so
             # the smoke run emits no offline Comet archive (and lr_monitor drops)
             "--trainer.logger=false",
             "--trainer.max_epochs=1",
@@ -375,12 +375,12 @@ class TestFitSmoke:
             "--trainer.limit_val_batches=2",
             "--trainer.num_sanity_val_steps=0",
             "--trainer.log_every_n_steps=1",
-            # null-delete the base2 ProgressBar (can't combine with the stock
+            # null-delete the base ProgressBar (can't combine with the stock
             # enable_progress_bar=false; the ProgressBar is default-on now)
             "--callbacks.progress=null",
         ])
         assert rc == 0
-        # base2's Checkpoint wrote a checkpoint under the run dir's ckpts/,
+        # base's Checkpoint wrote a checkpoint under the run dir's ckpts/,
         # with the 'loss=' stem the salt-test fallback globs
         ckpts = list(tmp_path.rglob("*.ckpt"))
         assert ckpts, f"no checkpoint written under {tmp_path}"

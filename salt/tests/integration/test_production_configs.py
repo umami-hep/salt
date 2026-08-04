@@ -44,8 +44,8 @@ RECIPES: dict[str, str] = {
     "MaskFormer": "maskformer_truth_hadron",
 }
 
-# base2.yaml is auto-loaded machinery, never a model in its own right.
-MACHINERY = {"base2"}
+# base.yaml is auto-loaded machinery, never a model in its own right.
+MACHINERY = {"base"}
 
 
 def _production_configs() -> list[str]:
@@ -163,9 +163,9 @@ def _trainer_args(root: Path) -> list[str]:
         "--trainer.limit_val_batches=2",
         "--trainer.num_sanity_val_steps=0",
         "--trainer.log_every_n_steps=1",
-        # base2 ships a default-ON CometLogger; off so no offline archive lands
+        # base ships a default-ON CometLogger; off so no offline archive lands
         "--trainer.logger=false",
-        # null-delete the base2 ProgressBar: the stock enable_progress_bar=false
+        # null-delete the base ProgressBar: the stock enable_progress_bar=false
         # cannot coexist with a configured bar
         "--callbacks.progress=null",
     ]
