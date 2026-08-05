@@ -30,6 +30,7 @@ import yaml
 from lightning.pytorch.callbacks import Callback
 
 from salt.graph.executor import STEP_SCOPE_PREFIX, record_steps
+from salt.logging import console
 
 __all__ = [
     "DEFAULT_DATASET_FUNCTIONS",
@@ -333,7 +334,7 @@ class TorchProfilerCallback(Callback):
         summary = self._summarise(events, sort_key)
         summary["stacks_available"] = stacks
         (self.dirpath / f"{self.tag}_summary.json").write_text(json.dumps(summary, indent=2))
-        print(f"[TorchProfilerCallback] wrote {self.tag}_* artifacts to {self.dirpath}")
+        console(f"[TorchProfilerCallback] wrote {self.tag}_* artifacts to {self.dirpath}")
 
     def _write_stacks(self, prof: Any, events: Any, sort_key: str | None) -> bool:
         """Write the stack-grouped table and flamegraph file; False when the build
@@ -626,7 +627,7 @@ def profile_model(
         f"--trainer.callbacks.record_shapes={str(record_shapes).lower()}",
     ])
 
-    print(
+    console(
         f"[profile model] {steps} train batches, capture = last "
         f"{schedule['active']} (wait {schedule['wait']}, warmup {schedule['warmup']})"
     )
@@ -654,8 +655,8 @@ def _print_model_report(
     """Print the per-op table plus the per-module / bucket split for the window."""
     table = out_dir / f"{tag}_key_averages.txt"
     if table.exists():
-        print(f"\n=== {tag}: torch.profiler key_averages ===")
-        print(table.read_text())
+        console(f"\n=== {tag}: torch.profiler key_averages ===")
+        console(table.read_text())
 
     totals = dict(summary.get("totals_us") or {})
     steps = dict(summary.get("forward_steps_us") or {})
@@ -673,24 +674,24 @@ def _print_model_report(
     if not on_device:
         denominator = sum(entry.get("cpu_us", 0.0) for entry in steps.values())
 
-    print(f"=== {tag}: per-plan-step {axis} time (ms/step over {active} steps) ===")
+    console(f"=== {tag}: per-plan-step {axis} time (ms/step over {active} steps) ===")
     ranked = sorted(steps.items(), key=lambda item: item[1].get(step_key, 0.0), reverse=True)
-    print(f"{'module':<32}{'ms/step':>12}{'% of fwd':>12}")
+    console(f"{'module':<32}{'ms/step':>12}{'% of fwd':>12}")
     for name, entry in ranked[:row_limit]:
         value = entry.get(step_key, 0.0)
         share = 100.0 * value / denominator if denominator else 0.0
-        print(f"{name:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
+        console(f"{name:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
 
     if not on_device:
-        print(
+        console(
             "\nno device time was recorded (CPU-only run) — the rows above are CPU wall time "
             "and are INCLUSIVE, so they do not partition the step. Run on a GPU for the "
             "forward/backward/optimizer split."
         )
-        print(f"\nartifacts: {out_dir}/{tag}_*")
+        console(f"\nartifacts: {out_dir}/{tag}_*")
         return
 
-    print(f"\n=== {tag}: step buckets (ms/step) ===")
+    console(f"\n=== {tag}: step buckets (ms/step) ===")
     buckets = (
         ("forward (sum of plan steps)", f"forward_steps_{bucket_suffix}"),
         ("backward (autograd engine)", f"autograd_engine_{bucket_suffix}"),
@@ -699,14 +700,14 @@ def _print_model_report(
     for label, key in buckets:
         value = totals.get(key, 0.0)
         share = 100.0 * value / denominator if denominator else 0.0
-        print(f"{label:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
+        console(f"{label:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
     profiled = summary.get("profiled_it_s")
     if profiled:
-        print(
+        console(
             f"\nprofiled rate {profiled:.3f} it/s — ATTRIBUTION ONLY. Divide an unprofiled "
             "run's rate by this to get the profiler overhead; never quote it as throughput."
         )
-    print(f"\nartifacts: {out_dir}/{tag}_*")
+    console(f"\nartifacts: {out_dir}/{tag}_*")
 
 
 # --------------------------------------------------------------------------- #
@@ -904,7 +905,7 @@ def profile_dataset(
     note = ""
     if passes > 1:
         note = f" ({passes} passes over {len(loader)} batches — page cache is warm)"
-    print(f"[profile dataset] {seen} batches in {elapsed:.2f}s{note} -> {report}")
+    console(f"[profile dataset] {seen} batches in {elapsed:.2f}s{note} -> {report}")
     return summary
 
 
@@ -1069,11 +1070,13 @@ def _run_dataset(args: Sequence[str]) -> int:
     """``salt profile dataset``."""
     parsed = _dataset_parser().parse_args(args)
     if parsed.batches is not None and parsed.steps is not None:
-        print("salt profile dataset: pass --steps or --batches, not both", file=sys.stderr)
+        console("salt profile dataset: pass --steps or --batches, not both", file=sys.stderr)
         return 1
     steps = parsed.steps
     if steps is None and parsed.batches is not None:
-        print("salt profile dataset: --batches is a deprecated alias for --steps", file=sys.stderr)
+        console(
+            "salt profile dataset: --batches is a deprecated alias for --steps", file=sys.stderr
+        )
         steps = parsed.batches
     if steps is None:
         steps = DEFAULT_STEPS
@@ -1089,7 +1092,7 @@ def _run_dataset(args: Sequence[str]) -> int:
             tag=parsed.tag,
         )
     except ImportError as err:
-        print(f"salt profile dataset: {err}", file=sys.stderr)
+        console(f"salt profile dataset: {err}", file=sys.stderr)
         return 1
     return 0
 
@@ -1114,7 +1117,7 @@ def _run_model(args: Sequence[str]) -> int:
             compile_model=parsed.compile,
         )
     except (ValueError, RuntimeError) as err:
-        print(f"salt profile model: {err}", file=sys.stderr)
+        console(f"salt profile model: {err}", file=sys.stderr)
         return 1
     return 0
 
@@ -1134,13 +1137,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = list(sys.argv[2:] if argv is None else argv)
     if not args or args[0] in {"-h", "--help"}:
-        print(_USAGE)
+        console(_USAGE)
         return 0 if args else 1
     if args[0] == "dataset":
         return _run_dataset(args[1:])
     if args[0] == "model":
         return _run_model(args[1:])
-    print(
+    console(
         f"salt profile: unknown subcommand {args[0]!r} (expected 'dataset' or 'model')",
         file=sys.stderr,
     )

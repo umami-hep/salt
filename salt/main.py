@@ -28,6 +28,7 @@ from lightning.pytorch.trainer import Trainer
 from salt import cli as graph_cli
 from salt.data.datamodule import GraphDataModule
 from salt.graph.errors import ConfigError, GraphError
+from salt.logging import console, get_logger
 from salt.model.saltmodule import SaltModule
 from salt.outputs.run_task_output import OutputSectionWriter
 from salt.outputs.sinks.onnx.config import ExportConfig
@@ -35,6 +36,8 @@ from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
+
+_LOG = get_logger(__name__)
 
 
 def _patch_jsonargparse_sys_modules_race() -> None:
@@ -252,7 +255,7 @@ def _best_checkpoint(config_path: Path) -> str:
     ``loss=<value>``. Raises `ConfigError` when none exist.
     """
     ckpt_dirs = [config_path.parent / name for name in ("ckpts", "checkpoints")]
-    print(
+    _LOG.info(
         "salt test: no --ckpt_path specified, looking for best checkpoint in "
         + " and ".join(str(d) for d in ckpt_dirs)
     )
@@ -269,7 +272,7 @@ def _best_checkpoint(config_path: Path) -> str:
             "base.yaml names checkpoints 'epoch=NNN-loss=<val/loss>.ckpt' to match)"
         )
     best = min(scored)[1]
-    print(f"salt test: using checkpoint {best}")
+    console(f"salt test: using checkpoint {best}")
     return best
 
 
@@ -1128,7 +1131,7 @@ class SaltCLI(LightningCLI):
             except ValueError:
                 n_devices = None  # "auto" — single-device eval contract
             if n_devices is not None and n_devices > 1:
-                print("salt test: forcing --trainer.devices=1 (single-device eval)")
+                _LOG.info("salt test: forcing --trainer.devices=1 (single-device eval)")
                 cfg.trainer.devices = "1"
         elif isinstance(devices, list) and len(devices) > 1:
             raise ConfigError("salt test requires a single device (v1 cli.py:330)")
@@ -1183,13 +1186,13 @@ class SaltCLI(LightningCLI):
         """
         log_dir = self.trainer.log_dir or self.trainer.default_root_dir
         ckpt_dir = getattr(self.trainer.checkpoint_callback, "dirpath", None)
-        print(f"salt fit artifacts: config.yaml in {log_dir}")
-        print(
+        console(f"salt fit artifacts: config.yaml in {log_dir}")
+        console(
             f"salt fit artifacts: checkpoints in {ckpt_dir}"
             if ckpt_dir
             else "salt fit artifacts: no checkpoint callback configured"
         )
-        print("(run-directory layout with timestamped names is not yet implemented)")
+        console("(run-directory layout with timestamped names is not yet implemented)")
 
 
 def main(args: Sequence[str] | None = None) -> int:
@@ -1249,7 +1252,7 @@ def main(args: Sequence[str] | None = None) -> int:
             SaltCLI(args=None if args is None else argv)
     except SystemExit:
         if help_requested:
-            print(
+            console(
                 "\nsee also: 'salt graph --help' (static graph tooling: validate/plan/plot/"
                 "why/deadcode/resolve), 'salt schema --help' (schema artifacts), "
                 "'salt mup-shapes --help' / 'salt mup-coord-check --help' (muP base/"
@@ -1265,7 +1268,7 @@ def main(args: Sequence[str] | None = None) -> int:
         raise
     except GraphError as err:
         # one-block form — no Python traceback for config errors
-        print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
+        console(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
     return 0
 

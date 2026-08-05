@@ -40,6 +40,7 @@ from salt.graph.spec import (
     split_key,
     unflatten_spec,
 )
+from salt.logging import console
 from salt.model.bind import resolve_bind_schema
 from salt.schema import dump_schema, load_schema, save_schema
 
@@ -646,7 +647,7 @@ def _modes_for(args: argparse.Namespace) -> tuple[Mode, ...]:
 
 def _fail(message: str) -> int:
     """Print an error to stderr and return exit code 1."""
-    print(message, file=sys.stderr)
+    console(message, file=sys.stderr)
     return 1
 
 
@@ -687,7 +688,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
-            print(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order")
+            console(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order")
     if cfg.model_modules is not None:
         # muP routing validator: apply_to naming a module without a mup init_arg
         # errors; a mup:true module outside apply_to warns. The same
@@ -706,7 +707,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 normalised = None
         warnings.extend(str(w.message) for w in caught)
         if normalised is not None:
-            print(
+            console(
                 f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
                 "init_arg, no mup:true module left out"
             )
@@ -723,7 +724,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             errors.append(f"edge port: {err}")
             n_edge = 0
         if n_edge:
-            print(
+            console(
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
                 "the attention backend is edge-compatible (no silent flash bypass)"
             )
@@ -756,7 +757,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             )
         except GraphError as err:
             return _fail(_format_graph_error(err))
-        print(
+        console(
             f"OK [mode={mode.name}] {len(plan.steps)} steps, {len(plan.edges)} edges, "
             f"plan_hash={plan.plan_hash[:12]}"
         )
@@ -767,11 +768,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # cfg.writers is always None (no WriterCallback), so there is no
         # writer-spec cross-check to run here.
     for info in infos:
-        print(f"info: {info}")
+        console(f"info: {info}")
     for warning in warnings:
-        print(f"WARNING: {warning}", file=sys.stderr)
+        console(f"WARNING: {warning}", file=sys.stderr)
     for error in errors:
-        print(f"ERROR: {error}", file=sys.stderr)
+        console(f"ERROR: {error}", file=sys.stderr)
     if errors:
         return _fail(f"{len(errors)} error-level deadcode finding(s)")
     if warnings and args.strict:
@@ -795,21 +796,21 @@ def _cmd_deadcode(args: argparse.Namespace) -> int:
     rc = 0
     for mode in _modes_for(args):
         if stored := cfg.mode_errors.get(mode):
-            print(f"[deadcode] mode={mode.name}:")
-            print(f"  ERROR {stored}")
+            console(f"[deadcode] mode={mode.name}:")
+            console(f"  ERROR {stored}")
             rc = 1
             continue
         findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
         if not findings:
-            print(f"[deadcode] mode={mode.name}: OK — all produced ports consumed.")
+            console(f"[deadcode] mode={mode.name}: OK — all produced ports consumed.")
             continue
-        print(f"[deadcode] mode={mode.name}:")
+        console(f"[deadcode] mode={mode.name}:")
         for finding in findings:
             level = finding.severity.upper()
             if finding.key == "*":
-                print(f"  {level} module {finding.module!r}: {finding.reason}")
+                console(f"  {level} module {finding.module!r}: {finding.reason}")
             else:
-                print(f"  {level} {finding.key!r} ({finding.module}): {finding.reason}")
+                console(f"  {level} {finding.key!r} ({finding.module}): {finding.reason}")
             if finding.severity == "error":
                 rc = 1
     return rc
@@ -835,7 +836,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         sinks=cfg.sinks,
         sink_origins=cfg.sink_origins.get(mode),
     )
-    print(plan_table(plan))
+    console(plan_table(plan))
     _print_onnx_static_caveat(cfg, mode)
     return 0
 
@@ -859,7 +860,7 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
     legitimately differ).
     """
     if mode is Mode.ONNX and cfg.reader is not None:
-        print(
+        console(
             "note: this is the dataset-fed STATIC view of the ONNX graph (reader/features "
             "included, no export reduces). The traced export graph is rendered to "
             "plan_onnx.txt next to network.onnx by `salt export`."
@@ -899,7 +900,7 @@ def _cmd_plot(args: argparse.Namespace) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
     dot_path = out_path.with_suffix(".dot")
     dot_path.write_text(dot_text)
-    print(f"wrote DOT to {dot_path}")
+    console(f"wrote DOT to {dot_path}")
     if out_path.suffix == ".dot":
         return 0
     _render_with_dot(dot_path, out_path)
@@ -965,7 +966,7 @@ def _render_with_dot(dot_path: Path, out_path: Path) -> None:
                 f"`dot` failed to render {target} (exit {result.returncode}): "
                 f"{result.stderr.strip() or '(no stderr)'}"
             )
-        print(f"wrote {target.suffix.lstrip('.').upper()} to {target} (graphviz/dot)")
+        console(f"wrote {target.suffix.lstrip('.').upper()} to {target} (graphviz/dot)")
 
 
 # ---------------------------------------------------------------------------
@@ -1018,13 +1019,13 @@ def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
     if producer is None or spec is None:
         return False
     consumers = sorted({edge.consumer for edge in plan.edges if edge.key == key})
-    print(f"[mode={mode.name}] {key!r}")
-    print(f"  producer:  {producer}")
-    print(f"  spec:      kind={spec.kind}, shape={spec.shape}, dtype={spec.dtype}")
+    console(f"[mode={mode.name}] {key!r}")
+    console(f"  producer:  {producer}")
+    console(f"  spec:      kind={spec.kind}, shape={spec.shape}, dtype={spec.dtype}")
     if consumers:
-        print(f"  consumers: {', '.join(consumers)}")
+        console(f"  consumers: {', '.join(consumers)}")
     else:
-        print(f"  consumers: none — dead output in mode {mode.name} (see salt graph deadcode)")
+        console(f"  consumers: none — dead output in mode {mode.name} (see salt graph deadcode)")
     return True
 
 
@@ -1098,7 +1099,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
         )
         explained = True
     if explained:
-        print("\n".join(lines))
+        console("\n".join(lines))
         return 0
     universe |= set(cfg.schema or ())
     near = get_close_matches(key, sorted(universe), n=3, cutoff=_SUGGESTION_CUTOFF)
@@ -1150,9 +1151,9 @@ def _cmd_schema_dump(args: argparse.Namespace) -> int:
         return _fail(f"input file not found: {h5_path}")
     schema = dump_schema(h5_path)
     if not schema.groups:
-        print(f"WARNING: no structured datasets found in {h5_path}", file=sys.stderr)
+        console(f"WARNING: no structured datasets found in {h5_path}", file=sys.stderr)
     save_schema(schema, args.output)
-    print(f"wrote schema for {len(schema.groups)} group(s) to {args.output}")
+    console(f"wrote schema for {len(schema.groups)} group(s) to {args.output}")
     return 0
 
 

@@ -7,7 +7,6 @@ from the Lightning step hooks.
 
 from __future__ import annotations
 
-import logging
 import warnings
 from collections.abc import Mapping
 from typing import Any
@@ -33,6 +32,7 @@ from salt.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
+from salt.logging import get_logger
 from salt.model.base import SaltModelModule
 from salt.model.bind import (
     ResolvedSchema,
@@ -81,7 +81,7 @@ _EDGE_OK_BACKENDS = frozenset({"torch-math"})
 CKPT_KEY = "salt_core"
 """Checkpoint dict key for the schema + plan-hash payload."""
 
-_LOG = logging.getLogger(__name__)
+_LOG = get_logger(__name__)
 
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "lion-pytorch", "HybridMuonAdamW")

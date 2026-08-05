@@ -13,6 +13,7 @@ import numpy as np
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.logging import console
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 
@@ -315,7 +316,7 @@ class JSONLOutputSink(RuntimeSink):
             return
         self._handle.close()
         self._handle = None
-        print(f"Wrote {self._rows_written:,} JSONL rows to {self.output_path}")
+        console(f"Wrote {self._rows_written:,} JSONL rows to {self.output_path}")
 
     def close_if_open(self) -> None:
         """Idempotently close a handle leaked by an interrupted test."""

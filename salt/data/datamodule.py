@@ -22,8 +22,11 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_setup_plan
 from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import PRIMARY_MODES, Mode
+from salt.logging import get_logger
 
 __all__ = ["GraphDataModule"]
+
+_LOG = get_logger(__name__)
 
 # Map the per-stage Mode to the stage key passed through Reader.with_source(stage=...).
 # Single-source readers ignore it; MultiSampleReader uses it to select each
@@ -467,14 +470,14 @@ class GraphDataModule(lightning.LightningDataModule):
             )
             self.val_dset = self._make_dataset(Mode.VAL, val_file, num_val, self.val_vds_path)
             if self.trainer is None or self.trainer.is_global_zero:
-                print(f"Created training dataset with {len(self.train_dset):,} entries")
-                print(f"Created validation dataset with {len(self.val_dset):,} entries")
+                _LOG.info(f"Created training dataset with {len(self.train_dset):,} entries")
+                _LOG.info(f"Created validation dataset with {len(self.val_dset):,} entries")
         if stage == "test":
             test_file, num_test = self._resolve_source(Mode.TEST)
             if test_file is None:
                 raise ConfigError("No test file specified, see --data.test_file")
             self.test_dset = self._make_dataset(Mode.TEST, test_file, num_test, self.test_vds_path)
-            print(f"Created test dataset with {len(self.test_dset):,} entries")
+            _LOG.info(f"Created test dataset with {len(self.test_dset):,} entries")
 
     @staticmethod
     def _modes_for_stage(stage: str) -> tuple[Mode, ...]:
@@ -532,7 +535,7 @@ class GraphDataModule(lightning.LightningDataModule):
             return
         import shutil
 
-        print("-" * 100)
-        print(f"Removing staged files under {root}")
+        _LOG.info("-" * 100)
+        _LOG.info(f"Removing staged files under {root}")
         shutil.rmtree(root, ignore_errors=True)
-        print("-" * 100)
+        _LOG.info("-" * 100)

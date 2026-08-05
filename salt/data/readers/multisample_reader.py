@@ -5,6 +5,7 @@ sample label; each sub-read stays a contiguous per-file slice.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,15 +18,23 @@ from salt.data.readers.stream import pad_fill
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import PlanStep
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.logging import get_logger
 from salt.schema import GroupSchema, Schema
 
 __all__ = ["MultiSampleReader", "SampleConfig"]
+
+_LOG = get_logger(__name__)
 
 _LABEL_DTYPE = "int64"
 """Injected label dtype: int64 so downstream ``Labels``/`ClassificationTaskModule`
 consume it directly without a cast."""
 
 _STAGE_KEYS = ("train", "val", "test")
+
+_EXHAUSTION_LOG_EVERY = 50
+"""Exhaustion logging EMISSION cadence only — the served-rows counter itself updates on
+EVERY `read()` call (i.e. every batch); this constant just throttles how often that state
+gets logged (1st call, then every 50th), since a per-batch record would drown the log."""
 
 
 @dataclass
@@ -149,6 +158,9 @@ class MultiSampleReader(Reader):
         self._local_of: np.ndarray | None = None  # global pos -> local row in that sample
         self._streams: tuple[str, ...] | None = None
         self._jagged: dict[str, bool] | None = None  # stream -> jagged?
+        self._debug_reads = 0  # count of read() calls, for the exhaustion-log cadence
+        # rows of each sample this worker has actually served; DEBUG-only, reset on bind
+        self._served: dict[int, int] = {}
 
     @staticmethod
     def _parse_sample(cfg: SampleConfig | Mapping[str, Any]) -> SampleConfig:
@@ -455,6 +467,9 @@ class MultiSampleReader(Reader):
         ``label_field`` is stripped, since it is not a disk field).
         """
         self.prepare()
+        # a re-bind is a new epoch/stage: reset the exhaustion counters
+        self._served = {}
+        self._debug_reads = 0
         # strip the injected (non-disk) label field from the demand we forward,
         # so a sub-reader never tries to read raw.<label_stream>.<label_field>.
         forwarded = dict(ctx.read_fields)
@@ -565,6 +580,8 @@ class MultiSampleReader(Reader):
         for sid, local_slice, positions in segments:
             produced = self.samples[sid].reader.read(local_slice, mode)
             seg_out.append((sid, positions, produced))
+        if _LOG.isEnabledFor(logging.DEBUG):
+            self._log_exhaustion(segments)
 
         out: dict[str, np.ndarray] = {}
         for stream in self._streams:
@@ -580,6 +597,45 @@ class MultiSampleReader(Reader):
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([start, stop], dtype=np.int64)
         return out
+
+    def _log_exhaustion(self, segments: list[tuple[int, slice, np.ndarray]]) -> None:
+        """Accumulate + (at cadence) log the per-worker, per-sample rows-served counter.
+
+        Called only from behind ``_LOG.isEnabledFor(logging.DEBUG)`` in `read`, so it
+        costs nothing at higher log levels. Counts rows actually returned by this call
+        (``positions.size`` per segment), never a window position — under
+        ``shuffle=True`` a position is a random walk, but a served-rows counter is
+        monotonic within an epoch. Per-worker because each DataLoader worker owns its
+        own reader instance (fork/spawn), so ``self._served`` is already private to it;
+        the worker id is included in the record for cross-worker comparison. Reset by
+        `bind` for a new epoch/stage — this method only ever runs behind the DEBUG
+        guard, so the counts accumulate only while DEBUG is enabled; only the emission
+        (not the accumulation) is additionally cadence-gated. Overlapping windows
+        legitimately count twice — this is a count of rows served, not of distinct rows.
+        """
+        from torch.utils.data import get_worker_info
+
+        self._debug_reads += 1
+        for sid, _local_slice, positions in segments:
+            self._served[sid] = self._served.get(sid, 0) + int(positions.size)
+        if (self._debug_reads - 1) % _EXHAUSTION_LOG_EVERY != 0:
+            return
+        info = get_worker_info()
+        worker = "main" if info is None else str(info.id)
+        parts = []
+        for sid, served in sorted(self._served.items()):
+            total = self._lens[sid] if self._lens else 0
+            if total <= 0:
+                continue
+            name = self.samples[sid].name
+            parts.append(f"{name}={served}/{total} ({served / total:.1%})")
+        if parts:
+            _LOG.debug(
+                "exhaustion [worker=%s] after %d reads: %s",
+                worker,
+                self._debug_reads,
+                ", ".join(parts),
+            )
 
     def _combine_scalar(
         self, blocks: list[tuple[np.ndarray, int, np.ndarray]], b: int, stream: str
@@ -639,6 +695,8 @@ class MultiSampleReader(Reader):
             "_local_of": None,
             "_streams": None,
             "_jagged": None,
+            "_debug_reads": 0,
+            "_served": {},
             "schema": None,
         })
         return state

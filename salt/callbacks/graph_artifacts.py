@@ -17,6 +17,9 @@ from salt.graph.errors import GraphError
 from salt.graph.planner import Plan
 from salt.graph.render import dot_source, plan_table
 from salt.graph.spec import Mode, TensorSpec
+from salt.logging import get_logger
+
+_LOG = get_logger(__name__)
 
 
 class GraphArtifacts(Callback):
@@ -106,7 +109,7 @@ class GraphArtifacts(Callback):
                 sorted(set(dataset.modules) - set(dataset.plan.module_names)),
                 out_dir / f"graph_{stage}_dataset",
             )
-        print(f"wrote graph/plan artifacts to {out_dir}")
+        _LOG.info(f"wrote graph/plan artifacts to {out_dir}")
 
     @staticmethod
     def _default_dir(trainer: Trainer, stage: str) -> Path:
@@ -199,7 +202,7 @@ class GraphArtifacts(Callback):
         hint = f"render manually with: dot -T{self.image_format} {dot_path} -o {img_path}"
         dot_bin = shutil.which("dot")
         if dot_bin is None:
-            print(f"graphviz `dot` not on PATH — wrote {dot_path} only; {hint}")
+            _LOG.warning(f"graphviz `dot` not on PATH — wrote {dot_path} only; {hint}")
             return
         result = subprocess.run(
             [dot_bin, f"-T{self.image_format}", str(dot_path), "-o", str(img_path)],
@@ -208,7 +211,7 @@ class GraphArtifacts(Callback):
             check=False,
         )
         if result.returncode != 0:
-            print(
+            _LOG.warning(
                 f"`dot` failed to render {img_path} (exit {result.returncode}): "
                 f"{result.stderr.strip() or '(no stderr)'} — wrote {dot_path} only; {hint}"
             )

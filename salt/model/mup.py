@@ -18,6 +18,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
 from salt.graph.planner import compile_plan
 from salt.graph.spec import Mode
+from salt.logging import console
 from salt.model.bind import bind_all, materialise_all, resolve_bind_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -310,7 +311,7 @@ def generate_shapes(
     base_model = build_model_at_widths(configs, base_w, set_overrides, bind=True)
     delta_model = build_model_at_widths(configs, delta_w, set_overrides, bind=True)
     base_shapes = make_base_shapes(base_model.net, delta_model.net, savefile=str(out_path))
-    print(
+    console(
         f"salt mup-shapes: wrote infshapes to {out_path} "
         f"(apply_to={cfg['apply_to']}, base_width={base_w}, delta_width={delta_w})"
     )
@@ -479,7 +480,7 @@ def _resolve_coord_shape_file(
         delta_width=delta_w,
         set_overrides=set_overrides,
     )
-    print(
+    console(
         f"salt mup-coord-check: generated SHARED base/delta infshapes (base_width={base_w}, "
         f"delta_width={delta_w}) at {out} — applied at EVERY swept width so width_mult is "
         "correct (the MU-HUMAN shared-base protocol, not a per-width self-base)"
@@ -585,7 +586,7 @@ def plot_coord_data(df: pd.DataFrame, save_to: str | Path, *, title: str | None 
     if save_to.parent != Path():
         save_to.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_to)
-    print(f"salt mup-coord-check: wrote coord-check plot to {save_to}")
+    console(f"salt mup-coord-check: wrote coord-check plot to {save_to}")
     return fig
 
 
@@ -650,6 +651,6 @@ def cmd_mup_coord_check(args: Any) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
     csv_path = out.with_suffix(".csv")
     df.to_csv(csv_path, index=False)
-    print(f"salt mup-coord-check: wrote coord-check data to {csv_path}")
+    console(f"salt mup-coord-check: wrote coord-check data to {csv_path}")
     plot_coord_data(df, out, title=f"muP coord-check (widths {widths})")
     return 0

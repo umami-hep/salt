@@ -129,10 +129,16 @@ lint.ignore = [
   "S101", "S404", "S602", "PLR2004", "PLR0912", "PLR0914", "CPY001", "TRY003",
   "G004", "N802", "C901", "DTZ005", "DTZ007", "INP", "EXE002",
   "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204",
-  "T201", "PLW1514", "PTH123", "RUF017", "PLR6301", "ISC001", "S307",
+  "PLW1514", "PTH123", "RUF017", "PLR6301", "ISC001", "S307",
   "PT027", "NPY002", "PT009", "PLW1641", "PLR0904", "N817", "S603", "PD011",
   "S113", "TCH", "PT011", "PLR1702", "S108", "PTH207", "S607", "E203", "SIM115", "PLR0913",
   "PLR0917", "A005", "ANN401", "PLR0915", "RUF015", "PLR6104", "TD003",
+              # T201 ("bare `print`") is deliberately NOT in this ignore list — it is
+              # a lint ERROR. All salt output routes through `salt.logging`:
+              # `get_logger()` for level-filtered diagnostics on stderr, `console()`
+              # for user-facing results on stdout, always. `salt/tests/*` is already
+              # excluded from ruff entirely (see `exclude` below), so tests may
+              # still print freely.
   "PLR0911",  # "too many return statements" — joins the PLR0912/0913/0914/0915/
               # 0917 family already ignored above; the one hit is main.py's
               # command dispatch, where a return per subcommand is the clearest form
