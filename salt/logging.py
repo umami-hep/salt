@@ -22,8 +22,6 @@ _EXPLICIT_LEVEL: int | str | None = None
 
 _FORMAT = "%(levelname)s %(name)s: %(message)s"
 
-_CONSOLE_KWARGS = {"sep", "end", "file", "flush"}
-
 
 def _style(level: str, text: str) -> str:  # noqa: ARG001 - the two-arg signature is the seam's contract; a colour implementation branches on `level`
     """Colour hook. Identity today; the single seam to add colour later.
@@ -77,7 +75,21 @@ class _StderrHandler(logging.StreamHandler):
 
 
 def _ensure_configured() -> None:
-    """Idempotently install a single marked handler on the `salt` logger."""
+    """Idempotently install a single marked handler on the `salt` logger.
+
+    The `salt` logger is set to INFO, not left at NOTSET. That is deliberate and
+    load-bearing: most `_LOG.info` calls in salt were `print()` before this module
+    existed, so they were unconditionally visible. Inheriting root's WARNING default
+    would silence them all, which would be a real regression in what a training run
+    tells you. `propagate` is left True, so a host application still sees the records.
+
+    Accepted consequence: the handful of `logging` users that predate this module
+    (`salt/model/saltmodule.py`, `salt/callbacks/schedule.py`) had their INFO records
+    swallowed by root's default and now emit; `schedule.py`'s warning gains the
+    standard level/name prefix instead of arriving bare via `logging.lastResort`.
+    Those messages were written to be read, so surfacing them is the intended
+    behaviour, not collateral. Set `SALT_LOG_LEVEL=WARNING` to get the old quiet.
+    """
     global _CONFIGURED  # noqa: PLW0603 - module-level singleton state for a process-wide logging facility
     if _CONFIGURED:
         return
@@ -129,7 +141,13 @@ def set_level(level: int | str) -> None:
     logging.getLogger(ROOT_NAME).setLevel(_resolve_level(level))
 
 
-def console(*args: object, **kwargs: object) -> None:
+def console(
+    *args: object,
+    sep: str = " ",
+    end: str = "\n",
+    file: TextIO | None = None,
+    flush: bool = False,
+) -> None:
     r"""Write user-facing results to stdout, unconditionally.
 
     Not a log record: no level, no filtering. This is the destination for
@@ -139,24 +157,18 @@ def console(*args: object, **kwargs: object) -> None:
     ----------
     *args:
         Values to print, stringified and joined by `sep`.
-    **kwargs:
-        `sep` (default `" "`), `end` (default `"\n"`), `file` (default
-        `None`, resolved to `sys.stdout` at call time), `flush` (default
-        `False`). Any other keyword raises `TypeError`.
+    sep:
+        Separator between values, by default `" "`.
+    end:
+        Trailing string, by default `"\n"`.
+    file:
+        Destination stream. `None` (the default) resolves to `sys.stdout` at
+        call time, so it follows redirection.
+    flush:
+        Whether to flush the stream after writing, by default `False`.
     """
-    unknown = set(kwargs) - _CONSOLE_KWARGS
-    if unknown:
-        raise TypeError(f"console() got unexpected keyword argument(s): {sorted(unknown)}")
-    sep = kwargs.get("sep", " ")
-    end = kwargs.get("end", "\n")
-    file: TextIO | None = kwargs.get("file")  # type: ignore[assignment]
-    flush = kwargs.get("flush", False)
-
-    if file is None:
-        file = sys.stdout
-
-    text = sep.join(str(a) for a in args)
-    text = _style("CONSOLE", text)
-    file.write(text + end)
+    stream = sys.stdout if file is None else file
+    text = _style("CONSOLE", sep.join(str(a) for a in args))
+    stream.write(text + end)
     if flush:
-        file.flush()
+        stream.flush()
