@@ -170,7 +170,10 @@ def _cut_sort_truncate_pad(
     dtype_fields: list[tuple[str, np.dtype]] = []
     blocks: dict[str, np.ndarray] = {}
     for f in fields:
-        arr = work[f][:, :t_dim]  # truncate to served multiplicity (leading)
+        # `pad_none(..., clip=True)` already TRUNCATES to `t_dim` as well as
+        # padding to it, so slicing to `[:, :t_dim]` first only builds a whole
+        # intermediate jagged array for `pad_none` to redo the same cut on.
+        arr = work[f]
         padded = ak.pad_none(arr, t_dim, axis=1, clip=True)
         dt = np.dtype(gschema.fields[f]) if gschema is not None else None
         fill = pad_fill(dt, arr)
