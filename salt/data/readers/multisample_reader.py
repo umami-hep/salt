@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from salt.data.base import Reader, WorkerCtx
+from salt.data.base import Reader, RowBlock, WorkerCtx
 from salt.data.readers.stream import pad_fill
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import PlanStep
@@ -596,6 +596,49 @@ class MultiSampleReader(Reader):
                 out[raw_key] = combined
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([start, stop], dtype=np.int64)
+        return out
+
+    def row_blocks(self) -> list[RowBlock]:
+        """Every sub-reader's blocks, tagged with its sample id.
+
+        Deliberately does NOT build the global interleaved index: that index is
+        one int64 pair per row of the whole corpus, which is the object the
+        streaming path exists to avoid holding once per reader process. The
+        per-shard proportional interleave is rebuilt from these blocks' row
+        counts instead, which is the same arithmetic over 236 numbers rather
+        than 20 million.
+        """
+        self.prepare()
+        return [
+            RowBlock(group=sid, start=block.start, stop=block.stop)
+            for sid, sample in enumerate(self.samples)
+            for block in sample.reader.row_blocks()
+        ]
+
+    def read_block(self, block: RowBlock, mode: Mode) -> dict[str, np.ndarray]:
+        """Read one sub-reader's contiguous range and inject that sample's label.
+
+        The single-sample case of `read`: one segment covering every output row,
+        run through the same combine helpers so the produced dtypes (including
+        the injected ``label_field``) are identical to the map-style path's.
+        """
+        self.prepare()
+        assert self._streams is not None
+        assert self._jagged is not None
+        b = block.n_rows
+        produced = self.samples[block.group].reader.read(slice(block.start, block.stop), mode)
+        positions = np.arange(b, dtype=np.int64)
+        out: dict[str, np.ndarray] = {}
+        for stream in self._streams:
+            raw_key = f"raw.{stream}"
+            blocks = [(positions, block.group, produced[raw_key])]
+            if self._jagged[stream]:
+                out[raw_key], combined_valid = self._combine_jagged(blocks, b)
+                out[f"masks.{stream}"] = ~combined_valid
+            else:
+                out[raw_key] = self._combine_scalar(blocks, b, stream)
+        if mode == Mode.TEST:
+            out["meta.rows"] = np.array([block.start, block.stop], dtype=np.int64)
         return out
 
     def _log_exhaustion(self, segments: list[tuple[int, slice, np.ndarray]]) -> None:

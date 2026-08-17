@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from salt.data.base import Reader, WorkerCtx, _require_root_deps
+from salt.data.base import Reader, RowBlock, WorkerCtx, _require_root_deps
 from salt.data.readers.cuts import VALID_FIELD, GlobalObjectCuts
 from salt.data.readers.expressions import Aggregation
 from salt.data.readers.stream import OffsetIndex, StreamConfig
@@ -1267,6 +1267,27 @@ class UprootReader(Reader):
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([start, stop], dtype=np.int64)
         return out
+
+    def row_blocks(self) -> list[RowBlock]:
+        """One block per file, from the `prepare`-built table.
+
+        A file is this reader's largest contiguous unit: reading within one
+        file's row range keeps `_read_stream_columns` on a single covering entry
+        range, i.e. one grouped `arrays()` call per stream instead of one per
+        file touched. Files contributing no rows (fully cut) are omitted, so the
+        blocks still tile ``[0, len(self))`` without gaps.
+        """
+        n_rows = len(self)  # resolves prepare(); honours the `num` cap
+        assert self._table is not None
+        blocks = []
+        for entry in self._table:
+            start = entry.row_start
+            stop = min(start + int(entry.kept.size), n_rows)  # `num` truncates the tail
+            if stop > start:
+                blocks.append(RowBlock(group=0, start=start, stop=stop))
+            if stop >= n_rows:
+                break
+        return blocks
 
     def _served_fields(self, stream: str) -> list[str]:
         """The field names served for a stream (demanded subset or all configured)."""
