@@ -7,6 +7,7 @@ Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from typing import Any
 from copy import deepcopy
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from torch.utils.data import DataLoader
 
 from salt.data.base import Reader, SaltDatasetModule, SetupBundle
 from salt.data.dataset import GraphDataset
+from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
 from salt.data.readers.vds import VDS
 from salt.data.samplers import RandomBatchSampler
@@ -106,6 +108,29 @@ class GraphDataModule(lightning.LightningDataModule):
         Base augmentation seed for non-worker reads, by default 42.
     debug : bool, optional
         Enable the boundary non-aliasing assertion.
+    iterable : bool, optional
+        Build `IterableGraphDataset` (sequential, sharded streaming) instead of
+        the map-style `GraphDataset`, by default False. The streaming path reads
+        large contiguous blocks and shards across ranks x workers by row
+        interval, which is what lets a run scale past the point where every
+        reader process can hold a row-granular corpus index. Downstream is
+        identical — same plan, same batch object.
+    block_rows : int | None, optional
+        Rows per reader call when `iterable`, by default `DEFAULT_BLOCK_ROWS`
+        (16,384 — the measured knee of the read-range curve); ``None`` reads
+        each of the reader's own blocks whole.
+    interleave_block : int, optional
+        Rows per turn of the per-shard sample round robin when `iterable`, by
+        default 1.
+    max_live_streams : int | None, optional
+        Samples holding a resident block at once when `iterable`, by default 2.
+        Peak resident rows per worker is ``max_live_streams * block_rows``.
+    manifest : str | Path | None, optional
+        `CorpusManifest` path for `iterable` runs. With one, shard planning and
+        epoch length need no reader index and open no data file.
+    shuffle_stream : bool, optional
+        Shuffle block order and within-batch row order on the fit streaming
+        loader, by default True. Val/test always stream in order.
 
     Raises
     ------
@@ -137,6 +162,12 @@ class GraphDataModule(lightning.LightningDataModule):
         multiprocessing_context: str | None = None,
         seed: int = 42,
         debug: bool = False,
+        iterable: bool = False,
+        block_rows: int | None = DEFAULT_BLOCK_ROWS,
+        interleave_block: int = 1,
+        max_live_streams: int | None = 2,
+        manifest: str | Path | None = None,
+        shuffle_stream: bool = True,
     ) -> None:
         super().__init__()
         # a None module entry (config-file or CLI override) deletes the module.
@@ -203,9 +234,15 @@ class GraphDataModule(lightning.LightningDataModule):
         self.multiprocessing_context = multiprocessing_context
         self.seed = seed
         self.debug = debug
-        self.train_dset: GraphDataset | None = None
-        self.val_dset: GraphDataset | None = None
-        self.test_dset: GraphDataset | None = None
+        self.iterable = bool(iterable)
+        self.block_rows = block_rows
+        self.interleave_block = int(interleave_block)
+        self.max_live_streams = max_live_streams
+        self.manifest = manifest
+        self.shuffle_stream = bool(shuffle_stream)
+        self.train_dset: GraphDataset | IterableGraphDataset | None = None
+        self.val_dset: GraphDataset | IterableGraphDataset | None = None
+        self.test_dset: GraphDataset | IterableGraphDataset | None = None
 
     def _wire_input_samples(self, modules: dict[str, SaltDatasetModule]) -> None:
         """Assemble the data-sourcing setup graph (mutates `modules` in place).
@@ -393,7 +430,7 @@ class GraphDataModule(lightning.LightningDataModule):
         filename: str | Path | None,
         num: int,
         vds_path: str | Path | None,
-    ) -> GraphDataset:
+    ) -> GraphDataset | IterableGraphDataset:
         """Clone the reader prototype onto a stage file and build its dataset.
 
         Deep-copies processors per stage — bind-time state (e.g. Labels'
@@ -420,13 +457,31 @@ class GraphDataModule(lightning.LightningDataModule):
             name: (reader if name == self._reader_name else deepcopy(module))
             for name, module in self._batch_modules.items()
         }
-        return GraphDataset(
+        common = {
+            "mode": mode,
+            "sinks": self._sinks,
+            "seed": self.seed,
+            "debug": self.debug,
+            "sink_origins": (self._sink_origins or {}).get(mode),
+        }
+        if not self.iterable:
+            return GraphDataset(modules, **common)
+        # Streaming: shuffle and drop-last are FIT-only. Val/test stream in
+        # order and keep the ragged tail, which is the eval writers'
+        # row-alignment contract — the same split the map-style loaders make
+        # through the sampler, expressed on the dataset because an
+        # IterableDataset has no sampler to make it.
+        fit = mode == Mode.FIT
+        return IterableGraphDataset(
             modules,
-            mode=mode,
-            sinks=self._sinks,
-            seed=self.seed,
-            debug=self.debug,
-            sink_origins=(self._sink_origins or {}).get(mode),
+            batch_size=self.batch_size,
+            shuffle=self.shuffle_stream and fit,
+            drop_last=fit,
+            block_rows=self.block_rows,
+            interleave_block=self.interleave_block,
+            max_live_streams=self.max_live_streams,
+            manifest=self.manifest,
+            **common,
         )
 
     def _resolve_stage_root(self, stage: str) -> Path | None:
@@ -488,19 +543,34 @@ class GraphDataModule(lightning.LightningDataModule):
             return (Mode.TEST,)
         return ()
 
-    def get_dataloader(self, stage: str, dataset: GraphDataset, shuffle: bool) -> DataLoader:
-        """Build a batch-sampler dataloader over a stage dataset.
+    def get_dataloader(
+        self, stage: str, dataset: GraphDataset | IterableGraphDataset, shuffle: bool
+    ) -> DataLoader:
+        """Build a dataloader over a stage dataset.
 
-        ``batch_size=None`` + `RandomBatchSampler`: the dataset receives
-        contiguous slices and returns complete batches; there is no collate step.
-        ``drop_last`` only for fit.
+        Map-style: ``batch_size=None`` + `RandomBatchSampler` — the dataset
+        receives contiguous slices and returns complete batches; there is no
+        collate step, and ``drop_last`` applies only to fit.
+
+        Streaming: NO sampler at all. An `IterableDataset` yields whole batches
+        itself and resolves its own shard from the worker/rank context, so a
+        sampler would be both meaningless and (under DDP) actively wrong. The
+        epoch is pushed onto the dataset here, because that is the one thing the
+        map-style path gets from the sampler and streaming has nowhere else to
+        get.
         """
         drop_last = stage == "fit"
+        sampler: Any = None
+        if isinstance(dataset, IterableGraphDataset):
+            if self.trainer is not None:
+                dataset.epoch = int(self.trainer.current_epoch)
+        else:
+            sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last)
         return DataLoader(
             dataset=dataset,
             batch_size=None,
             collate_fn=None,
-            sampler=RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last),
+            sampler=sampler,
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=self.pin_memory,
