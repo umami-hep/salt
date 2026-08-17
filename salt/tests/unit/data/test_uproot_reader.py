@@ -274,6 +274,20 @@ class _FakeTree:
     def __getitem__(self, name):
         return self._b[name]
 
+    def arrays(self, expressions, entry_start=None, entry_stop=None, library="ak", how=None):  # noqa: ARG002
+        """The grouped read the reader uses: same values as N per-branch `array()` calls.
+
+        Only ``how=dict`` is modelled, because that is the only form the reader
+        asks for — anything else would be a silent behaviour change rather than a
+        double that has fallen behind its subject.
+        """
+        if how is not dict:
+            raise NotImplementedError(f"_FakeTree.arrays only models how=dict, got {how!r}")
+        return {
+            name: self._b[name].array(entry_start=entry_start, entry_stop=entry_stop)
+            for name in expressions
+        }
+
 
 def _linked_reader():
     return UprootReader(
@@ -910,3 +924,94 @@ def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
         )
         total += int(expected_kept.size)
     assert len(reader) == total
+
+
+class _CountingTree(_FakeTree):
+    """A `_FakeTree` that records how many grouped reads it was asked for."""
+
+    def __init__(self, branches):
+        super().__init__(branches)
+        self.calls: list[list[str]] = []
+
+    def arrays(self, expressions, entry_start=None, entry_stop=None, library="ak", how=None):
+        self.calls.append(list(expressions))
+        return super().arrays(
+            expressions, entry_start=entry_start, entry_stop=entry_stop, library=library, how=how
+        )
+
+
+def _grouped_read_tree():
+    import awkward as ak
+
+    return _CountingTree({
+        f"AnalysisJetsAuxDyn.f{i}": ak.Array([[float(i), float(i) + 1.0], [float(i) + 2.0]])
+        for i in range(5)
+    })
+
+
+def test_grouped_read_returns_every_requested_branch():
+    """One grouped call serves the same values a per-branch read would."""
+    reader = _linked_reader()
+    tree = _grouped_read_tree()
+    names = [f"AnalysisJetsAuxDyn.f{i}" for i in range(5)]
+
+    got = reader._read_branches(tree, names, 0, 2)
+
+    assert sorted(got) == sorted(names)
+    assert len(tree.calls) == 1  # 5 branches, default cap 64 -> a single read
+    for name in names:
+        expected = tree[name].array(entry_start=0, entry_stop=2)
+        assert got[name].to_list() == expected.to_list()
+
+
+def test_grouped_read_is_chunked_by_max_branches(monkeypatch):
+    """The group size is bounded: 5 branches at a cap of 2 is three calls, not one."""
+    from salt.data.readers import uproot_reader as ur
+
+    monkeypatch.setattr(ur, "MAX_BRANCHES_PER_READ", 2)
+    reader = _linked_reader()
+    tree = _grouped_read_tree()
+    names = [f"AnalysisJetsAuxDyn.f{i}" for i in range(5)]
+
+    got = reader._read_branches(tree, names, 0, 2)
+
+    assert [len(c) for c in tree.calls] == [2, 2, 1]
+    assert sorted(got) == sorted(names)
+
+
+def test_grouped_read_deduplicates_repeated_branches():
+    """A branch named twice is read once, and still served under its name."""
+    reader = _linked_reader()
+    tree = _grouped_read_tree()
+    name = "AnalysisJetsAuxDyn.f0"
+
+    got = reader._read_branches(tree, [name, name, name], 0, 2)
+
+    assert tree.calls == [[name]]
+    assert list(got) == [name]
+
+
+def test_grouped_read_raises_when_a_branch_is_not_returned():
+    """A silently dropped/renamed expression must fail loudly, not serve wrong values."""
+
+    class _DroppingTree(_FakeTree):
+        def arrays(self, expressions, entry_start=None, entry_stop=None, library="ak", how=None):
+            out = super().arrays(
+                expressions,
+                entry_start=entry_start,
+                entry_stop=entry_stop,
+                library=library,
+                how=how,
+            )
+            out.pop("AnalysisJetsAuxDyn.f1", None)
+            return out
+
+    import awkward as ak
+
+    reader = _linked_reader()
+    tree = _DroppingTree({
+        f"AnalysisJetsAuxDyn.f{i}": ak.Array([[1.0, 2.0], [3.0]]) for i in range(3)
+    })
+
+    with pytest.raises(SchemaError, match="did not return branch"):
+        reader._read_branches(tree, [f"AnalysisJetsAuxDyn.f{i}" for i in range(3)], 0, 2)
