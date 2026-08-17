@@ -1015,3 +1015,103 @@ def test_grouped_read_raises_when_a_branch_is_not_returned():
 
     with pytest.raises(SchemaError, match="did not return branch"):
         reader._read_branches(tree, [f"AnalysisJetsAuxDyn.f{i}" for i in range(3)], 0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# index_cache — persist the built index instead of rebuilding it every run
+# --------------------------------------------------------------------------- #
+
+
+def _cached_reader(path, cache_dir, branches=None):
+    return UprootReader(
+        groups={"jets": {"branches": dict(branches or _JET), "jagged": False}},
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+        index_cache=cache_dir,
+    )
+
+
+def test_index_cache_round_trips_the_index(ej_file, tmp_path) -> None:
+    """A cached prepare serves exactly what the built one did."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+
+    cold = _cached_reader(path, cache)
+    cold.prepare()
+    n_cold = len(cold)
+    served_cold = cold.read(slice(0, n_cold), Mode.FIT)["raw.jets"]
+    assert list(cache.glob("uproot_index_*.npz")), "prepare wrote no artifact"
+
+    warm = _cached_reader(path, cache)
+    warm.prepare()
+    assert len(warm) == n_cold
+    assert warm._mult == cold._mult
+    assert warm.schema.groups["jets"].fields == cold.schema.groups["jets"].fields
+    served_warm = warm.read(slice(0, len(warm)), Mode.FIT)["raw.jets"]
+    np.testing.assert_array_equal(served_warm["pt"], served_cold["pt"])
+    for entry_c, entry_w in zip(cold._table, warm._table, strict=True):
+        np.testing.assert_array_equal(entry_w.kept, entry_c.kept)
+        np.testing.assert_array_equal(entry_w.per_row_kept, entry_c.per_row_kept)
+        np.testing.assert_array_equal(entry_w.orig_counts, entry_c.orig_counts)
+
+
+def test_index_cache_misses_on_a_different_config(ej_file, tmp_path) -> None:
+    """A different reader config is a different key, not a stale hit."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+
+    _cached_reader(path, cache).prepare()
+    (first_artifact,) = list(cache.glob("uproot_index_*.npz"))
+
+    other = _cached_reader(path, cache, branches={"pt": _JET["pt"]})
+    other.prepare()
+    artifacts = sorted(p.name for p in cache.glob("uproot_index_*.npz"))
+    assert len(artifacts) == 2, artifacts
+    assert first_artifact.name in artifacts
+    assert other.schema.groups["jets"].fields.keys() == {"pt"}
+
+
+def test_index_cache_misses_when_the_file_changes(ej_file, tmp_path) -> None:
+    """Size/mtime are in the key, so a re-derived file at the same path is a miss."""
+    path, arrays = ej_file
+    cache = tmp_path / "idxcache"
+    _cached_reader(path, cache).prepare()
+
+    import os
+
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    _cached_reader(path, cache).prepare()
+    assert len(list(cache.glob("uproot_index_*.npz"))) == 2
+
+
+def test_index_cache_survives_a_corrupt_artifact(ej_file, tmp_path) -> None:
+    """A cache is never the reason a run fails: garbage is a miss, not an exception."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+    built = _cached_reader(path, cache)
+    built.prepare()
+    (artifact,) = list(cache.glob("uproot_index_*.npz"))
+    artifact.write_bytes(b"not an npz at all")
+
+    recovered = _cached_reader(path, cache)
+    recovered.prepare()
+    assert len(recovered) == len(built)
+
+
+def test_index_cache_off_by_default_writes_nothing(ej_file, tmp_path) -> None:
+    """Without index_cache the reader behaves exactly as before."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+    cache.mkdir()
+    reader = UprootReader(
+        groups={"jets": {"branches": dict(_JET), "jagged": False}},
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+    )
+    reader.prepare()
+    assert reader.index_cache is None
+    assert not list(cache.iterdir())
