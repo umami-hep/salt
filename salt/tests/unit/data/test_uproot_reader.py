@@ -1041,9 +1041,20 @@ def test_index_cache_round_trips_the_index(ej_file, tmp_path) -> None:
     cold.prepare()
     n_cold = len(cold)
     served_cold = cold.read(slice(0, n_cold), Mode.FIT)["raw.jets"]
-    assert list(cache.glob("uproot_index_*.npz")), "prepare wrote no artifact"
+
+    # The EXACT path prepare is going to look for on the next run. A glob would
+    # have accepted `uproot_index_<key>.npz.tmp.npz`, which is what np.savez
+    # produced when handed a non-".npz" temp path — an artifact written where
+    # nothing would ever read it, so every "warm" run silently rebuilt.
+    key = cold._index_cache_key(cold._resolve_files())
+    expected = cache / f"uproot_index_{key}.npz"
+    assert expected.is_file(), sorted(p.name for p in cache.iterdir())
+    assert not list(cache.glob("*.tmp*")), "temp artifact left behind"
 
     warm = _cached_reader(path, cache)
+    assert warm._index_cache_key(warm._resolve_files()) == key  # same inputs -> same key
+    assert warm._load_index_cache(warm._resolve_files(), key), "artifact did not load"
+    warm._table = None  # re-run the real entry point now the load is proven
     warm.prepare()
     assert len(warm) == n_cold
     assert warm._mult == cold._mult
@@ -1062,11 +1073,11 @@ def test_index_cache_misses_on_a_different_config(ej_file, tmp_path) -> None:
     cache = tmp_path / "idxcache"
 
     _cached_reader(path, cache).prepare()
-    (first_artifact,) = list(cache.glob("uproot_index_*.npz"))
+    (first_artifact,) = [p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]
 
     other = _cached_reader(path, cache, branches={"pt": _JET["pt"]})
     other.prepare()
-    artifacts = sorted(p.name for p in cache.glob("uproot_index_*.npz"))
+    artifacts = sorted(p.name for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name)
     assert len(artifacts) == 2, artifacts
     assert first_artifact.name in artifacts
     assert other.schema.groups["jets"].fields.keys() == {"pt"}
@@ -1084,7 +1095,7 @@ def test_index_cache_misses_when_the_file_changes(ej_file, tmp_path) -> None:
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
 
     _cached_reader(path, cache).prepare()
-    assert len(list(cache.glob("uproot_index_*.npz"))) == 2
+    assert len([p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]) == 2
 
 
 def test_index_cache_survives_a_corrupt_artifact(ej_file, tmp_path) -> None:
@@ -1093,7 +1104,7 @@ def test_index_cache_survives_a_corrupt_artifact(ej_file, tmp_path) -> None:
     cache = tmp_path / "idxcache"
     built = _cached_reader(path, cache)
     built.prepare()
-    (artifact,) = list(cache.glob("uproot_index_*.npz"))
+    (artifact,) = [p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]
     artifact.write_bytes(b"not an npz at all")
 
     recovered = _cached_reader(path, cache)

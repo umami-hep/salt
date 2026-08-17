@@ -714,15 +714,24 @@ class UprootReader(Reader):
                     return False
                 table: list[_FileEntry] = []
                 for i, p in enumerate(files):
+                    orig_counts = z[f"orig_counts_{i}"]
+                    kept = (
+                        np.arange(int(meta["kept_size"][i]), dtype=np.int64)
+                        if meta["identity_kept"][i]
+                        else z[f"kept_{i}"]
+                    )
+                    per_row_kept = (
+                        orig_counts if meta["identity_per_row_kept"][i] else z[f"per_row_kept_{i}"]
+                    )
                     table.append(
                         _FileEntry(
                             path=p,
                             n_events=int(meta["n_events"][i]),
                             event_start=int(meta["event_start"][i]),
                             row_start=int(meta["row_start"][i]),
-                            kept=z[f"kept_{i}"],
-                            per_row_kept=z[f"per_row_kept_{i}"],
-                            orig_counts=z[f"orig_counts_{i}"],
+                            kept=kept,
+                            per_row_kept=per_row_kept,
+                            orig_counts=orig_counts,
                             fields={s: dict(f) for s, f in meta["fields"].items()},
                         )
                     )
@@ -762,15 +771,37 @@ class UprootReader(Reader):
             "num_rows": self._num_rows,
             "num_available": sum(int(e.kept.size) for e in self._table),
         }
-        arrays: dict[str, Any] = {"meta": np.array(json.dumps(meta, default=str))}
+        arrays: dict[str, Any] = {}
+        # With no row cuts, `kept` is just arange(n) and `per_row_kept` equals
+        # `orig_counts` — for the 236-file corpus that alone is a 160 MB int64
+        # copy of the row numbers 0..19,977,488. Record those two identities as
+        # flags and rebuild them on load; a cut index still stores its arrays.
+        identity_kept: list[bool] = []
+        identity_prk: list[bool] = []
         for i, e in enumerate(self._table):
-            arrays[f"kept_{i}"] = e.kept
-            arrays[f"per_row_kept_{i}"] = e.per_row_kept
+            is_id = bool(np.array_equal(e.kept, np.arange(e.kept.size, dtype=e.kept.dtype)))
+            identity_kept.append(is_id)
+            if not is_id:
+                arrays[f"kept_{i}"] = e.kept
+            same = bool(np.array_equal(e.per_row_kept, e.orig_counts))
+            identity_prk.append(same)
+            if not same:
+                arrays[f"per_row_kept_{i}"] = e.per_row_kept
             arrays[f"orig_counts_{i}"] = e.orig_counts
+        meta["identity_kept"] = identity_kept
+        meta["identity_per_row_kept"] = identity_prk
+        meta["kept_size"] = [int(e.kept.size) for e in self._table]
+        arrays["meta"] = np.array(json.dumps(meta, default=str))
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".npz.tmp")
-            np.savez(tmp, **arrays)
+            # Write through an OPEN FILE, not a path: `np.savez` appends ".npz"
+            # to any path that does not already end in it, so a ".tmp" path would
+            # be written as "<name>.tmp.npz" and the rename below would then fail
+            # on a file that was never created — leaving a cache that is written
+            # but never found. A file object is written verbatim.
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("wb") as fh:
+                np.savez(fh, **arrays)
             tmp.replace(path)  # atomic: a reader never sees a half-written artifact
         except OSError:
             pass
