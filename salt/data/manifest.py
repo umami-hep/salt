@@ -184,9 +184,7 @@ def schema_digest(reader: Reader) -> str:
         stream: dict(sorted(group.fields.items()))
         for stream, group in sorted(schema.groups.items())
     }
-    return hashlib.blake2b(
-        json.dumps(payload, sort_keys=True).encode(), digest_size=16
-    ).hexdigest()
+    return hashlib.blake2b(json.dumps(payload, sort_keys=True).encode(), digest_size=16).hexdigest()
 
 
 def build_manifest(reader: Reader, meta: dict[str, Any] | None = None) -> CorpusManifest:
