@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from salt.data.base import Reader, RowBlock, WorkerCtx
+from salt.data.datamodule import AUTO_PREFETCH_CAP, auto_prefetch_factor
 from salt.data.iterable_dataset import IterableGraphDataset
 from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
 from salt.data.processors.features import Features
@@ -573,3 +574,53 @@ def test_rejects_impossible_configuration(kwargs: dict) -> None:
             **kwargs,
         )
         dataset.shard()
+
+
+# --------------------------------------------------------------------------- #
+# prefetch-depth derivation (datamodule-side, but a streaming-path guarantee and
+# stub-only, so it belongs in the reader-agnostic suite)
+# --------------------------------------------------------------------------- #
+def test_map_style_prefetch_depth_is_unchanged() -> None:
+    """The map-style path keeps depth 2 — its workers are not bursty."""
+    assert auto_prefetch_factor(explicit=None, iterable=False, block_rows=16384, batch_size=1000) == 2
+
+
+def test_streaming_prefetch_covers_one_block() -> None:
+    """Depth covers ceil(block_rows / batch_size) so a block's burst never blocks."""
+    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=4000, batch_size=1000) == 4
+    # ceil, not floor: 4,001 rows is five batches, and a depth of four would
+    # leave the fifth stalling the round robin
+    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=4001, batch_size=1000) == 5
+
+
+def test_streaming_prefetch_is_capped() -> None:
+    """The depth is bounded — it is paid in shared memory on every rank."""
+    deep = auto_prefetch_factor(explicit=None, iterable=True, block_rows=16384, batch_size=1000)
+    assert deep == AUTO_PREFETCH_CAP
+    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=10**9, batch_size=1) == (
+        AUTO_PREFETCH_CAP
+    )
+
+
+def test_streaming_prefetch_has_a_floor_of_two() -> None:
+    """A block smaller than one batch still gets torch's minimum useful depth."""
+    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=10, batch_size=1000) == 2
+
+
+def test_unbounded_blocks_take_the_cap() -> None:
+    """block_rows=None reads the reader's own blocks whole — maximally bursty."""
+    assert auto_prefetch_factor(
+        explicit=None, iterable=True, block_rows=None, batch_size=1000
+    ) == AUTO_PREFETCH_CAP
+
+
+@pytest.mark.parametrize("iterable", [False, True])
+@pytest.mark.parametrize("value", [2, 17, 24])
+def test_explicit_prefetch_always_wins(iterable: bool, value: int) -> None:
+    """A user who sized their own shared memory is never overridden."""
+    assert (
+        auto_prefetch_factor(
+            explicit=value, iterable=iterable, block_rows=16384, batch_size=1000
+        )
+        == value
+    )

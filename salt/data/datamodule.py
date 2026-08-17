@@ -26,9 +26,90 @@ from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import PRIMARY_MODES, Mode
 from salt.logging import get_logger
 
-__all__ = ["GraphDataModule"]
+__all__ = ["AUTO_PREFETCH_CAP", "GraphDataModule", "auto_prefetch_factor"]
 
 _LOG = get_logger(__name__)
+
+AUTO_PREFETCH_CAP = 8
+"""Upper bound on the prefetch depth derived for a streaming loader.
+
+A streaming worker's output is BURSTY: it spends one long reader call filling a
+`block_rows`-row block, then emits ``block_rows / batch_size`` batches almost
+free. A `DataLoader` returns batches in strict round-robin worker order, so if a
+worker can only buffer a couple of them it blocks on the queue, and the consumer
+then waits out the NEXT worker's whole block read while every other worker sits
+full and idle. Covering roughly one block of batches is what removes that stall.
+
+The cap exists because the depth is paid in shared memory: torch's
+``file_descriptor`` sharing strategy holds ``num_workers * prefetch_factor *
+batch_bytes`` of ``/dev/shm`` in flight, and that scales with the worker count on
+every rank. Measured on the FTAG1LITE corpus (8-file subset, 19.4 MB batches,
+`block_rows` 16,384, so a full block is 17 batches):
+
+===========  ============  ============  ============  ============
+prefetch     nw4 jets/s    nw4 shm       nw8 jets/s    nw8 shm
+===========  ============  ============  ============  ============
+2 (old)      6,940         150 MB        8,182         311 MB
+8 (cap)      8,762         505 MB        13,170        1,127 MB
+17 (block)   9,983         1,030 MB      14,056        2,338 MB
+24           10,148        1,419 MB      14,915        3,012 MB
+===========  ============  ============  ============  ============
+
+The cap takes 88-89% of the deepest rate for 37% of its memory, which is the
+right side of that trade when the target is many ranks each running several
+workers. Raise `prefetch_factor` explicitly to buy the remainder.
+
+Note what the table does NOT show: shrinking `block_rows` does not shrink this.
+Shared memory holds prefetched BATCHES, so at a fixed depth it is unchanged
+(``block_rows`` 8,192 at depth 8 measured 1,108 MB against 16,384's 1,127 MB) —
+a shorter block only lowers the depth NEEDED, and measured 13,214 jets/s against
+13,170, i.e. no gain. Below that, 4,096-row blocks cost read rate (11,691 at
+nw8), matching the read-range curve. So depth, not block size, is the knob.
+"""
+
+
+def auto_prefetch_factor(
+    explicit: int | None,
+    iterable: bool,
+    block_rows: int | None,
+    batch_size: int,
+) -> int:
+    """Batches to prefetch per worker, deriving the streaming depth when unset.
+
+    An `explicit` value is returned untouched — a user who has sized their own
+    shared memory is never overridden. ``None`` derives: 2 for the map-style
+    path, whose workers produce at a steady cadence so extra depth buys nothing,
+    and for `iterable` enough depth to cover one reader block
+    (``ceil(block_rows / batch_size)``), clamped to ``[2, AUTO_PREFETCH_CAP]``.
+
+    ``block_rows=None`` means the reader's own blocks are read whole; that is at
+    least as bursty as any configured block, so it takes the cap.
+
+    Parameters
+    ----------
+    explicit : int | None
+        The configured `prefetch_factor`, or ``None`` to derive one.
+    iterable : bool
+        Whether the streaming dataset is in use.
+    block_rows : int | None
+        Rows per reader call on the streaming path.
+    batch_size : int
+        Rows per emitted batch.
+
+    Returns
+    -------
+    int
+        The prefetch depth to hand the `DataLoader` (always >= 2).
+    """
+    if explicit is not None:
+        return int(explicit)
+    if not iterable:
+        return 2
+    if block_rows is None:
+        return AUTO_PREFETCH_CAP
+    per_block = -(-int(block_rows) // int(batch_size))  # ceil
+    return max(2, min(AUTO_PREFETCH_CAP, per_block))
+
 
 # Map the per-stage Mode to the stage key passed through Reader.with_source(stage=...).
 # Single-source readers ignore it; MultiSampleReader uses it to select each
@@ -100,8 +181,10 @@ class GraphDataModule(lightning.LightningDataModule):
     persistent_workers : bool, optional
         Keep worker processes (and their H5 handles) alive between epochs,
         by default True.
-    prefetch_factor : int, optional
-        Batches prefetched per worker, by default 2.
+    prefetch_factor : int | None, optional
+        Batches prefetched per worker. ``None`` (the default) derives it: 2 for
+        the map-style path, and for `iterable` enough depth to cover one reader
+        block (see `AUTO_PREFETCH_CAP`). An explicit integer always wins.
     multiprocessing_context : str | None, optional
         Worker start method (``"fork"`` / ``"spawn"`` / ``"forkserver"``).
     seed : int, optional
@@ -158,7 +241,7 @@ class GraphDataModule(lightning.LightningDataModule):
         sinks: Mapping[Mode, Iterable[str]] | None = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
-        prefetch_factor: int = 2,
+        prefetch_factor: int | None = None,
         multiprocessing_context: str | None = None,
         seed: int = 42,
         debug: bool = False,
@@ -543,6 +626,15 @@ class GraphDataModule(lightning.LightningDataModule):
             return (Mode.TEST,)
         return ()
 
+    def resolved_prefetch_factor(self) -> int:
+        """The effective prefetch depth for this datamodule (see `auto_prefetch_factor`)."""
+        return auto_prefetch_factor(
+            explicit=self.prefetch_factor,
+            iterable=self.iterable,
+            block_rows=self.block_rows,
+            batch_size=self.batch_size,
+        )
+
     def get_dataloader(
         self, stage: str, dataset: GraphDataset | IterableGraphDataset, shuffle: bool
     ) -> DataLoader:
@@ -575,7 +667,7 @@ class GraphDataModule(lightning.LightningDataModule):
             shuffle=False,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers and self.num_workers > 0,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            prefetch_factor=self.resolved_prefetch_factor() if self.num_workers > 0 else None,
             multiprocessing_context=self.multiprocessing_context,
         )
 
