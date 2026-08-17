@@ -12,8 +12,11 @@ from typing import Any
 
 from salt.data.base import Reader, RowBlock
 from salt.graph.errors import ConfigError
+from salt.logging import get_logger
 
 __all__ = ["MANIFEST_VERSION", "CorpusManifest", "ManifestEntry", "build_manifest"]
+
+_LOG = get_logger(__name__)
 
 MANIFEST_VERSION = 1
 """Artifact format version. A mismatch is a miss, never a best-effort read."""
@@ -178,7 +181,8 @@ def schema_digest(reader: Reader) -> str:
     if schema is None:
         return ""
     payload = {
-        stream: dict(sorted(group.fields.items())) for stream, group in sorted(schema.groups.items())
+        stream: dict(sorted(group.fields.items()))
+        for stream, group in sorted(schema.groups.items())
     }
     return hashlib.blake2b(
         json.dumps(payload, sort_keys=True).encode(), digest_size=16
@@ -276,9 +280,12 @@ def main() -> int:
     assert dataset is not None
     manifest = build_manifest(dataset.reader)
     path = manifest.save(args.out)
-    print(
-        f"[manifest] {len(manifest.entries)} block(s), {len(manifest.group_names)} group(s), "
-        f"{manifest.n_rows:,} rows -> {path}"
+    _LOG.info(
+        "manifest: %d block(s), %d group(s), %s rows -> %s",
+        len(manifest.entries),
+        len(manifest.group_names),
+        f"{manifest.n_rows:,}",
+        path,
     )
     return 0
 
