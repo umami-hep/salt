@@ -47,7 +47,7 @@ def partition_blocks(
     shard_id: int,
     block_rows: int | None = None,
 ) -> dict[int, list[RowBlock]]:
-    """This shard's blocks per group, from the interval partition.
+    """Blocks per group owned by one shard, from the interval partition.
 
     Every group is split independently, so each shard holds the same PROPORTION
     of every sample — the property the per-shard stratified interleave then
@@ -107,9 +107,7 @@ def partition_blocks(
     return out
 
 
-def shard_row_counts(
-    group_rows: Sequence[int], n_shards: int
-) -> list[int]:
+def shard_row_counts(group_rows: Sequence[int], n_shards: int) -> list[int]:
     """Rows every shard receives, from the same interval arithmetic.
 
     Every rank can compute this locally, which is what lets the epoch length be

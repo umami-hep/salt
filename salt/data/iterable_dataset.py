@@ -175,7 +175,7 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
         return max(1, int(info.num_workers)), int(info.id)
 
     def shard(self) -> tuple[int, int]:
-        """This process's ``(n_shards, shard_id)``.
+        """The calling process's ``(n_shards, shard_id)``.
 
         ``n_shards = world_size * num_workers`` and
         ``shard_id = rank * num_workers + worker_id``, so shard ids are unique

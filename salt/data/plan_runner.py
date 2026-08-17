@@ -252,9 +252,7 @@ class _PlanRunner:
                 module.bind(replace(ctx, step=step))
         self._bound_pid = pid
 
-    def _run_plan(
-        self, rows: slice, raw: dict[str, np.ndarray] | None = None
-    ) -> dict[str, Any]:
+    def _run_plan(self, rows: slice, raw: dict[str, np.ndarray] | None = None) -> dict[str, Any]:
         """Run every plan step for one batch and cross the torch boundary.
 
         `raw` is the reader step's produced dict when the caller has already
