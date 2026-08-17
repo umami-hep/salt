@@ -26,6 +26,24 @@ from salt.schema import GroupSchema, Schema
 
 __all__ = ["UprootGroupConfig", "UprootReader"]
 
+MAX_BRANCHES_PER_READ = 64
+"""How many branches one batch read may ask `uproot` for at a time.
+
+A batch needs every configured branch over the same entry range, and `uproot`
+merges the resulting basket byte-ranges into as few source requests as it can
+(``uproot.source.coalesce``: adjacent ranges within ``max_range_gap``, capped by
+``max_request_bytes``). That merge runs **once per ``arrays()`` call**, so asking
+for the branches together is what lets ranges from *different* branches coalesce
+— which is the whole point on storage where seeking dominates.
+
+Grouping is bounded rather than unbounded because one call holds every requested
+branch's decompressed baskets at once: transient memory grows with the group, and
+uproot's own request packing stops paying off past a few MB anyway. 64 keeps a
+155-branch GN3-style read at three calls instead of 155, with a bounded working
+set. Sizing is empirical — see experiment 05's T2 group-size sweep — so this is a
+plain module constant a benchmark can monkeypatch, not a config surface.
+"""
+
 _GROUP_KEYS = {
     "branches",
     "prefix",
@@ -1128,17 +1146,75 @@ class UprootReader(Reader):
             cols[f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         return cols
 
+    def _read_branches(self, t: Any, branches: list[str], e0: int, e1: int) -> dict[str, Any]:
+        """Read several branches over entry block ``[e0, e1)`` in as few reads as possible.
+
+        One ``arrays()`` call per bounded group of branches instead of one
+        ``array()`` call per branch. The served values are the same either way —
+        both go through the same per-branch interpretation — but the number of
+        *source requests* is not: `uproot` coalesces basket byte-ranges inside a
+        single call, so grouping lets ranges from different branches merge, and a
+        155-branch batch stops being 155 independent seek-read round trips into
+        the file.
+
+        `array_cache` is deliberately left at uproot's ``"inherit"`` default, the
+        same as the per-branch call this replaces: whether reads are cached stays
+        a property of how the file was opened, so a caller that opened with
+        ``array_cache=None`` still gets no cache and nothing about the existing
+        cache-off path changes.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{on-disk branch name: awkward array}``, unflattened (the caller
+            applies the unroll).
+
+        Raises
+        ------
+        SchemaError
+            If a requested branch is missing from what `uproot` returned — a
+            guard against an expression being silently renamed or dropped rather
+            than serving another branch's values under its name.
+        """
+        out: dict[str, Any] = {}
+        if not branches:
+            return out
+        unique = list(dict.fromkeys(branches))
+        step = max(1, int(MAX_BRANCHES_PER_READ))
+        for start in range(0, len(unique), step):
+            chunk = unique[start : start + step]
+            got = t.arrays(chunk, entry_start=e0, entry_stop=e1, library="ak", how=dict)
+            missing = [b for b in chunk if b not in got]
+            if missing:
+                raise SchemaError(
+                    f"grouped read of entries [{e0}, {e1}) did not return branch(es) {missing} "
+                    f"— asked for {len(chunk)}, got {sorted(got)[:8]}..."
+                )
+            out.update({b: got[b] for b in chunk})
+        return out
+
+    def _unrolled(self, arr: Any) -> Any:
+        """Flatten the outer collection level away when unrolling; identity otherwise."""
+        import awkward as ak
+
+        return ak.flatten(arr, axis=1) if self.unroll is not None else arr
+
     def _read_group_cols(
         self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int
     ) -> dict[str, Any]:
         """Read a (non-ElementLink) group's fields over entry block ``[e0, e1)``.
 
-        Direct fields come off the group's own prefix; joined fields are gathered
-        through the group's 1:1 link. Both come back on the same axis.
+        Direct fields come off the group's own prefix and are read as ONE grouped
+        request (see `_read_branches`); joined fields are gathered through the
+        group's 1:1 link. Both come back on the same axis.
         """
         direct = [f for f in fields if f in cfg.branches]
         joined = [f for f in fields if f in cfg.join_branches]
-        block = {f: self._read_col(t, cfg, f, e0, e1) for f in direct}
+        block: dict[str, Any] = {}
+        if direct:
+            names = {f: self._on_disk(cfg, cfg.branches[f]) for f in direct}
+            raw = self._read_branches(t, list(names.values()), e0, e1)
+            block = {f: self._unrolled(raw[b]) for f, b in names.items()}
         if joined:
             block.update(self._read_joined_cols(t, cfg, joined, e0, e1))
         return block
@@ -1146,13 +1222,12 @@ class UprootReader(Reader):
     def _read_col(self, t: Any, cfg: UprootGroupConfig, f: str, e0: int, e1: int) -> Any:
         """Read one normal branch over entry block ``[e0, e1)`` as ``[row]`` / ``[row][const]``
         (flattening the outer collection level away when unrolling).
-        """
-        import awkward as ak
 
-        arr = t[self._on_disk(cfg, cfg.branches[f])].array(
-            entry_start=e0, entry_stop=e1, library="ak"
-        )
-        return ak.flatten(arr, axis=1) if self.unroll is not None else arr
+        The single-branch form of `_read_group_cols`' grouped read; kept because a
+        one-branch read is still occasionally the whole request.
+        """
+        branch = self._on_disk(cfg, cfg.branches[f])
+        return self._unrolled(self._read_branches(t, [branch], e0, e1)[branch])
 
     def _read_joined_cols(
         self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int
@@ -1169,7 +1244,12 @@ class UprootReader(Reader):
         import awkward as ak
 
         link_branch = self._on_disk(cfg, cfg.join_branch or "")
-        links = t[link_branch].array(entry_start=e0, entry_stop=e1, library="ak")  # [entry][elem]
+        # link + every join target in ONE grouped request (see `_read_branches`):
+        # they cover the same entry range, so reading them together lets uproot
+        # coalesce their basket ranges instead of seeking once per branch.
+        tgt_names = {f: self._join_branch(cfg, cfg.join_branches[f]) for f in fields}
+        raw = self._read_branches(t, [link_branch, *tgt_names.values()], e0, e1)
+        links = raw[link_branch]  # [entry][elem]
         pidx = _pers_index(links)
         pkey = _pers_key(links)
         _check_single_pers_key(pkey, link_branch)
@@ -1187,8 +1267,8 @@ class UprootReader(Reader):
 
         block: dict[str, Any] = {}
         for f in fields:
-            branch = self._join_branch(cfg, cfg.join_branches[f])
-            tgt = t[branch].array(entry_start=e0, entry_stop=e1, library="ak")  # [entry][target]
+            branch = tgt_names[f]
+            tgt = raw[branch]  # [entry][target]
             counts = ak.to_numpy(ak.num(tgt, axis=1)).astype(np.int64)
             if counts.size != per_elem.size:
                 raise SchemaError(
@@ -1222,9 +1302,15 @@ class UprootReader(Reader):
         """
         import awkward as ak
 
-        links = t[self._link_branch(cfg)].array(
-            entry_start=e0, entry_stop=e1, library="ak"
-        )  # [event][obj][link] (struct m_persKey/m_persIndex, or plain int for synthetic)
+        # link vector + every demanded target column in ONE grouped request
+        # (see `_read_branches`) — same entry range, so their basket ranges
+        # coalesce instead of costing a seek each.
+        link_branch = self._link_branch(cfg)
+        tgt_names = {f: self._target_branch(cfg, cfg.branches[f]) for f in fields}
+        raw = self._read_branches(t, [link_branch, *tgt_names.values()], e0, e1)
+        links = raw[
+            link_branch
+        ]  # [event][obj][link] (struct m_persKey/m_persIndex, or plain int for synthetic)
         pidx = _pers_index(links)  # [event][obj][link] int (m_persIndex into the target)
         pkey = _pers_key(links)  # [event][obj][link] uint | None
         _check_single_pers_key(pkey, cfg.link_branch)  # type: ignore[arg-type]
@@ -1237,9 +1323,7 @@ class UprootReader(Reader):
         # numpy-gather + re-impose the [obj][link] grouping (avoids nested ak fancy-index).
         block: dict[str, Any] = {}
         for f in fields:
-            tgt = t[self._target_branch(cfg, cfg.branches[f])].array(
-                entry_start=e0, entry_stop=e1, library="ak"
-            )  # [event][track]
+            tgt = raw[tgt_names[f]]  # [event][track]
             counts = ak.to_numpy(ak.num(tgt, axis=1))
             offsets = np.concatenate([[0], np.cumsum(counts)])[:-1]  # (n_events,) event starts
             global_idx = pidx + ak.Array(offsets)  # broadcast [event] over [event][obj][link]
