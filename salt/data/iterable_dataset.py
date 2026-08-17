@@ -332,7 +332,17 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
         only, never membership, so the plan's per-group proportions survive.
         """
         keys = list(chunks[0][1])
-        order = rng.permutation(b) if self.shuffle else None
+        # The shuffle is folded INTO the scatter rather than applied after it.
+        # `combined[order]` would be a second full pass over every stream, on top
+        # of the gather that materialises each chunk and the scatter that places
+        # it — three passes where one suffices. Writing a value destined for
+        # ``combined[p]`` straight to ``out[inv[p]]`` (where ``order[inv[p]] == p``)
+        # produces the identical array in one.
+        inv = None
+        if self.shuffle:
+            order = rng.permutation(b)
+            inv = np.empty(b, dtype=np.int64)
+            inv[order] = np.arange(b, dtype=np.int64)
         out: dict[str, np.ndarray] = {}
         for key in keys:
             if key == "meta.rows":
@@ -341,28 +351,40 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
             if ref.ndim == 1:
                 combined = np.zeros((b,), dtype=ref.dtype)
                 for positions, produced, rows in chunks:
-                    combined[positions] = produced[key][rows]
+                    dest = positions if inv is None else inv[positions]
+                    combined[dest] = _rows_of(produced[key], rows)
             else:
                 t = max(int(produced[key].shape[1]) for _pos, produced, _rows in chunks)
-                if ref.dtype.names is None and ref.dtype == np.bool_:
+                # a single chunk spanning the whole batch at full width overwrites
+                # every slot, so the initial fill it would need is dead work
+                covered = (
+                    len(chunks) == 1
+                    and chunks[0][0].size == b
+                    and (int(chunks[0][1][key].shape[1]) == t)
+                )
+                if ref.dtype.names is None and ref.dtype == np.bool_ and not covered:
                     # a pad mask: True MEANS padded, so a slot no chunk writes
                     # (a shorter sample's T-extension) must start True, not False
                     combined = np.ones((b, t), dtype=ref.dtype)
+                elif covered:
+                    combined = np.empty((b, t), dtype=ref.dtype)
                 else:
                     combined = np.zeros((b, t), dtype=ref.dtype)
-                for name in ref.dtype.names or ():
-                    fill = pad_fill(np.dtype(ref.dtype[name]))
-                    if fill:  # signed-int -1 sentinel; zeros/False are already right
-                        combined[name][:] = fill
+                if not covered:
+                    for name in ref.dtype.names or ():
+                        fill = pad_fill(np.dtype(ref.dtype[name]))
+                        if fill:  # signed-int -1 sentinel; zeros/False already right
+                            combined[name][:] = fill
                 for positions, produced, rows in chunks:
-                    block = produced[key][rows]
+                    dest = positions if inv is None else inv[positions]
+                    block = _rows_of(produced[key], rows)
                     tb = int(block.shape[1])
                     if ref.dtype.names:
                         for name in ref.dtype.names:
-                            combined[name][positions, :tb] = block[name]
+                            combined[name][dest, :tb] = block[name]
                     else:
-                        combined[positions, :tb] = block
-            out[key] = combined if order is None else combined[order]
+                        combined[dest, :tb] = block
+            out[key] = combined
         if self._mode == Mode.TEST:
             out["meta.rows"] = np.array([0, b], dtype=np.int64)
         return out
@@ -427,6 +449,23 @@ class _GroupCursor:
             self._offset += take
             n -= take
         return pairs
+
+
+def _rows_of(arr: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """``arr[rows]``, as a VIEW whenever `rows` is one contiguous ascending run.
+
+    `_GroupCursor.take` always hands back ``np.arange(offset, offset + n)``, so
+    the fancy index it names is really a slice — and taking it as a slice removes
+    a full copy of every stream per chunk, before the scatter that copies it
+    again. The run is verified rather than assumed (the span check short-circuits
+    the common miss; `rows` is at most one batch, so the confirming pass is
+    nothing against the megabytes it saves).
+    """
+    n = rows.size
+    if n and int(rows[-1]) - int(rows[0]) + 1 == n and bool(np.all(np.diff(rows) == 1)):
+        start = int(rows[0])
+        return arr[start : start + n]
+    return arr[rows]
 
 
 def _n_rows(produced: Mapping[str, np.ndarray]) -> int:
