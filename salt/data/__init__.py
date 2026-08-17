@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
-from salt.data.base import Processor, Reader, SaltDatasetModule, WorkerCtx
+from salt.data.base import Processor, Reader, RowBlock, SaltDatasetModule, WorkerCtx
 from salt.data.datamodule import GraphDataModule
 from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
 from salt.data.input_samples import InputSamples
+from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
 from salt.data.processors.features import Features
 from salt.data.processors.ftag_labeller import FtagLabeller
 from salt.data.processors.labels import Labels
@@ -21,6 +22,7 @@ from salt.data.readers.uproot_reader import UprootGroupConfig, UprootReader
 from salt.data.readers.vds import VDS, create_vds, default_vds_path, has_wildcard
 
 __all__ = [
+    "DEFAULT_BLOCK_ROWS",
     "MODEL_VISIBLE_NAMESPACES",
     "VDS",
     "ConstituentCuts",
@@ -34,6 +36,7 @@ __all__ = [
     "GroupConfig",
     "H5StructuredReader",
     "InputSamples",
+    "IterableGraphDataset",
     "Labels",
     "MaskFormerTargets",
     "MultiSampleReader",
@@ -41,6 +44,7 @@ __all__ = [
     "OffsetIndex",
     "Processor",
     "Reader",
+    "RowBlock",
     "SaltDatasetModule",
     "SampleConfig",
     "StreamConfig",
