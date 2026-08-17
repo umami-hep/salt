@@ -7,17 +7,17 @@ Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import lightning
 from torch.utils.data import DataLoader
 
 from salt.data.base import Reader, SaltDatasetModule, SetupBundle
 from salt.data.dataset import GraphDataset
-from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
+from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
 from salt.data.readers.vds import VDS
 from salt.data.samplers import RandomBatchSampler
 from salt.graph.errors import ConfigError
