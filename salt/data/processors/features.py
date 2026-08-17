@@ -13,6 +13,28 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 
+def _all_finite(a: np.ndarray) -> bool:
+    """Whether every element of a float array is finite — ``np.isfinite(a).all()``, cheaper.
+
+    Identical verdict, no temporary. ``np.isfinite(a).all()`` materialises a full
+    boolean array the size of `a` (megabytes per stream per batch) only to reduce
+    it away; `min`/`max` reduce in place.
+
+    The equivalence holds because both extremes are checked and NaN propagates
+    through both reductions: any NaN makes `min` and `max` NaN; any ``+inf`` with
+    no NaN makes `max` ``+inf``; any ``-inf`` with no NaN makes `min` ``-inf``.
+    So the pair is finite exactly when every element is. Summing instead would
+    NOT be equivalent — a float32 sum over millions of finite values can itself
+    overflow to ``inf`` and report a clean batch as corrupt.
+
+    Empty input is vacuously finite, matching ``.all()`` on an empty array (and
+    unlike `min`, which raises).
+    """
+    if a.size == 0:
+        return True
+    return bool(np.isfinite(a.min())) and bool(np.isfinite(a.max()))
+
+
 class Features(Processor):
     """``raw.* -> inputs.*`` float32 materialisation.
 
@@ -95,7 +117,7 @@ class Features(Processor):
             mask_key = f"masks.{stream}"
             if mask_key in batch:
                 flat[batch.get(mask_key)] = 0.0  # zero padded rows
-            if not np.isfinite(flat).all():
+            if not _all_finite(flat):
                 if self.ignore_finite_checks:
                     warnings.warn(
                         f"Non-finite inputs for {stream!r}. But ignore finite flag is on, "

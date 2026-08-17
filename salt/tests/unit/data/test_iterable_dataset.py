@@ -20,7 +20,7 @@ from salt.data.base import Reader, RowBlock, WorkerCtx
 from salt.data.datamodule import AUTO_PREFETCH_CAP, auto_prefetch_factor
 from salt.data.iterable_dataset import IterableGraphDataset
 from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
-from salt.data.processors.features import Features
+from salt.data.processors.features import Features, _all_finite
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.sharding import interleave_plan, partition_blocks, shard_row_counts
 from salt.graph.errors import ConfigError
@@ -624,3 +624,45 @@ def test_explicit_prefetch_always_wins(iterable: bool, value: int) -> None:
         )
         == value
     )
+
+
+# --------------------------------------------------------------------------- #
+# `Features` finiteness check — the fast form must agree with the obvious one
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "values",
+    [
+        [0.0, 1.0, -1.0],
+        [np.nan],
+        [np.inf],
+        [-np.inf],
+        [1.0, np.nan, 2.0],
+        [1.0, np.inf, 2.0],
+        [1.0, -np.inf, 2.0],
+        [np.inf, -np.inf],
+        [np.nan, np.inf, -np.inf],
+        [3.4e38, 3.4e38],  # finite float32 extremes: a SUM would overflow to inf
+        [],
+    ],
+)
+def test_all_finite_matches_isfinite_all(values: list) -> None:
+    """The min/max form returns exactly what `np.isfinite(a).all()` returns."""
+    a = np.array(values, dtype=np.float32)
+    assert _all_finite(a) == bool(np.isfinite(a).all())
+
+
+def test_all_finite_is_not_a_sum() -> None:
+    """Finite values whose SUM overflows float32 are still finite — a sum-based
+    check would call this batch corrupt.
+    """
+    a = np.full(64, 3.4e38, dtype=np.float32)
+    assert _all_finite(a) is True
+    assert not np.isfinite(a.sum())
+
+
+def test_all_finite_over_a_padded_batch_shape() -> None:
+    """Multi-dimensional input reduces the same way (the real call site is (B, T, F))."""
+    a = np.zeros((4, 5, 3), dtype=np.float32)
+    assert _all_finite(a) is True
+    a[2, 3, 1] = np.nan
+    assert _all_finite(a) is False
