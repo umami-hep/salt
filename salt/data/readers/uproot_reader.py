@@ -596,11 +596,20 @@ class UprootReader(Reader):
         """Resolve files, build the entry->row offset index (post-cut) and the schema
         (idempotent); evaluates the (per-stage) `GlobalObjectCuts` over row-axis scalars to keep
         only passing rows, then resolves each jagged stream's served ``pad_max``.
+
+        The served schema is probed ONCE, on the first file, from branch METADATA
+        (`uproot`'s ``interpretation``/``typename``) plus — only where the
+        interpretation is not one this reader maps directly — a single-entry
+        bounded read. Later files are checked for branch presence and for an
+        identical ``typename`` per configured branch, which is a pure metadata
+        comparison. Nothing here reads a whole branch: the only bulk reads
+        `prepare` performs are the ones it genuinely needs — the unroll carrier's
+        counts, the cut scalars, and (for a jagged stream with no ``pad_max``)
+        one multiplicity-carrying branch.
         """
         if self._table is not None:
             return
         self._require_deps()
-        import awkward as ak
         import uproot
 
         files = self._resolve_files()
@@ -611,6 +620,8 @@ class UprootReader(Reader):
         row_offset = 0
         max_mult: dict[str, int] = {s: 0 for s, c in self.groups.items() if c.jagged}
         schema_groups: dict[str, GroupSchema] | None = None
+        probed_fields: dict[str, dict[str, str]] | None = None
+        probed_typenames: dict[str, str] | None = None
 
         for path in files:
             with uproot.open(f"{path}:{self.tree}") as t:
@@ -619,29 +630,37 @@ class UprootReader(Reader):
                 entry = _FileEntry(
                     path=path, n_events=n_events, event_start=event_offset, row_start=row_offset
                 )
-                for stream, cfg in self.groups.items():
-                    entry.fields[stream] = self._probe_stream_fields(t, avail, path, stream, cfg)
+                if probed_fields is None:
+                    probed_fields = {
+                        stream: self._probe_stream_fields(t, avail, path, stream, cfg, n_events)
+                        for stream, cfg in self.groups.items()
+                    }
+                    probed_typenames = self._branch_typenames(t, avail)
+                else:
+                    assert probed_typenames is not None
+                    self._validate_file_schema(t, avail, path, probed_typenames)
+                entry.fields = {s: dict(f) for s, f in probed_fields.items()}
                 row_scalars, orig_counts = self._read_index_scalars(
                     t, avail, path, cut_fields, cut_aggs
                 )
 
-            kept, per_row_kept = self._apply_cuts(row_scalars, orig_counts)
-            entry.kept = kept
-            entry.per_row_kept = per_row_kept
-            entry.orig_counts = orig_counts
-            n_kept = int(kept.size)
-            if n_kept > 0:
-                for stream, cfg in self.groups.items():
-                    if cfg.jagged and cfg.pad_max is None:
-                        m = self._stream_max_mult(path, stream, kept)
-                        max_mult[stream] = max(max_mult[stream], m)
+                kept, per_row_kept = self._apply_cuts(row_scalars, orig_counts)
+                entry.kept = kept
+                entry.per_row_kept = per_row_kept
+                entry.orig_counts = orig_counts
+                n_kept = int(kept.size)
+                if n_kept > 0:
+                    for stream, cfg in self.groups.items():
+                        if cfg.jagged and cfg.pad_max is None:
+                            m = self._stream_max_mult(t, stream, kept)
+                            max_mult[stream] = max(max_mult[stream], m)
+
             if schema_groups is None:
                 schema_groups = {s: GroupSchema(fields=dict(entry.fields[s])) for s in self.groups}
             table.append(entry)
             event_offset += n_events
             row_offset += n_kept
 
-        del ak
         num_available = row_offset
         if self.num > num_available:
             raise ValueError(
@@ -659,7 +678,13 @@ class UprootReader(Reader):
         self._num_rows = num_available if self.num < 0 else self.num
 
     def _probe_stream_fields(
-        self, t: Any, avail: set[str], path: Path, stream: str, cfg: UprootGroupConfig
+        self,
+        t: Any,
+        avail: set[str],
+        path: Path,
+        stream: str,
+        cfg: UprootGroupConfig,
+        n_events: int,
     ) -> dict[str, str]:
         """Validate a stream's branches + capture per-field dtypes (linked or direct).
 
@@ -683,8 +708,7 @@ class UprootReader(Reader):
                         f"in {path.name!r}; ElementLink target fields live under "
                         f"{cfg.target_prefix!r}"
                     )
-                arr = t[branch].array(library="ak")  # [entry][obj]
-                fdtypes[fieldname] = self._array_dtype_name(arr)
+                fdtypes[fieldname] = self._field_dtype(t, branch, n_events)  # [entry][obj]
             fdtypes["valid"] = "bool"
             return fdtypes
         threshold = 2 + (1 if self.unroll is not None else 0)
@@ -695,23 +719,29 @@ class UprootReader(Reader):
                     f"group {stream!r}: branch {branch!r} (field {fieldname!r}) not "
                     f"in {path.name!r}; tree {self.tree!r} has {len(avail)} branches"
                 )
-            arr = t[branch].array(library="ak")
-            is_jagged = arr.ndim >= threshold
+            dtype_name, ndim = self._field_type(t, branch, n_events)
+            is_jagged = ndim >= threshold
             if is_jagged != cfg.jagged:
                 kind = "sequence (jagged)" if is_jagged else "scalar"
                 raise SchemaError(
                     f"group {stream!r}: branch {branch!r} reads as {kind} (ndim="
-                    f"{arr.ndim}) but config says jagged={cfg.jagged}"
+                    f"{ndim}) but config says jagged={cfg.jagged}"
                 )
-            fdtypes[fieldname] = self._array_dtype_name(arr)
+            fdtypes[fieldname] = dtype_name
         if cfg.is_joined:
-            fdtypes.update(self._probe_join_fields(t, avail, path, stream, cfg))
+            fdtypes.update(self._probe_join_fields(t, avail, path, stream, cfg, n_events))
         if cfg.jagged:
             fdtypes["valid"] = "bool"
         return fdtypes
 
     def _probe_join_fields(
-        self, t: Any, avail: set[str], path: Path, stream: str, cfg: UprootGroupConfig
+        self,
+        t: Any,
+        avail: set[str],
+        path: Path,
+        stream: str,
+        cfg: UprootGroupConfig,
+        n_events: int,
     ) -> dict[str, str]:
         """Validate a 1:1 join's link + target branches and capture the joined field dtypes.
 
@@ -733,8 +763,98 @@ class UprootReader(Reader):
                     f"group {stream!r}: join target branch {branch!r} (field {fieldname!r}) "
                     f"not in {path.name!r}; joined fields live under {cfg.join_prefix!r}"
                 )
-            fdtypes[fieldname] = self._array_dtype_name(t[branch].array(library="ak"))
+            fdtypes[fieldname] = self._field_dtype(t, branch, n_events)
         return fdtypes
+
+    # -- schema probing (metadata first, one bounded entry as the fallback) ----
+
+    def _configured_branches(self) -> list[str]:
+        """Every on-disk branch name this reader's groups address, in config order."""
+        names: list[str] = []
+        for cfg in self.groups.values():
+            if cfg.is_linked:
+                names.append(self._link_branch(cfg))
+                names += [self._target_branch(cfg, b) for b in cfg.branches.values()]
+                continue
+            names += [self._on_disk(cfg, b) for b in cfg.branches.values()]
+            if cfg.is_joined:
+                names.append(self._on_disk(cfg, cfg.join_branch or ""))
+                names += [self._join_branch(cfg, b) for b in cfg.join_branches.values()]
+        return list(dict.fromkeys(names))
+
+    def _branch_typenames(self, t: Any, avail: set[str]) -> dict[str, str]:
+        """``{on-disk branch: uproot typename}`` for every configured branch present.
+
+        The typename is the C++ type string uproot reads off the streamers — free
+        (no basket touched) and exactly the thing that has to agree across files
+        for one schema to describe all of them. Branches absent here were already
+        rejected by `_probe_stream_fields` on this same (first) file.
+        """
+        return {b: _typename(t[b]) for b in self._configured_branches() if b in avail}
+
+    def _validate_file_schema(
+        self, t: Any, avail: set[str], path: Path, reference: dict[str, str]
+    ) -> None:
+        """Check a non-first file carries the same configured branches, at the same type.
+
+        Metadata only — no basket is read. The schema itself was probed on the
+        first file; this is the guard that stops a later file with a missing or
+        re-typed branch being served under it.
+
+        Raises
+        ------
+        SchemaError
+            When a configured branch is absent from this file, or its
+            ``typename`` differs from the first file's.
+        """
+        for branch, want in reference.items():
+            if branch not in avail:
+                raise SchemaError(
+                    f"branch {branch!r} is configured and present in the first file but not "
+                    f"in {path.name!r}; tree {self.tree!r} has {len(avail)} branches"
+                )
+            got = _typename(t[branch])
+            if got != want:
+                raise SchemaError(
+                    f"branch {branch!r} reads as {got!r} in {path.name!r} but {want!r} in the "
+                    "first file — one reader serves one schema, so the files must agree"
+                )
+
+    def _field_type(self, t: Any, branch: str, n_events: int) -> tuple[str, int]:
+        """``(dtype name, awkward ndim)`` for one branch, without reading the branch.
+
+        `uproot`'s ``interpretation`` already carries both for the two shapes this
+        reader meets most often (a flat ``AsDtype`` column and an ``AsJagged`` one);
+        anything else — ``AsObjects`` over nested ``std::vector``, fixed-size
+        ``AsDtype`` sub-arrays, custom interpretations — falls back to a
+        ONE-ENTRY read. Both are exact: awkward's ``ndim`` and leaf dtype are
+        properties of the array TYPE, so a single entry (even an empty one)
+        describes the branch as well as all of it does.
+        """
+        from_meta = _interpretation_type(getattr(t[branch], "interpretation", None))
+        if from_meta is not None:
+            dtype, ndim = from_meta
+            return np.dtype(dtype.newbyteorder("=")).name, ndim
+        arr = self._probe_array(t, branch, n_events)
+        return self._array_dtype_name(arr), int(arr.ndim)
+
+    def _field_dtype(self, t: Any, branch: str, n_events: int) -> str:
+        """The dtype name of one branch (the ndim half of `_field_type` discarded)."""
+        return self._field_type(t, branch, n_events)[0]
+
+    def _probe_array(self, t: Any, branch: str, n_events: int) -> Any:
+        """A ONE-ENTRY read of `branch`, widened only if that entry types as ``unknown``.
+
+        awkward reports a concrete leaf type for an empty typed array, so one entry
+        normally suffices even when it holds no constituents. The widening is the
+        pathological case where it does not (an interpretation that yields an
+        `EmptyArray` layout) — reading everything then is still correct, and it is
+        a per-branch last resort rather than the default.
+        """
+        arr = t[branch].array(entry_stop=min(1, n_events), library="ak")
+        if "unknown" in str(arr.type):
+            arr = t[branch].array(library="ak")
+        return arr
 
     def _read_index_scalars(
         self,
@@ -850,16 +970,19 @@ class UprootReader(Reader):
         per_row_kept = np.where(orig_counts == 0, 0, per_row_kept).astype(np.int64)
         return kept, per_row_kept
 
-    def _stream_max_mult(self, path: Path, stream: str, kept: np.ndarray) -> int:
-        """Max per-row constituent multiplicity over kept rows.
+    def _stream_max_mult(self, t: Any, stream: str, kept: np.ndarray) -> int:
+        """Max per-row constituent multiplicity over kept rows, off the OPEN tree.
 
         Direct stream: per-row constituent count of the stream's first branch;
         linked stream: per-row NON-NULL link count. ``unroll`` flattens the outer
         collection level away first (``[entry][obj][const] -> [row][const]``);
-        ``unroll=None`` reads per-entry constituents directly.
+        ``unroll=None`` reads per-entry constituents directly. This is the one
+        part of `prepare` that legitimately reads bulk data, and only for a
+        jagged stream whose ``pad_max`` the config left unset — it takes the
+        tree handle `prepare` already has open rather than re-opening the file
+        (re-parsing streamers + re-reading a branch step 1 had in hand).
         """
         import awkward as ak
-        import uproot
 
         cfg = self.groups[stream]
         branch = (
@@ -867,8 +990,7 @@ class UprootReader(Reader):
             if cfg.is_linked
             else self._on_disk(cfg, next(iter(cfg.branches.values())))
         )
-        with uproot.open(f"{path}:{self.tree}") as t:
-            arr = t[branch].array(library="ak")
+        arr = t[branch].array(library="ak")
         if self.unroll is not None:
             arr = ak.flatten(arr, axis=1)  # [entry][obj][...] -> [row][...]
         if cfg.is_linked:
@@ -1181,6 +1303,42 @@ class UprootReader(Reader):
             "schema": None,
         })
         return state
+
+
+def _typename(branch: Any) -> str:
+    """A branch's C++ type string — the cross-file schema fingerprint.
+
+    Falls back to the interpretation's repr for branch objects that carry no
+    ``typename`` (hand-built test trees), which still compares equal across
+    files of the same shape.
+    """
+    name = getattr(branch, "typename", None)
+    if name is not None:
+        return str(name)
+    return str(getattr(branch, "interpretation", "<no typename>"))
+
+
+def _interpretation_type(interp: Any) -> tuple[np.dtype, int] | None:
+    """``(leaf dtype, awkward ndim)`` for the interpretations mapped directly, else None.
+
+    Only the two unambiguous shapes are claimed here — a flat numeric column and a
+    single-level jagged one. Fixed-size sub-arrays, ``AsObjects`` over nested
+    ``std::vector``, ElementLink records and anything custom return None so the
+    caller falls back to reading one entry and asking awkward.
+    """
+    if interp is None:
+        return None
+    from uproot.interpretation.jagged import AsJagged
+    from uproot.interpretation.numerical import AsDtype
+
+    if isinstance(interp, AsJagged):
+        content = interp.content
+        if isinstance(content, AsDtype) and not content.to_dtype.shape:
+            return np.dtype(content.to_dtype), 2
+        return None
+    if isinstance(interp, AsDtype) and not interp.to_dtype.shape:
+        return np.dtype(interp.to_dtype), 1
+    return None
 
 
 def _link_member(links: Any, member: str) -> Any | None:

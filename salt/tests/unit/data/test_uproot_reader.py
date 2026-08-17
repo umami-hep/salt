@@ -722,3 +722,191 @@ def test_open_trees_are_dropped_on_pickle(ej_file) -> None:
 
     revived = pickle.loads(pickle.dumps(reader))
     assert revived._open_trees == {}
+
+
+# --------------------------------------------------------------------------- #
+# 7. prepare() probes the schema from metadata, once, on the first file
+# --------------------------------------------------------------------------- #
+
+_TREE = "AnalysisMiniTree"
+
+
+class _RecordingBranch:
+    """A branch proxy that records every ``array()`` call's entry bound."""
+
+    def __init__(self, branch, calls: list, tag: int, name: str) -> None:
+        self._branch, self._calls, self._tag, self._name = branch, calls, tag, name
+
+    def __getattr__(self, attr):
+        return getattr(self._branch, attr)
+
+    def array(self, *args, **kwargs):
+        self._calls.append({
+            "file": self._tag,
+            "branch": self._name,
+            "entry_stop": kwargs.get("entry_stop"),
+        })
+        return self._branch.array(*args, **kwargs)
+
+
+class _RecordingTree:
+    """A TTree proxy handing out `_RecordingBranch`es (dunders must be explicit)."""
+
+    def __init__(self, tree, calls: list, tag: int) -> None:
+        self._tree, self._calls, self._tag = tree, calls, tag
+
+    def __getattr__(self, attr):
+        return getattr(self._tree, attr)
+
+    def __getitem__(self, name):
+        return _RecordingBranch(self._tree[name], self._calls, self._tag, name)
+
+    def __enter__(self):
+        self._tree.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._tree.__exit__(*exc)
+
+
+def _record_prepare(reader: UprootReader, monkeypatch) -> tuple[list, list]:
+    """Run `prepare` with every `uproot.open` and branch read recorded."""
+    calls: list = []
+    opens: list = []
+    real_open = uproot.open
+
+    def recording_open(spec, *args, **kwargs):
+        opens.append(str(spec))
+        return _RecordingTree(real_open(spec, *args, **kwargs), calls, len(opens) - 1)
+
+    monkeypatch.setattr(uproot, "open", recording_open)
+    reader.prepare()
+    return calls, opens
+
+
+def _probe_reader(source, truncate: int | None = 8, **kwargs) -> UprootReader:
+    jets: dict = {"branches": dict(_JET), "jagged": True}
+    if truncate is not None:
+        jets["truncate"] = truncate
+    return UprootReader(
+        groups={"jets": jets, "event": {"branches": dict(_EVENT), "jagged": False}},
+        filename=source,
+        tree=_TREE,
+        **kwargs,
+    )
+
+
+def _two_files(tmp_path: Path, second: dict | None = None) -> Path:
+    """A directory of two minitrees (the second optionally re-shaped)."""
+    d = tmp_path / "pair"
+    d.mkdir()
+    write_minitree(d / "a.root", build_fixture_arrays(seed=99))
+    write_minitree(d / "b.root", second if second is not None else build_fixture_arrays(seed=7))
+    return d
+
+
+def test_prepare_makes_no_unbounded_reads_when_pad_max_is_set(ej_file, monkeypatch) -> None:
+    """The schema probe must not decompress whole branches to learn their type."""
+    path, _ = ej_file
+    calls, opens = _record_prepare(_probe_reader(path), monkeypatch)
+    unbounded = [c for c in calls if c["entry_stop"] is None]
+    assert unbounded == [], f"prepare read whole branches: {unbounded}"
+    assert len(opens) == 1
+
+
+def test_prepare_opens_each_file_once(tmp_path, monkeypatch) -> None:
+    """One open per file — the max-multiplicity scan must not re-open."""
+    _, opens = _record_prepare(_probe_reader(_two_files(tmp_path), truncate=None), monkeypatch)
+    assert len(opens) == 2
+
+
+def test_prepare_reads_one_branch_for_an_unresolved_pad_max(ej_file, monkeypatch) -> None:
+    """An unset ``pad_max`` is the one legitimate bulk read: a single branch, once."""
+    path, _ = ej_file
+    calls, opens = _record_prepare(_probe_reader(path, truncate=None), monkeypatch)
+    unbounded = [c for c in calls if c["entry_stop"] is None]
+    assert [c["branch"] for c in unbounded] == [_JET["pt"]]
+    assert len(opens) == 1
+
+
+def test_prepare_probes_the_schema_only_on_the_first_file(tmp_path, monkeypatch) -> None:
+    """With the metadata fast path disabled, only file 0 pays a (bounded) probe read."""
+    monkeypatch.setattr(
+        "salt.data.readers.uproot_reader._interpretation_type", lambda _interp: None
+    )
+    calls, opens = _record_prepare(_probe_reader(_two_files(tmp_path)), monkeypatch)
+    assert len(opens) == 2
+    assert {c["file"] for c in calls} == {0}
+    assert all(c["entry_stop"] == 1 for c in calls)
+    assert {c["branch"] for c in calls} == set(_JET.values()) | set(_EVENT.values())
+
+
+def test_prepare_rejects_a_later_file_missing_a_configured_branch(tmp_path) -> None:
+    short = build_fixture_arrays(seed=7)
+    del short["recojet_antikt4PFlow_eta"]
+    with pytest.raises(SchemaError, match="present in the first file but not"):
+        _probe_reader(_two_files(tmp_path, second=short)).prepare()
+
+
+def test_prepare_rejects_a_later_file_with_a_retyped_branch(tmp_path) -> None:
+    retyped = build_fixture_arrays(seed=7)
+    retyped["eventNumber"] = retyped["eventNumber"].astype(np.float64)
+    with pytest.raises(SchemaError, match="in the first file"):
+        _probe_reader(_two_files(tmp_path, second=retyped)).prepare()
+
+
+def test_prepare_schema_dtypes_match_a_full_read_oracle(ej_file) -> None:
+    """The probed dtypes are exactly what a whole-branch read would have reported."""
+    import awkward as ak
+
+    path, _ = ej_file
+    reader = _probe_reader(path)
+    reader.prepare()
+    with uproot.open(f"{path}:{_TREE}") as tree:
+        for stream, branches in (("jets", _JET), ("event", _EVENT)):
+            for fieldname, bare in branches.items():
+                flat = ak.flatten(tree[bare].array(library="ak"), axis=None)
+                want = np.dtype(np.asarray(ak.to_numpy(flat)).dtype.newbyteorder("=")).name
+                assert reader.schema.groups[stream].fields[fieldname] == want
+
+
+def test_metadata_and_bounded_probe_agree_field_by_field(ej_file, monkeypatch) -> None:
+    """The interpretation fast path and the one-entry fallback are interchangeable."""
+    path, _ = ej_file
+    reader = _probe_reader(path)
+    names = list(_JET.values()) + list(_EVENT.values())
+    with uproot.open(f"{path}:{_TREE}") as tree:
+        n = int(tree.num_entries)
+        via_meta = {b: reader._field_type(tree, b, n) for b in names}
+        monkeypatch.setattr(
+            "salt.data.readers.uproot_reader._interpretation_type", lambda _interp: None
+        )
+        via_read = {b: reader._field_type(tree, b, n) for b in names}
+    assert via_meta == via_read
+
+
+def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
+    """Row index, per-file kept counts and resolved multiplicity survive the probe change."""
+    from salt.data import Cut, CutSpec
+
+    directory = _two_files(tmp_path)
+    reader = UprootReader(
+        groups={"jets": {"branches": dict(_JET), "jagged": False}},
+        filename=directory,
+        tree=_TREE,
+        unroll="jets",
+        cuts=CutSpec(global_cuts=(Cut("pt", ">", 100_000.0),)),
+    )
+    reader.prepare()
+    total = 0
+    for entry, seed in zip(reader._table, (99, 7), strict=True):
+        arrays = build_fixture_arrays(seed=seed)
+        pt = [np.asarray(v) for v in arrays["recojet_antikt4PFlow_pt_NOSYS"]]
+        expected_kept = np.flatnonzero(np.concatenate(pt) > 100_000.0)
+        np.testing.assert_array_equal(entry.kept, expected_kept)
+        np.testing.assert_array_equal(entry.orig_counts, [len(v) for v in pt])
+        np.testing.assert_array_equal(
+            entry.per_row_kept, [int((v > 100_000.0).sum()) for v in pt]
+        )
+        total += int(expected_kept.size)
+    assert len(reader) == total
