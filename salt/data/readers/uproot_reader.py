@@ -1255,9 +1255,13 @@ class UprootReader(Reader):
         start, stop = rows.start, rows.stop
         b = stop - start
         out: dict[str, np.ndarray] = {}
+        wanted = {stream: self._served_fields(stream) for stream in self.groups}
+        # ONE pass over the files for ALL streams, so their branches share a
+        # grouped read instead of costing a separate covering pass each
+        all_cols = self._read_streams_columns(wanted, start, stop)
         for stream, cfg in self.groups.items():
-            fields = self._served_fields(stream)
-            cols = self._read_stream_columns(stream, fields, start, stop)
+            fields = wanted[stream]
+            cols = all_cols[stream]
             if cfg.jagged:
                 raw, valid = self._assemble_jagged(stream, fields, cols, b)
                 out[f"raw.{stream}"] = raw
@@ -1326,17 +1330,43 @@ class UprootReader(Reader):
     def _read_stream_columns(
         self, stream: str, fields: list[str], start: int, stop: int
     ) -> dict[str, Any]:
-        """Read a stream's demanded branches over a global row range (multi-file): per
-        file, reads the covering entry range, flattens (when unrolling), applies the
-        kept-row mask and slices to the file's contribution; blocks concat in row order.
-        Linked streams dereference the target container by ``m_persIndex`` per row.
+        """One stream's columns over a global row range — `_read_streams_columns` for one."""
+        return self._read_streams_columns({stream: fields}, start, stop)[stream]
+
+    def _read_streams_columns(
+        self, wanted: dict[str, list[str]], start: int, stop: int
+    ) -> dict[str, dict[str, Any]]:
+        """Read SEVERAL streams' demanded branches over a global row range (multi-file).
+
+        Per file: resolve the covering entry range, read, flatten (when
+        unrolling), apply the kept-row mask and slice to the file's
+        contribution; blocks concat in row order. Linked streams dereference the
+        target container by ``m_persIndex`` per row.
+
+        Every stream is read in ONE pass over the files, and within a file every
+        non-linked stream's direct branches go out as a SINGLE grouped request.
+        That is the point of taking a dict rather than one stream at a time: the
+        covering entry range is a property of the FILE and the row range, not of
+        the stream (it is computed from ``entry.per_row_kept``), so all streams
+        want exactly the same entries — and `uproot` coalesces basket byte-ranges
+        within one ``arrays()`` call but not across calls. Reading stream by
+        stream therefore made a 155-branch block into 7 independent covering
+        passes over the same entries, one per stream, each seeking its own
+        baskets.
+
+        Linked streams keep their own reads: `_read_linked_block` dereferences an
+        ElementLink into a different container, so its branches do not live on
+        this group's axis and cannot share the request. Joined fields likewise
+        stay on `_read_joined_cols`, which already groups the link with its
+        targets.
         """
         self._require_deps()
         import awkward as ak
 
         assert self._table is not None
-        cfg = self.groups[stream]
-        per_field_chunks: dict[str, list[Any]] = {f: [] for f in fields}
+        per_field_chunks: dict[str, dict[str, list[Any]]] = {
+            s: {f: [] for f in fs} for s, fs in wanted.items()
+        }
 
         for entry in self._table:
             file_rlo = entry.row_start
@@ -1358,16 +1388,45 @@ class UprootReader(Reader):
             )
             sel = in_block[row_off : row_off + (hi - lo)]
             t = self._tree(entry.path)
-            if cfg.is_linked:
-                block = self._read_linked_block(t, cfg, fields, e0, e1)
-            else:
-                block = self._read_group_cols(t, cfg, fields, e0, e1)
+
+            # the shared request: every non-linked stream's direct branches
+            direct_names: dict[str, dict[str, str]] = {}
+            union: list[str] = []
+            for stream, fields in wanted.items():
+                cfg = self.groups[stream]
+                if cfg.is_linked:
+                    continue
+                names = {
+                    f: self._on_disk(cfg, cfg.branches[f]) for f in fields if f in cfg.branches
+                }
+                direct_names[stream] = names
+                union.extend(names.values())
+            shared = self._read_branches(t, union, e0, e1) if union else {}
+            # two streams may serve the same on-disk branch; flatten it once
+            unrolled: dict[str, Any] = {}
+
+            for stream, fields in wanted.items():
+                cfg = self.groups[stream]
+                if cfg.is_linked:
+                    block = self._read_linked_block(t, cfg, fields, e0, e1)
+                else:
+                    block = {}
+                    for f, branch in direct_names[stream].items():
+                        if branch not in unrolled:
+                            unrolled[branch] = self._unrolled(shared[branch])
+                        block[f] = unrolled[branch]
+                    joined = [f for f in fields if f in cfg.join_branches]
+                    if joined:
+                        block.update(self._read_joined_cols(t, cfg, joined, e0, e1))
+                for f in fields:
+                    per_field_chunks[stream][f].append(block[f][sel])
+
+        cols: dict[str, dict[str, Any]] = {}
+        for stream, fields in wanted.items():
+            cols[stream] = {}
             for f in fields:
-                per_field_chunks[f].append(block[f][sel])
-        cols: dict[str, Any] = {}
-        for f in fields:
-            chunks = per_field_chunks[f]
-            cols[f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+                chunks = per_field_chunks[stream][f]
+                cols[stream][f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         return cols
 
     def _read_branches(self, t: Any, branches: list[str], e0: int, e1: int) -> dict[str, Any]:
