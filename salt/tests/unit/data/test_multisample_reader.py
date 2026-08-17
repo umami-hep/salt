@@ -759,3 +759,137 @@ def test_multisample_restage_delegates_recursively_and_roundtrips(
     np.testing.assert_array_equal(
         staged_out["raw.event"]["eventNumber"], orig_out["raw.event"]["eventNumber"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# 1b. MANY samples of very different lengths (K >> 2)
+#
+# The K=2 tests above fix the two-sample case; the training target is many
+# samples whose sizes span orders of magnitude, so the same properties are
+# asserted for K in {3, 8, 32} over size mixes spanning ~180x. Nothing here is
+# a weaker assertion than the K=2 versions — same +/-2 per-window bound, same
+# exact epoch multiset, same label-injection identity.
+# --------------------------------------------------------------------------- #
+
+# size mixes spanning ~2 orders of magnitude (50 ... 9,000)
+_K3_SIZES = (50, 700, 9000)
+_K8_SIZES = (50, 120, 300, 700, 1500, 3000, 5000, 9000)
+_K32_SIZES = tuple(
+    int(round(50 * (9000 / 50) ** (i / 31))) for i in range(32)
+)  # log-spaced 50 -> 9000
+
+
+def _many_sample_reader(sizes, interleave_block: int = 1) -> MultiSampleReader:
+    """A MultiSampleReader over len(sizes) StubReaders; label i == sample i."""
+    return MultiSampleReader(
+        samples=[
+            SampleConfig(
+                name=f"s{i}",
+                label=i,
+                reader=StubReader(n=n, seed=100 + i, offset=1_000_000.0 * (i + 1)),
+            )
+            for i, n in enumerate(sizes)
+        ],
+        interleave_block=interleave_block,
+    )
+
+
+@pytest.mark.parametrize(
+    ("sizes", "b"),
+    [(_K3_SIZES, 100), (_K8_SIZES, 200), (_K32_SIZES, 500)],
+    ids=["K3", "K8", "K32"],
+)
+def test_many_samples_per_window_bounded_and_epoch_exact(sizes, b) -> None:
+    """Every sample stays within the documented per-window bound, at every K."""
+    reader = _many_sample_reader(sizes)
+    n = sum(sizes)
+    assert len(reader) == n
+
+    n_batches = 0
+    for _bi, proc in _full_batches(reader, b):
+        assert len(proc) == b
+        for i, n_i in enumerate(sizes):
+            ideal = b * n_i / n
+            got = int((proc == i).sum())
+            assert abs(got - ideal) <= 2, (
+                f"K={len(sizes)} sample {i} (n={n_i}): batch had {got}, ideal {ideal:.3f}"
+            )
+        n_batches += 1
+    assert n_batches == n // b
+
+    # epoch-level: every sample's rows emitted exactly once, no more, no fewer
+    counts = _epoch_counts(reader)
+    for i, n_i in enumerate(sizes):
+        assert counts[i] == n_i, f"sample {i}: epoch served {counts[i]}, expected {n_i}"
+    assert sum(counts.values()) == n
+
+
+@pytest.mark.parametrize(
+    "sizes", [_K3_SIZES, _K8_SIZES, _K32_SIZES], ids=["K3", "K8", "K32"]
+)
+def test_many_samples_label_injection_matches_the_index(sizes) -> None:
+    """The injected label identifies the owning sample for every row, at every K.
+
+    StubReader stamps eventNumber = local row + offset, and each sample gets a
+    distinct 1e6-spaced offset, so the label and the value are independently
+    derived — a mislabelled row cannot agree with both.
+    """
+    reader = _many_sample_reader(sizes)
+    out = reader.read(slice(0, len(reader)), Mode.FIT)
+    proc = out["raw.event"]["process"]
+    evno = out["raw.event"]["eventNumber"]
+
+    for i, n_i in enumerate(sizes):
+        mine = proc == i
+        assert int(mine.sum()) == n_i
+        local = evno[mine] - 1_000_000 * (i + 1)
+        # each sample contributes exactly its own rows 0..n_i-1, in order
+        np.testing.assert_array_equal(np.sort(local), np.arange(n_i))
+        np.testing.assert_array_equal(local, np.arange(n_i))
+
+
+@pytest.mark.parametrize(
+    ("sizes", "b"),
+    [(_K3_SIZES, 100), (_K8_SIZES, 200), (_K32_SIZES, 500)],
+    ids=["K3", "K8", "K32"],
+)
+def test_many_samples_minorities_are_spread_not_starved(sizes, b) -> None:
+    """The smallest samples appear across the epoch rather than bunching."""
+    reader = _many_sample_reader(sizes)
+    n = sum(sizes)
+    n_batches = n // b
+    smallest = min(range(len(sizes)), key=lambda i: sizes[i])
+
+    seen_in = []
+    for bi, proc in _full_batches(reader, b):
+        if int((proc == smallest).sum()) > 0:
+            seen_in.append(bi)
+
+    assert seen_in, "smallest sample never appeared"
+    # spread: its first and last appearance straddle most of the epoch, and it
+    # is not confined to one contiguous run at the start
+    assert seen_in[0] < n_batches * 0.2
+    assert seen_in[-1] > n_batches * 0.8
+
+
+@pytest.mark.parametrize("block", [1, 16, 64])
+@pytest.mark.parametrize(
+    ("sizes", "b"), [(_K8_SIZES, 200), (_K32_SIZES, 500)], ids=["K8", "K32"]
+)
+def test_many_samples_block_interleave_preserves_proportions(sizes, b, block) -> None:
+    """A block interleave moves rows between batches, never the epoch content."""
+    reader = _many_sample_reader(sizes, interleave_block=block)
+    n = sum(sizes)
+
+    for _bi, proc in _full_batches(reader, b):
+        for i, n_i in enumerate(sizes):
+            ideal = b * n_i / n
+            got = int((proc == i).sum())
+            # same bound the K=2 block test uses: one block of slack either way
+            assert abs(got - ideal) <= 2 * block, (
+                f"block={block} K={len(sizes)} sample {i}: {got} vs ideal {ideal:.3f}"
+            )
+
+    counts = _epoch_counts(reader)
+    for i, n_i in enumerate(sizes):
+        assert counts[i] == n_i
