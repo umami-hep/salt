@@ -9,6 +9,7 @@ from salt.data.datamodule import GraphDataModule
 from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
 from salt.data.input_samples import InputSamples
 from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
+from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
 from salt.data.processors.features import Features
 from salt.data.processors.ftag_labeller import FtagLabeller
 from salt.data.processors.labels import Labels
@@ -26,6 +27,7 @@ __all__ = [
     "MODEL_VISIBLE_NAMESPACES",
     "VDS",
     "ConstituentCuts",
+    "CorpusManifest",
     "Cut",
     "CutSpec",
     "Features",
@@ -38,6 +40,7 @@ __all__ = [
     "InputSamples",
     "IterableGraphDataset",
     "Labels",
+    "ManifestEntry",
     "MaskFormerTargets",
     "MultiSampleReader",
     "MultiTarget",
@@ -51,6 +54,7 @@ __all__ = [
     "UprootGroupConfig",
     "UprootReader",
     "WorkerCtx",
+    "build_manifest",
     "create_vds",
     "default_vds_path",
     "has_wildcard",

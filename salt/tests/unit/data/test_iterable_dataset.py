@@ -18,6 +18,7 @@ import pytest
 
 from salt.data.base import Reader, RowBlock, WorkerCtx
 from salt.data.iterable_dataset import IterableGraphDataset
+from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
 from salt.data.processors.features import Features
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.sharding import interleave_plan, partition_blocks, shard_row_counts
@@ -477,6 +478,79 @@ def test_default_row_blocks_is_one_whole_block() -> None:
     reader = BlockStubReader(n=64, n_blocks=1)
     blocks = Reader.row_blocks(reader)
     assert blocks == [RowBlock(group=0, start=0, stop=64)]
+
+
+# --------------------------------------------------------------------------- #
+# corpus manifest (T4) — planning without touching the corpus
+# --------------------------------------------------------------------------- #
+
+
+def test_manifest_round_trips_and_matches_the_reader(tmp_path) -> None:  # noqa: ANN001
+    """A saved manifest reproduces the reader's blocks and row counts exactly."""
+    reader = _multisample([40, 130, 7], n_blocks=3)
+    built = build_manifest(reader)
+    path = built.save(tmp_path / "corpus.json")
+    loaded = CorpusManifest.load(path)
+    assert loaded.blocks() == reader.row_blocks()
+    assert loaded.group_rows == [40, 130, 7]
+    assert loaded.n_rows == 177
+    assert loaded.group_names == ["s0", "s1", "s2"]
+
+
+def test_manifest_plans_the_same_shards_as_the_reader(tmp_path) -> None:  # noqa: ANN001
+    """A manifest-planned shard stream is identical to a reader-planned one."""
+    sizes = [40, 130, 7]
+    manifest = build_manifest(_multisample(sizes)).save(tmp_path / "corpus.json")
+    kw = {"batch_size": 4, "drop_last": False, "shuffle": False}
+    from_reader = _batch_uids(_dataset(_multisample(sizes), **kw))
+    from_manifest = _batch_uids(_dataset(_multisample(sizes), manifest=manifest, **kw))
+    assert from_reader == from_manifest
+
+
+def test_manifest_sizes_the_epoch_without_a_reader_index(tmp_path) -> None:  # noqa: ANN001
+    """`n_batches` comes off the manifest — `row_blocks` is never called."""
+    sizes = [40, 130, 7]
+    manifest = build_manifest(_multisample(sizes)).save(tmp_path / "corpus.json")
+    reader = _multisample(sizes)
+    calls = []
+    original = reader.row_blocks
+
+    def spy():  # noqa: ANN202
+        calls.append(1)
+        return original()
+
+    reader.row_blocks = spy  # type: ignore[method-assign]
+    dataset = _dataset(reader, batch_size=4, drop_last=False, manifest=manifest)
+    assert dataset.n_batches() == -(-177 // 4)
+    assert calls == [], "the manifest path still asked the reader for its blocks"
+
+
+def test_manifest_detects_a_changed_corpus(tmp_path) -> None:  # noqa: ANN001
+    """Validation is stat-based: a resized file makes the manifest stale."""
+    data = tmp_path / "f.root"
+    data.write_bytes(b"x" * 100)
+    st = data.stat()
+    manifest = CorpusManifest(
+        entries=[
+            ManifestEntry(
+                group=0, start=0, stop=10, path=str(data), size=st.st_size, mtime_ns=st.st_mtime_ns
+            )
+        ],
+        schema_hash="abc",
+    )
+    assert manifest.validate(schema_hash="abc") == []
+    data.write_bytes(b"x" * 200)
+    problems = manifest.validate(schema_hash="abc")
+    assert problems and "size changed" in problems[0]
+    assert any("schema hash" in p for p in manifest.validate(schema_hash="different"))
+
+
+def test_manifest_rejects_a_foreign_format_version(tmp_path) -> None:  # noqa: ANN001
+    """A future/older artifact is a hard error, never a partial read."""
+    path = tmp_path / "corpus.json"
+    path.write_text('{"version": 999, "entries": [], "group_names": ["default"]}')
+    with pytest.raises(ConfigError):
+        CorpusManifest.load(path)
 
 
 @pytest.mark.parametrize(

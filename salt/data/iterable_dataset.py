@@ -5,12 +5,14 @@ with per-shard proportional interleaving and bounded buffers.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from torch.utils.data import IterableDataset, get_worker_info
 
 from salt.data.base import RowBlock, SaltDatasetModule
+from salt.data.manifest import CorpusManifest
 from salt.data.plan_runner import _PlanRunner
 from salt.data.readers.stream import pad_fill
 from salt.data.sharding import interleave_plan, partition_blocks, shard_row_counts
@@ -78,6 +80,12 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
     interleave_block : int, optional
         Rows per turn of the group round robin, by default 1. Every batch's
         per-group counts stay within this many rows of their ideal share.
+    manifest : CorpusManifest | str | Path | None, optional
+        A prebuilt `CorpusManifest` (or its path) to plan shards from. With one,
+        `n_batches`/`__len__`/the partition need no reader index at all, so a
+        rank can size its epoch without touching the corpus. ``None`` (default)
+        asks the reader for its blocks, which resolves `prepare` — cheap with an
+        index cache, expensive without one.
     max_live_streams : int | None, optional
         Maximum groups holding a resident block at once, by default 2. Bounds
         peak resident rows at ``max_live_streams * block_rows``; ``None``
@@ -111,6 +119,7 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
         drop_last: bool = True,
         block_rows: int | None = DEFAULT_BLOCK_ROWS,
         interleave_block: int = 1,
+        manifest: CorpusManifest | str | Path | None = None,
         max_live_streams: int | None = 2,
         world_size: int | None = None,
         rank: int | None = None,
@@ -135,6 +144,9 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
         self.block_rows = block_rows
         self.interleave_block = int(interleave_block)
         self.max_live_streams = max_live_streams
+        # a path is kept as a path (picklable, and loaded post-fork like
+        # everything else that touches the filesystem)
+        self.manifest = manifest
         self._world_size = world_size
         self._rank = rank
         self._num_workers = num_workers
@@ -187,19 +199,34 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
 
     # -- layout ---------------------------------------------------------------
 
+    def _manifest(self) -> CorpusManifest | None:
+        """The configured manifest, loaded from disk on first use; ``None`` if unset."""
+        if self.manifest is None:
+            return None
+        if not isinstance(self.manifest, CorpusManifest):
+            self.manifest = CorpusManifest.load(self.manifest)
+        return self.manifest
+
     def _resolve_layout(self) -> tuple[list[RowBlock], list[int]]:
         """``(blocks, group_rows)`` for the whole corpus, cached per process.
 
-        Calls the reader's `row_blocks`, which resolves `prepare` — with an index
-        cache or manifest in place that opens no data files.
+        From the manifest when one is configured — no reader index, no file
+        opened. Otherwise from the reader's `row_blocks`, which resolves
+        `prepare`; with the index cache in place that also opens no data file,
+        but it does have to build or restore a per-row index the manifest makes
+        unnecessary for planning.
         """
         if self._layout is None:
-            blocks = list(self._reader.row_blocks())
-            n_groups = 1 + max((b.group for b in blocks), default=0)
-            group_rows = [0] * n_groups
-            for block in blocks:
-                group_rows[block.group] += block.n_rows
-            self._layout = (blocks, group_rows)
+            manifest = self._manifest()
+            if manifest is not None:
+                self._layout = (manifest.blocks(), manifest.group_rows)
+            else:
+                blocks = list(self._reader.row_blocks())
+                n_groups = 1 + max((b.group for b in blocks), default=0)
+                group_rows = [0] * n_groups
+                for block in blocks:
+                    group_rows[block.group] += block.n_rows
+                self._layout = (blocks, group_rows)
         return self._layout
 
     def n_batches(self) -> int:
