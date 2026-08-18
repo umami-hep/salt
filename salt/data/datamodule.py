@@ -20,6 +20,8 @@ from salt.data.input_samples import InputSamples, deepest_source_path, source_nu
 from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
 from salt.data.manifest import (
     AUTO_MANIFEST,
+    CorpusManifest,
+    apply_schema,
     built_schema_hash,
     ensure_manifest,
     is_auto,
@@ -579,6 +581,11 @@ class GraphDataModule(lightning.LightningDataModule):
         # staging never invalidates it (the blocks are the same rows either way).
         manifest = self._manifest_for(mode, reader, num)
         reader = self._stage(reader)
+        if isinstance(manifest, CorpusManifest) and apply_schema(manifest, reader):
+            _LOG.info(
+                f"manifest: seeded the {_STAGE_OF_MODE[mode]} reader's schema from the manifest "
+                "— plan compilation opens no data file"
+            )
         # only `_batch_modules` are copied — setup-only modules never reach a dataset
         modules = {
             name: (reader if name == self._reader_name else deepcopy(module))

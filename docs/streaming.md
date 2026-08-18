@@ -156,13 +156,21 @@ Staleness is decided without opening a data file:
 
 A stale manifest is rebuilt, loudly.
 
+The manifest also records the **served schema** (`{stream: {field: dtype}}`).
+Plan compilation validates demanded fields against it, and both `schema_group`
+and `label_universe` resolve `prepare()` when the reader has none — so without
+this a run with a perfectly good manifest still opened one file per stage just
+to re-learn field names the manifest already had. With it, a warm `setup()`
+opens **no data file at all**. Reading still builds the index when a worker
+actually reads: the manifest seeds the schema, not the row table.
+
 !!! note "Format version 2"
 
-    `MANIFEST_VERSION` is 2, and the filename key now includes the reader's
-    config. **Manifests written by an earlier salt are a miss.** Under
-    `manifest: auto` that is invisible — the run rebuilds. An explicit
-    `manifest: /path/...` **errors as stale**; rebuild it with
-    `python -m salt.data.manifest`.
+    `MANIFEST_VERSION` is 2: the artifact now carries the served schema, and its
+    filename key includes the reader's config. **Manifests written by an earlier
+    salt are a miss.** Under `manifest: auto` that is invisible — the run
+    rebuilds. An explicit `manifest: /path/...` **errors as stale**; rebuild it
+    with `python -m salt.data.manifest`.
 
 ### `manifest: /path/to/corpus_manifest.json` — build it yourself
 

@@ -27,6 +27,7 @@ from salt.data.iterable_dataset import IterableGraphDataset
 from salt.data.manifest import (
     CorpusManifest,
     ManifestEntry,
+    apply_schema,
     build_manifest,
     corpus_root,
     is_auto,
@@ -35,15 +36,14 @@ from salt.data.manifest import (
 )
 from salt.data.processors.features import Features
 from salt.graph.spec import Mode
-from salt.schema import GroupSchema, Schema
+from salt.schema import GroupSchema
 from salt.tests.unit.data.test_iterable_dataset import BlockStubReader
 
 ROWS_PER_FILE = 25
 SINKS = {mode: ["inputs.event"] for mode in (Mode.FIT, Mode.VAL, Mode.TEST)}
 
-# The stub's schema is CONFIG-derived, so `schema_group` (which the plan compile
-# calls) never counts as opening anything — only index resolution does.
-_SCHEMA = Schema(groups={"event": GroupSchema(fields={"uid": "int64", "val": "float32"})})
+# Both index resolution AND schema resolution count as opening the corpus, which
+# is what makes the "opens nothing" assertions mean what they say.
 
 
 class FileStubReader(BlockStubReader):
@@ -81,7 +81,16 @@ class FileStubReader(BlockStubReader):
         super()._build()
 
     def schema_group(self, stream: str) -> GroupSchema | None:
-        return _SCHEMA.groups.get(stream)
+        """Resolving the schema means opening the corpus — unless it was seeded.
+
+        This deliberately counts as an open. An earlier version answered from a
+        config-derived constant, which made the "setup opens nothing" assertions
+        pass without ever exercising the schema path — the very thing
+        `manifest.schema` exists to close.
+        """
+        if self.schema is None:
+            self._build()
+        return self.schema.groups.get(stream) if self.schema is not None else None
 
     def row_blocks(self) -> list[RowBlock]:
         """One block per file (empty reader: none)."""
@@ -316,6 +325,32 @@ def test_second_run_reuses_it_and_setup_opens_nothing(tmp_path) -> None:
     assert isinstance(again.train_dset, IterableGraphDataset)
     assert isinstance(again.train_dset.manifest, CorpusManifest)
     assert len(again.train_dset) == (2 * ROWS_PER_FILE) // 5
+
+
+def test_a_warm_manifest_carries_the_schema(tmp_path) -> None:
+    """The manifest records the served schema, so a later run need not re-probe it."""
+    root = tmp_path / "corpus"
+    reader = FileStubReader(files=[]).with_source(_corpus(root, ["a.root"]))
+    manifest = build_manifest(reader)
+    assert manifest.schema == {"event": {"uid": "int64", "val": "float32"}}
+    assert CorpusManifest.load(manifest.save(root / "m.json")).schema == manifest.schema
+
+
+def test_a_seeded_reader_resolves_fields_without_opening(tmp_path) -> None:
+    """`apply_schema` is what makes a warm setup zero-open: the schema comes off the
+    manifest, so `schema_group` answers without resolving the index.
+    """
+    root = tmp_path / "corpus"
+    built = build_manifest(FileStubReader(files=[]).with_source(_corpus(root, ["a.root"])))
+
+    FileStubReader.reset()
+    fresh = FileStubReader(files=[]).with_source(str(root / "*.root"))
+    assert apply_schema(built, fresh) is True
+    assert fresh.schema_group("event") is not None
+    assert FileStubReader.opens == 0
+
+    # a reader that already has one keeps it — its own schema is authoritative
+    assert apply_schema(built, fresh) is False
 
 
 def test_prepare_data_is_idempotent(tmp_path) -> None:

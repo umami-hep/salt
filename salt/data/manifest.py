@@ -16,6 +16,7 @@ from typing import Any
 from salt.data.base import Reader, RowBlock
 from salt.graph.errors import ConfigError
 from salt.logging import get_logger
+from salt.schema import GroupSchema, Schema
 
 __all__ = ["AUTO_MANIFEST", "MANIFEST_VERSION", "CorpusManifest", "ManifestEntry", "build_manifest"]
 
@@ -79,6 +80,10 @@ class CorpusManifest:
     schema_hash : str
         Digest of the served schema; a manifest is only valid for the reader
         configuration that produced it.
+    schema : dict, optional
+        The served schema as ``{stream: {field: dtype}}``. Carried so plan
+        compilation can validate demanded fields without asking the reader to
+        probe a file for them — see `apply_schema`.
     version : int, optional
         Artifact format version, by default `MANIFEST_VERSION`.
     meta : dict, optional
@@ -88,6 +93,7 @@ class CorpusManifest:
     entries: list[ManifestEntry]
     group_names: list[str] = field(default_factory=lambda: ["default"])
     schema_hash: str = ""
+    schema: dict[str, dict[str, str]] = field(default_factory=dict)
     version: int = MANIFEST_VERSION
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -122,6 +128,7 @@ class CorpusManifest:
             "version": self.version,
             "group_names": list(self.group_names),
             "schema_hash": self.schema_hash,
+            "schema": {s: dict(f) for s, f in self.schema.items()},
             "meta": dict(self.meta),
             "entries": [asdict(entry) for entry in self.entries],
         }
@@ -157,6 +164,7 @@ class CorpusManifest:
             entries=[ManifestEntry(**entry) for entry in payload["entries"]],
             group_names=list(payload.get("group_names", ["default"])),
             schema_hash=str(payload.get("schema_hash", "")),
+            schema={s: dict(f) for s, f in payload.get("schema", {}).items()},
             version=int(payload["version"]),
             meta=dict(payload.get("meta", {})),
         )
@@ -276,8 +284,40 @@ def build_manifest(reader: Reader, meta: dict[str, Any] | None = None) -> Corpus
         entries=entries,
         group_names=names,
         schema_hash=schema_digest(reader),
+        schema=served_schema(reader),
         meta={"sources": sources, **(meta or {})},
     )
+
+
+def served_schema(reader: Reader) -> dict[str, dict[str, str]]:
+    """The reader's built schema as ``{stream: {field: dtype}}``; empty if it has none."""
+    schema = getattr(reader, "schema", None)
+    if schema is None:
+        return {}
+    return {stream: dict(group.fields) for stream, group in schema.groups.items()}
+
+
+def apply_schema(manifest: CorpusManifest, reader: Reader) -> bool:
+    """Give `reader` the manifest's schema, so plan compilation opens no data file.
+
+    This is the difference between a warm start that still probes and one that
+    does not. `schema_group` and `label_universe` both resolve `prepare()` when
+    the reader has no schema, and plan compilation calls both — so a run with a
+    perfectly good manifest still opened one file per stage just to re-learn
+    field names the manifest already recorded.
+
+    Reading still builds the index when a worker actually reads: this seeds the
+    schema, not the row table. Returns whether anything was seeded — a reader
+    that already has a schema is left alone, since its own is authoritative.
+    """
+    if not manifest.schema or getattr(reader, "schema", None) is not None:
+        return False
+    reader.schema = Schema(
+        groups={
+            stream: GroupSchema(fields=dict(fields)) for stream, fields in manifest.schema.items()
+        }
+    )
+    return True
 
 
 # --------------------------------------------------------------------------- #
