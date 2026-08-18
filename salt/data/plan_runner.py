@@ -29,6 +29,14 @@ __all__ = ["MODEL_VISIBLE_NAMESPACES", "_PlanRunner"]
 MODEL_VISIBLE_NAMESPACES = ("inputs", "masks", "labels", "meta")
 """Bundle namespaces converted at the numpy->torch boundary."""
 
+_DERIVED_ATTRS = ("_plan", "_read_fields", "_bound_pid", "_exec_steps", "_boundary_keys")
+"""Attributes rebuilt from the config by `_recompute_derived`, dropped when pickling."""
+
+
+def _is_model_visible(key: str) -> bool:
+    """Whether a produced key crosses the numpy->torch boundary to the model."""
+    return key.split(KEY_SEP, 1)[0] in MODEL_VISIBLE_NAMESPACES
+
 
 class _PlanRunner:
     """Compiled-plan host: one `Reader`, N processors, one torch-boundary conversion.
@@ -111,24 +119,50 @@ class _PlanRunner:
                 "cannot be checked statically; a misspelled key will fail at worker bind",
                 stacklevel=3,
             )
+        self._recompute_derived()
+
+    def _recompute_derived(self) -> None:
+        """Build everything implied by the modules + config: the compiled plan, the
+        demand-narrowed read set, and the per-batch loop caches.
+
+        Called from `__init__` and again after unpickling (`__getstate__` drops
+        exactly `_DERIVED_ATTRS`), so this is the single place that decides what
+        the two paths have to agree on.
+
+        The loop caches turn the frozen plan into a step sequence plus the
+        model-visible boundary key list once, instead of per batch.
+        """
         self._plan: Plan = self._compile()
         self._read_fields: dict[str, dict[str, str]] = self._collect_read_fields()
         self._bound_pid: int | None = None
-        self._build_caches()
+        self._exec_steps = tuple(
+            (step.name, step.module, isinstance(step.module, Reader), set(step.produces))
+            for step in self._plan.steps
+        )
+        self._boundary_keys = tuple(
+            (key, tuple(key.split(KEY_SEP)))
+            for step in self._plan.steps
+            for key in step.produces
+            if _is_model_visible(key)
+        )
 
     def _compile(self) -> Plan:
-        """Compile the dataset plan and statically validate raw-field demands against the
-        schema (raises `SchemaError` with nearest-name suggestions).
-        """
-        universe = self._reader.label_universe()
+        """Compile the dataset plan, then statically validate its raw-field demands."""
         plan = compile_plan(
             self._modules,  # type: ignore[arg-type]
             self._mode,
             sources={},
-            schema=universe,
+            schema=self._reader.label_universe(),
             sinks=self._sinks,
             sink_origins=self._sink_origins,
         )
+        self._check_raw_fields(plan)
+        return plan
+
+    def _check_raw_fields(self, plan: Plan) -> None:
+        """Raise `SchemaError` (with nearest-name suggestions) for a demanded raw field the
+        reader's schema artifact does not have. Readers without one are checked at bind.
+        """
         for step in plan.steps:
             for key, spec in step.requires.items():
                 parts = key.split(KEY_SEP)
@@ -137,6 +171,8 @@ class _PlanRunner:
                 gschema = self._reader.schema_group(parts[1])
                 if gschema is None:  # no schema artifact: bind-time checks remain
                     continue
+                # declaration order, not set order: with two fields missing the
+                # error must always name the same one
                 for field in spec.fields:
                     if field in gschema.fields:
                         continue
@@ -148,7 +184,6 @@ class _PlanRunner:
                         f"field {field!r} demanded by module {step.name!r} not present in "
                         f"the schema for stream {parts[1]!r}{hint}"
                     )
-        return plan
 
     def _collect_read_fields(self) -> dict[str, dict[str, str]]:
         """Compute the demand-narrowed per-stream read set from the plan.
@@ -157,6 +192,7 @@ class _PlanRunner:
         (`sink_origins`), so a reader bind error names the task module the
         user configured, not just the `Labels` relay.
         """
+        origins = self._sink_origins or {}
         out: dict[str, dict[str, str]] = {}
         for step in self._plan.steps:
             collector = getattr(step.module, "read_fields", None)
@@ -165,30 +201,9 @@ class _PlanRunner:
             for stream, fields in collector(step).items():
                 bucket = out.setdefault(stream, {})
                 for field, who in fields.items():
-                    origin = (
-                        self._sink_origins.get(f"labels.{stream}.{field}")
-                        if self._sink_origins is not None
-                        else None
-                    )
+                    origin = origins.get(f"labels.{stream}.{field}")
                     bucket.setdefault(field, f"{who} (for {origin})" if origin else who)
         return out
-
-    def _build_caches(self) -> None:
-        """Precompute the per-batch loop state from the frozen plan (hot path).
-
-        Static plan -> step sequence + model-visible boundary keys computed
-        once here instead of every batch. Rebuilt after unpickling.
-        """
-        self._exec_steps = tuple(
-            (step.name, step.module, isinstance(step.module, Reader), frozenset(step.produces))
-            for step in self._plan.steps
-        )
-        self._boundary_keys = tuple(
-            (key, tuple(parts))
-            for step in self._plan.steps
-            for key in step.produces
-            if (parts := key.split(KEY_SEP))[0] in MODEL_VISIBLE_NAMESPACES
-        )
 
     @property
     def plan(self) -> Plan:
@@ -216,22 +231,13 @@ class _PlanRunner:
         return self._mode
 
     def boundary_specs(self) -> dict[str, TensorSpec]:
-        """The model-visible produced leaves — the model plan's ``sources``.
-
-        Returns
-        -------
-        dict[str, TensorSpec]
-            ``{dotted_key: spec}`` for every produced key under the
-            model-visible namespaces, in plan order.
-        """
-        out: dict[str, TensorSpec] = {}
-        for step in self._plan.steps:
-            out.update({
-                key: spec
-                for key, spec in step.produces.items()
-                if key.split(KEY_SEP, 1)[0] in MODEL_VISIBLE_NAMESPACES
-            })
-        return out
+        """The model-visible produced leaves, in plan order — the model plan's ``sources``."""
+        return {
+            key: spec
+            for step in self._plan.steps
+            for key, spec in step.produces.items()
+            if _is_model_visible(key)
+        }
 
     def _maybe_bind(self) -> None:
         """Bind all plan modules once per worker process (pid-guarded for fork inheritance)."""
@@ -301,21 +307,12 @@ class _PlanRunner:
         return out
 
     def __getstate__(self) -> dict[str, Any]:
-        """Drop the compiled plan (holds MappingProxyType — not picklable); recompiled in
-        `__setstate__` (deterministic: same config -> same plan/plan_hash).
+        """Drop the derived state — the compiled plan holds a `MappingProxyType` and does
+        not pickle. `__setstate__` rebuilds it (deterministic: same config -> same plan).
         """
-        state = self.__dict__.copy()
-        state["_plan"] = None
-        state["_read_fields"] = None
-        state["_bound_pid"] = None
-        state["_exec_steps"] = None
-        state["_boundary_keys"] = None
-        return state
+        return {k: v for k, v in self.__dict__.items() if k not in _DERIVED_ATTRS}
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore and recompile the plan (static, config-only)."""
+        """Restore the config and recompile everything derived from it."""
         self.__dict__.update(state)
-        self._plan = self._compile()
-        self._read_fields = self._collect_read_fields()
-        self._bound_pid = None
-        self._build_caches()
+        self._recompute_derived()
