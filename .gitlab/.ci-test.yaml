@@ -64,8 +64,9 @@ modular-integration-cpu-gates:
 # --------------------- GPU RUNNER (k8s-gpu) SMOKE ---------------------
 # Proves the GPU path end-to-end on CERN's k8s-gpu fleet: GPU visible, our salt
 # test image actually ships CUDA torch, and a real training runs on the GPU
-# (fast_dev_run on the synthetic gn2v2-dummy config — the same generator +
-# override pattern the unit suite uses). `tags: [k8s-gpu]` selects the GPU
+# (fast_dev_run on the derived GN2v2 test config — the same generator + config
+# the unit suite uses, so this job stays a GPU check and not a second config
+# gate). `tags: [k8s-gpu]` selects the GPU
 # runner; we keep the .test-template salt image (overrides the runner's default
 # AlmaLinux9). FAIR USE: keep k8s-gpu jobs <= 5 in parallel.
 gpu-smoke:
@@ -93,13 +94,27 @@ gpu-smoke:
     - nvidia-smi || echo "nvidia-smi not in image (ok as long as torch sees CUDA below)"
     - python -c "import torch; print('cuda_available:', torch.cuda.is_available()); print('torch built for CUDA:', torch.version.cuda); assert torch.cuda.is_available(), 'GPU runner gave no CUDA device to torch — check the image CUDA major is <= the runner driver (nvidia-smi above)'; print('gpu:', torch.cuda.get_device_name(0))"
     - |
-      # Synthetic training data for the gn2v2-dummy config (deterministic,
-      # same generators the unit suite uses — salt/tests/unit/test_main.py).
+      # Synthetic training data + the derived GN2v2 test config (deterministic,
+      # the same generators and the same config the unit suite uses —
+      # salt/tests/_fixtures/gn2v2_test_config.py).
+      #
+      # This job trains a TEST config, not a shipped one, and that is deliberate.
+      # It is a GPU check: does the image ship CUDA torch and does a real
+      # training step run on the device. Pointing it at a shipped model makes it
+      # a second config gate — one whose data has to satisfy that model's own
+      # variable names and class set. salt/tests/integration/test_production_configs.py
+      # is where shipped configs get fed from salt.testing.datagen and taken
+      # through the full lifecycle; that belongs there, on CPU, not on a
+      # rationed k8s-gpu slot.
+      #
+      # derive() writes to a per-process temp dir, so the path is copied out for
+      # the shell step below.
       python - <<'EOF'
       from pathlib import Path
       from salt.schema import dump_schema, save_schema
       from salt.testing.inputs import write_dummy_file
       from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+      from salt.tests._fixtures.gn2v2_test_config import small_config
       base = Path("gpu_smoke_data")
       base.mkdir(exist_ok=True)
       nd, cd = base / "norm_dict.yaml", base / "class_dict.yaml"
@@ -107,9 +122,10 @@ gpu-smoke:
       h5 = base / "pp_output_train.h5"
       write_dummy_file(h5, nd)
       save_schema(dump_schema(h5), base / "schema.yaml")
+      (base / "config.yaml").write_text(small_config().read_text())
       EOF
     - salt fit
-      --config salt/configs/gn2v2-dummy.yaml
+      --config gpu_smoke_data/config.yaml
       --data.train_file=gpu_smoke_data/pp_output_train.h5
       --data.val_file=gpu_smoke_data/pp_output_train.h5
       --data.modules.reader.init_args.schema=gpu_smoke_data/schema.yaml

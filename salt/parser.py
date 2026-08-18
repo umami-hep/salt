@@ -84,6 +84,38 @@ def _deep_merge_dicts(base: dict[str, Any], over: dict[str, Any]) -> dict[str, A
     return merged
 
 
+_CONFIG_FLAGS = ("--config", "-c")
+
+
+def _expand_config_includes(args: list[Any]) -> list[Any]:
+    """Rewrite every ``--config``/``-c`` value to its include-expanded form.
+
+    ``include:`` is a salt-level key, so it has to be resolved and stripped
+    before jsonargparse reads the file. Configs without includes are passed
+    through untouched.
+    """
+    from salt.config_utils import (
+        expand_includes,
+    )  # local import: avoids a parser<->config_utils cycle
+
+    out: list[Any] = []
+    expect_value = False
+    for arg in args:
+        if expect_value and isinstance(arg, str):
+            out.append(expand_includes(arg))
+            expect_value = False
+            continue
+        expect_value = False
+        if isinstance(arg, str):
+            if arg in _CONFIG_FLAGS:
+                expect_value = True
+            elif arg.startswith("--config="):
+                out.append("--config=" + expand_includes(arg.split("=", 1)[1]))
+                continue
+        out.append(arg)
+    return out
+
+
 class DeepMergeParser(LightningArgumentParser):
     """`LightningArgumentParser` with cross-config-file dict-merge semantics.
 
@@ -141,6 +173,7 @@ class DeepMergeParser(LightningArgumentParser):
         print_config_flags: str | None = None
         schedule_overrides: list[tuple[str, Any]] = []
         if isinstance(args, Sequence) and not isinstance(args, str):
+            args = _expand_config_includes(list(args))
             args, schedule_overrides = _extract_schedule_cli_overrides(list(args))
             normalised: list[Any] = []
             for arg in args:

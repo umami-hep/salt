@@ -1,8 +1,11 @@
 # Overlay on GN3V00.yaml: adds an electrons stream and a GN3 'global'
 # post-pooling VectorConcat, rewiring every inherited task from pooled.global
-# (256) to vconcat.global (258). Stack GN3V00.yaml first, then this overlay.
+# (256) to vconcat.global (258).
 # Note: list-valued fields (norm.streams, concat.streams) are REPLACED, not
 # merged, by cross-config deep-merge, so grown lists must be re-stated in full.
+
+include:
+  - GN3V00.yaml
 
 name: GN3_SoftE
 

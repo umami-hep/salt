@@ -30,11 +30,11 @@ exposed. Nothing to install, nothing to configure:
 
 ```bash
 # per-Lightning-action wall time: dataloader next, forward, backward, optimizer
-salt fit --config configs/GN3V00.yaml --trainer.profiler simple
+salt fit --config configs/GN3/GN3V00.yaml --trainer.profiler simple
 
 # cProfile per function, sorted by cumulative time — the closest built-in
 # to a line profile, and the right first look at CPU-side overhead
-salt fit --config configs/GN3V00.yaml --trainer.profiler advanced
+salt fit --config configs/GN3/GN3V00.yaml --trainer.profiler advanced
 ```
 
 `simple` prints a table of Lightning's own action names — `run_training_batch`,
@@ -65,7 +65,7 @@ for the GPU work.
 pip install 'salt-ml[profile]'      # line_profiler is an optional dependency
 
 salt profile dataset \
-    --config configs/GN3V00.yaml \
+    --config configs/GN3/GN3V00.yaml \
     --steps 100 \
     --out profile/
 ```
@@ -119,7 +119,7 @@ pipeline would call collation.
 
 ```bash
 salt profile model \
-    --config configs/GN3V00.yaml \
+    --config configs/GN3/GN3V00.yaml \
     --steps 100 \
     --out profile/
 ```
@@ -147,7 +147,7 @@ Use the callback when you want the profile of a run you were going to do
 anyway, rather than a throwaway one:
 
 ```bash
-salt fit --config configs/GN3V00.yaml \
+salt fit --config configs/GN3/GN3V00.yaml \
     --trainer.callbacks+=salt.profiling.TorchProfilerCallback \
     --trainer.callbacks.dirpath profile/ \
     --trainer.callbacks.tag eager_flash \
@@ -277,7 +277,7 @@ following. It is a useful calibration for what the harness can tell you.
     count is per parameter *group* rather than per parameter.
 
     Re-running the same capture on the same GPU afterwards (`salt profile model
-    --config configs/GN3V00.yaml --steps 100`, `flash-varlen`, batch 1000):
+    --config configs/GN3/GN3V00.yaml --steps 100`, `flash-varlen`, batch 1000):
 
     | bucket | before | after |
     | --- | --- | --- |

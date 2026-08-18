@@ -186,7 +186,7 @@ configs put them last.
 Setting an entry to `null` deletes it, which is how a stacked config drops a
 writer or a sink it inherited.
 
-Every model config declares its own section; `base2.yaml` ships none. A
+Every model config declares its own section; `base.yaml` ships none. A
 `salt test` config with no `outputs:` section is refused, and a config still
 carrying the retired top-level `writers:` block fails with a migration error
 pointing here.
@@ -735,6 +735,7 @@ summary — the whole thing is short:
 ```python
 # row_count_sink.py
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.logging import console
 from salt.outputs import RuntimeSink
 
 
@@ -758,7 +759,7 @@ class RowCountSink(RuntimeSink):
         self.rows += int(stop) - int(start)
 
     def flush(self):
-        print(f"saw {self.rows} rows")
+        console(f"saw {self.rows} rows")
 ```
 
 Notes for sink authors:

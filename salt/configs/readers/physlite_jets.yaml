@@ -1,7 +1,11 @@
-# Reader fragment — DAOD_PHYSLITE POOL files, pre-calibrated AnalysisJets.
+# Reader fragment, JET axis — DAOD_PHYSLITE POOL files, pre-calibrated
+# AnalysisJets, one row per jet. For the EVENT axis (one row per event, two
+# samples, for `ttbar_vs_hh4b_event_tagger.yaml`) see `readers/physlite_events.yaml`.
 #
-# Stackable: `salt fit --config readers/physlite.yaml --config <model>.yaml`.
-# Provide the source file(s) via --data.train_file / --data.val_file.
+# Stackable: `salt fit --config readers/physlite_jets.yaml --config <model>.yaml`.
+# A fragment, not a config: it declares only `data.modules.reader` and has no
+# model, so it is never loaded alone. Provide the source file(s) via
+# --data.train_file / --data.val_file.
 #
 # Schema notes:
 #   - unroll: jets  -> one row per AnalysisJet; `[event][jet]` flattened away.

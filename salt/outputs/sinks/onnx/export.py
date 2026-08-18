@@ -27,6 +27,7 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
+from salt.logging import console
 from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.check import CheckResult, check_onnx
 from salt.outputs.sinks.onnx.config import (
@@ -585,10 +586,10 @@ def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str
 
 def _print_check_result(result: CheckResult) -> None:
     """Print the checker verdict table: one row per output, floats AND int8."""
-    print("-" * 100)
-    print(f"ONNX check: {result.n_cases} cases")
+    console("-" * 100)
+    console(f"ONNX check: {result.n_cases} cases")
     for name, diff in sorted(result.worst_abs_diff.items()):
-        print(f"  {name:50s} worst abs diff {diff:.3e}")
+        console(f"  {name:50s} worst abs diff {diff:.3e}")
     for name, values in sorted(result.int8_distinct.items()):
         # int8 outputs are exact-or-fail (never tolerant); give them a positive
         # verdict row so every declared output is visibly checked
@@ -597,14 +598,14 @@ def _print_check_result(result: CheckResult) -> None:
             if result.passed
             else "int8 exact-or-fail (see failures)"
         )
-        print(f"  {name:50s} {status} (values seen: {values})")
+        console(f"  {name:50s} {status} (values seen: {values})")
     for failure in result.failures[:20]:
-        print(f"  FAIL: {failure}")
+        console(f"  FAIL: {failure}")
     if len(result.failures) > 20:
-        print(f"  ... and {len(result.failures) - 20} more failures")
+        console(f"  ... and {len(result.failures) - 20} more failures")
     verdict = "consistent" if result.passed else "INCONSISTENT"
-    print(f"Torch and ONNX models are {verdict}.")
-    print("-" * 100)
+    console(f"Torch and ONNX models are {verdict}.")
+    console("-" * 100)
 
 
 def main(args: Sequence[str] | None = None) -> int:
@@ -619,17 +620,17 @@ def main(args: Sequence[str] | None = None) -> int:
     """
     parsed = _parse_args(args)
     if not parsed.manifest and parsed.ckpt_path is None:
-        print("salt export: --ckpt_path is required (except with --manifest)", file=sys.stderr)
+        console("salt export: --ckpt_path is required (except with --manifest)", file=sys.stderr)
         return 1
     try:
         if parsed.manifest:
             return _print_manifest_from_cli(parsed)
         result, adapter = _export_from_cli(parsed)
     except GraphError as err:
-        print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
+        console(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
     except FileExistsError as err:
-        print(
+        console(
             f"{err} Pass -o/--overwrite to replace it, or --output <path> for a new path "
             "(v1 refusal contract, to_onnx.py:710-711).",
             file=sys.stderr,
@@ -646,13 +647,13 @@ def main(args: Sequence[str] | None = None) -> int:
         )
         _print_check_result(check)
         if not check.passed:
-            print(f"removing inconsistent export? NO — kept at {result.onnx_path} for debugging")
+            console(f"removing inconsistent export? NO — kept at {result.onnx_path} for debugging")
             return 1
-    print("-" * 100)
-    print(f"Done! Saved ONNX model at {result.onnx_path}")
+    console("-" * 100)
+    console(f"Done! Saved ONNX model at {result.onnx_path}")
     if result.plan_txt_path is not None:
-        print(f"ONNX plan table (the traced graph): {result.plan_txt_path}")
-    print("-" * 100)
+        console(f"ONNX plan table (the traced graph): {result.plan_txt_path}")
+    console("-" * 100)
     return 0
 
 
@@ -701,9 +702,9 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
         export_sink.model_name = resolved.model_name
     rows = list(zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True))
     width = max((len(name) for name, _ in rows), default=1)
-    print(f"ONNX output manifest (folded conversion nodes, model_name={export_sink.model_name}):")
+    console(f"ONNX output manifest (folded conversion nodes, model_name={export_sink.model_name}):")
     for name, dtype in rows:
-        print(f"  {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)")
+        console(f"  {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)")
     return 0
 
 
@@ -763,9 +764,9 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     onnx_path: Path = parsed.output or (config_path.parent / "network.onnx")
     if onnx_path.exists() and not parsed.overwrite:
         raise FileExistsError(f"Found existing file '{onnx_path}'.")
-    print("-" * 100)
-    print(f"Converting model to ONNX (model_name={resolved.model_name})...")
-    print("-" * 100)
+    console("-" * 100)
+    console(f"Converting model to ONNX (model_name={resolved.model_name})...")
+    console("-" * 100)
     with open(config_path) as fh:
         config_payload = yaml.safe_load(fh) or {}
     result = export_graph(

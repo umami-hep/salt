@@ -538,6 +538,7 @@ class RuntimeSink(Node):
     A minimal sink counting the rows it saw::
 
         from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+        from salt.logging import console
         from salt.outputs import RuntimeSink
 
 
@@ -561,7 +562,7 @@ class RuntimeSink(Node):
                 self.rows += int(stop) - int(start)
 
             def flush(self):
-                print(f"saw {self.rows} rows")
+                console(f"saw {self.rows} rows")
     """
 
     allowed_modes: ClassVar[frozenset[Mode]] = frozenset({Mode.TEST})

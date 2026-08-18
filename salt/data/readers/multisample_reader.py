@@ -5,6 +5,7 @@ sample label; each sub-read stays a contiguous per-file slice.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,15 +18,23 @@ from salt.data.readers.stream import pad_fill
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import PlanStep
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
+from salt.logging import get_logger
 from salt.schema import GroupSchema, Schema
 
 __all__ = ["MultiSampleReader", "SampleConfig"]
+
+_LOG = get_logger(__name__)
 
 _LABEL_DTYPE = "int64"
 """Injected label dtype: int64 so downstream ``Labels``/`ClassificationTaskModule`
 consume it directly without a cast."""
 
 _STAGE_KEYS = ("train", "val", "test")
+
+_EXHAUSTION_LOG_EVERY = 50
+"""Exhaustion logging EMISSION cadence only — the served-rows counter itself updates on
+EVERY `read()` call (i.e. every batch); this constant just throttles how often that state
+gets logged (1st call, then every 50th), since a per-batch record would drown the log."""
 
 
 @dataclass
@@ -80,9 +89,9 @@ class MultiSampleReader(Reader):
 
     Wraps a list of sub-`Reader`s (one per sample) with identical produced
     schemas, builds a proportional round-robin interleaved combined index, reads
-    contiguous global windows by decomposing them into per-sample contiguous
-    runs, and injects a per-event sample label as a scalar field on a chosen
-    (global_object) stream. It is itself a `Reader`.
+    contiguous global windows by decomposing them into the fewest per-sample
+    contiguous sub-reads (`_segments`), and injects a per-event sample label as a
+    scalar field on a chosen (global_object) stream. It is itself a `Reader`.
 
     Parameters
     ----------
@@ -97,12 +106,21 @@ class MultiSampleReader(Reader):
         default ``"process"``. Must not collide with an existing sub-reader field.
     seed : int, optional
         Seed for the (deterministic) interleave order, by default 42.
+    interleave_block : int, optional
+        Rows emitted per turn of the round robin, by default 1 (row-granular —
+        the historical behaviour, bit-for-bit). Larger values interleave in
+        blocks of `interleave_block` rows, which leaves the per-batch sample
+        proportions intact but CHANGES which rows land in which batch, so it is
+        not a bitwise-neutral setting. Read granularity does not depend on it:
+        `_segments` already coalesces each sample's contribution to a window
+        into one sub-read per contiguous local stretch.
 
     Raises
     ------
     ConfigError
-        On an empty / malformed samples list, duplicate sample names, or a
-        ``label_field`` that collides with an existing field.
+        On an empty / malformed samples list, duplicate sample names, a
+        ``label_field`` that collides with an existing field, or an
+        ``interleave_block`` below 1.
     SchemaError
         When the sub-readers' produced streams/fields/jaggedness are not identical,
         or ``label_stream`` is absent / not a scalar stream.
@@ -114,6 +132,7 @@ class MultiSampleReader(Reader):
         label_stream: str = "event",
         label_field: str = "process",
         seed: int = 42,
+        interleave_block: int = 1,
     ) -> None:
         super().__init__()
         if not samples:
@@ -125,6 +144,11 @@ class MultiSampleReader(Reader):
         self.label_stream = str(label_stream)
         self.label_field = str(label_field)
         self.seed = int(seed)
+        self.interleave_block = int(interleave_block)
+        if self.interleave_block < 1:
+            raise ConfigError(
+                f"MultiSampleReader: interleave_block must be >= 1, got {interleave_block!r}"
+            )
         # No own on-disk schema artifact; built in prepare() from the sub-readers'.
         self.schema: Schema | None = None
         # transient per-process state (never pickled, see __getstate__)
@@ -134,6 +158,9 @@ class MultiSampleReader(Reader):
         self._local_of: np.ndarray | None = None  # global pos -> local row in that sample
         self._streams: tuple[str, ...] | None = None
         self._jagged: dict[str, bool] | None = None  # stream -> jagged?
+        self._debug_reads = 0  # count of read() calls, for the exhaustion-log cadence
+        # rows of each sample this worker has actually served; DEBUG-only, reset on bind
+        self._served: dict[int, int] = {}
 
     @staticmethod
     def _parse_sample(cfg: SampleConfig | Mapping[str, Any]) -> SampleConfig:
@@ -291,8 +318,9 @@ class MultiSampleReader(Reader):
 
     def _build_index(self) -> None:
         """Build the proportional round-robin interleaved combined index (largest-remainder
-        apportionment): at each step, emit the sample with the largest deficit
-        ``(j+1)*n_i/N - emitted_i``; every prefix's per-sample counts stay within ±1 of ideal.
+        apportionment): at each turn, emit `interleave_block` rows of the sample with the
+        largest deficit ``(j+1)*n_i/N - emitted_i``; every prefix's per-sample counts stay
+        within ±`interleave_block` of ideal (±1 at the default block of 1).
         """
         assert self._streams is not None
         lens = [len(s.reader) for s in self.samples]
@@ -303,10 +331,12 @@ class MultiSampleReader(Reader):
         local_of = np.empty(n, dtype=np.int64)
         emitted = [0] * len(self.samples)
         cursor = [0] * len(self.samples)
+        block = self.interleave_block
         # Largest-remainder round-robin. At step j (0-based), the ideal cumulative
         # count for sample i after emitting (j+1) items is (j+1)*n_i/N. We emit the
         # sample with the largest positive deficit, skipping exhausted samples.
-        for j in range(n):
+        j = 0
+        while j < n:
             best_id = -1
             best_deficit = -np.inf
             target = j + 1
@@ -317,10 +347,12 @@ class MultiSampleReader(Reader):
                 if deficit > best_deficit:
                     best_deficit = deficit
                     best_id = i
-            sample_of[j] = best_id
-            local_of[j] = cursor[best_id]
-            cursor[best_id] += 1
-            emitted[best_id] += 1
+            take = min(block, lens[best_id] - emitted[best_id], n - j)
+            sample_of[j : j + take] = best_id
+            local_of[j : j + take] = np.arange(cursor[best_id], cursor[best_id] + take)
+            cursor[best_id] += take
+            emitted[best_id] += take
+            j += take
         self._sample_of = sample_of
         self._local_of = local_of
 
@@ -388,6 +420,7 @@ class MultiSampleReader(Reader):
             label_stream=self.label_stream,
             label_field=self.label_field,
             seed=self.seed,
+            interleave_block=self.interleave_block,
         )
         clone.name = self.name
         return clone
@@ -424,6 +457,7 @@ class MultiSampleReader(Reader):
             label_stream=self.label_stream,
             label_field=self.label_field,
             seed=self.seed,
+            interleave_block=self.interleave_block,
         )
         clone.name = self.name
         return clone
@@ -433,6 +467,9 @@ class MultiSampleReader(Reader):
         ``label_field`` is stripped, since it is not a disk field).
         """
         self.prepare()
+        # a re-bind is a new epoch/stage: reset the exhaustion counters
+        self._served = {}
+        self._debug_reads = 0
         # strip the injected (non-disk) label field from the demand we forward,
         # so a sub-reader never tries to read raw.<label_stream>.<label_field>.
         forwarded = dict(ctx.read_fields)
@@ -489,10 +526,46 @@ class MultiSampleReader(Reader):
             j = k
         return runs
 
-    def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
-        """Read one combined contiguous window: per-run sub-reads, reorder, inject label.
+    def _segments(self, rows: slice) -> list[tuple[int, slice, np.ndarray]]:
+        """Decompose a global window into the FEWEST contiguous per-sample sub-reads.
 
-        Jagged streams pad to the max served ``T`` across the runs in this window.
+        `_runs` splits at every change of sample. That satisfies the sub-read
+        contract but is ruinous on disk: a row-granular interleave of two samples
+        turns a 1,000-row window into ~750 one-row sub-reads, and a sub-read is
+        both an uproot range read per branch AND a full truncate/pad pass — the
+        two costs a line profile of this path finds, in that order.
+
+        The local rows one sample contributes to a window are consecutive across
+        those splits, because `_build_index` hands them out from a per-sample
+        cursor. So the same rows can be fetched in ONE sub-read per contiguous
+        local stretch and scattered back to their interleaved output positions.
+        Contiguity is DERIVED here, never assumed: a non-consecutive stretch
+        simply splits, which in the worst case reproduces `_runs` exactly.
+
+        Each segment is ``(sample_id, local_slice, out_positions)``, where
+        ``out_positions`` index into ``[0, stop - start)``. Segments are ordered
+        by their first output position, so the decomposition is deterministic.
+        """
+        assert self._sample_of is not None
+        assert self._local_of is not None
+        start, stop = rows.start, rows.stop
+        window_sample = self._sample_of[start:stop]
+        window_local = self._local_of[start:stop]
+        segments: list[tuple[int, slice, np.ndarray]] = []
+        for sid in np.unique(window_sample):
+            pos = np.flatnonzero(window_sample == sid)
+            loc = window_local[pos]
+            breaks = np.flatnonzero(np.diff(loc) != 1) + 1
+            for chunk in np.split(np.arange(pos.size), breaks):
+                first = int(loc[chunk[0]])
+                segments.append((int(sid), slice(first, first + chunk.size), pos[chunk]))
+        segments.sort(key=lambda seg: int(seg[2][0]))
+        return segments
+
+    def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
+        """Read one combined contiguous window: per-segment sub-reads, scatter, inject label.
+
+        Jagged streams pad to the max served ``T`` across the segments in this window.
         """
         if self._sample_of is None:
             self.bind(WorkerCtx(mode=mode, read_fields={}, seed=0))  # standalone (tests)
@@ -500,19 +573,21 @@ class MultiSampleReader(Reader):
         assert self._jagged is not None
         start, stop = rows.start, rows.stop
         b = stop - start
-        runs = self._runs(rows)
+        segments = self._segments(rows)
 
-        # read every run once (a run yields all streams)
-        run_out: list[tuple[int, int, int, dict[str, np.ndarray]]] = []
-        for sid, local_slice, out_lo, out_hi in runs:
+        # read every segment once (a segment yields all streams)
+        seg_out: list[tuple[int, np.ndarray, dict[str, np.ndarray]]] = []
+        for sid, local_slice, positions in segments:
             produced = self.samples[sid].reader.read(local_slice, mode)
-            run_out.append((sid, out_lo, out_hi, produced))
+            seg_out.append((sid, positions, produced))
+        if _LOG.isEnabledFor(logging.DEBUG):
+            self._log_exhaustion(segments)
 
         out: dict[str, np.ndarray] = {}
         for stream in self._streams:
             jagged = self._jagged[stream]
             raw_key = f"raw.{stream}"
-            blocks = [(out_lo, out_hi, sid, p[raw_key]) for sid, out_lo, out_hi, p in run_out]
+            blocks = [(positions, sid, p[raw_key]) for sid, positions, p in seg_out]
             if jagged:
                 out[raw_key], combined_valid = self._combine_jagged(blocks, b)
                 out[f"masks.{stream}"] = ~combined_valid
@@ -523,36 +598,77 @@ class MultiSampleReader(Reader):
             out["meta.rows"] = np.array([start, stop], dtype=np.int64)
         return out
 
+    def _log_exhaustion(self, segments: list[tuple[int, slice, np.ndarray]]) -> None:
+        """Accumulate + (at cadence) log the per-worker, per-sample rows-served counter.
+
+        Called only from behind ``_LOG.isEnabledFor(logging.DEBUG)`` in `read`, so it
+        costs nothing at higher log levels. Counts rows actually returned by this call
+        (``positions.size`` per segment), never a window position — under
+        ``shuffle=True`` a position is a random walk, but a served-rows counter is
+        monotonic within an epoch. Per-worker because each DataLoader worker owns its
+        own reader instance (fork/spawn), so ``self._served`` is already private to it;
+        the worker id is included in the record for cross-worker comparison. Reset by
+        `bind` for a new epoch/stage — this method only ever runs behind the DEBUG
+        guard, so the counts accumulate only while DEBUG is enabled; only the emission
+        (not the accumulation) is additionally cadence-gated. Overlapping windows
+        legitimately count twice — this is a count of rows served, not of distinct rows.
+        """
+        from torch.utils.data import get_worker_info
+
+        self._debug_reads += 1
+        for sid, _local_slice, positions in segments:
+            self._served[sid] = self._served.get(sid, 0) + int(positions.size)
+        if (self._debug_reads - 1) % _EXHAUSTION_LOG_EVERY != 0:
+            return
+        info = get_worker_info()
+        worker = "main" if info is None else str(info.id)
+        parts = []
+        for sid, served in sorted(self._served.items()):
+            total = self._lens[sid] if self._lens else 0
+            if total <= 0:
+                continue
+            name = self.samples[sid].name
+            parts.append(f"{name}={served}/{total} ({served / total:.1%})")
+        if parts:
+            _LOG.debug(
+                "exhaustion [worker=%s] after %d reads: %s",
+                worker,
+                self._debug_reads,
+                ", ".join(parts),
+            )
+
     def _combine_scalar(
-        self, blocks: list[tuple[int, int, int, np.ndarray]], b: int, stream: str
+        self, blocks: list[tuple[np.ndarray, int, np.ndarray]], b: int, stream: str
     ) -> np.ndarray:
-        """Concatenate scalar ``(b_i,)`` blocks into a combined ``(B,)`` array, in order;
-        for the ``label_stream`` an integer ``label_field`` is appended and filled per run.
+        """Scatter scalar ``(b_i,)`` blocks into a combined ``(B,)`` array at their output
+        positions; for the ``label_stream`` an integer ``label_field`` is appended and filled
+        per segment.
         """
         inject = stream == self.label_stream
         # field/dtype layout from the first block (identical across samples)
-        ref = blocks[0][3]
+        ref = blocks[0][2]
         names = list(ref.dtype.names or ())
         dtype_fields = [(nm, ref.dtype[nm]) for nm in names]
         if inject:
             dtype_fields.append((self.label_field, np.dtype(_LABEL_DTYPE)))
         combined = np.empty((b,), dtype=np.dtype(dtype_fields))
-        for out_lo, out_hi, sid, block in blocks:
+        for positions, sid, block in blocks:
             for nm in names:
-                combined[nm][out_lo:out_hi] = block[nm]
+                combined[nm][positions] = block[nm]
             if inject:
-                combined[self.label_field][out_lo:out_hi] = self.samples[sid].label
+                combined[self.label_field][positions] = self.samples[sid].label
         return combined
 
     def _combine_jagged(
-        self, blocks: list[tuple[int, int, int, np.ndarray]], b: int
+        self, blocks: list[tuple[np.ndarray, int, np.ndarray]], b: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Concatenate jagged ``(b_i, T_i)`` blocks into a combined ``(B, T)`` array (T = max
-        served multiplicity across runs; shorter blocks pad-extended via `pad_fill`).
+        """Scatter jagged ``(b_i, T_i)`` blocks into a combined ``(B, T)`` array at their
+        output positions (T = max served multiplicity across segments; shorter blocks
+        pad-extended via `pad_fill`).
         """
-        ref = blocks[0][3]
+        ref = blocks[0][2]
         names = list(ref.dtype.names or ())
-        t = max(int(block.shape[1]) for _lo, _hi, _sid, block in blocks)
+        t = max(int(block.shape[1]) for _pos, _sid, block in blocks)
         dtype_fields = [(nm, ref.dtype[nm]) for nm in names]
         combined = np.zeros((b, t), dtype=np.dtype(dtype_fields))
         # np.zeros already gives 0.0/0/False; only signed-int needs the -1 sentinel.
@@ -560,10 +676,10 @@ class MultiSampleReader(Reader):
             fill = pad_fill(np.dtype(ref.dtype[nm]))
             if fill:  # non-zero/non-False fill (the signed-int -1 sentinel)
                 combined[nm][:] = fill
-        for out_lo, out_hi, _sid, block in blocks:
+        for positions, _sid, block in blocks:
             tb = block.shape[1]
             for nm in names:
-                combined[nm][out_lo:out_hi, :tb] = block[nm]
+                combined[nm][positions, :tb] = block[nm]
         valid = combined["valid"] if "valid" in names else np.zeros((b, t), dtype=bool)
         return combined, valid
 
@@ -579,6 +695,8 @@ class MultiSampleReader(Reader):
             "_local_of": None,
             "_streams": None,
             "_jagged": None,
+            "_debug_reads": 0,
+            "_served": {},
             "schema": None,
         })
         return state

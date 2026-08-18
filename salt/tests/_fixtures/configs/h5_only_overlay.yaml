@@ -1,0 +1,9 @@
+# TEST FIXTURE — not a shipped config. Overlay on salt/configs/gn2v2-opendata.yaml
+# flipping the task family to test-only, so the run-free ONNX parse assembles no
+# tuple at all. H5 columns are unchanged.
+
+outputs:
+  # H5-only: no RunTaskOutput opts into export, so no implicit ONNX sink is wired
+  jets_out:
+    class_path: salt.outputs.RunTaskOutput
+    init_args: {modes: [test]}

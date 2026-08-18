@@ -11,10 +11,10 @@ from salt.cli import load_config
 from salt.graph.planner import compile_plan
 from salt.graph.spec import Mode
 from salt.graph.render import dot_source
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
-_CONFIGS = Path(__file__).parents[3] / "configs"
-_DUMMY = str(_CONFIGS / "gn2v2-dummy.yaml")
-_FOLD = str(_CONFIGS / "gn2v2-dummy-onnx-fold.yaml")
+_DUMMY = str(small_config())
+_FOLD = str(Path(__file__).resolve().parents[2] / "_fixtures/configs/onnx_fold_overlay.yaml")
 _OVERRIDES = [
     "model.modules.norm.init_args.norm_dict=unused.yaml",
     "trainer.logger=false",
@@ -25,7 +25,7 @@ _FOLDED_NODES = ("jet_probs", "track_origin_index", "pbc")
 
 @pytest.fixture(scope="module")
 def fold_cfg():
-    """The folded-ONNX config (gn2v2-dummy + the onnx-fold override)."""
+    """The folded-ONNX config (gn2v2-opendata + the onnx-fold overlay fixture)."""
     return load_config([_DUMMY, _FOLD], _OVERRIDES)
 
 

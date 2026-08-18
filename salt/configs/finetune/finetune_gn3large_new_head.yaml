@@ -8,7 +8,7 @@
 #
 #   salt fit \
 #     --config <saved_gn3large_config.yaml> \
-#     --config salt/configs/finetune_gn3large_new_head.yaml \
+#     --config salt/configs/finetune/finetune_gn3large_new_head.yaml \
 #     --init_from <pretrained.ckpt> \
 #     --data.train_file <new_campaign/train.h5> \
 #     --data.val_file   <new_campaign/val.h5>
@@ -22,6 +22,9 @@
 # Walk-through: docs/tutorials/finetuning.md (worked example B).
 
 # 1. Module surgery — deep-merge a new head into the pretrained model's modules.
+include:
+  - GN3/GN3V00.yaml
+
 model:
   init_args:
     modules:

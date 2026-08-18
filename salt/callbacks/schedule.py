@@ -14,18 +14,18 @@ multi-stage or freezes anything — the user never registers it.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from lightning.pytorch.callbacks import Callback
 
+from salt.logging import get_logger
 from salt.schedule import reducer_safe_freeze_required
 
 if TYPE_CHECKING:
     from lightning.pytorch import LightningModule, Trainer
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 __all__ = ["StageScopedCallbacks", "TrainingScheduleCallback"]
 

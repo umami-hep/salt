@@ -4,7 +4,6 @@ import shutil
 import textwrap
 from functools import reduce
 from operator import or_
-from pathlib import Path
 
 import h5py
 import numpy as np
@@ -13,10 +12,11 @@ import pytest
 from salt.cli import main
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.schema import load_schema
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
 # the in-repo test-scale GN2v2 trainer config (16-dim, no machine paths) — the
 # static width-resolution plot path needs a real trainer config but no data file
-_DUMMY_CFG = str(Path(__file__).parent.parent.parent / "configs" / "gn2v2-dummy.yaml")
+_DUMMY_CFG = str(small_config())
 
 # toy modules (no physics); instance names assigned by the CLI
 

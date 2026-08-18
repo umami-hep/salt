@@ -42,6 +42,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
     compile_gn2v2,
     write_parity_norm_dict,
 )
+from salt.tests._fixtures.gn2v2_test_config import small_config
 from salt.tests.unit.onnx.test_adapter import (
     VARIABLES,
     bind_producers,
@@ -398,7 +399,7 @@ def cli_run(tmp_path_factory):
     trainer.test(model, datamodule=dm)
     ckpt = run_dir / "checkpoints" / "epoch=000-loss=0.10000.ckpt"
     trainer.save_checkpoint(ckpt)
-    config = yaml.safe_load((CONFIG_DIR / "gn2v2-dummy.yaml").read_text())
+    config = yaml.safe_load(small_config().read_text())
     config["model"]["init_args"]["modules"]["norm"]["init_args"]["norm_dict"] = str(
         tmp_path / "norm_dict.yaml"
     )
@@ -413,7 +414,7 @@ class TestSaltSurface:
         cli = SaltCLI(
             args=[
                 "--config",
-                str(CONFIG_DIR / "gn2v2-dummy.yaml"),
+                str(small_config()),
                 "--model.modules.norm.init_args.norm_dict=unused.yaml",
             ],
             run=False,

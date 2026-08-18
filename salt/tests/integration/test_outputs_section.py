@@ -31,10 +31,13 @@ from salt.tests._fixtures.gn2v2_fixture import (
     build_gn2v2_modules,
     write_parity_norm_dict,
 )
+from salt.tests._fixtures.gn2v2_test_config import full_family_config, small_config
 
-DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
-CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
-GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
+DUMMY_CFG = small_config()
+CUTOVER34_CFG = full_family_config()
+GOLDEN = (
+    Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
+)
 RUN_NAME = "GN2v2_dummy"
 N_TEST = 300
 
@@ -315,7 +318,7 @@ class TestColumnOrderDrivenBySection:
 
 
 class TestSectionOverlayConfigContent:
-    """The gn2v2-dummy-cutover34.yaml overlay wires the full-family outputs: section.
+    """The gn2v2-opendata.yaml config wires the full-family outputs: section.
 
     The overlay replaces the base's mode-split jets_out/origin_out
     writers with ONE all-modes RunTaskOutput, and declares NO callbacks: sinks —

@@ -27,9 +27,12 @@ _NORM = "model.modules.norm.init_args.norm_dict=unused.yaml"
 # instantiate failure (no COMET_API_KEY in CI/local) — _run_free_cli does not apply
 # the disable_logger_in_config patch the salt graph/test entry points do.
 _NO_LOGGER = "trainer.logger=false"
+# stem -> (path under salt/configs, --set overrides). The golden is keyed on the
+# stem, so a config moving between family directories does not churn the
+# committed goldens — but the path has to follow the move.
 MIGRATED = {
-    "regression": [_NORM, _NO_LOGGER],
-    "regression_gaussian": [_NORM, _NO_LOGGER],
+    "regression": ("regression/regression", [_NORM, _NO_LOGGER]),
+    "regression_gaussian": ("regression/regression_gaussian", [_NORM, _NO_LOGGER]),
 }
 
 
@@ -69,12 +72,13 @@ def test_section_h5_schema_matches_committed_golden(config_name):
     """The migrated config's ``outputs:``-section H5 schema == the committed golden table."""
     from salt.cli import _as_sink_node, _static_writer_sink_callback
 
-    config = CONFIG_DIR / f"{config_name}.yaml"
+    rel_path, overrides = MIGRATED[config_name]
+    config = CONFIG_DIR / f"{rel_path}.yaml"
     assert config.is_file(), f"missing config {config}"
     golden = _golden_columns(config_name)
     assert golden, f"{config_name}: committed golden carries no H5 columns"
 
-    cli = _run_free_cli([config], MIGRATED[config_name])
+    cli = _run_free_cli([config], overrides)
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001
     sink = _as_sink_node(_static_writer_sink_callback(cli))
     assert sink is not None, f"{config_name}: no H5OutputSink wired at callbacks"

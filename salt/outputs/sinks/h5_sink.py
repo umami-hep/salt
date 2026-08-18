@@ -26,9 +26,12 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
+from salt.logging import console, get_logger
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
 from salt.outputs.sinks.sink import OutputSink, RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
+
+_LOG = get_logger(__name__)
 
 _SinkCallback = OutputSink
 """Deprecated private alias for `OutputSink` (the sink base was made public)."""
@@ -657,15 +660,15 @@ class H5OutputSink(RuntimeSink):
         if self._rows_written == self._expected:
             self._h5.close()
         else:
-            print(
-                f"WARNING: wrote {self._rows_written:,} of {self._expected:,} expected rows "
+            _LOG.warning(
+                f"wrote {self._rows_written:,} of {self._expected:,} expected rows "
                 f"to {self.output_path} — trailing rows are zero-filled"
             )
             self._h5.file.close()
         self._h5 = None
-        print("-" * 100)
-        print(f"Wrote eval file {self.output_path}")
-        print("-" * 100)
+        console("-" * 100)
+        console(f"Wrote eval file {self.output_path}")
+        console("-" * 100)
 
     def close_if_open(self) -> None:
         """Idempotently close any open handle on an interrupted test.
@@ -1006,7 +1009,7 @@ class H5OutputSink(RuntimeSink):
 
 # DEPRECATED one-window alias (design Q4): the node-shaped sink was renamed
 # H5OutputWriter -> H5OutputSink. Downstream configs that wire
-# `salt.outputs.H5OutputWriter` (incl. gn2v2-dummy-cutover.yaml) keep
+# `salt.outputs.H5OutputWriter` (incl. the H5-only overlay fixture) keep
 # working — the alias resolves to the promoted node. Remove after the migration
 # window.
 H5OutputWriter = H5OutputSink

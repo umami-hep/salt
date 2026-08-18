@@ -1,12 +1,5 @@
-"""End-to-end eval-H5 check for the base gn2v2-dummy.yaml — implicit H5 sink.
+"""End-to-end eval-H5 check for the shipped gn2v2-opendata.yaml — implicit H5 sink.
 
-Historical note: gn2v2-dummy.yaml migrated OFF the explicit-sink ``outputs:``
-OutputColumn table onto the ``outputs:`` section path (two mode-split
-RunTaskOutput writers). No config declares H5OutputSink/OnnxExportSink — the
-``salt test`` command wires the H5 sink over the section. This test fits +
-evaluates the shipped config end-to-end through the real CLI (proving the
-implicit-sink runtime path) and asserts the eval H5's TASK columns against the
-committed Phase-A golden (``gn2v2-dummy.json``) — a PARSED-JSON contract, not a
 text oracle.
 """
 
@@ -19,12 +12,13 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.main import CONFIG_DIR, main
+from salt.main import main
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
-DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
+DUMMY_CFG = small_config()
 GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy.json"
 RUN_NAME = "GN2v2_dummy"  # the dummy config's `name:`
 N_TEST = 300
@@ -92,7 +86,7 @@ def _overrides(data) -> list[str]:
 
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
-    """A live 1-epoch fit of the shipped gn2v2-dummy.yaml (also proves it fits)."""
+    """A live 1-epoch fit of the shipped gn2v2-opendata.yaml (also proves it fits)."""
     fit_dir = tmp_path_factory.mktemp("h5_writer_fit")
     rc = main([
         "fit",
@@ -108,7 +102,7 @@ def ckpt(data, tmp_path_factory) -> Path:
         "--trainer.num_sanity_val_steps=0",
         "--trainer.log_every_n_steps=1",
     ])
-    assert rc == 0, "salt fit on the shipped gn2v2-dummy.yaml must run end-to-end"
+    assert rc == 0, "salt fit on the shipped gn2v2-opendata.yaml must run end-to-end"
     ckpts = sorted(fit_dir.rglob("*.ckpt"))
     assert ckpts, f"no checkpoint under {fit_dir}"
     return ckpts[0]
@@ -131,14 +125,14 @@ def cli_h5(data, ckpt) -> Path:
         f"--trainer.default_root_dir={data['dir']}",
         *_overrides(data),
     ])
-    assert rc == 0, "salt test on the shipped gn2v2-dummy.yaml must run end-to-end"
+    assert rc == 0, "salt test on the shipped gn2v2-opendata.yaml must run end-to-end"
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
     return evals[-1]
 
 
 class TestImplicitSinkCliE2E:
-    """The shipped gn2v2-dummy.yaml drives the implicit H5 sink end-to-end."""
+    """The shipped gn2v2-opendata.yaml drives the implicit H5 sink end-to-end."""
 
     def test_cli_writes_eval_h5(self, cli_h5):
         """``salt test`` writes a non-empty eval H5 with the reader-stream groups."""
@@ -191,7 +185,7 @@ class TestImplicitSinkCliE2E:
     def test_target_label_columns_match_source_labels(self, data, cli_h5):
         """Phase-C gate: the target_{task} columns EQUAL the source-file labels.
 
-        gn2v2-dummy has no label_map, so the consumed global label is the raw
+        gn2v2-opendata has no label_map, so the consumed global label is the raw
         flavour_label; the per-token origin target reads the raw label on
         valid positions and -1 on padded ones.
         """

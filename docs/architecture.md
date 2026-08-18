@@ -77,7 +77,7 @@ pin (redundant by construction):
 from `provenance.json` and the retired oracle test, both in git history at
 `93a29ed^` (`salt/tests/_fixtures/gn2v2_dummy_oracle/provenance.json`,
 `salt/tests/integration/test_outputs_h5_parity.py`). Parameters recorded there:
-commit `a9e2ac2`, salt-py314 container, `salt/configs/gn2v2-dummy.yaml`;
+commit `a9e2ac2`, salt-py314 container, `salt/configs/gn2v2-opendata.yaml`;
 synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
 `np.random.default_rng(42)`); training `max_epochs=1`, `limit_train_batches=2`,
 `limit_val_batches=2`, `batch_size=100`, `seed_everything=42`; `N_TEST=300`.
@@ -101,7 +101,7 @@ write_parity_norm_dict('/tmp/v2/norm_dict.yaml', '/tmp/v2/class_dict.yaml')
 write_dummy_file('/tmp/v2/train.h5', '/tmp/v2/norm_dict.yaml')
 "
 
-salt fit --config salt/configs/gn2v2-dummy.yaml \
+salt fit --config salt/configs/gn2v2-opendata.yaml \
   --data.train_file /tmp/v2/train.h5 \
   --data.val_file   /tmp/v2/train.h5 \
   --model.modules.norm.init_args.norm_dict /tmp/v2/norm_dict.yaml \
@@ -125,7 +125,7 @@ next to the checkpoint, with the eval H5 (see below).
 
 ## Config model
 
-- `base2.yaml` is auto-loaded; your config stacks on top.
+- `base.yaml` is auto-loaded; your config stacks on top.
 - `model.init_args.modules` and `data.modules` are **dicts of named
   modules** (`{name: {class_path, init_args}}`). The dict key is the
   instance name and the config address.
@@ -140,7 +140,7 @@ next to the checkpoint, with the eval H5 (see below).
 ### Worked example: add an aux task from an override file
 
 ```yaml
-# my_aux_task.yaml — stack with: --config salt/configs/gn2v2-dummy.yaml --config my_aux_task.yaml
+# my_aux_task.yaml — stack with: --config salt/configs/gn2v2-opendata.yaml --config my_aux_task.yaml
 model:
   init_args:
     modules:
@@ -181,7 +181,7 @@ base — further `--config` override files and CLI flags stack on top of it
 exactly as for `fit` (the custom-output journey below relies on this); one
 test file per call; logger off; single device forced. Without `--ckpt_path`
 the v1 best-epoch glob picks the lowest `loss=` checkpoint from `ckpts/`
-(v1 runs) or `checkpoints/` (v2 runs — `base2.yaml` names files
+(v1 runs) or `checkpoints/` (v2 runs — `base.yaml` names files
 `epoch=NNN-loss=<val/loss>.ckpt` so the glob matches by construction) next
 to the single `--config` — when stacking a second `--config`, pass
 `--ckpt_path` explicitly (the glob needs exactly one config to anchor on). The output is ONE H5 next to the checkpoint:
@@ -207,7 +207,7 @@ only when it carries a manifest the command cannot guess (`MaskFormer.yaml`)
 or when it is a third-party one; the implicit wiring then leaves it alone.
 A sink declared under `callbacks:` is accepted for one deprecation window.
 
-Every model config defines its own section (`base2.yaml` ships none) —
+Every model config defines its own section (`base.yaml` ships none) —
 **writer dict order = per-group column order**, the v1 layout being:
 
 ```yaml
@@ -247,7 +247,7 @@ Per-writer mode participation is the `modes:` list: each
 section writer declares the modes it runs in — `test` (eval H5) and/or
 `export` (ONNX); omitted = both. A `modes: [test]` writer mints no ONNX
 leaves; an export-only writer contributes no eval columns.
-`gn2v2-dummy.yaml` splits its tasks across two writers to keep
+`gn2v2-opendata.yaml` splits its tasks across two writers to keep
 `track_origin` H5-only:
 
 ```yaml
@@ -480,7 +480,7 @@ leaf (e.g. `preds.jets.classification` as `kind=label` where the task
 publishes `data`) — data-free, not only at `salt test` setup:
 
 ```bash
-salt graph validate -c salt/configs/gn2v2-dummy.yaml \
+salt graph validate -c salt/configs/gn2v2-opendata.yaml \
   --set model.modules.norm.init_args.norm_dict=unused.yaml
 salt graph plan -c <cfg> --mode fit
 salt graph plot -c <cfg> --mode fit -o graph.svg
@@ -547,7 +547,7 @@ every module's flattened requires/produces with resolved specs) and
 `graph_<stage>.{dot,svg}` (+ `graph_<stage>_dataset.{dot,svg}`). Fit
 artifacts go into the trainer log dir; test artifacts go NEXT TO THE
 CHECKPOINT, with the eval H5. Default-on via the `artifacts:` entry in
-`base2.yaml` (`salt.callbacks.GraphArtifacts`); delete with
+`base.yaml` (`salt.callbacks.GraphArtifacts`); delete with
 `--callbacks.artifacts=null`, retarget with
 `--callbacks.artifacts.init_args.output_dir=...`. (Writer nodes are not
 rendered in the `graph plot` output itself — the plan-table writer-sinks
@@ -650,7 +650,7 @@ outputs:
    alias, kept for one release window (`DeprecationWarning` on use): each key
    it sets fills a field the sink itself left unset, and a key carried by
    both homes is a `ConfigError` naming the key and both homes.
-   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/gn2v2-dummy.yaml`
+   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/gn2v2-opendata.yaml`
    still ships the deprecated block, deliberately, as the alias-window proof.
 
 How it works (no data file is touched — config + checkpoint only):

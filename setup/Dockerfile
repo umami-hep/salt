@@ -145,8 +145,10 @@ RUN uv pip install "scikit-build-core<0.8" cmake ninja pyproject-metadata pathsp
     uv pip install --no-build-isolation --no-deps /tmp/py_lap_solver-0.1.4 && \
     rm -rf /tmp/py_lap_solver-0.1.4 /tmp/py_lap_solver-0.1.4.tar.gz
 
-# Install dependencies (torch already satisfied above; flash already installed)
-RUN uv pip install --group dev ".[muP]"
+# Install dependencies (torch already satisfied above; flash already installed).
+# `root` (uproot + awkward, both pure-python wheels) is included so the shipped
+# UprootReader configs are exercised by the config gate rather than skipped.
+RUN uv pip install --group dev ".[muP]" ".[root]"
 
 # py-lap-solver's _batched_scipy_lap C++ extension lacks DT_NEEDED for
 # libstdc++ ("undefined symbol: _ZTVN10__cxxabiv117__class_type_infoE" at

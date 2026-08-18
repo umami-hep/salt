@@ -4,7 +4,7 @@ The three-part gate:
 
 (a) on a labelled file, the inference H5 columns correspond ONE-TO-ONE to the
     export-mode `OutputField` selection and the ONNX tuple order/names
-    (anchored on the committed ``gn2v2-dummy-cutover34`` golden);
+    (anchored on the committed ``gn2v2-opendata`` golden);
 (b) the H5 values match the ONNXRuntime outputs of the exported model on the
     same per-jet inputs (the ``check_onnx`` comparison style + tolerance);
 (c) on a label-stripped copy of the same file the command runs green and
@@ -22,16 +22,19 @@ import pytest
 import yaml
 from numpy.lib.recfunctions import repack_fields
 
-from salt.main import CONFIG_DIR, main
+from salt.main import main
 from salt.outputs.sinks.onnx.check import make_session
 from salt.outputs.sinks.onnx.export import main as export_main
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict  # noqa: PLC2701
+from salt.tests._fixtures.gn2v2_test_config import full_family_config, small_config
 
-DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
-CUTOVER34_CFG = CONFIG_DIR / "gn2v2-dummy-cutover34.yaml"
-GOLDEN = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
+DUMMY_CFG = small_config()
+CUTOVER34_CFG = full_family_config()
+GOLDEN = (
+    Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
+)
 
 RUN_NAME = "GN2v2_dummy"  # the config `name:` — the H5 column prefix
 MODEL_NAME = "GN2v2dummy"  # export.model_name — the ONNX tuple prefix

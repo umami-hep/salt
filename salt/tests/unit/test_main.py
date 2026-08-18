@@ -27,9 +27,10 @@ from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
 from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_test_config import small_config
 from salt.testing.inputs import write_dummy_file
 
-DUMMY_CFG = CONFIG_DIR / "gn2v2-dummy.yaml"
+DUMMY_CFG = small_config()
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
 TOY_GRAPH_CFG = Path(__file__).parent.parent / "_fixtures" / "configs" / "toy.yaml"
 GN2V2_MODULES = {
@@ -43,7 +44,7 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # gn2v2-dummy.yaml declares its eval outputs as an outputs:
+    # gn2v2-opendata.yaml declares its eval outputs as an outputs:
     # section (composed onto model.net). The graph-folded section writers appear
     # in model.net (inputs_copy is manifest-only, not folded); the standalone
     # conversion producers (jet_probs/track_origin_probs/...) are retired.
@@ -89,7 +90,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
 
 
 def required_overrides(data) -> list[str]:
-    """The gn2v2-dummy.yaml documented required overrides (its header)."""
+    """The gn2v2-opendata.yaml documented required overrides (its header)."""
     return [
         f"--data.train_file={data['h5']}",
         f"--data.val_file={data['h5']}",
@@ -113,7 +114,7 @@ def write_yaml(tmp_path: Path, name: str, text: str) -> str:
     return str(path)
 
 
-# parse + instantiate (gn2v2-dummy.yaml is the shipped worked config)
+# parse + instantiate (gn2v2-opendata.yaml is the shipped worked config)
 
 
 class TestParseAndInstantiate:
@@ -189,8 +190,11 @@ class TestDeepMerge:
         assert set(cli.model.net.keys()) == GN2V2_MODULES | {"track_type"}
         task = cli.model.net["track_type"]
         assert isinstance(task, ClassificationTaskModule)
-        # sibling init_args of the model itself survive the partial restate
-        assert cli.model.lrs["max"] == pytest.approx(1.0e-3)
+        # sibling init_args of the model itself survive the partial restate.
+        # Read the expected value off the config under test rather than pinning
+        # a literal: what is asserted is that the override did not clear it.
+        base_lrs = yaml.safe_load(DUMMY_CFG.read_text())["model"]["init_args"]["lrs"]
+        assert cli.model.lrs["max"] == pytest.approx(base_lrs["max"])
         # the un-restated sibling modules keep their config
         assert cli.model.net["track_origin"].weight == pytest.approx(0.5)
 
@@ -261,15 +265,15 @@ class TestDottedOverrides:
 
 
 class TestCallbacksDict:
-    def test_base2_defaults_assembled(self, data):
-        # base2.yaml ships the salt.callbacks.Checkpoint port (a
+    def test_base_defaults_assembled(self, data):
+        # base.yaml ships the salt.callbacks.Checkpoint port (a
         # ModelCheckpoint subclass) + ProgressBar + ModelSummary
         cli = make_cli(data)
         assert any(isinstance(cb, Checkpoint) for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ProgressBar) for cb in cli.trainer.callbacks)
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
         ckpt = next(cb for cb in cli.trainer.callbacks if isinstance(cb, ModelCheckpoint))
-        assert ckpt.monitor == "val/loss"  # base2.yaml monitor_loss default
+        assert ckpt.monitor == "val/loss"  # base.yaml monitor_loss default
         assert ckpt.save_top_k == -1  # the v1 Checkpoint keeps every epoch
 
     def test_one_key_override(self, data):
@@ -367,7 +371,7 @@ class TestFitSmoke:
             *required_overrides(data),
             f"--trainer.default_root_dir={tmp_path}",
             "--trainer.accelerator=cpu",
-            # base2 ships a default-ON CometLogger; turn it off so
+            # base ships a default-ON CometLogger; turn it off so
             # the smoke run emits no offline Comet archive (and lr_monitor drops)
             "--trainer.logger=false",
             "--trainer.max_epochs=1",
@@ -375,12 +379,12 @@ class TestFitSmoke:
             "--trainer.limit_val_batches=2",
             "--trainer.num_sanity_val_steps=0",
             "--trainer.log_every_n_steps=1",
-            # null-delete the base2 ProgressBar (can't combine with the stock
+            # null-delete the base ProgressBar (can't combine with the stock
             # enable_progress_bar=false; the ProgressBar is default-on now)
             "--callbacks.progress=null",
         ])
         assert rc == 0
-        # base2's Checkpoint wrote a checkpoint under the run dir's ckpts/,
+        # base's Checkpoint wrote a checkpoint under the run dir's ckpts/,
         # with the 'loss=' stem the salt-test fallback globs
         ckpts = list(tmp_path.rglob("*.ckpt"))
         assert ckpts, f"no checkpoint written under {tmp_path}"
@@ -848,7 +852,7 @@ class TestGraphFitConfigAdapter:
 # ===========================================================================
 
 
-# the two classification tasks in gn2v2-dummy.yaml, both with weight_source unset
+# the two classification tasks in gn2v2-opendata.yaml, both with weight_source unset
 CLS_TASKS = ("jets_classification", "track_origin")
 NORM_MODULE = "norm"
 
@@ -877,7 +881,7 @@ def wave1_data(tmp_path_factory) -> dict[str, Path]:
 
 
 def wave1_base_overrides(wave1_data) -> list[str]:
-    """The gn2v2-dummy.yaml required path overrides MINUS the per-task weight_source."""
+    """The gn2v2-opendata.yaml required path overrides MINUS the per-task weight_source."""
     return [
         "--config",
         str(DUMMY_CFG),

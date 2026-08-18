@@ -74,15 +74,15 @@ model:
         init_args:
           stream: tracks
           context: [normed.jets]
-          out_dim: &embed_dim 16
-          dense: {hidden_layers: [16], activation: ReLU}
+          out_dim: &embed_dim 256
+          dense: {hidden_layers: [256], activation: ReLU}
       flow_embed:
         class_path: salt.model.modules.StreamEmbed
         init_args:
           stream: flow
           context: [normed.jets]
           out_dim: *embed_dim # equal embed width is a Concat constraint
-          dense: {hidden_layers: [16], activation: ReLU}
+          dense: {hidden_layers: [256], activation: ReLU}
       concat:
         class_path: salt.model.modules.Concat
         init_args: {streams: [tracks, flow]}
@@ -90,10 +90,10 @@ model:
         class_path: salt.model.modules.TransformerEncoder
         init_args:
           dim: *embed_dim
-          out_dim: &out_dim 16
-          num_layers: 2
+          out_dim: &out_dim 128
+          num_layers: 8
           num_registers: 8
-          attention: {num_heads: 2, attn_type: torch-math}
+          attention: {num_heads: 8, attn_type: flash-varlen, dropout: 0.1}
           dense: {activation: ReLU, gated: true, dropout: 0.1}
       split:
         # only tracks has per-token tasks
@@ -115,7 +115,7 @@ model:
             class_path: torch.nn.CrossEntropyLoss
             init_args:
               weight: [8.0, 2.0, 2.0, 4.0, 20.0, 20.0, 10.0, 1.5, 16.0]
-          dense: {hidden_layers: [16], activation: ReLU}
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_origin:
         class_path: salt.model.modules.tasks.ClassificationTaskModule
         init_args:
@@ -124,7 +124,7 @@ model:
           label: ftagTruthOriginLabel
           class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
           weight_source: null
-          dense: {hidden_layers: [16], activation: ReLU}
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       track_vertexing:
         class_path: salt.model.modules.tasks.VertexingTaskModule
         init_args:
@@ -132,7 +132,7 @@ model:
           label: ftagTruthVertexIndex
           origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
           context: pooled.global
-          dense: {hidden_layers: [16], activation: ReLU}
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.model.modules.LossGLS
 

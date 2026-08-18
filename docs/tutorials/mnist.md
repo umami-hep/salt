@@ -267,7 +267,7 @@ tutorial. `num_workers: 0` and `batch_size: 32` keep the run laptop-safe.
 ### `model:`
 
 Four modules, matched to salt's shipped
-[`DL1.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/DL1.yaml)
+[`DL1.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/legacy/DL1.yaml)
 — the simplest production config (global feature vector → MLP → classifier).
 MNIST is structurally identical: a fixed-length global vector per sample.
 

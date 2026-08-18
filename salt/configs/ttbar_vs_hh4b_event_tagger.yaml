@@ -1,0 +1,99 @@
+# Event-level HH->4b (signal) vs ttbar (background) classifier. One event is one
+# row: the event's jets are embedded, encoded, attention-pooled to a single event
+# representation and classified against `raw.event.process`, the per-event sample
+# label a MultiSampleReader injects (signal=1, background=0).
+#
+# THIS CONFIG DECLARES NO READER — it is the model half of a two-part stack, and
+# that is the point. Pair it with exactly one reader fragment:
+#
+#   salt fit -c ttbar_vs_hh4b_event_tagger.yaml -c readers/easyjet_events.yaml
+#   salt fit -c ttbar_vs_hh4b_event_tagger.yaml -c readers/physlite_events.yaml
+#
+# Same model, same physics, two input formats — easyjet AnalysisMiniTree ROOT
+# ntuples, or the DAOD_PHYSLITE the ntuples were themselves produced from. Each
+# fragment carries only `data.modules.reader` and serves the same stream/field
+# names, so the model binds to either without knowing which it got. A reader
+# fragment is a component, not a config: it deliberately does NOT `include:` a
+# model, and this config deliberately does not name a format.
+#
+# The `jets` variables below ARE the model<->reader contract. Note what is absent:
+# `HF_Classification` / `HF_SimpleClassification` exist on the ttbar side only
+# (easyjet writes them for the DSIDs in `DSID_HF_class_samples`, and the ttbar
+# PHYSLITE carries `EventInfoAuxDyn.HF_Classification`), so their mere presence
+# is the class label. They must never enter a feature list here.
+
+name: ttbar_vs_hh4b_event_tagger
+
+data:
+  batch_size: 1000
+  num_workers: 4
+  modules:
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta, phi, m, GN2v01_pb, GN2v01_pc, GN2v01_pu]
+    labels:
+      class_path: salt.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.model.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.model.modules.Normaliser
+        init_args:
+          # norm_dict must be supplied via CLI/override at fit time.
+          streams: [jets]
+      jet_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: jets
+          out_dim: &embed_dim 128
+          dense: {hidden_layers: [128], activation: ReLU}
+      concat:
+        class_path: salt.model.modules.Concat
+        init_args: {streams: [jets]}
+      encoder:
+        class_path: salt.model.modules.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: &out_dim 128
+          num_layers: 2
+          attention: {num_heads: 4, attn_type: torch-math}
+          dense: {activation: ReLU, gated: false}
+      pool:
+        # event representation: globally attention-pool the jet tokens (no Split)
+        class_path: salt.model.modules.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      events_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: event
+          input: pooled.global
+          label: process
+          class_names: [background, signal] # index 0 = bg (label 0), 1 = signal
+          dense: {hidden_layers: [128, 64, 32], activation: ReLU, dropout: 0.1}
+      loss:
+        class_path: salt.model.modules.LossSum
+
+outputs:
+  # NO InputCopyWriter. It re-opens the reader's source with h5py to copy input
+  # columns into the eval file, so it needs an H5StructuredReader-style reader
+  # exposing `h5_source`. Both legs of this model are ROOT readers behind a
+  # MultiSampleReader, which advertises no such source — the writer this config
+  # inherited raised
+  #   ConfigError: H5OutputSink: input-copying need an H5StructuredReader-style
+  #   reader ... MultiSampleReader advertises none
+  # on `salt test` (experiment 59). Input-copying is impossible here by
+  # construction, not merely unconfigured.
+  run_tasks:
+    class_path: salt.outputs.RunTaskOutput
+    init_args: {tasks: [events_classification], modes: [test]}
+
+trainer:
+  max_epochs: 20
+  precision: 32-true

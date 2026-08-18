@@ -112,8 +112,8 @@ class TestGraphArtifacts:
             GraphArtifacts().on_fit_start(stub_trainer(tmp_path), SimpleNamespace(plans={}))
         assert list(tmp_path.iterdir()) == []
 
-    def test_registered_by_default_in_base2(self, tmp_path):
-        # base2.yaml ships the artifacts entry; the CLI assembles it into
+    def test_registered_by_default_in_base(self, tmp_path):
+        # base.yaml ships the artifacts entry; the CLI assembles it into
         # trainer.callbacks (run=False instantiation — no fit needed)
         from salt.schema import dump_schema, save_schema
         from salt.tests.unit.test_main import make_cli

@@ -20,6 +20,10 @@ try:
 except ImportError:
     _boto3 = None
 
+from salt.logging import get_logger
+
+_LOG = get_logger(__name__)
+
 
 def get_temp_path(move_files_temp: str, in_path: str | Path) -> Path:
     """Create the full temporary path for a file: ``move_files_temp / in_path.name``."""
@@ -42,7 +46,7 @@ def remove_file(path: Path) -> None:
     if path.is_file():
         path.unlink()
     else:
-        print(f"No file to delete at {path}")
+        _LOG.info(f"No file to delete at {path}")
 
 
 def remove_files_temp(train_temp_path: Path, val_temp_path: Path) -> None:
@@ -140,7 +144,7 @@ def download_script_S3(
             session = _boto3.client("s3")
             download_S3(session, bucket, file, target_path, count)
         else:
-            print(f'- "{file}" found locally and not downloaded.')
+            _LOG.info(f'- "{file}" found locally and not downloaded.')
         return key, str(target_path)
 
     raise ValueError("boto3 is not installed!")
@@ -167,8 +171,8 @@ def import_data_S3(config_path: str | Path) -> str:
     if config_s3.get("download_S3"):
         local_path = Path(config_s3["download_path"])
         local_path.mkdir(parents=True, exist_ok=True)
-        print("-" * 100)
-        print(f"S3 download in progress at local path: {local_path}")
+        _LOG.info("-" * 100)
+        _LOG.info(f"S3 download in progress at local path: {local_path}")
         args = [
             (config_s3["bucket"], local_path, key, cfg["data"][key], count)
             for count, key in enumerate(config_s3["download_files"])
@@ -176,14 +180,14 @@ def import_data_S3(config_path: str | Path) -> str:
         with Pool() as pool:
             output = pool.starmap(download_script_S3, args)
         for file, result in output:  # type: ignore[assignment]
-            print(f"Downloaded {file} as {result.split('/')[-1]} at local path")
+            _LOG.info(f"Downloaded {file} as {result.split('/')[-1]} at local path")
             cfg["data"][file] = str(result)
 
         local_config = Path(local_path, "local_base.yaml")
         with open(local_config, "w") as file:
             yaml.dump(cfg, file, sort_keys=False)
-        print("Stored a local version of the config.")
-        print("-" * 100, "\n")
+        _LOG.info("Stored a local version of the config.")
+        _LOG.info("-" * 100 + " \n")
     else:
         local_config = Path(config_path)
 
@@ -205,8 +209,8 @@ def setup_S3_CLI(sc_data: dict) -> dict:
     if config_s3.get("download_S3"):
         local_path = Path(config_s3["download_path"])
         local_path.mkdir(parents=True, exist_ok=True)
-        print("-" * 100)
-        print(f"S3 download in progress at local path: {local_path}")
+        _LOG.info("-" * 100)
+        _LOG.info(f"S3 download in progress at local path: {local_path}")
 
         # Parallelise the download
         args = [
@@ -218,11 +222,11 @@ def setup_S3_CLI(sc_data: dict) -> dict:
 
         # Update the config
         for file, result in output:
-            print(f"Downloaded {file} as {result.split('/')[-1]} at local path")
+            _LOG.info(f"Downloaded {file} as {result.split('/')[-1]} at local path")
             sc_data[file] = str(result)
 
-        print("Data part of the config updated to track the downloaded files.")
-        print("-" * 100, "\n")
+        _LOG.info("Data part of the config updated to track the downloaded files.")
+        _LOG.info("-" * 100 + " \n")
     return sc_data
 
 
@@ -232,7 +236,7 @@ def require_S3(path: Path | str) -> bool:
     True if ``data.config_s3.use_S3 == true``.
     """
     with open(path) as file:
-        print("Doign this")
+        _LOG.debug("Doign this")
         cfg = yaml.safe_load(file)
         return (
             "config_s3" in cfg["data"]

@@ -1,11 +1,8 @@
-# Overlay on gn2v2-dummy.yaml: demonstrates the folded ONNX export path — a
-# ClassProbs softmax, a SeqClassIndex argmax, and a Combination (pbc = pb+pc)
-# minted in-graph, each naming its own ONNX output through its manifest (the
-# probs and the argmax index inherit their names from the source task; the
-# combination names itself). The eval-H5 side rides the base's outputs: section
-# (test-only); the ONNX tuple is collected from the conversion nodes below.
-# Stack as:
-#   salt graph plot --config gn2v2-dummy.yaml --config gn2v2-dummy-onnx-fold.yaml --mode onnx
+# TEST FIXTURE — not a shipped config. Overlay on salt/configs/gn2v2-opendata.yaml
+# exercising the folded ONNX export path: a ClassProbs softmax, a SeqClassIndex
+# argmax and a Combination (pbc = pb+pc) minted in-graph, each naming its own
+# ONNX output through its manifest. No shipped config uses this shape, so it
+# lives here rather than in salt/configs.
 
 model:
   modules:

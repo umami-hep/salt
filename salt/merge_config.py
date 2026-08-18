@@ -4,7 +4,7 @@ and render one static model-graph plot per ``training_schedule`` stage with the
 stage's frozen modules visually distinguished.
 
 Trainer-free and data-free: the merged YAML is the ``salt fit --print_config``
-dump (same `DeepMergeParser` surface, `base2.yaml` defaults, fan-out + schedule
+dump (same `DeepMergeParser` surface, `base.yaml` defaults, fan-out + schedule
 relocation), and the per-stage graphs are the FIT-mode plan overlaid with each
 stage's freeze mask. ``--init_from``/``ckpt_path`` are accepted for fit-parity
 but only echoed into the merged YAML — no checkpoint is read.
@@ -25,6 +25,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan, deadcode
 from salt.graph.render import dot_source
 from salt.graph.spec import Mode
+from salt.logging import console
 from salt.schedule import StageConfig, TrainingSchedule
 
 __all__ = ["main"]
@@ -70,7 +71,7 @@ def main(args: Sequence[str] | None = None) -> int:
     """
     argv = list(sys.argv[1:] if args is None else args)
     if any(a in {"-h", "--help"} for a in argv):
-        print(_HELP)
+        console(_HELP)
         return 0
 
     output_path, do_plots, fit_args = _split_merged_args(argv)
@@ -78,7 +79,7 @@ def main(args: Sequence[str] | None = None) -> int:
     merged_text = _materialize_schedule(_dump_merged_config(fit_args))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(merged_text)
-    print(f"wrote merged config to {output_path}")
+    console(f"wrote merged config to {output_path}")
 
     _write_stage_plots(output_path, merged_text, do_plots=do_plots)
     return 0
@@ -232,7 +233,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
         dot_text = dot_source(plan, cfg.modules, pruned, widths=widths, frozen=frozen, title=title)
         dot_path = Path(f"{stem}_stage{index:02d}_{stage.name}.dot")
         dot_path.write_text(dot_text)
-        print(f"wrote DOT to {dot_path}")
+        console(f"wrote DOT to {dot_path}")
         if do_plots:
             from salt.cli import _render_with_dot
 

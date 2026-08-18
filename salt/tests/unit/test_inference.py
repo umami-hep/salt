@@ -48,6 +48,7 @@ from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test 
     build_gn2v2_modules,
     write_parity_norm_dict,
 )
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
 LABEL_FIELDS = {
     "flavour_label",
@@ -355,7 +356,7 @@ class TestLabelFreePlanCompile:
     @pytest.mark.parametrize(
         ("config", "overrides"),
         [
-            ("gn2v2-dummy.yaml", ["model.modules.norm.init_args.norm_dict=unused.yaml"]),
+            (str(small_config()), ["model.modules.norm.init_args.norm_dict=unused.yaml"]),
             ("gn2v2-opendata.yaml", []),
         ],
     )

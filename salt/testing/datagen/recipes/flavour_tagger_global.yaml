@@ -1,0 +1,58 @@
+# flavour_tagger_global (GN3EPCLV01) -- flavour_tagger plus the `global`
+# object the config's reader declares alongside jets/tracks/flows/electrons.
+seed: 42
+n_samples: 1000
+flags: {}
+modules:
+  - class_path: salt.testing.datagen.modules.Jets
+    init_args:
+      fields: jet_features.yaml
+  - class_path: salt.testing.datagen.modules.Tracks
+    init_args:
+      name: tracks
+      max_items: 40
+      min_valid: 1
+      fields: track_features.yaml
+  # tracks_dr / tracks_ghost: identical-schema duplicate groups the dummy writer
+  # emits (inputs.py:676-677) and the GN3 input_map remaps `tracks`->`tracks_ghost`.
+  - class_path: salt.testing.datagen.modules.Tracks
+    init_args:
+      name: tracks_dr
+      max_items: 40
+      min_valid: 1
+      fields: track_features.yaml
+  - class_path: salt.testing.datagen.modules.Tracks
+    init_args:
+      name: tracks_ghost
+      max_items: 40
+      min_valid: 1
+      fields: track_features.yaml
+  - class_path: salt.testing.datagen.modules.Flows
+    init_args:
+      name: flows
+      max_items: 40
+      fields: flow_features.yaml
+  # 'flow' (singular): flow.yaml declares group 'flow'; the dummy writer
+  # duplicates flows->flow (inputs.py:681). Both names must be present.
+  - class_path: salt.testing.datagen.modules.Flows
+    init_args:
+      name: flow
+      max_items: 40
+      fields: flow_features.yaml
+  - class_path: salt.testing.datagen.modules.Electrons
+    init_args:
+      max_items: 10
+      mask_invalid: false
+      fields: electron_features.yaml
+  - class_path: salt.testing.datagen.modules.GlobalObject
+    init_args:
+      name: global
+      fields:
+        - { name: pt_btagJes,  type: distribution, dtype: f4, dist: lognormal }
+        - { name: eta_btagJes, type: distribution, dtype: f4, dist: normal }
+  - class_path: salt.testing.datagen.modules.H5Writer
+    init_args: { path: "${OUTPUT_DIR}/flavour_tagger_global.h5" }
+  - class_path: salt.testing.datagen.modules.NormWriter
+    init_args: { path: "${OUTPUT_DIR}/norm_dict.yaml" }
+  - class_path: salt.testing.datagen.modules.ClassDictWriter
+    init_args: { path: "${OUTPUT_DIR}/class_dict.yaml" }

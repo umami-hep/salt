@@ -17,6 +17,7 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, GraphError
 from salt.graph.spec import Mode
+from salt.logging import console
 from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
@@ -311,8 +312,8 @@ def run_inference(
         column_plan = _column_plan(sink, export_sink)
         total = len(dset)
         step = batch_size or dm.batch_size
-        print("-" * 100)
-        print(f"salt inference: {total:,} rows from {test_file} (export selection, eager)")
+        console("-" * 100)
+        console(f"salt inference: {total:,} rows from {test_file} (export selection, eager)")
         for start in range(0, total, step):
             stop = min(start + step, total)
             _consume_batch(sink, adapter, column_plan, dset[np.s_[start:stop]])
@@ -402,7 +403,7 @@ def main(args: Sequence[str] | None = None) -> int:
     parsed = _parse_args(args)
     for entry in parsed.set_overrides:
         if "=" not in entry:
-            print(
+            console(
                 f"salt inference: --set entries must be KEY=VALUE, got {entry!r}", file=sys.stderr
             )
             return 1
@@ -416,11 +417,11 @@ def main(args: Sequence[str] | None = None) -> int:
             batch_size=parsed.batch_size,
         )
     except GraphError as err:
-        print(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
+        console(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
-    print("-" * 100)
-    print(f"Done! Wrote inference H5 at {out}")
-    print("-" * 100)
+    console("-" * 100)
+    console(f"Done! Wrote inference H5 at {out}")
+    console("-" * 100)
     return 0
 
 

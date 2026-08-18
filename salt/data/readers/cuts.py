@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from salt.data.processors.multi_target import _OPERATORS
-from salt.data.readers.expressions import parse_expression
+from salt.data.readers.expressions import Aggregation, parse_expression
 from salt.graph.errors import ConfigError
 
 __all__ = ["ConstituentCuts", "Cut", "CutSpec", "GlobalObjectCuts"]
@@ -122,10 +122,17 @@ class Cut:
 
     @property
     def fields(self) -> tuple[str, ...]:
-        """The bare field names this cut reads — the read-planner contract."""
+        """The bare ROW-axis field names this cut reads — the read-planner contract."""
         if self.field:
             return (self.bare_field,)
         return parse_expression(self.expr).fields
+
+    @property
+    def aggregations(self) -> tuple[Aggregation, ...]:
+        """The constituent-axis reductions this cut needs precomputed (see `Aggregation`)."""
+        if self.field:
+            return ()
+        return parse_expression(self.expr).aggregations
 
     def mask(self, source: Mapping[str, Any] | np.ndarray) -> Any:
         """Evaluate this cut to a keep mask (True where the entry PASSES).
@@ -271,11 +278,18 @@ class GlobalObjectCuts:
             keep &= c.mask(rows)
         return keep
 
+    def _effective(self, split: str | None) -> tuple[Cut, ...]:
+        """One split's effective cuts, or the union across every split when `split` is None."""
+        if split is not None:
+            return self.for_split(split)
+        return (*self.global_cuts, *(c for cs in self.per_split.values() for c in cs))
+
     def fields(self, split: str | None = None) -> tuple[str, ...]:
-        """The bare field names referenced by the effective cuts.
+        """The bare ROW-axis field names referenced by the effective cuts.
 
         Used by the reader to guarantee the cut variables are read at index-build
-        even when not otherwise demanded.
+        even when not otherwise demanded. Constituent fields reached through a
+        reduction are NOT here — see `aggregations`.
 
         Parameters
         ----------
@@ -288,15 +302,36 @@ class GlobalObjectCuts:
         tuple[str, ...]
             The deduplicated bare field names, in first-seen order.
         """
-        if split is not None:
-            cuts = self.for_split(split)
-        else:
-            cuts = (*self.global_cuts, *(c for cs in self.per_split.values() for c in cs))
         seen: dict[str, None] = {}
-        for c in cuts:
+        for c in self._effective(split):
             for f in c.fields:
                 seen.setdefault(f, None)
         return tuple(seen)
+
+    def aggregations(self, split: str | None = None) -> tuple[Aggregation, ...]:
+        """The constituent-axis reductions the effective cuts need precomputed.
+
+        The reader evaluates each of these over the stream it names and adds the
+        result to the row-scalar record under `Aggregation.key` before applying
+        the cuts — that is what makes ``sum(jets.valid) >= 4`` an expressible
+        row cut at all.
+
+        Parameters
+        ----------
+        split : str | None, optional
+            Restrict to one split's effective cuts; ``None`` (default) returns the
+            union across global + every per-split.
+
+        Returns
+        -------
+        tuple[Aggregation, ...]
+            The reductions, deduplicated by key, in first-seen order.
+        """
+        seen: dict[str, Aggregation] = {}
+        for c in self._effective(split):
+            for agg in c.aggregations:
+                seen.setdefault(agg.key, agg)
+        return tuple(seen.values())
 
 
 CutSpec = GlobalObjectCuts
@@ -328,7 +363,8 @@ class ConstituentCuts:
     Raises
     ------
     ConfigError
-        On an unset/unknown ``on_fail`` or an entry that is not a cut.
+        On an unset/unknown ``on_fail``, an entry that is not a cut, or a cut
+        containing a constituent-axis reduction (``sum``/``count``).
     """
 
     cuts: tuple[Cut, ...] = ()
@@ -341,6 +377,14 @@ class ConstituentCuts:
                 f"ConstituentCuts: on_fail must be set explicitly to one of {list(_ON_FAIL)}, "
                 f"got {self.on_fail!r} — 'mask' blanks a failing constituent in place, 'drop' "
                 "removes it and re-pads"
+            )
+        reduced = [agg.source for c in self.cuts for agg in c.aggregations]
+        if reduced:
+            raise ConfigError(
+                f"ConstituentCuts.cuts: {reduced} reduce the constituent axis, but a "
+                "constituent cut is evaluated ON that axis — it decides one constituent at a "
+                "time and cannot see the row. Put a reduction in the reader's row-level "
+                "cuts: instead"
             )
 
     @property

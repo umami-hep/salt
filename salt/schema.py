@@ -6,7 +6,6 @@ dtypes, group/file attrs); `load_schema`/`save_schema` round-trip it to YAML.
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -19,6 +18,9 @@ import yaml
 
 from salt.graph.errors import _SUGGESTION_CUTOFF, SchemaError
 from salt.graph.spec import KEY_SEP, join_key, split_key
+from salt.logging import get_logger
+
+_LOG = get_logger(__name__)
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -289,19 +291,17 @@ def dump_schema(h5_path: str | Path) -> Schema:
             if not isinstance(node, h5py.Dataset) or node.dtype.names is None:
                 continue
             if KEY_SEP in name:
-                print(
-                    f"WARNING: skipping dataset {name!r} in {h5_path}: names containing "
-                    f"{KEY_SEP!r} cannot be addressed as bundle keys",
-                    file=sys.stderr,
+                _LOG.warning(
+                    f"skipping dataset {name!r} in {h5_path}: names containing "
+                    f"{KEY_SEP!r} cannot be addressed as bundle keys"
                 )
                 continue
             fields: dict[str, str] = {}
             for fname in node.dtype.names:
                 if KEY_SEP in fname:
-                    print(
-                        f"WARNING: skipping field {name}/{fname!r} in {h5_path}: names "
-                        f"containing {KEY_SEP!r} cannot be addressed as bundle keys",
-                        file=sys.stderr,
+                    _LOG.warning(
+                        f"skipping field {name}/{fname!r} in {h5_path}: names "
+                        f"containing {KEY_SEP!r} cannot be addressed as bundle keys"
                     )
                     continue
                 fields[fname] = _dtype_name(node.dtype[fname])

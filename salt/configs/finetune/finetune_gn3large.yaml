@@ -7,7 +7,7 @@
 #
 #   salt fit \
 #     --config <saved_gn3large_config.yaml> \
-#     --config salt/configs/finetune_gn3large.yaml \
+#     --config salt/configs/finetune/finetune_gn3large.yaml \
 #     --init_from <pretrained.ckpt> \
 #     --data.train_file <new_campaign/train.h5> \
 #     --data.val_file   <new_campaign/val.h5>
@@ -15,9 +15,12 @@
 # Before running, REPLACE the placeholders above with your real config,
 # checkpoint, and data paths. The names in `trainable:` must be real
 # `model.modules` keys of your base config — `jets_classification` is the
-# flavour head across the GN3 family (see salt/configs/GN3V00.yaml).
+# flavour head across the GN3 family (see salt/configs/GN3/GN3V00.yaml).
 #
 # Walk-through: docs/tutorials/finetuning.md (worked example A).
+
+include:
+  - GN3/GN3V00.yaml
 
 training_schedule:
   stages:
