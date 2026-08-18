@@ -134,12 +134,35 @@ Where it lands:
 
 Corpus directories on cluster storage are frequently read-only, so the fallback
 is routine. The chosen path is logged either way. Filenames are keyed by a digest
-of (source list, stage, row cap, reader class), so train and val get their own
-manifests and two different corpora never collide in one directory.
+of (source list, stage, row cap, reader class, **reader config**), so train and
+val get their own manifests and two different corpora never collide in one
+directory.
 
-Staleness is decided without opening a data file: the artifact's format version,
-a `stat` per recorded file (size and mtime), and the corpus's file list — which
-is the one change no per-file `stat` can see. A stale manifest is rebuilt, loudly.
+Staleness is decided without opening a data file:
+
+- the artifact's format version;
+- a `stat` per recorded file (size and mtime);
+- the corpus's file list — the one change no per-file `stat` can see;
+- the **reader's config fingerprint**, which is in the filename itself. The
+  checks above all describe the files, and none of them sees a reader
+  reconfigured over the *same* files. That matters because a changed `cuts:`
+  changes row counts and therefore every block boundary, while leaving every
+  file byte-identical. Config changes are a miss by construction: they key a
+  different filename.
+- the served schema's hash, whenever the caller already has a built schema and
+  can supply it for nothing. (Computing one means opening files, which is the
+  cost the artifact exists to avoid — so this check is a bonus, and the config
+  fingerprint is the guarantee.)
+
+A stale manifest is rebuilt, loudly.
+
+!!! note "Format version 2"
+
+    `MANIFEST_VERSION` is 2, and the filename key now includes the reader's
+    config. **Manifests written by an earlier salt are a miss.** Under
+    `manifest: auto` that is invisible — the run rebuilds. An explicit
+    `manifest: /path/...` **errors as stale**; rebuild it with
+    `python -m salt.data.manifest`.
 
 ### `manifest: /path/to/corpus_manifest.json` — build it yourself
 

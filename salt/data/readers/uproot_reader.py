@@ -633,29 +633,14 @@ class UprootReader(Reader):
 
     # -- index cache ----------------------------------------------------------
 
-    def _index_cache_key(self, files: list[Path]) -> str:
-        """A digest of everything the built index depends on.
+    def config_fingerprint(self) -> dict[str, Any]:
+        """The config facts that decide which rows and fields this reader serves.
 
-        Anything that could change the index must be in here, or a stale artifact
-        gets served as if it were current: the resolved file list with each file's
-        size and mtime (a re-derived file at the same path is a different file),
-        the full group/unroll/tree/num/stage config, the cut spec, the cache
-        format version, and the versions of the libraries whose output is being
-        cached. Cheap to compute — it is `stat` plus a hash, never a file read.
+        Everything here is set at construction, so it costs no file open. `cuts`
+        and `constituent_cuts` go in by `repr` — they are config objects, and what
+        matters is that a changed cut yields a changed string.
         """
-        import hashlib
-        import json
-
-        import awkward
-        import uproot
-
-        import salt
-
-        payload = {
-            "format": INDEX_CACHE_VERSION,
-            "salt": getattr(salt, "__version__", "unknown"),
-            "uproot": uproot.__version__,
-            "awkward": awkward.__version__,
+        return {
             "tree": self.tree,
             "unroll": self.unroll,
             "num": self.num,
@@ -676,6 +661,32 @@ class UprootReader(Reader):
                 }
                 for stream, cfg in self.groups.items()
             },
+        }
+
+    def _index_cache_key(self, files: list[Path]) -> str:
+        """A digest of everything the built index depends on.
+
+        Anything that could change the index must be in here, or a stale artifact
+        gets served as if it were current: the resolved file list with each file's
+        size and mtime (a re-derived file at the same path is a different file),
+        the reader's `config_fingerprint`, the cache format version, and the
+        versions of the libraries whose output is being cached. Cheap to compute —
+        it is `stat` plus a hash, never a file read.
+        """
+        import hashlib
+        import json
+
+        import awkward
+        import uproot
+
+        import salt
+
+        payload = {
+            "format": INDEX_CACHE_VERSION,
+            "salt": getattr(salt, "__version__", "unknown"),
+            "uproot": uproot.__version__,
+            "awkward": awkward.__version__,
+            **self.config_fingerprint(),
             "files": [
                 {"path": str(p), "size": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
                 for p in files

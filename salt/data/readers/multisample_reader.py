@@ -370,6 +370,27 @@ class MultiSampleReader(Reader):
             return None
         return self.schema.groups.get(stream)
 
+    def config_fingerprint(self) -> dict[str, Any]:
+        """The interleave config plus every sub-reader's own fingerprint.
+
+        Recursive because a change inside one sample changes what this reader
+        serves just as surely as a change out here does.
+        """
+        return {
+            "label_stream": self.label_stream,
+            "label_field": self.label_field,
+            "interleave_block": self.interleave_block,
+            "samples": [
+                {
+                    "name": s.name,
+                    "label": s.label,
+                    "reader": type(s.reader).__name__,
+                    "config": s.reader.config_fingerprint(),
+                }
+                for s in self.samples
+            ],
+        }
+
     def label_universe(self) -> tuple[str, ...] | None:
         """The ``labels.<stream>.<field>`` universe, including the injected label."""
         if self.schema is None:

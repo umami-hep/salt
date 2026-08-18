@@ -21,7 +21,7 @@ __all__ = ["AUTO_MANIFEST", "MANIFEST_VERSION", "CorpusManifest", "ManifestEntry
 
 _LOG = get_logger(__name__)
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 """Artifact format version. A mismatch is a miss, never a best-effort read."""
 
 AUTO_MANIFEST = "auto"
@@ -204,6 +204,32 @@ class CorpusManifest:
         return problems
 
 
+def built_schema_hash(reader: Reader) -> str | None:
+    """`schema_digest` when the reader ALREADY has a schema, else None.
+
+    Never triggers a build: an unprepared reader returns None so validation skips
+    the schema check rather than opening every file to perform it.
+    """
+    return schema_digest(reader) if getattr(reader, "schema", None) is not None else None
+
+
+def config_digest(reader: Reader) -> str:
+    """A digest of the reader's `config_fingerprint`; empty when it has none.
+
+    The manifest's only OPEN-FREE staleness signal. The stat checks catch a
+    changed corpus and `schema_hash` catches a changed served schema, but both
+    describe the files; neither sees a reader reconfigured over the SAME files —
+    a different `cuts` (which changes row counts, and so every block boundary) or
+    a different `groups`. That has to be caught before anything is read, which
+    means it belongs in the artifact's key, not in its contents.
+    """
+    fingerprint = reader.config_fingerprint()
+    if not fingerprint:
+        return ""
+    blob = json.dumps(fingerprint, sort_keys=True, default=str).encode()
+    return hashlib.blake2b(blob, digest_size=8).hexdigest()
+
+
 def schema_digest(reader: Reader) -> str:
     """A stable digest of a reader's served schema (streams, fields, dtypes)."""
     schema = getattr(reader, "schema", None)
@@ -301,7 +327,8 @@ def resolve_manifest_path(
     """
     srcs = [str(s) for s in (reader.sources() if sources is None else sources)]
     key = json.dumps(
-        [MANIFEST_VERSION, type(reader).__name__, stage, int(num), srcs], sort_keys=True
+        [MANIFEST_VERSION, type(reader).__name__, stage, int(num), srcs, config_digest(reader)],
+        sort_keys=True,
     )
     name = f"salt_manifest_{hashlib.blake2b(key.encode(), digest_size=6).hexdigest()}.json"
     root = corpus_root(srcs)
@@ -313,13 +340,21 @@ def resolve_manifest_path(
 
 
 def read_manifest(
-    path: str | Path, sources: Sequence[str | Path] | None = None
+    path: str | Path,
+    sources: Sequence[str | Path] | None = None,
+    schema_hash: str | None = None,
 ) -> tuple[CorpusManifest | None, list[str]]:
     """The manifest at `path` if it is present AND usable, else ``(None, why not)``.
 
     Absent, unreadable, wrong-version and stale are one outcome to a caller that
     can rebuild — so none of them raise, and none of them return a
     partially-trusted manifest.
+
+    `schema_hash` is optional because computing it needs a BUILT schema, and
+    building one opens files — which is the cost this artifact exists to avoid.
+    Callers pass it when the reader has already been prepared and it is therefore
+    free; when they cannot, the config digest in the artifact's own filename is
+    what stands between a reconfigured reader and a stale manifest.
     """
     path = Path(path)
     if not path.exists():
@@ -328,7 +363,7 @@ def read_manifest(
         manifest = CorpusManifest.load(path)
     except ConfigError as exc:
         return None, [str(exc)]
-    problems = manifest.validate(sources=sources)
+    problems = manifest.validate(schema_hash=schema_hash, sources=sources)
     return (None, problems) if problems else (manifest, [])
 
 
@@ -339,7 +374,9 @@ def ensure_manifest(reader: Reader, path: Path, stage: str, where: str) -> Corpu
     `prepare_data`: building resolves the reader's index, which opens every
     source file once. One rank pays that behind the framework's own barrier.
     """
-    existing, problems = read_manifest(path, sources=reader.sources())
+    existing, problems = read_manifest(
+        path, sources=reader.sources(), schema_hash=built_schema_hash(reader)
+    )
     if existing is not None:
         _LOG.info(
             f"manifest: reusing {path} ({len(existing.entries):,} blocks, {existing.n_rows:,} rows)"

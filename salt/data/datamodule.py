@@ -20,6 +20,7 @@ from salt.data.input_samples import InputSamples, deepest_source_path, source_nu
 from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
 from salt.data.manifest import (
     AUTO_MANIFEST,
+    built_schema_hash,
     ensure_manifest,
     is_auto,
     read_manifest,
@@ -681,7 +682,9 @@ class GraphDataModule(lightning.LightningDataModule):
             return None
         stage = _STAGE_OF_MODE[mode]
         path, _where = resolve_manifest_path(reader, stage=stage, num=num)
-        manifest, problems = read_manifest(path, sources=reader.sources())
+        manifest, problems = read_manifest(
+            path, sources=reader.sources(), schema_hash=built_schema_hash(reader)
+        )
         if manifest is None:
             _LOG.warning(
                 f"manifest: no usable {stage} manifest at {path} ({'; '.join(problems)}) — "

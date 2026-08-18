@@ -391,6 +391,22 @@ class Reader(SaltDatasetModule):
         del stream
         return None
 
+    def config_fingerprint(self) -> dict[str, Any]:
+        """Everything about this reader's CONFIG that changes the rows or fields it serves.
+
+        Must be answerable WITHOUT opening a data file — it is what lets a cached
+        artifact (index cache, corpus manifest) be keyed to the configuration that
+        produced it, and a stale one detected before anything is read. Anything
+        omitted here is something a changed config will NOT invalidate.
+
+        Source paths belong to the caller's key, not here: two stages of one run
+        share a config and differ only in their files.
+
+        Default: empty, meaning "cannot be fingerprinted" — a caller then keys on
+        what it knows (paths, stats) alone, exactly as before.
+        """
+        return {}
+
     def label_universe(self) -> tuple[str, ...] | None:
         """The ``labels.<stream>.<field>`` universe for wildcard narrowing.
 

@@ -30,6 +30,7 @@ from salt.data.manifest import (
     build_manifest,
     corpus_root,
     is_auto,
+    read_manifest,
     resolve_manifest_path,
 )
 from salt.data.processors.features import Features
@@ -54,8 +55,9 @@ class FileStubReader(BlockStubReader):
 
     opens = 0
 
-    def __init__(self, files, offset: int = 0, seed: int = 0) -> None:
+    def __init__(self, files, offset: int = 0, seed: int = 0, fingerprint=None) -> None:  # noqa: ANN001
         self.files = [Path(f) for f in files]
+        self._fingerprint = dict(fingerprint) if fingerprint else {}
         super().__init__(
             n=ROWS_PER_FILE * len(self.files),
             offset=offset,
@@ -91,10 +93,16 @@ class FileStubReader(BlockStubReader):
             for i in range(len(self.files))
         ]
 
+    def config_fingerprint(self) -> dict:
+        """Stands in for a real reader's cuts/groups config."""
+        return dict(self._fingerprint)
+
     def with_source(self, filename, num=-1, vds_path=None, stage=None):  # noqa: ANN001
         """Re-source onto the glob's expansion — the per-stage clone."""
         del num, vds_path, stage
-        return FileStubReader(files=sorted(_glob.glob(str(filename))))
+        return FileStubReader(
+            files=sorted(_glob.glob(str(filename))), fingerprint=self._fingerprint
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -223,6 +231,48 @@ def test_the_key_separates_stages_and_corpora(tmp_path) -> None:
     other_path, _ = resolve_manifest_path(other, stage="train")
     assert train_path != val_path
     assert {train_path, val_path}.isdisjoint({other_path})
+
+
+def test_a_reconfigured_reader_keys_a_different_manifest(tmp_path) -> None:
+    """A config change over the SAME files must not reuse the old manifest.
+
+    The stat checks describe the corpus and cannot see this: change a row cut and
+    every block boundary moves while every file stays byte-identical. Keying the
+    artifact on the config digest is what turns that into a miss.
+    """
+    corpus = _corpus(tmp_path / "corpus", ["a.root", "b.root"])
+    base = FileStubReader(files=[]).with_source(corpus)
+    cut = FileStubReader(files=[], fingerprint={"cuts": "pt > 20"}).with_source(corpus)
+    groups = FileStubReader(files=[], fingerprint={"groups": ["pt", "eta"]}).with_source(corpus)
+
+    base_path, _ = resolve_manifest_path(base, stage="train")
+    cut_path, _ = resolve_manifest_path(cut, stage="train")
+    groups_path, _ = resolve_manifest_path(groups, stage="train")
+    assert len({base_path, cut_path, groups_path}) == 3
+
+
+def test_a_fingerprintless_reader_keys_as_before(tmp_path) -> None:
+    """An empty fingerprint adds nothing to the key — readers that cannot answer
+    are keyed on paths alone, exactly as they were.
+    """
+    corpus = _corpus(tmp_path / "corpus", ["a.root"])
+    a, _ = resolve_manifest_path(FileStubReader(files=[]).with_source(corpus), stage="train")
+    b, _ = resolve_manifest_path(FileStubReader(files=[]).with_source(corpus), stage="train")
+    assert a == b
+
+
+def test_a_changed_served_schema_is_stale(tmp_path) -> None:
+    """`schema_hash` is checked when the caller can supply one for free."""
+    root = tmp_path / "corpus"
+    reader = FileStubReader(files=[]).with_source(_corpus(root, ["a.root"]))
+    path = build_manifest(reader).save(root / "salt_manifest_probe.json")
+
+    assert read_manifest(path, sources=reader.sources())[0] is not None
+    manifest, problems = read_manifest(
+        path, sources=reader.sources(), schema_hash="a-different-reader"
+    )
+    assert manifest is None
+    assert any("schema hash" in p for p in problems)
 
 
 def test_is_auto_accepts_only_the_keyword() -> None:
