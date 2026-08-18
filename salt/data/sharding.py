@@ -115,10 +115,7 @@ def shard_row_counts(group_rows: Sequence[int], n_shards: int) -> list[int]:
     has to ask.
     """
     return [
-        sum(
-            _interval(shard, n_shards, int(n))[1] - _interval(shard, n_shards, int(n))[0]
-            for n in group_rows
-        )
+        sum(hi - lo for lo, hi in (_interval(shard, n_shards, int(n)) for n in group_rows))
         for shard in range(n_shards)
     ]
 

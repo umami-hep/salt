@@ -578,11 +578,7 @@ class GraphDataModule(lightning.LightningDataModule):
         # staging never invalidates it (the blocks are the same rows either way).
         manifest = self._manifest_for(mode, reader, num)
         reader = self._stage(reader)
-        # deep-copy the processors per stage: bind-time state (e.g. the Labels
-        # narrowed key set) is per-(dataset, mode) and must not leak between
-        # the train/val/test plans sharing this module dict. Only
-        # `_batch_modules` are copied — setup-only modules are never handed to
-        # GraphDataset.
+        # only `_batch_modules` are copied — setup-only modules never reach a dataset
         modules = {
             name: (reader if name == self._reader_name else deepcopy(module))
             for name, module in self._batch_modules.items()
