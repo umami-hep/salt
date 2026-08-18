@@ -23,14 +23,12 @@ from salt.graph.spec import Mode
 __all__ = ["DEFAULT_BLOCK_ROWS", "IterableGraphDataset"]
 
 DEFAULT_BLOCK_ROWS = 16_384
-"""Rows per reader call.
+"""Rows per reader call — the measured knee of the FTAG1LITE read-range curve.
 
-Measured, not chosen: on the FTAG1LITE corpus the read-range curve
-(experiment 06, job 3966) is flat from a whole file down to ~3,400 entries
-(~16k jets) — 9,052 vs 9,070 jets/s — and falls off below it (7,275 jets/s at
-859 entries, 4,853 at 212). 16,384 rows sits on that knee, holding one read's
-decompressed footprint near 77 MB mean / 179 MB max instead of the 302 / 690 MB
-a whole-file read costs, which is what makes many concurrent shards affordable.
+Throughput is flat down to here and falls off below it, while one read's
+decompressed footprint stays near 77 MB mean / 179 MB max against the
+302 / 690 MB a whole-file read costs, which is what makes many concurrent
+shards affordable. Curve and numbers: study experiment 06, job 3966.
 """
 
 
@@ -51,19 +49,15 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
     since O(100-1000) GPUs times DataLoader workers is thousands of shards
     against a corpus of a few hundred files.
 
+    `modules`, `mode`, `sinks`, `seed`, `debug` and `sink_origins` are the
+    `_PlanRunner` constructor's, documented there. The user-facing spelling of
+    the streaming knobs below is `GraphDataModule`'s (``data.block_rows`` and
+    friends), which is where they are set in a config.
+
     Parameters
     ----------
-    modules : dict[str, SaltDatasetModule]
-        The dataset modules by instance name (exactly one `Reader`).
-    mode : Mode
-        The primary mode to compile for.
-    sinks : Sinks
-        The model boundary's demanded keys.
     batch_size : int
         Rows per emitted batch.
-    seed : int, optional
-        Base seed for the epoch shuffle and read-time augmentations, by
-        default 42.
     epoch : int, optional
         Epoch index; with `seed` it fixes the whole stream, by default 0. The
         datamodule sets it from ``trainer.current_epoch``.
@@ -81,11 +75,9 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
         Rows per turn of the group round robin, by default 1. Every batch's
         per-group counts stay within this many rows of their ideal share.
     manifest : CorpusManifest | str | Path | None, optional
-        A prebuilt `CorpusManifest` (or its path) to plan shards from. With one,
-        `n_batches`/`__len__`/the partition need no reader index at all, so a
-        rank can size its epoch without touching the corpus. ``None`` (default)
-        asks the reader for its blocks, which resolves `prepare` — cheap with an
-        index cache, expensive without one.
+        A prebuilt `CorpusManifest` (or its path) to plan shards from, so a rank
+        can size its epoch without touching the corpus. ``None`` (default) asks
+        the reader for its blocks, which resolves `prepare`.
     max_live_streams : int | None, optional
         Maximum groups holding a resident block at once, by default 2. Bounds
         peak resident rows at ``max_live_streams * block_rows``; ``None``
@@ -95,10 +87,6 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
         `torch.distributed` and `torch.utils.data.get_worker_info`. Injecting
         them is what lets tests sweep a whole (ranks x workers) grid in one
         process with no DDP and no DataLoader.
-    debug : bool, optional
-        Assert no boundary leaf aliases a reader buffer, by default False.
-    sink_origins : Mapping[str, str] | None, optional
-        Demanded-key -> demander description, for error messages.
 
     Raises
     ------
@@ -321,23 +309,17 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
     ) -> dict[str, np.ndarray]:
         """Scatter ``(positions, produced, rows)`` chunks into one batch.
 
-        Same shape of operation as `MultiSampleReader._combine_scalar` /
-        `_combine_jagged`, and for the same reason: two samples may serve
-        different multiplicities, so a jagged stream is allocated at the batch's
-        maximum ``T`` and each chunk written into its own prefix. Scattering to
-        `positions` (rather than concatenating) keeps the batch in the interleave
+        A jagged stream is allocated at the batch's maximum ``T`` and each chunk
+        written into its own prefix, since two samples may serve different
+        multiplicities (as in `MultiSampleReader._combine_jagged`). Scattering to
+        `positions` rather than concatenating keeps the batch in the interleave
         plan's order, which is what makes the unshuffled stream inspectable.
-
-        With `shuffle` on, one permutation is applied to every stream — ORDER
-        only, never membership, so the plan's per-group proportions survive.
+        `shuffle` permutes order only, never membership.
         """
         keys = list(chunks[0][1])
-        # The shuffle is folded INTO the scatter rather than applied after it.
-        # `combined[order]` would be a second full pass over every stream, on top
-        # of the gather that materialises each chunk and the scatter that places
-        # it — three passes where one suffices. Writing a value destined for
-        # ``combined[p]`` straight to ``out[inv[p]]`` (where ``order[inv[p]] == p``)
-        # produces the identical array in one.
+        # Fold the shuffle into the scatter: writing a value destined for
+        # ``combined[p]`` straight to ``out[inv[p]]`` gives the identical array
+        # in one pass, where a following `combined[order]` would cost a second.
         inv = None
         if self.shuffle:
             order = rng.permutation(b)
@@ -408,9 +390,7 @@ class _GroupCursor:
         """Drop the resident block — where the memory bound is actually enforced.
 
         A block evicted part-way through has its UNCONSUMED tail pushed back onto
-        the queue, so eviction costs a re-read and never a row: without this the
-        rows between the cursor and the block's end would be silently skipped,
-        which is exactly the class of bug the coverage test exists to catch.
+        the queue, so eviction costs a re-read and never a row.
         """
         if self._buffer is not None and self._offset < self._size:
             block = self._blocks[self._next_block - 1]
@@ -455,11 +435,9 @@ def _rows_of(arr: np.ndarray, rows: np.ndarray) -> np.ndarray:
     """``arr[rows]``, as a VIEW whenever `rows` is one contiguous ascending run.
 
     `_GroupCursor.take` always hands back ``np.arange(offset, offset + n)``, so
-    the fancy index it names is really a slice — and taking it as a slice removes
-    a full copy of every stream per chunk, before the scatter that copies it
-    again. The run is verified rather than assumed (the span check short-circuits
-    the common miss; `rows` is at most one batch, so the confirming pass is
-    nothing against the megabytes it saves).
+    the fancy index it names is really a slice — and taking it as one saves a
+    full copy of every stream per chunk. Verified rather than assumed: `rows` is
+    at most one batch, so the confirming pass costs nothing against that.
     """
     n = rows.size
     if n and int(rows[-1]) - int(rows[0]) + 1 == n and bool(np.all(np.diff(rows) == 1)):
