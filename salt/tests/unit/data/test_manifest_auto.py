@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import glob as _glob
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,6 +171,7 @@ def test_auto_lands_next_to_a_writable_corpus(tmp_path) -> None:
     assert path.parent == root.resolve()
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes to any directory, mode bits included")
 def test_auto_falls_back_to_the_cache_when_the_corpus_is_read_only(
     tmp_path, _isolated_cache
 ) -> None:
@@ -183,6 +185,21 @@ def test_auto_falls_back_to_the_cache_when_the_corpus_is_read_only(
         root.chmod(0o755)
     assert where == "cache"
     assert path.parent == _isolated_cache
+
+
+def test_auto_falls_back_to_the_cache_when_there_is_no_corpus_directory(
+    tmp_path, _isolated_cache
+) -> None:
+    """The same fallback, reached by geometry rather than permissions.
+
+    The permissions route above cannot be tested as root; this one can, so the
+    cache branch stays covered wherever the suite runs.
+    """
+    reader = FileStubReader(files=["/aaa/x.root", "/bbb/y.root"])
+    path, where = resolve_manifest_path(reader, stage="train")
+    assert where == "cache"
+    assert path.parent == _isolated_cache
+    assert path.name.startswith("salt_manifest_")
 
 
 def test_a_broad_common_ancestor_is_not_a_corpus_root() -> None:
