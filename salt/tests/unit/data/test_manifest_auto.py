@@ -171,6 +171,11 @@ def test_auto_lands_next_to_a_writable_corpus(tmp_path) -> None:
     assert path.parent == root.resolve()
 
 
+# The next two tests look like duplicates and are not: they reach the SAME cache
+# branch by two different routes, because neither route alone covers every
+# environment. The permissions route is the realistic one but cannot run as root
+# (CI does); the geometry route can run anywhere. Deleting either leaves the
+# branch untested somewhere.
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes to any directory, mode bits included")
 def test_auto_falls_back_to_the_cache_when_the_corpus_is_read_only(
     tmp_path, _isolated_cache

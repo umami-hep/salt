@@ -27,6 +27,12 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.schema import GroupSchema, Schema
 
+SIZES = [40, 130, 7]
+"""The default three-sample corpus: a ~19x size spread, 177 rows."""
+
+RAGGED_SIZES = [37, 411, 5]
+"""Sizes chosen so the shards do NOT divide evenly — the drop-last/tail cases."""
+
 # --------------------------------------------------------------------------- #
 # A trivial in-memory STUB Reader — reader-agnosticism is the contract here
 # --------------------------------------------------------------------------- #
@@ -308,7 +314,7 @@ def test_coverage_and_disjointness_over_a_worker_grid(grid: tuple[int, int]) -> 
     """Every corpus row is yielded exactly once across all (rank, worker) shards."""
     world, workers = grid
     n_shards = world * workers
-    sizes = [40, 130, 7]
+    sizes = SIZES
     emitted: list[int] = []
     for shard in range(n_shards):
         dataset = _dataset(
@@ -327,7 +333,7 @@ def test_coverage_and_disjointness_over_a_worker_grid(grid: tuple[int, int]) -> 
 
 def test_epoch_multiset_preserved_under_shuffle() -> None:
     """Shuffling changes order, never membership."""
-    sizes = [40, 130, 7]
+    sizes = SIZES
     plain = _batch_uids(_dataset(_multisample(sizes), batch_size=4, drop_last=False, shuffle=False))
     shuffled = _batch_uids(
         _dataset(_multisample(sizes), batch_size=4, drop_last=False, shuffle=True, seed=7)
@@ -364,7 +370,7 @@ def test_per_batch_stratification_at_k_samples(k: int) -> None:
 
 def test_determinism_same_seed_and_epoch() -> None:
     """Same (seed, epoch, shard) -> identical stream; a new epoch reorders the same rows."""
-    sizes = [40, 130, 7]
+    sizes = SIZES
     kw = {"batch_size": 4, "drop_last": False, "shuffle": True, "seed": 11}
     a = _batch_uids(_dataset(_multisample(sizes), epoch=0, **kw))
     b = _batch_uids(_dataset(_multisample(sizes), epoch=0, **kw))
@@ -387,7 +393,7 @@ def test_shards_are_disjoint_and_deterministic() -> None:
 
 def test_even_termination_across_ranks() -> None:
     """With drop_last every shard emits the same number of batches, and the loss is bounded."""
-    sizes = [37, 411, 5]
+    sizes = RAGGED_SIZES
     n_shards, batch_size = 6, 8
     counts, emitted = [], 0
     for shard in range(n_shards):
@@ -411,7 +417,7 @@ def test_even_termination_across_ranks() -> None:
 
 def test_no_drop_last_streams_every_row() -> None:
     """`drop_last=False` keeps the ragged tail."""
-    sizes = [37, 411, 5]
+    sizes = RAGGED_SIZES
     uids = _batch_uids(_dataset(_multisample(sizes), batch_size=8, drop_last=False))
     assert Counter(uids) == Counter(range(sum(sizes)))
 
@@ -488,19 +494,19 @@ def test_default_row_blocks_is_one_whole_block() -> None:
 
 def test_manifest_round_trips_and_matches_the_reader(tmp_path) -> None:  # noqa: ANN001
     """A saved manifest reproduces the reader's blocks and row counts exactly."""
-    reader = _multisample([40, 130, 7], n_blocks=3)
+    reader = _multisample(SIZES, n_blocks=3)
     built = build_manifest(reader)
     path = built.save(tmp_path / "corpus.json")
     loaded = CorpusManifest.load(path)
     assert loaded.blocks() == reader.row_blocks()
-    assert loaded.group_rows == [40, 130, 7]
+    assert loaded.group_rows == SIZES
     assert loaded.n_rows == 177
     assert loaded.group_names == ["s0", "s1", "s2"]
 
 
 def test_manifest_plans_the_same_shards_as_the_reader(tmp_path) -> None:  # noqa: ANN001
     """A manifest-planned shard stream is identical to a reader-planned one."""
-    sizes = [40, 130, 7]
+    sizes = SIZES
     manifest = build_manifest(_multisample(sizes)).save(tmp_path / "corpus.json")
     kw = {"batch_size": 4, "drop_last": False, "shuffle": False}
     from_reader = _batch_uids(_dataset(_multisample(sizes), **kw))
@@ -510,7 +516,7 @@ def test_manifest_plans_the_same_shards_as_the_reader(tmp_path) -> None:  # noqa
 
 def test_manifest_sizes_the_epoch_without_a_reader_index(tmp_path) -> None:  # noqa: ANN001
     """`n_batches` comes off the manifest — `row_blocks` is never called."""
-    sizes = [40, 130, 7]
+    sizes = SIZES
     manifest = build_manifest(_multisample(sizes)).save(tmp_path / "corpus.json")
     reader = _multisample(sizes)
     calls = []
@@ -585,33 +591,38 @@ def test_map_style_prefetch_depth_is_unchanged() -> None:
     assert auto_prefetch_factor(explicit=None, iterable=False, block_rows=16384, batch_size=1000) == 2
 
 
-def test_streaming_prefetch_covers_one_block() -> None:
-    """Depth covers ceil(block_rows / batch_size) so a block's burst never blocks."""
-    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=4000, batch_size=1000) == 4
-    # ceil, not floor: 4,001 rows is five batches, and a depth of four would
-    # leave the fifth stalling the round robin
-    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=4001, batch_size=1000) == 5
-
-
-def test_streaming_prefetch_is_capped() -> None:
-    """The depth is bounded — it is paid in shared memory on every rank."""
-    deep = auto_prefetch_factor(explicit=None, iterable=True, block_rows=16384, batch_size=1000)
-    assert deep == AUTO_PREFETCH_CAP
-    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=10**9, batch_size=1) == (
-        AUTO_PREFETCH_CAP
+@pytest.mark.parametrize(
+    ("block_rows", "batch_size", "expected"),
+    [
+        (4000, 1000, 4),
+        (4001, 1000, 5),
+        (10, 1000, 2),
+        (16384, 1000, AUTO_PREFETCH_CAP),
+        (10**9, 1, AUTO_PREFETCH_CAP),
+        (None, 1000, AUTO_PREFETCH_CAP),
+    ],
+    ids=[
+        "covers_one_block",
+        # ceil, not floor: 4,001 rows is five batches, and a depth of four would
+        # leave the fifth stalling the round robin
+        "ceil_not_floor",
+        # torch's minimum useful depth, for a block smaller than one batch
+        "floor_of_two",
+        "capped",
+        # the cap is what bounds the shared memory paid on every rank
+        "capped_however_deep",
+        # block_rows=None reads the reader's own blocks whole — maximally bursty
+        "unbounded_takes_the_cap",
+    ],
+)
+def test_streaming_prefetch_depth(block_rows: int | None, batch_size: int, expected: int) -> None:
+    """Streaming depth is ceil(block_rows / batch_size), floored at 2 and capped."""
+    assert (
+        auto_prefetch_factor(
+            explicit=None, iterable=True, block_rows=block_rows, batch_size=batch_size
+        )
+        == expected
     )
-
-
-def test_streaming_prefetch_has_a_floor_of_two() -> None:
-    """A block smaller than one batch still gets torch's minimum useful depth."""
-    assert auto_prefetch_factor(explicit=None, iterable=True, block_rows=10, batch_size=1000) == 2
-
-
-def test_unbounded_blocks_take_the_cap() -> None:
-    """block_rows=None reads the reader's own blocks whole — maximally bursty."""
-    assert auto_prefetch_factor(
-        explicit=None, iterable=True, block_rows=None, batch_size=1000
-    ) == AUTO_PREFETCH_CAP
 
 
 @pytest.mark.parametrize("iterable", [False, True])
