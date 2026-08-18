@@ -10,7 +10,6 @@ import yaml
 
 from salt.graph import ConfigError, Mode
 from salt.graph.planner import compile_plan
-from salt.main import CONFIG_DIR
 from salt.model.mup import (
     _combined_graph,
     _parse_cli,
@@ -28,8 +27,9 @@ from salt.model.saltmodule import (
     validate_mup_routing,
 )
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
-DUMMY_CFG = str(CONFIG_DIR / "gn2v2-opendata.yaml")
+DUMMY_CFG = str(small_config())
 LRS = {"initial": 1e-4, "max": 5e-4, "end": 1e-5, "pct_start": 0.1}
 
 

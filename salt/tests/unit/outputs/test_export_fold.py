@@ -21,11 +21,12 @@ from salt.outputs.sinks.onnx.config import (
 from salt.outputs.sinks.onnx.export import _merge_export_alias, _resolve_export_contract
 from salt.outputs import OnnxExportSink
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
 pytestmark = pytest.mark.cpu_always
 
 _CONFIGS = Path(__file__).parents[3] / "configs"
-_DUMMY = _CONFIGS / "gn2v2-opendata.yaml"
+_DUMMY = small_config()
 _MASKFORMER = _CONFIGS / "MaskFormer.yaml"
 
 _INPUTS = [

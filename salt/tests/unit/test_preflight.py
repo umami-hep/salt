@@ -11,6 +11,7 @@ from salt.model.modules.norm import Normaliser
 from salt.model.saltmodule import SaltModule
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, gn2v2_sources
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
 LRS = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}
 
@@ -114,7 +115,6 @@ class TestSaltModulePreflights:
         # the documented data-free flow: validate with a placeholder norm
         # dict must stay exit 0 (warning only), --strict promotes it
         from salt.cli import main as cli_main
-        from salt.main import CONFIG_DIR
         from salt.schema import dump_schema, save_schema
         from salt.testing.inputs import write_dummy_file
 
@@ -128,7 +128,7 @@ class TestSaltModulePreflights:
             "graph",
             "validate",
             "-c",
-            str(CONFIG_DIR / "gn2v2-opendata.yaml"),
+            str(small_config()),
             "--mode",
             "fit",
             "--set",

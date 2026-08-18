@@ -16,15 +16,16 @@ from salt.config_utils import disable_logger_in_config
 from salt.graph.planner import compile_plan
 from salt.graph.render import dot_source
 from salt.graph.spec import Mode, TensorSpec, unflatten_spec
-from salt.main import CONFIG_DIR, SaltCLI
+from salt.main import SaltCLI
 from salt.main import main as salt_main
 from salt.merge_config import main as merge_config_main
 from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
 from salt.testing.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_test_config import small_config
 
-DUMMY_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
+DUMMY_CFG = small_config()
 
 # a two-stage schedule twin of the fine-tuning example: head_warmup freezes
 # everything but jets_classification (via trainable:), full_finetune frees all.
