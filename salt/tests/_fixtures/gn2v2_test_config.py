@@ -128,6 +128,22 @@ SPLIT_OUTPUTS: dict[str, Any] = {
     }
 }
 
+class _ExplicitNull:
+    """A key that must be WRITTEN as a YAML null, not removed.
+
+    `_deep_merge` follows the jsonargparse cross-config rule where a null patch
+    value DELETES the key. Some keys need the opposite: `expose: null` is a
+    value `VertexingTaskModule` reads to mean "every mode", so dropping the key
+    leaves the module on its default and the head silently disappears from
+    TEST/ONNX. Patches that mean the value carry this sentinel instead of None.
+    """
+
+    def __repr__(self) -> str:
+        return "NULL"
+
+
+NULL = _ExplicitNull()
+
 _CACHE: dict[str, Path] = {}
 
 
@@ -137,7 +153,9 @@ def _deep_merge(base: Any, patch: Any) -> Any:
         return patch
     out = dict(base)
     for key, value in patch.items():
-        if value is None and key in out:
+        if isinstance(value, _ExplicitNull):
+            out[key] = None
+        elif value is None and key in out:
             del out[key]
         elif key in out and isinstance(out[key], dict) and isinstance(value, dict):
             out[key] = _deep_merge(out[key], value)
@@ -193,14 +211,18 @@ def full_family_config() -> Path:
         FIXTURE_VARIABLES,
         GOLDEN_HEADS,
         {
+            # NULL, not None: `expose: null` means "every mode" and must reach
+            # the written config. Deleting the key instead leaves the deferral
+            # from GOLDEN_HEADS in place, and run_tasks then demands a
+            # preds.tracks.track_vertexing that no module produces in TEST/ONNX.
             "model": {
                 "init_args": {
-                    "modules": {"track_vertexing": {"init_args": {"expose": None}}}
+                    "modules": {"track_vertexing": {"init_args": {"expose": NULL}}}
                 }
             },
             "outputs": {
-                "jets_out": None,
-                "origin_out": None,
+                "jets_out": NULL,
+                "origin_out": NULL,
                 "run_tasks": {
                     "class_path": "salt.outputs.RunTaskOutput",
                     "init_args": {

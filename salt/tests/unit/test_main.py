@@ -190,8 +190,11 @@ class TestDeepMerge:
         assert set(cli.model.net.keys()) == GN2V2_MODULES | {"track_type"}
         task = cli.model.net["track_type"]
         assert isinstance(task, ClassificationTaskModule)
-        # sibling init_args of the model itself survive the partial restate
-        assert cli.model.lrs["max"] == pytest.approx(1.0e-3)
+        # sibling init_args of the model itself survive the partial restate.
+        # Read the expected value off the config under test rather than pinning
+        # a literal: what is asserted is that the override did not clear it.
+        base_lrs = yaml.safe_load(DUMMY_CFG.read_text())["model"]["init_args"]["lrs"]
+        assert cli.model.lrs["max"] == pytest.approx(base_lrs["max"])
         # the un-restated sibling modules keep their config
         assert cli.model.net["track_origin"].weight == pytest.approx(0.5)
 
