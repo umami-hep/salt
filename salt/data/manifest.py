@@ -38,10 +38,9 @@ _MIN_ROOT_PARTS = 3
 class ManifestEntry:
     """One sequential read unit, described without reference to its contents.
 
-    `path` is informational for a plain reader and load-bearing for validation:
-    together with `size` and `mtime_ns` it is what lets a manifest be rejected
-    when the corpus underneath it changed, using three `stat` calls per file
-    rather than a re-read.
+    `path`, `size` and `mtime_ns` are what let a manifest be rejected when the
+    corpus underneath it changed, at three `stat` calls per file rather than a
+    re-read.
     """
 
     group: int
@@ -112,11 +111,10 @@ class CorpusManifest:
     def save(self, path: str | Path) -> Path:
         """Write the manifest as JSON, atomically (temp file + replace).
 
-        A job that read a half-written manifest would shard against a truncated
-        corpus and silently train on part of it. The temp name carries the
-        writer's pid, so racing builders (a multi-node run without a shared
-        filesystem) each write their own and one `os.replace` wins whole — they
-        can waste work, never corrupt it. A failed write takes its temp with it.
+        A half-written manifest would shard against a truncated corpus and
+        silently train on part of it. The temp name carries the writer's pid, so
+        racing builders each write their own and one `os.replace` wins whole:
+        they can waste work, never corrupt it.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,13 +168,12 @@ class CorpusManifest:
     ) -> list[str]:
         """Structural + filesystem checks; returns the reasons it is stale (empty = usable).
 
-        Opens NO data file. Row totals come from the manifest itself; what is
-        re-checked is only what a `stat` can decide — that every recorded file
-        is still present at the same size and mtime — plus the schema hash, so a
+        Opens NO data file — only what a `stat` can decide (every recorded file
+        still present at the same size and mtime), plus the schema hash, so a
         manifest built for a different reader configuration cannot be used by
-        accident, and optionally the corpus's file LIST, which is the one change
-        no per-file stat can see: a file added to (or removed from) the glob
-        leaves every recorded file untouched.
+        accident. `sources` additionally catches the one change no per-file stat
+        can see: a file added to or removed from the glob leaves every recorded
+        file untouched.
         """
         problems: list[str] = []
         if schema_hash is not None and self.schema_hash and schema_hash != self.schema_hash:
@@ -371,30 +368,30 @@ def _group_names(reader: Reader) -> list[str]:
     return ["default"]
 
 
+def _paths_by_row_start(table: Any) -> dict[int, str]:
+    """``{row_start: path}`` for a reader's file table; empty when it has none."""
+    return {int(e.row_start): str(e.path) for e in table} if table is not None else {}
+
+
 def _block_paths(reader: Reader, blocks: list[RowBlock]) -> list[str]:
     """Best-effort source path per block, for the stat-based staleness check.
 
-    Only readers whose blocks correspond one-to-one with files can answer this;
-    for anything else the path is empty and validation falls back to the schema
-    hash alone. An empty path is a documented reduction in checking, not a
-    silent one — `validate` skips exactly those entries.
+    Only readers whose blocks correspond one-to-one with files can answer this.
+    For anything else the path is empty and `validate` skips exactly those
+    entries — a documented reduction in checking, not a silent one.
     """
     table = getattr(reader, "_table", None)
     if table is not None and len(table) >= len(blocks):
-        by_start = {int(e.row_start): str(e.path) for e in table}
+        by_start = _paths_by_row_start(table)
         return [by_start.get(b.start, "") for b in blocks]
     samples = getattr(reader, "samples", None)
     if samples:
-        out = []
-        for block in blocks:
-            sub = samples[block.group].reader
-            sub_table = getattr(sub, "_table", None)
-            if sub_table is None:
-                out.append("")
-                continue
-            by_start = {int(e.row_start): str(e.path) for e in sub_table}
-            out.append(by_start.get(block.start, ""))
-        return out
+        # one lookup table per sample, not one rebuilt per block
+        by_group = {
+            group: _paths_by_row_start(getattr(samples[group].reader, "_table", None))
+            for group in {b.group for b in blocks}
+        }
+        return [by_group[b.group].get(b.start, "") for b in blocks]
     return ["" for _ in blocks]
 
 
