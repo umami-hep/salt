@@ -106,7 +106,45 @@ contains, so the per-sample proportion guarantee above survives it.
 ## The corpus manifest
 
 Resolving a reader's blocks means resolving its index, which is the expensive
-part of startup. Do it once, offline:
+part of startup. With a manifest, shard assignment and epoch length are computed
+without opening a single data file.
+
+`manifest:` takes three values.
+
+### `manifest: auto` — let the run build it
+
+```yaml
+data:
+  iterable: true
+  manifest: auto
+```
+
+The datamodule resolves a conventional path per stage, validates whatever is
+there, and builds it when it is missing or stale. Building happens in Lightning's
+`prepare_data()` hook, which runs on **global rank 0 only** and barriers every
+other rank before `setup()` — so one process pays for the artifact and the rest
+read it, with no lock and no stampede. Writes are atomic (temp file plus
+`os.replace`), so a half-written manifest can never be read.
+
+Where it lands:
+
+1. next to the corpus — the common ancestor directory of the reader's resolved
+   source files, when that directory is writable;
+2. otherwise `$SALT_MANIFEST_CACHE`, or `~/.cache/salt/manifests/`.
+
+Corpus directories on cluster storage are frequently read-only, so the fallback
+is routine. The chosen path is logged either way. Filenames are keyed by a digest
+of (source list, stage, row cap, reader class), so train and val get their own
+manifests and two different corpora never collide in one directory.
+
+Staleness is decided without opening a data file: the artifact's format version,
+a `stat` per recorded file (size and mtime), and the corpus's file list — which
+is the one change no per-file `stat` can see. A stale manifest is rebuilt, loudly.
+
+### `manifest: /path/to/corpus_manifest.json` — build it yourself
+
+Recommended for a large corpus, and the only option that keeps the cost out of
+the training job entirely:
 
 ```bash
 python -m salt.data.manifest \
@@ -115,18 +153,14 @@ python -m salt.data.manifest \
     --out /path/to/corpus_manifest.json
 ```
 
-then point runs at the artifact:
+An explicit path must exist and load; it is applied to **every** streaming stage
+of the run, so build it from the corpus those stages read, or use `auto` when
+train and val are different file sets.
 
-```yaml
-data:
-  iterable: true
-  manifest: /path/to/corpus_manifest.json
-```
+### `manifest:` unset — no artifact
 
-With a manifest, shard assignment and epoch length are computed without opening
-a single data file. The artifact is versioned and validated on load by its
-schema hash plus a `stat` per file, so a changed corpus or a changed reader
-configuration is a hard error rather than a silently wrong plan.
+Every reader process resolves its own index. Correct, and the thing that stops
+scaling first.
 
 ## Writing a reader that streams well
 

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,12 +17,21 @@ from salt.data.base import Reader, RowBlock
 from salt.graph.errors import ConfigError
 from salt.logging import get_logger
 
-__all__ = ["MANIFEST_VERSION", "CorpusManifest", "ManifestEntry", "build_manifest"]
+__all__ = ["AUTO_MANIFEST", "MANIFEST_VERSION", "CorpusManifest", "ManifestEntry", "build_manifest"]
 
 _LOG = get_logger(__name__)
 
 MANIFEST_VERSION = 1
 """Artifact format version. A mismatch is a miss, never a best-effort read."""
+
+AUTO_MANIFEST = "auto"
+"""The `manifest:` config value that resolves, validates and builds on demand."""
+
+MANIFEST_CACHE_ENV = "SALT_MANIFEST_CACHE"
+"""Environment variable overriding the fallback manifest cache directory."""
+
+_MIN_ROOT_PARTS = 3
+"""Shallowest directory that may hold a manifest (``/a/b`` == 3 parts)."""
 
 
 @dataclass(frozen=True)
@@ -100,8 +112,11 @@ class CorpusManifest:
     def save(self, path: str | Path) -> Path:
         """Write the manifest as JSON, atomically (temp file + replace).
 
-        Atomic because a training job that reads a half-written manifest would
-        shard against a truncated corpus and silently train on part of it.
+        A job that read a half-written manifest would shard against a truncated
+        corpus and silently train on part of it. The temp name carries the
+        writer's pid, so racing builders (a multi-node run without a shared
+        filesystem) each write their own and one `os.replace` wins whole — they
+        can waste work, never corrupt it. A failed write takes its temp with it.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,9 +127,13 @@ class CorpusManifest:
             "meta": dict(self.meta),
             "entries": [asdict(entry) for entry in self.entries],
         }
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2))
-        tmp.replace(path)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload, indent=2))
+            tmp.replace(path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return path
 
     @classmethod
@@ -144,14 +163,20 @@ class CorpusManifest:
             meta=dict(payload.get("meta", {})),
         )
 
-    def validate(self, schema_hash: str | None = None) -> list[str]:
+    def validate(
+        self,
+        schema_hash: str | None = None,
+        sources: Sequence[str | Path] | None = None,
+    ) -> list[str]:
         """Structural + filesystem checks; returns the reasons it is stale (empty = usable).
 
         Opens NO data file. Row totals come from the manifest itself; what is
         re-checked is only what a `stat` can decide — that every recorded file
         is still present at the same size and mtime — plus the schema hash, so a
         manifest built for a different reader configuration cannot be used by
-        accident.
+        accident, and optionally the corpus's file LIST, which is the one change
+        no per-file stat can see: a file added to (or removed from) the glob
+        leaves every recorded file untouched.
         """
         problems: list[str] = []
         if schema_hash is not None and self.schema_hash and schema_hash != self.schema_hash:
@@ -159,6 +184,13 @@ class CorpusManifest:
                 f"schema hash {schema_hash} != manifest's {self.schema_hash} "
                 "(reader configuration changed)"
             )
+        if sources is not None:
+            recorded = [str(s) for s in self.meta.get("sources", [])]
+            wanted = [str(s) for s in sources]
+            if recorded != wanted:
+                problems.append(
+                    f"corpus file list changed ({len(recorded)} -> {len(wanted)} file(s))"
+                )
         for entry in self.entries:
             if not entry.path:
                 continue
@@ -223,6 +255,112 @@ def build_manifest(reader: Reader, meta: dict[str, Any] | None = None) -> Corpus
         schema_hash=schema_digest(reader),
         meta={"sources": sources, **(meta or {})},
     )
+
+
+# --------------------------------------------------------------------------- #
+# `manifest: auto` — resolve a conventional path, validate it, build on a miss
+# --------------------------------------------------------------------------- #
+
+
+def is_auto(manifest: Any) -> bool:
+    """Whether a configured `manifest:` value asks for automatic resolution."""
+    return isinstance(manifest, str) and manifest.strip().lower() == AUTO_MANIFEST
+
+
+def corpus_root(sources: Sequence[str | Path]) -> Path | None:
+    """The corpus's own directory, when a manifest can be written next to it.
+
+    The sources' common ancestor, rejected unless it is a writable directory
+    deep enough to BE a corpus: sources on different trees have ``/`` in common,
+    which is an accident, not a corpus root.
+    """
+    if not sources:
+        return None
+    try:
+        resolved = [Path(s).resolve() for s in sources]
+        common = Path(os.path.commonpath([str(p) for p in resolved]))
+    except ValueError:  # nothing in common (different roots)
+        return None
+    if common in set(resolved):  # a single file is its own commonpath
+        common = common.parent
+    if len(common.parts) < _MIN_ROOT_PARTS or not os.access(common, os.W_OK):
+        return None
+    return common if common.is_dir() else None
+
+
+def resolve_manifest_path(
+    reader: Reader,
+    *,
+    stage: str | None = None,
+    num: int = -1,
+    sources: Sequence[str | Path] | None = None,
+) -> tuple[Path, str]:
+    """Where this reader's auto manifest belongs, and whether that is ``"corpus"`` or ``"cache"``.
+
+    Pure: every rank derives the same path without coordinating, from facts
+    known before any file is opened. The filename is keyed by everything that
+    decides which rows the manifest describes, so two stages of one run get two
+    manifests — as they must, being two different corpora.
+    """
+    srcs = [str(s) for s in (reader.sources() if sources is None else sources)]
+    key = json.dumps(
+        [MANIFEST_VERSION, type(reader).__name__, stage, int(num), srcs], sort_keys=True
+    )
+    name = f"salt_manifest_{hashlib.blake2b(key.encode(), digest_size=6).hexdigest()}.json"
+    root = corpus_root(srcs)
+    if root is not None:
+        return root / name, "corpus"
+    cache = os.environ.get(MANIFEST_CACHE_ENV)
+    base = Path(cache).expanduser() if cache else Path.home() / ".cache" / "salt" / "manifests"
+    return base / name, "cache"
+
+
+def read_manifest(
+    path: str | Path, sources: Sequence[str | Path] | None = None
+) -> tuple[CorpusManifest | None, list[str]]:
+    """The manifest at `path` if it is present AND usable, else ``(None, why not)``.
+
+    Absent, unreadable, wrong-version and stale are one outcome to a caller that
+    can rebuild — so none of them raise, and none of them return a
+    partially-trusted manifest.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None, ["not built yet"]
+    try:
+        manifest = CorpusManifest.load(path)
+    except ConfigError as exc:
+        return None, [str(exc)]
+    problems = manifest.validate(sources=sources)
+    return (None, problems) if problems else (manifest, [])
+
+
+def ensure_manifest(reader: Reader, path: Path, stage: str, where: str) -> CorpusManifest:
+    """Reuse the manifest at `path`, or build it from `reader` and write it there.
+
+    The expensive half of ``manifest: auto``, and why it belongs in Lightning's
+    `prepare_data`: building resolves the reader's index, which opens every
+    source file once. One rank pays that behind the framework's own barrier.
+    """
+    existing, problems = read_manifest(path, sources=reader.sources())
+    if existing is not None:
+        _LOG.info(
+            f"manifest: reusing {path} ({len(existing.entries):,} blocks, {existing.n_rows:,} rows)"
+        )
+        return existing
+    _LOG.info(
+        f"manifest: building the {stage} manifest -> {path} [{where}] ({'; '.join(problems)}). "
+        "This opens every source file once; for a large corpus pre-build it offline with "
+        "`python -m salt.data.manifest` and point `manifest:` at the artifact."
+    )
+    start = time.perf_counter()
+    manifest = build_manifest(reader, meta={"stage": stage})
+    manifest.save(path)
+    _LOG.info(
+        f"manifest: built {len(manifest.entries):,} block(s), {manifest.n_rows:,} rows in "
+        f"{time.perf_counter() - start:.1f} s"
+    )
+    return manifest
 
 
 def _group_names(reader: Reader) -> list[str]:
