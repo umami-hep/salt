@@ -26,10 +26,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-HEAD_SHA = "d848b61+phaseC"
+HEAD_SHA = "e329e77+plan02"
 """Worktree state this golden set is anchored to — regenerating at a later
-HEAD requires updating this sha (last verified 2026-07-14, all 30 capturable
-configs; GN2_muP exempt — mup not in salt-py314.sif)."""
+HEAD requires updating this sha (last verified 2026-08-30, 24 captured + 1
+expected-uncapturable stub; GN2_muP exempt — mup not in salt-py314.sif)."""
+
+EXPECTED_UNCAPTURABLE: dict[str, str] = {
+    "GN2_muP": "mup not installed in the salt-py314 containers",
+}
+"""Configs whose capture is known to fail in the canonical container. They
+still get a ``captured: false`` stub (so the inventory stays complete), but
+they do not fail the exit code — only UNEXPECTED failures do."""
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../worktrees/one-class-per-file/salt
 CONFIG_DIR = REPO_ROOT / "configs"
@@ -323,9 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", nargs="*", default=None, help="capture only these config names")
     args = parser.parse_args(argv)
 
-    generator_command = "apptainer exec --bind /home/npond/Documents/CCRA --bind /tmp " \
-        "$CCRA_CONTAINERS_DIR/salt-py314.sif python " \
-        "salt/tests/_fixtures/output_goldens/generate_goldens.py"
+    generator_command = (
+        "ccra-run-experiment <study>/experiments/02_golden_regen  "
+        "# salt-py314-cuda129 container; runs this script against the pinned repo"
+    )
 
     targets = [c for c in CONFIGS if args.only is None or c.name in args.only]
     summary: dict[str, Any] = {
@@ -358,8 +366,14 @@ def main(argv: list[str] | None = None) -> int:
             else 0,
         }
         if not ok:
-            n_failed += 1
-            print(f"  FAILED: {golden.get('error')}", file=sys.stderr)
+            if spec.name in EXPECTED_UNCAPTURABLE:
+                print(
+                    f"  expected-uncapturable ({EXPECTED_UNCAPTURABLE[spec.name]})",
+                    file=sys.stderr,
+                )
+            else:
+                n_failed += 1
+                print(f"  FAILED: {golden.get('error')}", file=sys.stderr)
         else:
             print(
                 f"  ok (h5_columns={summary['results'][spec.name]['h5_columns']}, "
@@ -371,7 +385,12 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(summary, fh, separators=(",", ":"), sort_keys=True); fh.write("\n")
         fh.write("\n")
 
-    print(f"\n{len(targets) - n_failed}/{len(targets)} configs captured", file=sys.stderr)
+    n_captured = sum(1 for r in summary["results"].values() if r["captured"])
+    print(
+        f"\n{n_captured}/{len(targets)} configs captured"
+        f" ({n_failed} unexpected failure(s))",
+        file=sys.stderr,
+    )
     return 1 if n_failed else 0
 
 
