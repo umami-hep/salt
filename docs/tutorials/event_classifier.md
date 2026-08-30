@@ -159,7 +159,7 @@ data:
                 groups: &groups
                   jets:
                     jagged: true
-                    truncate: 10
+                    pad_max: 10
                     branches:
                       pt: recojet_antikt4PFlow_pt_NOSYS
                       eta: recojet_antikt4PFlow_eta
@@ -266,9 +266,10 @@ dataset (different production tags) would instead give each sample its own
 — the reader contract does not care, since field names (`pt`, `eta`, ...) are
 resolved to on-disk branch names per sample, independently.
 
-`jets` is `jagged: true` with `truncate: 10` — the leading 10 jets per event,
-padded/masked. `event` is `jagged: false` — one row per event, carrying only
-the two housekeeping branches plus the reader-injected `process` label.
+`jets` is `jagged: true` with `pad_max: 10` — the leading 10 jets per event
+(events with fewer are padded, events with more are truncated), padded/masked.
+`event` is `jagged: false` — one row per event, carrying only the two
+housekeeping branches plus the reader-injected `process` label.
 
 ### `model:` — embed, encode, pool, classify
 

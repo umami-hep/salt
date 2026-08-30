@@ -63,7 +63,7 @@
 #       sum((log(...) > -0.385) & (abs(eta) < 2.5)) >= 2   # >= 2 at FixedCutBEff_85
 #
 #   `sum()` reduces AFTER the constituent cuts and AFTER truncation to
-#   `truncate: 20`, so it counts the jets the model is actually handed. `log` and
+#   `pad_max: 20`, so it counts the jets the model is actually handed. `log` and
 #   `abs` are whitelisted, so the b-tag discriminant is spelled the way ATLAS
 #   defines it, D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385, rather than as the
 #   equivalent ratio > exp(-0.385); `&` joins that to the |eta| < 2.5 b-tagging
@@ -121,7 +121,7 @@ data:
                   jets:
                     prefix: AnalysisJetsAuxDyn.
                     jagged: true
-                    truncate: 20 # matches readers/easyjet_events.yaml
+                    pad_max: 20 # matches readers/easyjet_events.yaml
                     branches:
                       pt: pt
                       eta: eta
@@ -155,7 +155,7 @@ data:
                   jets:
                     prefix: AnalysisJetsAuxDyn.
                     jagged: true
-                    truncate: 20
+                    pad_max: 20
                     # p7017 flattens the scores onto the jet, so no join — the
                     # field names and their ORDER still match the signal leg
                     branches:

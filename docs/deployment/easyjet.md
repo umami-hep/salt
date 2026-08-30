@@ -90,7 +90,11 @@ on the framework side:
 - **`variableScales`** is the unit conversion. xAOD serves MeV; a model trained
   on GeV needs `0.001` on `pt` and `m`. Nothing detects this — the scores are
   simply wrong at the wrong scale.
-- **`truncate`** must match the `truncate:` the training reader used.
+- **`truncate`** must match the training reader's `pad_max:` — the reader's
+  semantics: sequences **shorter** than `pad_max` are **padded** up to it,
+  sequences **longer** are **truncated** down to it. This algorithm only
+  truncates (see "no padding" below), so its per-event jet count must line up
+  with what training saw after that pad/truncate.
 
 Each `variables` entry is either a jet kinematic (`pt`, `eta`, `phi`, `m`, `e`,
 `rapidity`) or the name of a float aux decoration on the jet, which the

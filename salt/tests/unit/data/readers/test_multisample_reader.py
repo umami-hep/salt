@@ -645,9 +645,9 @@ _EJ_JET_BRANCHES = {
 _EJ_EVENT_BRANCHES = {"eventNumber": "eventNumber"}
 
 
-def _ej_groups(truncate: int = 8) -> dict:
+def _ej_groups(pad_max: int = 8) -> dict:
     return {
-        "jets": UprootGroupConfig(branches=dict(_EJ_JET_BRANCHES), jagged=True, pad_max=truncate),
+        "jets": UprootGroupConfig(branches=dict(_EJ_JET_BRANCHES), jagged=True, pad_max=pad_max),
         "event": UprootGroupConfig(branches=dict(_EJ_EVENT_BRANCHES), jagged=False),
     }
 
@@ -667,8 +667,8 @@ def test_easyjet_wrapped_multisample_roundtrip_and_labels(
     two_easyjet_files: tuple[Path, Path],
 ) -> None:
     sig_path, bkg_path = two_easyjet_files
-    sig = _ej_reader(groups=_ej_groups(truncate=8), filename=sig_path)
-    bkg = _ej_reader(groups=_ej_groups(truncate=8), filename=bkg_path)
+    sig = _ej_reader(groups=_ej_groups(pad_max=8), filename=sig_path)
+    bkg = _ej_reader(groups=_ej_groups(pad_max=8), filename=bkg_path)
     reader = MultiSampleReader(
         samples=[
             SampleConfig(name="signal", label=1, reader=sig),
@@ -726,8 +726,8 @@ def test_multisample_restage_delegates_recursively_and_roundtrips(
 ) -> None:
     """restage() restages EACH sub-reader into root; combined read is byte-identical."""
     sig_path, bkg_path = two_easyjet_files
-    sig = _ej_reader(groups=_ej_groups(truncate=8), filename=sig_path)
-    bkg = _ej_reader(groups=_ej_groups(truncate=8), filename=bkg_path)
+    sig = _ej_reader(groups=_ej_groups(pad_max=8), filename=sig_path)
+    bkg = _ej_reader(groups=_ej_groups(pad_max=8), filename=bkg_path)
     orig = MultiSampleReader(
         samples=[
             SampleConfig(name="signal", label=1, reader=sig),

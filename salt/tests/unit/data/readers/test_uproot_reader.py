@@ -3,8 +3,8 @@
 Format is config, not class: the same reader serves tree entries (``unroll=None``)
 or the elements of one jagged group (``unroll=<group>``). Format-parity vs the
 legacy presets lives in `test_uproot_equivalence.py`; here we exercise the
-capabilities (easyjet jet-rows, cuts on either axis, config aliases) and the
-config-validation error surface.
+capabilities (easyjet jet-rows, cuts on either axis) and the config-validation
+error surface.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def test_event_rows_len_and_streams(ej_file) -> None:
     path, arrays = ej_file
     reader = UprootReader(
         groups={
-            "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
         filename=path,
@@ -65,7 +65,7 @@ def test_event_rows_jagged_and_scalar(ej_file) -> None:
     path, arrays = ej_file
     reader = UprootReader(
         groups={
-            "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
         filename=path,
@@ -150,7 +150,7 @@ def test_group_order_independent(ej_file) -> None:
     path, _ = ej_file
     a = UprootReader(
         groups={
-            "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
         filename=path,
@@ -159,7 +159,7 @@ def test_group_order_independent(ej_file) -> None:
     b = UprootReader(
         groups={
             "event": {"branches": dict(_EVENT), "jagged": False},
-            "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
         },
         filename=path,
         tree="AnalysisMiniTree",
@@ -172,13 +172,8 @@ def test_group_order_independent(ej_file) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 4. config aliases + validation error surface (no file I/O)
+# 4. config validation error surface (no file I/O)
 # --------------------------------------------------------------------------- #
-
-
-def test_truncate_alias_maps_to_pad_max() -> None:
-    g = UprootReader._parse_group("jets", {"branches": {"pt": "pt"}, "truncate": 12})
-    assert g.pad_max == 12
 
 
 def test_unknown_unroll_group_raises() -> None:
@@ -229,7 +224,7 @@ def test_empty_groups_raises() -> None:
 def test_missing_branch_raises(ej_file) -> None:
     path, _ = ej_file
     reader = UprootReader(
-        groups={"jets": {"branches": {"pt": "NOT_A_BRANCH"}, "jagged": True, "truncate": 4}},
+        groups={"jets": {"branches": {"pt": "NOT_A_BRANCH"}, "jagged": True, "pad_max": 4}},
         filename=path,
         tree="AnalysisMiniTree",
     )
@@ -517,12 +512,12 @@ def test_join_on_a_jagged_group_under_unroll_is_refused() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _agg_reader(path, cut: str, truncate: int = 8):
+def _agg_reader(path, cut: str, pad_max: int = 8):
     from salt.data import GlobalObjectCuts
 
     return UprootReader(
         groups={
-            "jets": {"branches": dict(_JET), "jagged": True, "truncate": truncate},
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": pad_max},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
         filename=path,
@@ -545,10 +540,10 @@ def test_sum_valid_cuts_events_on_jet_multiplicity(ej_file) -> None:
 
 
 def test_sum_valid_counts_what_is_served_not_what_is_on_disk(ej_file) -> None:
-    """`truncate` caps the served multiplicity, so the reduction has to see the cap."""
+    """`pad_max` caps the served multiplicity, so the reduction has to see the cap."""
     path, arrays = ej_file
     njets = np.array(arrays["njets"])
-    reader = _agg_reader(path, "sum(jets.valid) >= 2", truncate=2)
+    reader = _agg_reader(path, "sum(jets.valid) >= 2", pad_max=2)
     assert len(reader) == int((np.minimum(njets, 2) >= 2).sum())  # 4, not 3
 
 
@@ -565,7 +560,7 @@ def test_a_reduction_sees_the_constituent_cuts(ej_file) -> None:
     path, arrays = ej_file
     thresh = 100_000.0
     reader = UprootReader(
-        groups={"jets": {"branches": dict(_JET), "jagged": True, "truncate": 8}},
+        groups={"jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8}},
         filename=path,
         tree="AnalysisMiniTree",
         unroll=None,
@@ -603,7 +598,7 @@ def test_reduction_config_errors(cut: str, match: str) -> None:
     with pytest.raises(ConfigError, match=match):
         UprootReader(
             groups={
-                "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+                "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
                 "event": {"branches": dict(_EVENT), "jagged": False},
             },
             tree="AnalysisMiniTree",
@@ -659,7 +654,7 @@ def test_link_member_lookup_is_unambiguous() -> None:
 def _cache_reader(path: Path) -> UprootReader:
     return UprootReader(
         groups={
-            "jets": {"branches": dict(_JET), "jagged": True, "truncate": 8},
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
             "event": {"branches": dict(_EVENT), "jagged": False},
         },
         filename=path,
@@ -785,10 +780,10 @@ def _record_prepare(reader: UprootReader, monkeypatch) -> tuple[list, list]:
     return calls, opens
 
 
-def _probe_reader(source, truncate: int | None = 8, **kwargs) -> UprootReader:
+def _probe_reader(source, pad_max: int | None = 8, **kwargs) -> UprootReader:
     jets: dict = {"branches": dict(_JET), "jagged": True}
-    if truncate is not None:
-        jets["truncate"] = truncate
+    if pad_max is not None:
+        jets["pad_max"] = pad_max
     return UprootReader(
         groups={"jets": jets, "event": {"branches": dict(_EVENT), "jagged": False}},
         filename=source,
@@ -817,14 +812,14 @@ def test_prepare_makes_no_unbounded_reads_when_pad_max_is_set(ej_file, monkeypat
 
 def test_prepare_opens_each_file_once(tmp_path, monkeypatch) -> None:
     """One open per file — the max-multiplicity scan must not re-open."""
-    _, opens = _record_prepare(_probe_reader(_two_files(tmp_path), truncate=None), monkeypatch)
+    _, opens = _record_prepare(_probe_reader(_two_files(tmp_path), pad_max=None), monkeypatch)
     assert len(opens) == 2
 
 
 def test_prepare_reads_one_branch_for_an_unresolved_pad_max(ej_file, monkeypatch) -> None:
     """An unset ``pad_max`` is the one legitimate bulk read: a single branch, once."""
     path, _ = ej_file
-    calls, opens = _record_prepare(_probe_reader(path, truncate=None), monkeypatch)
+    calls, opens = _record_prepare(_probe_reader(path, pad_max=None), monkeypatch)
     unbounded = [c for c in calls if c["entry_stop"] is None]
     assert [c["branch"] for c in unbounded] == [_JET["pt"]]
     assert len(opens) == 1

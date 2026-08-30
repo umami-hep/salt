@@ -290,8 +290,9 @@ print(cfg["output_names"])
        reader's `branches:` block. A consumer must supply it.
     2. **Units.** If the model was trained on GeV and your input serves MeV,
        nothing will tell you — the scores will just be wrong.
-    3. **Padding and truncation semantics.** The training reader's `truncate:`
-       and its padding convention are not in the file.
+    3. **Padding and truncation semantics.** The training reader's `pad_max:`
+       (sequences shorter than it are padded up, longer ones truncated down)
+       is not in the file.
 
     All three are part of the deployment contract and all three fail silently.
     Carry them alongside the model, and check them by parity.

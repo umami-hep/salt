@@ -41,7 +41,6 @@ _GROUP_KEYS = {
     "prefix",
     "jagged",
     "pad_max",
-    "truncate",
     "link_branch",
     "target_prefix",
     "join_branch",
@@ -68,9 +67,9 @@ class UprootGroupConfig:
         a fixed ``T`` with a ``valid`` field + pad mask); ``False`` is a scalar
         per-row stream. The row axis is set by the reader's ``unroll``.
     pad_max : int | None, optional
-        Keeps the leading N constituents of a jagged stream; ``None`` (default)
-        auto-resolves the file's max multiplicity in `prepare`. (``truncate`` is
-        accepted as an alias.)
+        Keeps the leading N constituents of a jagged stream, padding sequences
+        shorter than N and truncating sequences longer than N; ``None``
+        (default) auto-resolves the file's max multiplicity in `prepare`.
     link_branch : str | None, optional
         Turns a jagged stream into an ElementLink-dereferenced constituent stream
         (PHYSLITE ``GhostTrack``): the per-row link vector
@@ -396,7 +395,7 @@ class UprootReader(Reader):
     def _parse_group(
         stream: str, cfg: UprootGroupConfig | Mapping[str, Any] | Any
     ) -> UprootGroupConfig:
-        """Normalise a group config entry (``truncate``->``pad_max``)."""
+        """Normalise a group config entry."""
         if isinstance(cfg, UprootGroupConfig):
             return cfg
         cfg = dict(cfg or {})
@@ -404,23 +403,18 @@ class UprootReader(Reader):
         if unknown:
             raise ConfigError(
                 f"group {stream!r}: unknown config keys {sorted(unknown)} — expected "
-                "branches/prefix/jagged/pad_max/link_branch/target_prefix (truncate "
-                "accepted as an alias)"
+                "branches/prefix/jagged/pad_max/link_branch/target_prefix"
             )
         if "branches" not in cfg:
             raise ConfigError(
                 f"group {stream!r}: 'branches' mapping is required (field -> branch name)"
-            )
-        if "pad_max" in cfg and "truncate" in cfg:
-            raise ConfigError(
-                f"group {stream!r}: give either 'pad_max' or 'truncate' (its alias), not both"
             )
         join_branches = dict(cfg.get("join_branches") or {})
         return UprootGroupConfig(
             branches={str(k): str(v) for k, v in dict(cfg["branches"]).items()},
             prefix=str(cfg.get("prefix", "")),
             jagged=bool(cfg.get("jagged", True)),
-            pad_max=cfg.get("pad_max", cfg.get("truncate")),
+            pad_max=cfg.get("pad_max"),
             link_branch=cfg.get("link_branch"),
             target_prefix=cfg.get("target_prefix"),
             join_branch=cfg.get("join_branch"),

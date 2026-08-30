@@ -47,7 +47,7 @@ data:
                 groups: &ej_groups
                   jets:
                     jagged: true
-                    truncate: 20
+                    pad_max: 20
                     branches:
                       pt: recojet_antikt4PFlow_pt_NOSYS
                       eta: recojet_antikt4PFlow_eta
