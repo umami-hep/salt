@@ -684,34 +684,6 @@ class TestGraphFitConfigAdapter:
         assert rc == 1
         assert "trainer configs only" in capsys.readouterr().err
 
-    def test_validate_onnx_legacy_outputs_fail_with_the_migration_error(self, tmp_path, capsys):
-        # export.outputs was removed — a config carrying the section must fail
-        # `validate --mode onnx` with the migration error pointing at the
-        # writers (NOT silently validate green against a stale hand-typed
-        # manifest)
-        import yaml
-
-        config = yaml.safe_load(DUMMY_CFG.read_text())
-        config["export"]["outputs"] = [
-            {"port": "preds.jets.jets_classification", "names": ["pb", "pc", "pu"]}
-        ]
-        bad = tmp_path / "legacy_outputs.yaml"
-        bad.write_text(yaml.dump(config, sort_keys=False))
-        rc = main([
-            "graph",
-            "validate",
-            "-c",
-            str(bad),
-            "--mode",
-            "onnx",
-            "--set",
-            "model.modules.norm.init_args.norm_dict=unused.yaml",
-        ])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "export.outputs was REMOVED" in err
-        assert "OnnxExportSink" in err  # the migration error names the live mechanism
-
     def test_validate_onnx_sinks_derive_from_writers(self, capsys):
         # the unified-manifest happy path: ONNX validates green with sinks
         # from the writers (the shipped config carries NO export.outputs)
@@ -730,11 +702,11 @@ class TestGraphFitConfigAdapter:
         assert "OK [mode=ONNX]" in out
 
     def test_validate_onnx_underscore_model_name_fails(self, tmp_path, capsys):
-        # the 'export.model_name contains no _/-' validate check
+        # the sink's 'model_name contains no _/-' validate check
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
-        config["export"]["model_name"] = "GN2_v2_dummy"
+        config["outputs"]["onnx_export"]["init_args"]["model_name"] = "GN2_v2_dummy"
         bad = tmp_path / "bad_name.yaml"
         bad.write_text(yaml.dump(config, sort_keys=False))
         rc = main([
@@ -758,7 +730,7 @@ class TestGraphFitConfigAdapter:
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
-        config.pop("export")
+        del config["outputs"]["onnx_export"]
         no_export = tmp_path / "no_export.yaml"
         no_export.write_text(yaml.dump(config, sort_keys=False))
         flags = ["--set", "model.modules.norm.init_args.norm_dict=unused.yaml"]

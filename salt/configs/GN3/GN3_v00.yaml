@@ -157,13 +157,14 @@ outputs:
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-export:
-  model_name: GN3v00 # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
-    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN3v00 # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
 
 trainer:
   max_epochs: 40

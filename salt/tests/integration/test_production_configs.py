@@ -216,14 +216,10 @@ def _norm_dict_overrides(cfg: Path, norm_dict: Path) -> list[str]:
 
 
 def _declares_onnx_export(cfg: Path) -> bool:
-    """Whether the config wires an ONNX sink, by a top-level ``export:`` block
-    or an ``OnnxExportSink`` in its ``outputs:`` section.
-    """
+    """Whether the config wires an ``OnnxExportSink`` in its ``outputs:`` section."""
     import yaml  # noqa: PLC0415
 
     raw = yaml.safe_load(cfg.read_text()) or {}
-    if raw.get("export"):
-        return True
     outputs = raw.get("outputs") or {}
     return any(
         "Onnx" in str(node.get("class_path", ""))

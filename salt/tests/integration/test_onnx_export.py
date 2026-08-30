@@ -406,8 +406,8 @@ def cli_run(tmp_path_factory):
 
 
 class TestSaltSurface:
-    def test_export_block_round_trips_through_the_parser(self):
-        from salt.main import CONFIG_DIR, SaltCLI
+    def test_export_contract_round_trips_onto_the_dummy_sink(self):
+        from salt.main import SaltCLI
 
         cli = SaltCLI(
             args=[
@@ -417,7 +417,9 @@ class TestSaltSurface:
             ],
             run=False,
         )
-        export_cfg = cli._get(cli.config_init, "export")
+        sink = cli._get(cli.config_init, "outputs")["onnx_export"]  # noqa: SLF001 - main.py precedent
+        assert isinstance(sink, OnnxExportSink)
+        export_cfg = sink.export_config("GN2v2_dummy")
         assert isinstance(export_cfg, ExportConfig)
         assert export_cfg.model_name == "GN2v2dummy"
         assert [entry.port for entry in export_cfg.inputs] == ["inputs.jets", "inputs.tracks"]
@@ -499,12 +501,14 @@ class TestSaltSurface:
         assert "-o/--overwrite" in err
 
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
-        # a run config trained without ANY export contract (no top-level block,
-        # nothing on the sink) must fail naming the sink's inputs: as the home
+        # a run config trained without ANY export contract (no sink declared)
+        # must fail naming the sink's inputs: as the home
         from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
-        config.pop("export")
+        outputs = dict(config["outputs"])
+        del outputs["onnx_export"]
+        config["outputs"] = outputs
         no_export_cfg = tmp_path / "no_export.yaml"
         no_export_cfg.write_text(yaml.dump(config, sort_keys=False))
         rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(no_export_cfg)])
@@ -514,18 +518,20 @@ class TestSaltSurface:
         assert "OnnxExportSink" in err
         assert "init_args.inputs" in err  # the config address to fix
 
-    def test_export_block_stacked_as_second_config(self, cli_run, tmp_path):
+    def test_export_sink_stacked_as_second_config(self, cli_run, tmp_path):
         # the documented escape hatch: -c is repeatable, later files
-        # deep-merge on top (the fit semantics) — an export-block-only
-        # override file completes a run config trained without one
+        # deep-merge on top (the fit semantics) — a sink-only override file
+        # completes a run config trained without one
         from salt.outputs.sinks.onnx.export import main as export_main
 
         config = dict(cli_run.config)
-        export_block = {"export": config.pop("export")}
+        outputs = dict(config["outputs"])
+        sink_only = {"outputs": {"onnx_export": outputs.pop("onnx_export")}}
+        config["outputs"] = outputs
         no_export_cfg = tmp_path / "no_export.yaml"
         no_export_cfg.write_text(yaml.dump(config, sort_keys=False))
-        override_cfg = tmp_path / "export_block.yaml"
-        override_cfg.write_text(yaml.dump(export_block, sort_keys=False))
+        override_cfg = tmp_path / "export_sink.yaml"
+        override_cfg.write_text(yaml.dump(sink_only, sort_keys=False))
         out_path = tmp_path / "stacked.onnx"
         rc = export_main([
             "--ckpt_path",
@@ -561,21 +567,3 @@ class TestSaltSurface:
         for name in ("GN2v2dummy_pb", "GN2v2dummy_TrackOrigin", "GN2v2dummy_VertexIndex"):
             assert name in out
         assert "folded conversion node (outputs.* leaf)" in out
-
-    def test_config_declared_outputs_hard_error_through_the_cli(self, cli_run, tmp_path, capsys):
-        # the retired export.outputs carrier must fire on the CLI path, through
-        # the deprecated top-level block (its only remaining spelling)
-        from salt.outputs.sinks.onnx.export import main as export_main
-
-        config = dict(cli_run.config)
-        config["export"] = dict(config["export"])
-        config["export"]["outputs"] = [
-            {"port": "preds.jets.jets_classification", "names": ["pb", "pc", "pu"]}
-        ]
-        legacy_cfg = tmp_path / "legacy_outputs.yaml"
-        legacy_cfg.write_text(yaml.dump(config, sort_keys=False))
-        rc = export_main(["--ckpt_path", str(cli_run.ckpt), "-c", str(legacy_cfg)])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "export.outputs was REMOVED" in err
-        assert "OnnxExportSink" in err

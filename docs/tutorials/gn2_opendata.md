@@ -161,10 +161,9 @@ trainer:
   precision: 32-true
 ```
 
-(the full 19-variable track list and the `export:` ONNX-input block — this
-shipped config still uses the deprecated top-level alias, see
-[Export to ONNX](../deployment/export.md) — are elided here for length; see
-the shipped file for the complete config.)
+(the full 19-variable track list and the `onnx_export` sink's ONNX-input block
+— see [Export to ONNX](../deployment/export.md) — are elided here for length;
+see the shipped file for the complete config.)
 
 ### What each piece is doing
 
@@ -548,8 +547,7 @@ truth selection from either file is valid for both.
 
 To run your tagger in Athena it has to be exported to
 [ONNX](https://onnxruntime.ai/). The export set is not a separate
-configuration — it comes from the export sink's `inputs:` (still the
-deprecated top-level `export:` block in this shipped config, see
+configuration — it comes from the `onnx_export` sink's `inputs:` (see
 [Export to ONNX](../deployment/export.md)) plus the `outputs:` section you
 already have, so the eval columns and the Athena outputs cannot drift apart.
 
@@ -580,9 +578,7 @@ file), alongside `plan_onnx.txt` — the rendered ONNX plan and output manifest.
 
 `--name` sets the prefix on every ONNX output (Athena forbids `_` and `-` in
 it), so `--name GN2vXX` gives `GN2vXX_pb`, `GN2vXX_pc`, `GN2vXX_pu`. It
-overrides `model_name` in the config, wherever it is declared — the export
-sink's `init_args`, or (as in this shipped config) the deprecated top-level
-`export:` block.
+overrides `model_name` set on the export sink's `init_args`.
 
 !!! info "The torch-vs-ONNX check runs automatically"
 

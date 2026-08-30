@@ -64,11 +64,12 @@ outputs:
   run_tasks:
     class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [jets_classification]}
-
-export:
-  model_name: DL1 # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: DL1 # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
 
 trainer:
   max_epochs: 100

@@ -32,7 +32,6 @@ from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.check import CheckResult, check_onnx
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
-    reject_declared_outputs,
     resolve_export_config,
     stream_of_input_port,
 )
@@ -469,73 +468,17 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
     )
 
 
-_ALIAS_KEYS = ("model_name", "inputs", "track_selection", "rename", "combine")
-"""The export-contract keys the deprecated top-level ``export:`` block still fills."""
-
-_ALIAS_MERGED = "_salt_export_alias_merged"
-"""Marks a sink the alias already folded onto, so a second merge is a no-op
-rather than a spurious both-homes error."""
-
-
-def _alias_is_set(key: str, value: Any) -> bool:
-    """Whether an export-contract field carries a user-set value, not its default."""
-    if key == "track_selection":
-        return value != ExportConfig().track_selection
-    return bool(value)
-
-
-def _merge_export_alias(cli: Any, export_sink: Any) -> None:
-    """Fold a parsed top-level ``export:`` block onto the ONNX sink.
-
-    The block is a deprecated alias for the sink's own export keys: each one it
-    sets fills a field the sink LEFT UNSET, and a key carried by both homes
-    raises `ConfigError` naming it and both homes rather than picking a winner
-    silently. A declared ``export.outputs`` stays the hard error it is. A
-    no-op when the config declares no block.
-    """
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - the main.py _get precedent
-    if export_cfg is None or getattr(export_sink, _ALIAS_MERGED, False):
-        return
-    reject_declared_outputs(export_cfg.outputs)
-    warnings.warn(
-        "the top-level `export:` block is deprecated — its keys "
-        f"({', '.join(_ALIAS_KEYS)}) are now init_args of the ONNX sink, e.g.\n"
-        "  outputs:\n"
-        "    onnx_export:\n"
-        "      class_path: salt.outputs.OnnxExportSink\n"
-        "      init_args: {model_name: ..., inputs: [...]}\n"
-        "Move the block onto the sink; it is read for one deprecation window and a key "
-        "set in both homes is an error.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    for key in _ALIAS_KEYS:
-        block_value = getattr(export_cfg, key, None)
-        if not _alias_is_set(key, block_value):
-            continue
-        if _alias_is_set(key, getattr(export_sink, key, None)):
-            raise ConfigError(
-                f"export.{key} is set in BOTH homes — the deprecated top-level `export:` "
-                f"block and the OnnxExportSink's `{key}:` init_arg. Delete the top-level "
-                f"export.{key}; the sink is the export contract."
-            )
-        setattr(export_sink, key, block_value)
-    setattr(export_sink, _ALIAS_MERGED, True)
-
-
 def _resolve_export_contract(
     cli: Any, export_sink: Any, model_name: str | None = None
 ) -> ExportConfig:
     """The resolved export contract for a parsed run config.
 
-    The single seam every export-side caller goes through: folds the deprecated
-    top-level ``export:`` block onto the sink (`_merge_export_alias`), applies a
-    ``-n/--name`` override on top, and resolves the sink's contract against the
-    run ``name:``.
+    The single seam every export-side caller goes through: applies a
+    ``-n/--name`` override on top of the sink's own fields, and resolves the
+    contract against the run ``name:``.
 
-    A `ConfigError` propagates from the alias merge when a key is set in both
-    homes, and from the sink's own resolution when the contract is incomplete
-    or malformed.
+    A `ConfigError` propagates from the sink's own resolution when the
+    contract is incomplete or malformed.
 
     Parameters
     ----------
@@ -544,14 +487,13 @@ def _resolve_export_contract(
     export_sink : Any
         The config's `salt.outputs.OnnxExportSink`.
     model_name : str | None, optional
-        CLI model-name override, applied after the alias merge, by default None.
+        CLI model-name override, by default None.
 
     Returns
     -------
     ExportConfig
         The resolved export-only half.
     """
-    _merge_export_alias(cli, export_sink)
     if model_name is not None:
         export_sink.model_name = model_name
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent

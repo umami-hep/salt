@@ -100,13 +100,16 @@ model:
         class_path: salt.model.modules.tasks.RegressionTaskModule
         init_args: {input: vconcat.global}
 
-export:
-  model_name: GN3SoftE # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
-    - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
-    - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons}
-    # clones one Athena jet tensor into the global port (identity here, since
-    # global==jets cols)
-    - {port: inputs.global, alias: inputs.jets}
+outputs:
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN3SoftE # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
+        - {port: inputs.electrons, name: electron_features, sequence: true, dyn_axis: n_electrons}
+        # clones one Athena jet tensor into the global port (identity here, since
+        # global==jets cols)
+        - {port: inputs.global, alias: inputs.jets}

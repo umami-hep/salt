@@ -1,8 +1,7 @@
 # NaN-tolerant RegressionTaskModule family: an encoder-less DiPS body feeding
 # pooled/sequence regression heads whose targets may contain NaN. NaN targets
 # are masked to 0 and reduced with nanmean, so every head needs loss
-# reduction: none. H5-only — no OnnxExportSink wired (matches v1, which never
-# exported this config); the export: block below is for validation hygiene only.
+# reduction: none.
 
 name: nan_regression
 
@@ -115,16 +114,16 @@ outputs:
     class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [reg_nan_norm, reg_nan_ratio, reg_nan_seq]
-      modes: [test]
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-export:
-  model_name: nanRegression # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: nanRegression # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
 
 trainer:
   max_epochs: 2

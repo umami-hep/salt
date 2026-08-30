@@ -100,8 +100,7 @@ over the section's export-mode leaves for you — but that injected sink carries
 no `init_args`, so it has no `inputs:` and no `model_name:`. Those two, plus
 `track_selection`, `rename` and `combine`, are the sink's own init args (see
 the next section) — to set any of them, declare the sink yourself in the
-top-level `outputs:` section (or, for one deprecation window, under
-`callbacks:`):
+top-level `outputs:` section:
 
 ```yaml
 outputs:
@@ -146,16 +145,6 @@ outputs:
 | `inputs` | the graph inputs, **in positional order** |
 | `rename` | manifest suffix renames, applied before `combine` |
 | `combine` | new outputs built from existing ones inside the graph |
-
-!!! note "Deprecated: the top-level `export:` block"
-
-    Setting these five keys under a top-level `export:` block (rather than on
-    the sink) is a deprecated alias, kept for one release window: it emits a
-    `DeprecationWarning` pointing at the sink form above. Each key it sets
-    fills a field the sink itself left unset — a key carried by **both**
-    homes (the sink's `init_args` and the top-level block) is a `ConfigError`
-    naming the key and both homes, rather than picking a winner silently. New
-    configs should declare the sink directly.
 
 Each `inputs:` entry describes one tensor:
 

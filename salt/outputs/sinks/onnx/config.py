@@ -181,9 +181,8 @@ class ExportConfig:
     Carries the EXPORT-ONLY half: inputs, the Athena model name, and the
     ``rename:``/``combine:`` manifest post-processing. Its config home is the
     `salt.outputs.OnnxExportSink` (``OnnxExportSink.export_config`` assembles and
-    resolves one); the deprecated top-level ``export:`` block parses into the same
-    dataclass. The output manifest itself derives from the sink's collected leaves;
-    DECLARING ``outputs`` in a config is a hard error.
+    resolves one). The output manifest itself derives from the sink's collected
+    leaves; DECLARING ``outputs`` in a config is a hard error.
 
     Parameters
     ----------
@@ -327,8 +326,7 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
             "OnnxExportSink (outputs.<sink key>.init_args.inputs), a list of "
             "{port, name, sequence, dyn_axis} entries naming the Athena input tensors "
             "in positional order. A sink-only override file stacked as a second `-c` "
-            "completes a run config trained without one; the deprecated top-level "
-            "export.inputs block still fills it for one release window."
+            "completes a run config trained without one."
         )
     inputs = [_resolve_input(entry, export.track_selection) for entry in export.inputs]
     _check_input_uniqueness(inputs)

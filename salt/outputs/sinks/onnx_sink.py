@@ -130,9 +130,7 @@ class OnnxExportSink(Node):
     export never runs a test loop. It is also the CONFIG HOME of the ONNX
     artifact contract (`model_name`, `inputs`, `track_selection`, `rename`,
     `combine`); `export_config` assembles the resolved `ExportConfig` that
-    ``salt export`` / ``salt inference`` trace against. The top-level
-    ``export:`` block is a deprecated alias (a key set in both homes is a
-    `ConfigError`).
+    ``salt export`` / ``salt inference`` trace against.
 
     Parameters
     ----------

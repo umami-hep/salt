@@ -267,24 +267,11 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     # perturbation).
     sink_node = _as_sink_node(writer_sink_cb)
     onnx_sink_node = _static_onnx_export_sink(cli)
-    # the export contract lives on the sink; fold the deprecated top-level
-    # export: block onto it through the SAME seam `salt export` uses, so the
-    # static render and the exporter never disagree about either home.
-    from salt.outputs.sinks.onnx.export import _merge_export_alias
-
-    onnx_alias_error: str | None = None
-    export_cfg = cli._get(cli.config_init, "export")  # noqa: SLF001 - same-package adapter
-    onnx_has_contract = export_cfg is not None
+    # the export contract lives on the sink (model_name/inputs init_args); the
+    # static render and `salt export` both read it straight off the sink.
+    onnx_has_contract = False
     if onnx_sink_node is not None:
-        try:
-            _merge_export_alias(cli, onnx_sink_node)
-        except ConfigError as err:
-            onnx_alias_error = str(err)
-        onnx_has_contract = (
-            onnx_has_contract
-            or bool(onnx_sink_node.inputs)
-            or onnx_sink_node.model_name is not None
-        )
+        onnx_has_contract = bool(onnx_sink_node.inputs) or onnx_sink_node.model_name is not None
         if onnx_sink_node.model_name is None:
             # the static render needs a model_name to derive the Athena output
             # names; default it from the sanitised run name exactly as
@@ -330,9 +317,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
             # declared requires; the export-only half (model_name/inputs) is
             # validated below whenever the config declares any of it.
             keys = []
-            if onnx_alias_error is not None:
-                mode_errors[mode] = onnx_alias_error
-            elif onnx_has_contract:
+            if onnx_has_contract:
                 try:
                     onnx_sink_node.export_config(run_name)
                 except ConfigError as err:

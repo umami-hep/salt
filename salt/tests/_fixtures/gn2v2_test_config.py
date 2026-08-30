@@ -96,7 +96,9 @@ GOLDEN_HEADS: dict[str, Any] = {
     # H5 column prefixes and ONNX output names are both derived from the run
     # name, so reproducing the goldens means pinning it too.
     "name": "GN2v2_dummy",
-    "export": {"model_name": "GN2v2dummy"},
+    # the shipped config's onnx_export sink carries model_name: GN2v2opendata;
+    # override to match the dummy run name (sanitised: GN2v2_dummy -> GN2v2dummy).
+    "outputs": {"onnx_export": {"init_args": {"model_name": "GN2v2dummy"}}},
     "model": {
         "init_args": {
             "modules": {
@@ -254,7 +256,11 @@ def h5_only_config() -> Path:
                 "jets_out": {
                     "class_path": "salt.outputs.RunTaskOutput",
                     "init_args": {"modes": ["test"]},
-                }
+                },
+                # every writer is test-only above, so no ONNX leaf is minted;
+                # null the shipped config's inherited sink too, or a
+                # zero-leaf OnnxExportSink would contradict "no ONNX tuple".
+                "onnx_export": None,
             }
         },
     )

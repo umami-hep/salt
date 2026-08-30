@@ -460,11 +460,11 @@ The export-only half of the contract — now the sink's `init_args` — is
 validated as `salt export` does: an invalid `model_name` (`_`/`-`) is an
 error-level `validate` finding (`plan`/`plot`/`why --mode onnx` raise it),
 `rename:`/`combine:` are checked against the assembled manifest, and a
-legacy config still carrying `export.outputs` fails with the migration
-error. A trainer config whose sink declares neither `inputs` nor
-`model_name` (and carries no deprecated top-level `export:` block either)
-keeps the section-derived sinks but WARNS that inputs/model_name were
-unchecked (promoted to an error under `--strict`). Predictions narrowed
+legacy config still declaring an explicit `outputs:` leaf list on the sink
+fails with the migration error. A trainer config whose sink declares
+neither `inputs` nor `model_name` keeps the section-derived sinks but
+WARNS that inputs/model_name were unchecked (promoted to an error under
+`--strict`). Predictions narrowed
 out of the manifest (a
 `modes: [test]` writer, or a task listed in no export-mode
 `RunTaskOutput`) show up as info-level ONNX deadcode findings (the
@@ -597,12 +597,8 @@ outputs:
         - { name: pbc, inputs: { pb: 0.5, pc: 0.5 } }
 ```
 
-   A top-level `export:` block setting these same five keys is a deprecated
-   alias, kept for one release window (`DeprecationWarning` on use): each key
-   it sets fills a field the sink itself left unset, and a key carried by
-   both homes is a `ConfigError` naming the key and both homes.
-   `salt/configs/MaskFormer.yaml` ships the sink form; `salt/configs/gn2v2-opendata.yaml`
-   still ships the deprecated block, deliberately, as the alias-window proof.
+   Every shipped config declares the sink form; `salt/configs/MaskFormer.yaml`
+   and `salt/configs/gn2v2-opendata.yaml` are two worked examples.
 
 How it works (no data file is touched — config + checkpoint only):
 

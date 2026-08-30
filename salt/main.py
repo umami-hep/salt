@@ -31,7 +31,6 @@ from salt.graph.errors import ConfigError, GraphError
 from salt.logging import console, get_logger
 from salt.model.saltmodule import SaltModule
 from salt.outputs.run_task_output import OutputSectionWriter
-from salt.outputs.sinks.onnx.config import ExportConfig
 from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
 
@@ -634,19 +633,6 @@ class SaltCLI(LightningCLI):
             "and therefore excluded from that ordering. Composed AFTER the model; NOT a "
             "link_arguments link — the section is composed onto the model in "
             "instantiate_classes (SaltModule.compose_output_section).",
-        )
-        parser.add_argument(
-            "--export",
-            type=ExportConfig | None,
-            default=None,
-            help="DEPRECATED alias for the ONNX sink's own export keys — model_name, "
-            "inputs (port/name/sequence/dyn_axis/alias), track_selection and the "
-            "rename/combine manifest post-processing now live at "
-            "outputs.<sink>.init_args on the OnnxExportSink. Accepted "
-            "for one deprecation window: `salt export` folds each key it sets onto a "
-            "field the sink LEFT UNSET, and a key carried by both homes is a hard error. "
-            "Declaring export.outputs stays a hard error. Inert during fit/test; "
-            "round-trips through saved run configs.",
         )
         parser.add_argument(
             "--compile",
