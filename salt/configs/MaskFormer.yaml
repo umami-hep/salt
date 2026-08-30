@@ -55,10 +55,10 @@ data:
         object_id: barcode
         constituent_stream: tracks
         constituent_id: ftagTruthParentBarcode
-        num_objects: 5 # == the decoder query bank (declared label M dim)
         # opts in to object selection (PV-pin + truncate-to-5); the
         # truth_hadrons reader group is left untruncated above so this
         # selection owns the truncation, avoiding a double-truncate.
+        # Also == the decoder query bank (declared label M dim).
         max_objects: 5
         pv_class: 0 # b-class mapped index (the PV pin)
         # null class key is quoted "null" — an unquoted `null:` would parse

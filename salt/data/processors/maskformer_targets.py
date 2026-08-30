@@ -90,12 +90,6 @@ class MaskFormerTargets(Processor):
     regression_targets : Sequence[str] | None, optional
         Per-object regression label fields published under
         ``labels.objects.<target>``, by default None (no regression labels).
-    num_objects : int | None, optional
-        The number of object queries ``M``. When set, the produced shapes
-        carry it as a concrete dim (a static check that the file's object
-        count matches the decoder's query bank); None leaves ``M``
-        symbolic. Bridged to ``max_objects`` when only one is set (see
-        below).
     cuts : Sequence[_ObjectCut | Mapping[str, Any]] | None, optional
         Per-jet field cuts for object selection; dicts are coerced to
         :class:`_ObjectCut`. Default None.
@@ -109,8 +103,11 @@ class MaskFormerTargets(Processor):
         (validated to a non-null mapped index); ``None`` disables PV
         pinning. Default 0.
     max_objects : int | None, optional
-        Max object slots retained per jet after selection. ``None``
-        auto-links to ``num_objects`` (the decoder query bank).
+        The single object-cap kwarg: max object slots retained per jet after
+        selection, AND (when set) the concrete ``M`` dim the produced shapes
+        carry — a static check that the file's object count matches the
+        decoder's query bank. ``None`` leaves ``M`` symbolic and disables
+        selection-by-count.
     max_lxy_mm : float | None, optional
         |Lxy| threshold (mm) above which a vertex is re-labelled to null.
         Default None (disabled).
@@ -129,7 +126,7 @@ class MaskFormerTargets(Processor):
         On a missing ``null`` class, a null not mapped last, ``mapped``
         values that are not ``range(len(class_map))``, a raw value shared
         across mapped indices, a non-scalar class weight, a duplicate
-        regression target, a non-positive ``num_objects`` / ``max_objects``,
+        regression target, a non-positive ``max_objects``,
         an out-of-range ``pv_class``, or an ``_ObjectCut`` with neither min
         nor max.
     """
@@ -143,7 +140,6 @@ class MaskFormerTargets(Processor):
         object_stream: str,
         constituent_stream: str,
         regression_targets: Sequence[str] | None = None,
-        num_objects: int | None = None,
         cuts: Sequence[_ObjectCut | Mapping[str, Any]] | None = None,
         sort_by: str | None = None,
         sort_descending: bool = True,
@@ -178,38 +174,14 @@ class MaskFormerTargets(Processor):
         self.lxy_field = str(lxy_field)
 
         # Selection (and the pv_class PV-pin REORDER) runs ONLY when the user
-        # explicitly configured cuts / sort_by / max_objects. MUST key on the
-        # PRE-bridge `max_objects` argument: the bridge below sets
-        # self.max_objects for every MaskFormer config, so gating on it would
-        # fire selection unconditionally and silently reorder slot 0.
-        # max_lxy relabel is a SEPARATE gate.
+        # explicitly configured cuts / sort_by / max_objects. max_lxy relabel
+        # is a SEPARATE gate.
         self._should_select: bool = (
             bool(self.cuts) or sort_by is not None or max_objects is not None
         )
 
-        # num_objects is the decoder query bank (the declared label M dim);
-        # max_objects is the selection truncation count. They MUST agree, or
-        # the emitted [B, max_objects] array contradicts the declared
-        # [B, num_objects] shape; the bridge below only equalises when one is
-        # None, so guard the both-set case explicitly.
-        if num_objects is not None and max_objects is not None and num_objects != max_objects:
-            raise ConfigError(
-                f"MaskFormerTargets: num_objects ({num_objects}) and max_objects "
-                f"({max_objects}) are both set but differ — num_objects is the decoder "
-                "query bank (declared label M) and max_objects is the selection "
-                "truncation count; they must be equal (set only one, or set both equal)"
-            )
-
-        # auto-link: setting one of num_objects/max_objects sets the other
-        if max_objects is None and num_objects is not None:
-            max_objects = num_objects
-        if num_objects is None and max_objects is not None:
-            num_objects = max_objects
-        if num_objects is not None and num_objects < 1:
-            raise ConfigError(f"MaskFormerTargets: num_objects must be >= 1, got {num_objects}")
         if max_objects is not None and max_objects < 1:
             raise ConfigError(f"MaskFormerTargets: max_objects must be >= 1, got {max_objects}")
-        self.num_objects = num_objects
         self.max_objects = max_objects
 
         # PV class must be a valid non-null mapped index (null_index == n_non_null)
@@ -349,7 +321,7 @@ class MaskFormerTargets(Processor):
                 kind="data", fields=(self.constituent_id,)
             ),
         }
-        m: int | str = self.num_objects if self.num_objects is not None else sym_dim("M", self.name)
+        m: int | str = self.max_objects if self.max_objects is not None else sym_dim("M", self.name)
         tok = sym_dim("T", self.constituent_stream)
         produces: dict[str, TensorSpec] = {
             f"labels.{OBJECT_STREAM}.object_class": TensorSpec(
