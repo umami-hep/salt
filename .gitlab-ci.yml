@@ -14,7 +14,8 @@ default:
 stages:
   - lint
   - builds
-  - tests
+  - tests-cpu
+  - tests-gpu
   - coverage
   - docs
   - publish

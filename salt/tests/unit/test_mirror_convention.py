@@ -220,3 +220,24 @@ def test_every_source_has_a_mirror_unit_test():
         f"{label}:\n" + "\n".join(f"  {hit}" for hit in hits) for label, hits in problems.items()
     )
     assert not problems, f"unit-test mirror convention violated:\n{report}"
+
+
+def _main() -> int:
+    """Stdlib-only CI entry point: run the same check without pytest, print, exit non-zero."""
+    problems = check_mirrors(
+        iter_sources(_REPO), _existing_test_files(_REPO), EXEMPT, EXEMPT_TREES, COVERED_ELSEWHERE
+    )
+    if not problems:
+        print("mirror convention OK")
+        return 0
+    for label, hits in problems.items():
+        print(f"{label}:")
+        for hit in hits:
+            print(f"  {hit}")
+    return 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())

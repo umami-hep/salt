@@ -1,5 +1,5 @@
 .test-template:
-  stage: tests
+  stage: tests-cpu
   # build_docker_test is a parallel:matrix job, so the dependency must name the
   # cell. Test jobs pull the unsuffixed `-test` tag, which only V2H publishes —
   # so V2H is the one to wait for. Depending on the bare job name here would
@@ -70,6 +70,7 @@ modular-integration-cpu-gates:
 # AlmaLinux9). FAIR USE: keep k8s-gpu jobs <= 5 in parallel.
 gpu-smoke:
   extends: .test-template
+  stage: tests-gpu
   tags:
     - k8s-gpu
   # This job runs on the V2H (cu126) image: .test-template pulls the UNSUFFIXED
