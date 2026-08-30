@@ -1,15 +1,19 @@
-"""Eval-H5 output checks: implicit-sink CLI wiring, outputs:-section self-consistency.
+"""H5OutputSink mechanism: section writer units, column order, dtype policy,
+the int32-min VertexIndex sentinel, softmax-once, ckpt-glob fallback, and the
+section ONNX contract.
 
-Two halves of one story, merged from ``test_outputs_explicit.py`` +
-``test_outputs_section.py``: the SAME gn2v2-dummy config and fit fixture,
-stacked with (section half) or without (explicit half) the full-family
-overlay, each checked against its own committed golden. Also the eval-H5
-column-order + section-writer-unit + section-ONNX-contract home.
+Split out of the retired ``tests/integration/test_eval_h5.py`` (re-anchored
+from ``test_outputs_explicit.py`` + ``test_outputs_section.py``): the
+schema-vs-golden and cli-writes-h5 checks that file also carried are now the
+matrix eval leg's job (``pipeline/test_pipeline.py::_assert_eval_h5_matches_golden``,
+column NAMES/order only); everything here is either a value-level check the
+matrix golden comparison does not make (dtype, softmax sum, sentinel value,
+target-label content) or pure section/writer-unit introspection with no
+config-lifecycle equivalent.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import h5py
@@ -33,9 +37,6 @@ from salt.tests._fixtures.gn2v2_test_config import full_family_config, small_con
 
 DUMMY_CFG = small_config()
 CUTOVER34_CFG = full_family_config()
-_GOLDEN_DIR = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens"
-EXPLICIT_GOLDEN = _GOLDEN_DIR / "gn2v2-dummy.json"
-SECTION_GOLDEN = _GOLDEN_DIR / "gn2v2-dummy-cutover34.json"
 RUN_NAME = "GN2v2_dummy"
 N_TEST = 300
 
@@ -45,46 +46,10 @@ ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
 # integer column + ONNX int8 leaf). Nothing is deferred in this config.
 
 
-def _golden_task_columns(golden: Path) -> dict[str, list[str]]:
-    """Per-stream ordered flat TASK column names from a committed golden."""  # noqa: DOC201
-    data = json.loads(golden.read_text())
-    per_stream: dict[str, list[str]] = {}
-    for col in data["h5"]["columns"]:
-        per_stream.setdefault(col["stream"], []).extend(col["column_names"])
-    return per_stream
-
-
-def _expected_full_columns(golden: Path, src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The FULL ordered per-stream H5 column contract from a committed golden.
-
-    Exact columns = input-copy source columns FIRST (in source-file order; an
-    empty golden ``copy_inputs`` means the copy-ALL default), then task
-    columns in golden order — including each task's trailing
-    ``target_{task}`` label column — then the trailing pad-mask column.
-    Asserting the H5 dtype.names EQUAL this list (not merely contain it)
-    enforces "no ADDED columns" beyond the committed golden.
-    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
-    h5 = json.loads(golden.read_text())["h5"]
-    tasks: dict[str, list[str]] = {}
-    for col in h5["columns"]:
-        tasks.setdefault(col["stream"], []).extend(col["column_names"])
-    copy_cfg = h5["copy_inputs"]
-    pad_streams = set(h5["write_pad_mask"])
-    per_stream: dict[str, list[str]] = {}
-    for stream, file_fields in src_cols.items():
-        # input copies: explicit golden subset, else copy-all (source order)
-        cols = list(copy_cfg.get(stream) or file_fields)
-        cols += tasks.get(stream, [])  # task columns in golden order
-        if stream in pad_streams:
-            cols.append("mask")  # pad mask written last
-        per_stream[stream] = cols
-    return per_stream
-
-
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
     """Synthetic norm dict + dummy H5 + schema artifact — shared by both halves."""
-    base = tmp_path_factory.mktemp("eval_h5_data")
+    base = tmp_path_factory.mktemp("h5_sink_data")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
     h5_path = base / "pp_output_test_ttbar.h5"
@@ -107,7 +72,7 @@ def _overrides(data) -> list[str]:
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
     """A live 1-epoch fit of the shipped gn2v2-dummy config — shared by both halves."""
-    fit_dir = tmp_path_factory.mktemp("eval_h5_fit")
+    fit_dir = tmp_path_factory.mktemp("h5_sink_fit")
     rc = main([
         "fit",
         "--config",
@@ -179,168 +144,100 @@ def section_h5(data, ckpt) -> Path:
 # --------------------------------------------------- implicit-sink half (single config)
 
 
-class TestImplicitSinkCliE2E:
-    """The shipped gn2v2-dummy config drives the implicit H5 sink end-to-end."""
+def test_cli_probs_are_softmaxed_not_double_converted(cli_h5):
+    """The implicit single-config sink's prob columns are probabilities (sum
+    ~1) — converted EXACTLY ONCE."""
+    with h5py.File(cli_h5) as f:
+        jets = f["jets"][:]
+        tracks = f["tracks"][:]
+        valid = ~tracks["mask"]
+    jet_cols = [f"{RUN_NAME}_{s}" for s in JET_SUFFIXES]
+    prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
+    assert np.allclose(prob_sum, 1.0, atol=1e-3)
+    # padded track positions read 0.0 (masked softmax), valid sum to ~1
+    origin_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
+    origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
+    assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
+    assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
 
-    def test_cli_writes_eval_h5(self, cli_h5):
-        """``salt test`` writes a non-empty eval H5 with the reader-stream groups."""
-        with h5py.File(cli_h5) as f:
-            assert set(f.keys()) >= {"jets", "tracks"}
-            assert f["jets"].shape[0] == N_TEST
 
-    def test_task_columns_match_golden(self, data, cli_h5):
-        """The eval H5's columns EQUAL the committed Phase-C golden, per stream, in order.
+def test_cli_target_label_columns_match_source_labels(data, cli_h5):
+    """Phase-C gate: the target_{task} columns EQUAL the source-file labels.
 
-        Exact-list equality (not membership): pre-Phase-C columns byte-identical,
-        plus exactly the per-task ``target_{task}`` label columns the golden
-        declares. Any OTHER added column fails here.
-        """
-        with h5py.File(data["h5"]) as src:
-            src_cols = {
-                "jets": list(src["jets"].dtype.names),
-                "tracks": list(src["tracks"].dtype.names),
-            }
-        expected = _expected_full_columns(EXPLICIT_GOLDEN, src_cols)
-        with h5py.File(cli_h5) as f:
-            present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
-        assert present.keys() == expected.keys(), (
-            f"H5 streams {sorted(present)} != golden streams {sorted(expected)}"
-        )
-        for stream, cols in expected.items():
-            assert present[stream] == cols, (
-                f"{stream} columns diverge from golden (added/removed/reordered): "
-                f"got {present[stream]}, golden {cols}"
-            )
-
-    def test_probs_are_softmaxed_not_double_converted(self, cli_h5):
-        """The prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
-        expected = _golden_task_columns(EXPLICIT_GOLDEN)
-        with h5py.File(cli_h5) as f:
-            jets = f["jets"][:]
-            tracks = f["tracks"][:]
-            valid = ~tracks["mask"]
-        # the golden task columns include the Phase-C target_{task} label
-        # columns — only the prob columns participate in the sum-to-1 check
-        jet_cols = [c for c in expected["jets"] if not c.startswith("target_")]
-        prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
-        assert np.allclose(prob_sum, 1.0, atol=1e-3)
-        # padded track positions read 0.0 (masked softmax), valid sum to ~1
-        origin_cols = [c for c in expected["tracks"] if not c.startswith("target_")]
-        origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
-        assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
-        assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
-
-    def test_target_label_columns_match_source_labels(self, data, cli_h5):
-        """Phase-C gate: the target_{task} columns EQUAL the source-file labels.
-
-        gn2v2-opendata has no label_map, so the consumed global label is the raw
-        flavour_label; the per-token origin target reads the raw label on
-        valid positions and -1 on padded ones.
-        """
-        with h5py.File(data["h5"]) as src:
-            src_flav = src["jets"]["flavour_label"][:N_TEST].astype("i4")
-            src_origin = src["tracks"]["ftagTruthOriginLabel"][:N_TEST].astype("i4")
-            src_valid = src["tracks"]["valid"][:N_TEST].astype(bool)
-        with h5py.File(cli_h5) as f:
-            got_flav = f["jets"]["target_jets_classification"][:]
-            got_origin = f["tracks"]["target_track_origin"][:]
-        assert (got_flav == src_flav).all()
-        # valid positions read the raw label, except label==-2 which the loss
-        # (and hence the target column) masks to -1 (MR!60199 workaround)
-        v_got, v_src = got_origin[src_valid], src_origin[src_valid]
-        assert ((v_got == v_src) | ((v_src == -2) & (v_got == -1))).all()
-        assert (got_origin[~src_valid] == -1).all()
+    gn2v2-opendata has no label_map, so the consumed global label is the raw
+    flavour_label; the per-token origin target reads the raw label on
+    valid positions and -1 on padded ones.
+    """
+    with h5py.File(data["h5"]) as src:
+        src_flav = src["jets"]["flavour_label"][:N_TEST].astype("i4")
+        src_origin = src["tracks"]["ftagTruthOriginLabel"][:N_TEST].astype("i4")
+        src_valid = src["tracks"]["valid"][:N_TEST].astype(bool)
+    with h5py.File(cli_h5) as f:
+        got_flav = f["jets"]["target_jets_classification"][:]
+        got_origin = f["tracks"]["target_track_origin"][:]
+    assert (got_flav == src_flav).all()
+    # valid positions read the raw label, except label==-2 which the loss
+    # (and hence the target column) masks to -1 (MR!60199 workaround)
+    v_got, v_src = got_origin[src_valid], src_origin[src_valid]
+    assert ((v_got == v_src) | ((v_src == -2) & (v_got == -1))).all()
+    assert (got_origin[~src_valid] == -1).all()
 
 
 # --------------------------------------------------- outputs:-section half (DUMMY+CUTOVER34)
 
 
-@pytest.mark.cpu_always
-class TestSectionH5SelfConsistency:
-    """The outputs:-section eval H5, asserted from first principles.
+def test_section_task_column_dtypes(section_h5):
+    """Prob columns are float; the bare VertexIndex + target-label columns are integer.
 
-    Every expectation here derives from the section config + the section
-    manifest alone (v1 parity closed at the frozen pin 29c67a1).
+    A value-level dtype check the matrix's golden-vs-schema comparison does
+    NOT make (that check is column NAMES/order only). Nothing is deferred in
+    this config: the vertexing get_output fold mints the per-token
+    VertexIndex integer column alongside the classification probs.
     """
-
-    def test_groups_are_the_reader_streams(self, section_h5):
-        """The eval H5 carries exactly the reader streams as groups."""
-        with h5py.File(section_h5) as f:
-            assert set(f.keys()) == {"jets", "tracks"}
-
-    def test_row_count_matches(self, section_h5):
-        """The section eval H5 carries all N_TEST rows."""
-        with h5py.File(section_h5) as f:
-            assert f["jets"].shape[0] == N_TEST
-
-    def test_task_columns_match_golden(self, data, section_h5):
-        """The eval H5's columns EQUAL the committed golden, per stream, in order.
-
-        Exact-list equality (not membership): any added/removed/reordered
-        column — e.g. an un-deferred extra leaf from a bad expose merge —
-        fails here. Nothing is deferred in this config: the vertexing
-        get_output fold mints the per-token VertexIndex integer column
-        alongside the classification probs.
-        """
-        with h5py.File(data["h5"]) as src:
-            src_cols = {
-                "jets": list(src["jets"].dtype.names),
-                "tracks": list(src["tracks"].dtype.names),
-            }
-        expected = _expected_full_columns(SECTION_GOLDEN, src_cols)
-        with h5py.File(section_h5) as f:
-            present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
-            jets, tracks = f["jets"].dtype, f["tracks"].dtype
-        assert present.keys() == expected.keys(), (
-            f"H5 streams {sorted(present)} != golden streams {sorted(expected)}"
-        )
-        for stream, cols in expected.items():
-            assert present[stream] == cols, (
-                f"{stream} columns diverge from golden (added/removed/reordered): "
-                f"got {present[stream]}, golden {cols}"
-            )
-        # dtypes: prob columns float, the bare VertexIndex column integer
-        for s in JET_SUFFIXES:
-            assert np.issubdtype(jets[f"{RUN_NAME}_{s}"], np.floating)
-        for s in ORIGIN_SUFFIXES:
-            assert np.issubdtype(tracks[f"{RUN_NAME}_{s}"], np.floating)
-        assert np.issubdtype(tracks["VertexIndex"], np.integer)
-        # target-label columns: unprefixed (model-independent), integer
-        assert np.issubdtype(jets["target_jets_classification"], np.integer)
-        assert np.issubdtype(tracks["target_track_origin"], np.integer)
-        assert np.issubdtype(tracks["target_track_vertexing"], np.integer)
-
-    def test_probs_are_softmaxed_not_double_converted(self, section_h5):
-        """The section prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
-        with h5py.File(section_h5) as f:
-            jets = f["jets"][:]
-            tracks = f["tracks"][:]
-            valid = ~tracks["mask"]
-        jet_cols = [f"{RUN_NAME}_{s}" for s in JET_SUFFIXES]
-        prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
-        assert np.allclose(prob_sum, 1.0, atol=1e-3)
-        origin_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
-        origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
-        assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
-        assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
-
-    def test_padded_vertex_index_is_int32_min_sentinel(self, section_h5):
-        """Padded positions carry the VertexIndex sentinel VALUE.
-
-        The union-find -inf padding int-casts to int32 min (-2147483648) —
-        asserted at value level (re-anchored from the retired
-        ``test_eval_file_v1_layout`` e2e), not just integer-dtype.
-        """
-        with h5py.File(section_h5) as f:
-            tracks = f["tracks"][:]
-        padded = tracks["mask"]
-        assert padded.any(), "fixture must contain padded track positions"
-        assert (tracks["VertexIndex"][padded] == np.int64(-2147483648)).all()
-        # valid positions never carry the sentinel
-        assert (tracks["VertexIndex"][~padded] != np.int64(-2147483648)).all()
+    with h5py.File(section_h5) as f:
+        jets, tracks = f["jets"].dtype, f["tracks"].dtype
+    for s in JET_SUFFIXES:
+        assert np.issubdtype(jets[f"{RUN_NAME}_{s}"], np.floating)
+    for s in ORIGIN_SUFFIXES:
+        assert np.issubdtype(tracks[f"{RUN_NAME}_{s}"], np.floating)
+    assert np.issubdtype(tracks["VertexIndex"], np.integer)
+    # target-label columns: unprefixed (model-independent), integer
+    assert np.issubdtype(jets["target_jets_classification"], np.integer)
+    assert np.issubdtype(tracks["target_track_origin"], np.integer)
+    assert np.issubdtype(tracks["target_track_vertexing"], np.integer)
 
 
-@pytest.mark.cpu_always
+def test_section_probs_are_softmaxed_not_double_converted(section_h5):
+    """The section prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
+    with h5py.File(section_h5) as f:
+        jets = f["jets"][:]
+        tracks = f["tracks"][:]
+        valid = ~tracks["mask"]
+    jet_cols = [f"{RUN_NAME}_{s}" for s in JET_SUFFIXES]
+    prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
+    assert np.allclose(prob_sum, 1.0, atol=1e-3)
+    origin_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
+    origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
+    assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
+    assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
+
+
+def test_padded_vertex_index_is_int32_min_sentinel(section_h5):
+    """Padded positions carry the VertexIndex sentinel VALUE.
+
+    The union-find -inf padding int-casts to int32 min (-2147483648) —
+    asserted at value level (re-anchored from the retired
+    ``test_eval_file_v1_layout`` e2e), not just integer-dtype.
+    """
+    with h5py.File(section_h5) as f:
+        tracks = f["tracks"][:]
+    padded = tracks["mask"]
+    assert padded.any(), "fixture must contain padded track positions"
+    assert (tracks["VertexIndex"][padded] == np.int64(-2147483648)).all()
+    # valid positions never carry the sentinel
+    assert (tracks["VertexIndex"][~padded] != np.int64(-2147483648)).all()
+
+
 class TestNoCkptFallback:
     """``salt test`` without ``--ckpt_path`` (the v1 best-epoch glob).
 
@@ -390,7 +287,6 @@ class TestNoCkptFallback:
         assert "ckpt" in capsys.readouterr().err
 
 
-@pytest.mark.cpu_always
 class TestColumnOrderDrivenBySection:
     """The H5 column ORDER is enforced by _merge_columns; the SECTION drives task-column order."""
 
@@ -446,7 +342,6 @@ class TestSectionOverlayConfigContent:
         assert "callbacks" not in cfg
 
 
-@pytest.mark.cpu_always
 class TestSectionWriterUnits:
     """Unit-level checks of the section writers' declare_io + manifest + ordering."""
 
@@ -574,7 +469,6 @@ SECTION_ONNX_NAMES = ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_TrackOrigin", "
 SECTION_ONNX_DTYPES = ["float32", "float32", "float32", "int8", "int8"]
 
 
-@pytest.mark.cpu_always
 class TestSectionOnnxContract:
     """The dumb OnnxExportSink names the section's get_output leaves (pinned contract)."""
 

@@ -87,7 +87,7 @@ class TestSaltModulePreflights:
         # ConfigError from the preflight at fit start (NOT a bare
         # FileNotFoundError from inside materialise)
         from salt.schema import dump_schema, save_schema
-        from salt.tests.integration.test_saltmodule import build_datamodule, build_model, make_trainer
+        from salt.tests.unit.model.test_saltmodule import build_datamodule, build_model, make_trainer
         from salt.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"

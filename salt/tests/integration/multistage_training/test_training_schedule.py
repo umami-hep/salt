@@ -763,7 +763,7 @@ class HookProbe(Callback):
         HOOK_LOG.append((self.tag, "batch_end", pl_module._current_stage_index))  # noqa: SLF001
 
 
-_PROBE = "salt.tests.integration.test_training_schedule.HookProbe"
+_PROBE = "salt.tests.integration.multistage_training.test_training_schedule.HookProbe"
 
 
 class TestStageScopedCallbacks:

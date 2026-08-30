@@ -32,8 +32,8 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     "salt/config_utils.py": ("salt/tests/unit/test_include.py",),
     # needs a Trainer, so its contract tests are integration-level
     "salt/callbacks/schedule.py": (
-        "salt/tests/integration/test_training_schedule.py",
-        "salt/tests/integration/test_schedule_resume.py",
+        "salt/tests/integration/multistage_training/test_training_schedule.py",
+        "salt/tests/integration/multistage_training/test_schedule_resume.py",
     ),
     # reader/dataset ABCs asserted throughout unit/data
     "salt/data/base.py": (
@@ -56,7 +56,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/data/test_manifest.py",
     ),
     # map-style batch sampler engaged by every fit/test lifecycle run
-    "salt/data/samplers.py": ("salt/tests/integration/test_graph_cli.py",),
+    "salt/data/samplers.py": ("salt/tests/unit/graph/test_graph_cli.py",),
     "salt/data/sharding.py": ("salt/tests/unit/data/test_iterable_dataset.py",),
     "salt/data/processors/features.py": (
         "salt/tests/unit/data/test_iterable_dataset.py",
@@ -64,19 +64,19 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     ),
     "salt/data/processors/labels.py": ("salt/tests/unit/data/test_label_stripped_read.py",),
     # config-driven processors exercised through the shipped-config lifecycles
-    "salt/data/processors/ftag_labeller.py": ("salt/tests/integration/test_shipped_configs.py",),
+    "salt/data/processors/ftag_labeller.py": (
+        "salt/tests/integration/pipeline/test_pipeline.py",
+    ),
     "salt/data/processors/maskformer_targets.py": (
         "salt/tests/unit/model/modules/test_maskdecoder.py",
-        "salt/tests/integration/test_shipped_configs.py",
+        "salt/tests/integration/pipeline/test_pipeline.py",
     ),
-    "salt/data/processors/multi_target.py": ("salt/tests/integration/test_pipeline.py",),
+    "salt/data/processors/multi_target.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
     "salt/data/readers/reader.py": (
         "salt/tests/unit/data/readers/test_uproot_reader.py",
         "salt/tests/unit/test_profiling.py",
     ),
-    # builds full models, so its dedicated file is integration-level
-    "salt/model/saltmodule.py": ("salt/tests/integration/test_saltmodule.py",),
-    "salt/model/modules/edge_embed.py": ("salt/tests/integration/test_compile_regression.py",),
+    "salt/model/modules/edge_embed.py": ("salt/tests/unit/model/test_compile_regression.py",),
     "salt/model/modules/maskformer_matched_loss.py": (
         "salt/tests/unit/model/test_maskformer_test_bind.py",
     ),
@@ -107,12 +107,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/outputs/test_section_demand.py",
         "salt/tests/unit/outputs/test_dumb_sink_guards.py",
     ),
-    # dedicated three-file family, one aspect per file
-    "salt/outputs/sinks/h5_sink.py": (
-        "salt/tests/unit/outputs/test_h5_sink_precision.py",
-        "salt/tests/unit/outputs/test_h5_sink_reader_gate.py",
-        "salt/tests/unit/outputs/test_h5_sink_uproot_family.py",
-    ),
     "salt/outputs/sinks/registry.py": (
         "salt/tests/unit/callbacks/test_sink_adapter.py",
         "salt/tests/unit/outputs/test_runtime_sink_selection.py",
@@ -121,21 +115,17 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/outputs/test_sink_consumes.py",
         "salt/tests/unit/outputs/test_sink_node.py",
     ),
-    "salt/outputs/sinks/onnx/check.py": ("salt/tests/integration/test_inference_e2e.py",),
+    "salt/outputs/sinks/onnx/check.py": ("salt/tests/integration/pipeline/test_inference.py",),
     "salt/outputs/sinks/onnx/config.py": (
         "salt/tests/unit/outputs/test_export_fold.py",
         "salt/tests/unit/outputs/sinks/onnx/test_adapter.py",
     ),
-    "salt/outputs/sinks/onnx/export.py": (
-        "salt/tests/unit/outputs/test_export_fold.py",
-        "salt/tests/integration/test_onnx_export.py",
-    ),
-    "salt/outputs/sinks/onnx/metadata.py": ("salt/tests/integration/test_onnx_export.py",),
+    "salt/outputs/sinks/onnx/metadata.py": ("salt/tests/unit/outputs/sinks/onnx/test_export.py",),
     "salt/outputs/sinks/onnx/reduces.py": (
         "salt/tests/unit/outputs/test_hard_reduce_nodes.py",
         "salt/tests/unit/outputs/sinks/onnx/test_adapter.py",
     ),
-    "salt/utils/array_utils.py": ("salt/tests/integration/pipeline.py",),
+    "salt/utils/array_utils.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
     "salt/utils/file_utils.py": ("salt/tests/unit/data/readers/test_vds.py",),
     "salt/utils/mask_utils.py": ("salt/tests/unit/outputs/test_maskformer_eval_h5.py",),
     "salt/utils/scalers.py": ("salt/tests/unit/model/modules/tasks/test_regression.py",),

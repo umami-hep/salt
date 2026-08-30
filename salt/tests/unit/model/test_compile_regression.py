@@ -6,8 +6,8 @@ plan module-by-module under `torch._dynamo.explain` with the eager backend and
 compares the graph breaks it finds against a checked-in ALLOWLIST. A break at a
 site nobody signed off on fails the gate.
 
-CPU-only and inductor-free (eager backend, tiny fixture models), so it is
-`cpu_always` and runs in the integration-cpu CI job.
+CPU-only and inductor-free (eager backend, tiny fixture models) — runs
+unconditionally in the unit-test job.
 """
 
 from __future__ import annotations
@@ -35,8 +35,6 @@ from salt.tests._fixtures.v2_builders import (
     compile_regression,
     make_regression_labels,
 )
-
-pytestmark = pytest.mark.cpu_always
 
 B, T = 6, 10
 
@@ -198,7 +196,7 @@ def assert_allowlisted(inventory: list[tuple[str, str]], allowlist: dict[str, in
         "un-allowlisted graph break(s) under torch.compile:\n"
         + "\n".join(offenders)
         + "\n\nEither fix the break, or add the site to the allowlist in "
-        "salt/tests/integration/test_compile_regression.py WITH a reason."
+        "salt/tests/unit/model/test_compile_regression.py WITH a reason."
     )
 
     if stale := sorted(site for site, budget in allowlist.items() if counts.get(site, 0) < budget):

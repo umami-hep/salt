@@ -19,7 +19,7 @@ from salt.graph.planner import SINKS, SOURCES, Edge, compile_plan, deadcode
 from salt.graph.spec import Mode
 from salt.tests._fixtures.toys import ToyDead
 
-CONFIG_DIR = Path(__file__).parent.parent / "_fixtures" / "configs"
+CONFIG_DIR = Path(__file__).parent.parent.parent / "_fixtures" / "configs"
 TOY_CFG = str(CONFIG_DIR / "toy.yaml")
 BROKEN_CFG = str(CONFIG_DIR / "toy_broken.yaml")
 

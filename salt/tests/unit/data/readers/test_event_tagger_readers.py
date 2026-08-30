@@ -11,7 +11,7 @@ them must cover every variable the model declares. A drift on either side is a
 config error, not a training failure discovered hours later.
 
 **Dynamically** the easyjet leg trains — as matrix row 6 (`event_tagger_easyjet`)
-in ``pipeline.py``/``test_pipeline.py``, on the same synthetic
+in ``pipeline/test_pipeline.py``, on the same synthetic
 ``AnalysisMiniTree`` fixture this module's static gates use. PHYSLITE
 deliberately has no dynamic leg, here or in the matrix: its xAOD POOL layout
 (``ElementLink`` structs resolving into separate containers) is not worth
@@ -27,8 +27,6 @@ import pytest
 import yaml
 
 from salt.main import CONFIG_DIR
-
-pytestmark = pytest.mark.cpu_always
 
 MODEL = "ttbar_vs_hh4b_event_tagger"
 EASYJET = "readers/easyjet_events"
@@ -182,6 +180,6 @@ def test_no_shipped_config_uses_a_label_leaking_branch():
 
 # The dynamic gate — the model + easyjet fragment training end-to-end on the
 # synthetic minitree pair — now lives as matrix row 6 (`event_tagger_easyjet`)
-# in pipeline.py/test_pipeline.py (`_paired_root_context`, same
+# in pipeline/test_pipeline.py (`_paired_root_context`, same
 # write_sample_pair/write_sourced_fragment fixtures). No dynamic PHYSLITE leg
 # exists there either, for the same reason given in the module docstring.

@@ -54,14 +54,8 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "pipeline: a config-lifecycle matrix row (test_pipeline.py) — its own CI job "
-        "(pipeline-matrix), parallel with the rest of tests/integration/ "
-        "(integration-cpu selects `-m \"not pipeline\"`). See pipeline.py MATRIX.",
-    )
-    config.addinivalue_line(
-        "markers",
-        "gpu: a matrix row in pipeline.py's GPU_ROWS subset — selected by the "
-        "pipeline-matrix-gpu CI job via `-m \"pipeline and gpu\"`.",
+        "gpu: a matrix row in test_pipeline.py's GPU_ROWS subset — selected by the "
+        "integration-gpu CI job via `-m gpu`.",
     )
 
 

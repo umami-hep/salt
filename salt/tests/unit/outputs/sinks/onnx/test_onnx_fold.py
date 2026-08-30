@@ -7,9 +7,7 @@ helper set, split only by node family in the two source files.
 
 These are pure-CPU ONNX-trace gates (export contract, folded argmax,
 combination==pb+pc, check_onnx incl L=0, the MaskFormer object-node export
-contract + traces). They are NOT GPU/heavy integration tests despite living
-under tests/integration/ — the `cpu_always` marker (conftest.py) opts them OUT
-of the GPU skip so they run on EVERY CI invocation, with or without
+contract + traces) — the unit tree runs them unconditionally, with or without
 --run-integration. Skipping them silently would let an ONNX-contract
 regression (a reorder/rename/redtype, a double-softmax, an object-node export
 regression) ship unnoticed.
@@ -58,8 +56,6 @@ from salt.tests._fixtures.v2_builders import (
 )
 
 VARIABLES = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
-
-pytestmark = pytest.mark.cpu_always
 
 
 def _bind_producers(modules) -> None:

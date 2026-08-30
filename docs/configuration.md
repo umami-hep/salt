@@ -505,7 +505,7 @@ deliberate and permanent:
 | flash-varlen unpad/repad | `salt/utils/tensor_utils.py` | boolean-mask index -> `aten.nonzero`, which inductor refuses to lower on CUDA |
 | vertexing head | `VertexingTaskModule.head_forward` | compresses a `[B, N, N]` adjacency to one row per valid edge: both the allocation size and the indices are data-dependent |
 
-Everything else is expected to capture. `salt/tests/integration/test_compile_regression.py`
+Everything else is expected to capture. `salt/tests/unit/model/test_compile_regression.py`
 is the gate: it replays a compiled plan module-by-module under `torch._dynamo.explain`
 and fails on any graph break at a site that is not on its checked-in allowlist, on any
 module that captures no graph at all, and on an encoder that will not compile with
