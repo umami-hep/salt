@@ -64,7 +64,7 @@ class TestMaskFormerMatchedLossBindGuard:
     def _loss() -> MaskFormerMatchedLoss:
         loss = MaskFormerMatchedLoss(
             num_classes=2,
-            num_objects=5,
+            num_queries=5,
             loss_weights={"object_class_ce": 2.0, "mask_dice": 2.0, "regression": 2.0},
         )
         loss.name = "mf_matched_loss"

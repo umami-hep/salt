@@ -46,9 +46,9 @@ class MaskFormerMatchedLoss(SaltModelModule):
     num_classes : int
         The number of non-null object classes. The null/no-object class index is
         ``num_classes``. MUST equal the decoder's ``class_net.output_size - 1``.
-    num_objects : int
+    num_queries : int
         The number of object queries ``M``. Must equal the decoder's
-        ``num_objects`` and the truth-object slot count. MUST be >= 1.
+        ``num_queries`` and the truth-object slot count. MUST be >= 1.
     loss_weights : Mapping[str, float]
         Per-component loss weights; keys among ``object_class_ce``, ``mask_dice``,
         ``mask_focal``, ``mask_ce``, ``regression``. A component is produced only
@@ -76,7 +76,7 @@ class MaskFormerMatchedLoss(SaltModelModule):
     def __init__(
         self,
         num_classes: int,
-        num_objects: int,
+        num_queries: int,
         loss_weights: Mapping[str, float],
         matcher_weights: Mapping[str, float] | None = None,
         null_class_weight: float = 0.5,
@@ -89,13 +89,13 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 f"MaskFormerMatchedLoss: num_classes (non-null classes) must be >= 1, got "
                 f"{num_classes}"
             )
-        if num_objects < 1:
+        if num_queries < 1:
             raise ConfigError(
-                f"MaskFormerMatchedLoss: num_objects (query count M) must be >= 1, got "
-                f"{num_objects}"
+                f"MaskFormerMatchedLoss: num_queries (query count M) must be >= 1, got "
+                f"{num_queries}"
             )
         self.num_classes = num_classes
-        self.num_objects = num_objects
+        self.num_queries = num_queries
         self.input_stream = input_stream
 
         self.loss_weights = {k: float(v) for k, v in dict(loss_weights).items()}
@@ -142,7 +142,7 @@ class MaskFormerMatchedLoss(SaltModelModule):
         # composes the HungarianMatcher + empty_weight buffer + loss_labels/loss_masks
         self.v1_loss = MaskFormerLoss(
             num_classes=num_classes,
-            num_objects=num_objects,
+            num_objects=num_queries,
             loss_weights=self.loss_weights,
             matcher_weights=self.matcher_weights,
             null_class_weight=self.null_class_weight,
@@ -167,7 +167,7 @@ class MaskFormerMatchedLoss(SaltModelModule):
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
 
-        m = self.num_objects
+        m = self.num_queries
         tok = sym_dim("T", self.name)
         emb = sym_dim("E", self.name)
         n_classes = self.num_classes + 1

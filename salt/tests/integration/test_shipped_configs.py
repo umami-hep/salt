@@ -3,16 +3,24 @@
 Discovery is a recursive glob of ``salt/configs`` — a config added anywhere in
 the tree is picked up automatically and cannot silently go untested. A shipped
 file is either a **config** (has a ``model:`` AND a ``data.modules.reader`` —
-a whole run; overlays declare their bases in their own ``include:``) or a
-**fragment** (only one half). A fragment has no plan to compile, so it is NOT
-passed alone to ``graph validate``; fragments are gated by
-`test_event_tagger_readers.py` (reader constructor invariants + cross-format
-contract) and the ``ttbar_vs_hh4b_event_tagger`` pairings by
-`test_production_configs.py`.
+a whole run) or one of three fragment kinds, judged on the EXPANDED
+(``include:``-resolved) config: a **reader fragment** (has a reader, no
+model), a **model fragment** (has a model, no reader), or an **overlay**
+(neither — a pure data-behaviour patch, e.g. ``readers/ftag1lite_streaming``,
+stacked on top of a reader fragment + model at fit time). None of the three
+has a plan to compile, so none is passed alone to ``graph validate``: reader
+fragments are gated by `test_reader_fragment_instantiates` below plus
+`test_event_tagger_readers.py` (cross-format contract); the one model
+fragment (``ttbar_vs_hh4b_event_tagger``'s pairings) is gated by
+`test_production_configs.py`; overlays are named in ``OVERLAY_GATED_BY`` with
+a reason, checked for completeness by `test_every_overlay_is_gated`.
 
-Two tiers: **Tier A** — all-mode ``salt graph validate`` for every config.
-**Tier B** — a real 2-batch fit for every config a synthetic fixture can
-serve; configs the dummy writer cannot serve carry an explicit ``xfail``
+Two tiers: **Tier A** — all-mode ``salt graph validate`` for every whole
+config, plus a ``salt graph plot --mode fit`` render (all 38 shipped files get
+some Tier-A-level gate; the ~32 whole configs get validate+plot, the
+remaining ~6 fragments/overlays get the instantiation/completeness checks
+above). **Tier B** — a real 2-batch fit for every config a synthetic fixture
+can serve; configs the dummy writer cannot serve carry an explicit ``xfail``
 naming the missing piece — never a silent skip.
 """
 
@@ -75,6 +83,16 @@ NO_FIXTURE: dict[str, str] = {
     "absent from write_dummy_file — trained by test_finetune_templates.py",
 }
 
+# Overlays (fragments with neither a model nor a reader — a pure
+# data-behaviour patch stacked on top of a reader fragment + model at fit
+# time) cannot be Tier-A validated or Tier-B fit alone. Each must be named
+# here with why. See `test_every_overlay_is_gated`.
+OVERLAY_GATED_BY: dict[str, str] = {
+    "readers/ftag1lite_streaming": "needs a manifest and real DAOD_FTAG1LITE files to build an "
+    "IterableSaltDataset — no synthetic fixture emits that corpus shape, so it stays floor-only "
+    "(this table entry) rather than Tier A/B.",
+}
+
 # Optional extras. Present in the shipped image (setup/Dockerfile installs both
 # --group dev ".[muP]" and ".[root]"), so these skip only on a bare local env.
 EXTRAS: dict[str, tuple[str, str]] = {
@@ -91,8 +109,7 @@ EXTRAS: dict[str, tuple[str, str]] = {
 def _discover() -> list[str]:
     """Every shipped file under CONFIG_DIR, relative to it and without suffix."""
     found = sorted(
-        p.relative_to(CONFIG_DIR).with_suffix("").as_posix()
-        for p in CONFIG_DIR.rglob("*.yaml")
+        p.relative_to(CONFIG_DIR).with_suffix("").as_posix() for p in CONFIG_DIR.rglob("*.yaml")
     )
     return [c for c in found if c not in MACHINERY]
 
@@ -207,11 +224,12 @@ def _data_for(config: str, fixtures: dict[str, dict[str, Path]]) -> dict[str, Pa
 
 
 def test_tables_name_only_files_that_exist():
-    """NO_FIXTURE/EXTRAS/FIXTURE_FLAVOUR name only shipped files."""
+    """NO_FIXTURE/EXTRAS/FIXTURE_FLAVOUR/OVERLAY_GATED_BY name only shipped files."""
     for name, table in (
         ("NO_FIXTURE", NO_FIXTURE),
         ("EXTRAS", EXTRAS),
         ("FIXTURE_FLAVOUR", FIXTURE_FLAVOUR),
+        ("OVERLAY_GATED_BY", OVERLAY_GATED_BY),
     ):
         unknown = sorted(set(table) - set(ALL_FILES))
         assert not unknown, f"{name} names files that do not exist: {unknown}"
@@ -220,18 +238,31 @@ def test_tables_name_only_files_that_exist():
     assert not overlap, f"NO_FIXTURE names fragments, which Tier B never runs: {overlap}"
 
 
-def _reader_node(config: str) -> dict | None:
-    """The expanded config's ``data.modules.reader`` node, or None."""
+def _expanded(config: str) -> dict:
+    """The expanded (``include:``-resolved) top-level config mapping."""
     from salt.config_utils import expand_includes  # noqa: PLC0415
 
-    raw = yaml.safe_load(
-        Path(expand_includes(str(CONFIG_DIR / f"{config}.yaml"))).read_text()
-    )
-    return (((raw or {}).get("data") or {}).get("modules") or {}).get("reader")
+    raw = yaml.safe_load(Path(expand_includes(str(CONFIG_DIR / f"{config}.yaml"))).read_text())
+    return raw or {}
 
 
+def _reader_node(config: str) -> dict | None:
+    """The expanded config's ``data.modules.reader`` node, or None."""
+    return ((_expanded(config).get("data") or {}).get("modules") or {}).get("reader")
+
+
+def _has_model(config: str) -> bool:
+    """Whether the expanded config declares a ``model:`` section."""
+    return "model" in _expanded(config)
+
+
+# Fragments split three ways on the EXPANDED config (an overlay declares
+# neither a reader nor a model of its own — it patches data behaviour and is
+# stacked on top of both at fit time; see OVERLAY_GATED_BY above).
 READER_FRAGMENTS = [c for c in FRAGMENTS if _reader_node(c) is not None]
-MODEL_FRAGMENTS = [c for c in FRAGMENTS if _reader_node(c) is None]
+_NO_READER = [c for c in FRAGMENTS if _reader_node(c) is None]
+MODEL_FRAGMENTS = [c for c in _NO_READER if _has_model(c)]
+OVERLAYS = [c for c in _NO_READER if not _has_model(c)]
 
 
 @pytest.mark.parametrize("fragment", READER_FRAGMENTS)
@@ -275,12 +306,40 @@ def test_every_model_fragment_is_gated_elsewhere():
     assert not stale, f"named as model fragments but are whole configs: {stale}"
 
 
+def test_every_overlay_is_gated():
+    """A config with neither a model nor a reader must be named in OVERLAY_GATED_BY.
+
+    Discovered live: ``readers/ftag1lite_streaming`` sets ``data.iterable`` /
+    ``block_rows`` / ... but declares no reader and no model of its own, so it
+    used to be silently swept into "model fragment" by a two-way split (any
+    fragment with no reader was called a model fragment, whether or not it
+    actually had a model) — the first time this file ran in CI that would have
+    made `test_every_model_fragment_is_gated_elsewhere` fail on a config that
+    was never a model fragment to begin with. The three-way split fixes the
+    classification; this assertion keeps the overlay set from silently growing
+    past what is a documented, floor-only gap.
+    """
+    uncovered = sorted(set(OVERLAYS) - set(OVERLAY_GATED_BY))
+    assert not uncovered, (
+        f"overlays with no recorded reason: {uncovered}. A config carrying neither a "
+        "reader nor a model cannot be passed alone to graph validate or fast_dev_run — "
+        "name it in OVERLAY_GATED_BY with why."
+    )
+    stale = sorted(set(OVERLAY_GATED_BY) - set(OVERLAYS))
+    assert not stale, f"named in OVERLAY_GATED_BY but are not overlays: {stale}"
+
+
 @pytest.mark.parametrize("config", ALL_CONFIGS)
-def test_config_plan_compiles(config, fixtures):
-    """Tier A — the config plan-compiles in fit, val, test and onnx modes."""
+def test_config_plan_compiles(config, fixtures, tmp_path):
+    """Tier A — the config plan-compiles in fit/val/test/onnx modes, then renders fit."""
     _require_extra(config)
     data = _data_for(config, fixtures)
     stack = _stack(config)
+
+    sets: list[str] = ["--set", "trainer.accelerator=auto"]
+    for override in _norm_dict_overrides(stack, data["nd"]):
+        sets += ["--set", override]
+
     argv = ["graph", "validate"]
     for path in stack:
         argv += ["-c", str(path)]
@@ -290,16 +349,23 @@ def test_config_plan_compiles(config, fixtures):
     # config shipping accelerator: gpu (a config declaring accelerator: gpu) would fail on a
     # CPU runner for a reason that has nothing to do with its graph. `auto`
     # rather than `cpu`: on a GPU runner these must exercise the GPU path.
-    argv += ["--set", "trainer.accelerator=auto"]
-    for override in _norm_dict_overrides(stack, data["nd"]):
-        argv += ["--set", override]
-
-    rc = salt_main(argv)
+    rc = salt_main([*argv, *sets])
     assert rc == 0, (
         f"{config} failed graph validate.\n"
         "  If this is an overlay, declare its bases in the config's own "
         "include: block."
     )
+
+    # `graph plot` renders the fit-mode plan — folded into Tier A so a DOT-render
+    # regression surfaces on every shipped config, not just the 6 flagships that
+    # used to get this leg in test_production_configs.py (§7 ruling 3).
+    plot_argv = ["graph", "plot"]
+    for path in stack:
+        plot_argv += ["-c", str(path)]
+    out_path = tmp_path / f"{config.replace('/', '_')}.dot"
+    plot_argv += ["--mode", "fit", "-o", str(out_path)]
+    assert salt_main([*plot_argv, *sets]) == 0, f"{config}: graph plot failed"
+    assert out_path.is_file(), f"{config}: graph plot wrote nothing to {out_path}"
 
 
 @pytest.mark.parametrize("config", ALL_CONFIGS)

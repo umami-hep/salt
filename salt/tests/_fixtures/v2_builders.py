@@ -317,7 +317,7 @@ def build_maskformer_decoder_modules(
         ),
         "mask_decoder": MaskDecoder(
             embed_dim=MASKFORMER_ENC_DIM,
-            num_objects=MASKFORMER_NUM_OBJECTS,
+            num_queries=MASKFORMER_NUM_OBJECTS,
             num_layers=num_layers,
             class_net={"output_size": MASKFORMER_NUM_OBJECT_CLASSES},
             md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
@@ -364,7 +364,7 @@ def build_matched_loss_module(
     """A bound `MaskFormerMatchedLoss` over the object stream, ready to drive."""
     module = MaskFormerMatchedLoss(
         num_classes=num_classes,
-        num_objects=num_objects,
+        num_queries=num_objects,
         loss_weights=dict(loss_weights or MASKFORMER_LOSS_WEIGHTS),
         null_class_weight=MASKFORMER_NULL_CLASS_WEIGHT,
     )

@@ -107,7 +107,12 @@ model:
         init_args:
           input: encoded.seq # register-free encoder output
           embed_dim: *embed_dim
-          num_objects: 5
+          # single-sourced via YAML anchor, aliased below on mf_matched_loss —
+          # decoder query count and matched-loss dim are one concept and must
+          # always agree. Anchors resolve per-document at YAML-load time, so
+          # this only holds within this one file; it would not survive being
+          # split across stacked configs.
+          num_queries: &num_queries 5
           num_layers: 3
           md: {n_heads: 8, mask_attention: true, bidirectional_ca: true}
           class_net: {output_size: 3} # b, c, null — null LAST
@@ -140,7 +145,7 @@ model:
         class_path: salt.model.modules.MaskFormerMatchedLoss # FIT|VAL only
         init_args:
           num_classes: 2 # non-null classes (b, c)
-          num_objects: 5 # == the decoder query bank M
+          num_queries: *num_queries # == the decoder query bank M, single-sourced from mask_decoder
           null_class_weight: 0.5
           # mask_ce (binary cross-entropy) is deliberately used, not mask_focal
           loss_weights: {object_class_ce: 2.0, mask_ce: 10.0, mask_dice: 2.0, regression: 2.0}
@@ -218,7 +223,7 @@ outputs:
       # HadronIndex column (from the MaskFormerObjects TEST reconstruction leaf).
       object_groups:
         - name: objects
-          shape: [5] # == num_objects M (the decoder query bank)
+          shape: [5] # == num_queries M (the decoder query bank)
           fields:
             - {leaf: objects.class_probs, suffixes: [pb, pc, pnull], dtype: f4}
             - {leaf: labels.objects.object_class, suffixes: [class_label], dtype: i8,

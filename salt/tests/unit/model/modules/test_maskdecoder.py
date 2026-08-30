@@ -40,27 +40,27 @@ class TestMaskDecoder:
 
     def test_missing_n_heads_rejected(self):
         with pytest.raises(ConfigError, match="n_heads"):
-            MaskDecoder(embed_dim=16, num_objects=5, num_layers=2, class_net={"output_size": 3})
+            MaskDecoder(embed_dim=16, num_queries=5, num_layers=2, class_net={"output_size": 3})
 
     def test_missing_class_output_size_rejected(self):
         with pytest.raises(ConfigError, match=r"class_net\.output_size is required"):
-            MaskDecoder(embed_dim=16, num_objects=5, num_layers=2, class_net={}, md={"n_heads": 2})
+            MaskDecoder(embed_dim=16, num_queries=5, num_layers=2, class_net={}, md={"n_heads": 2})
 
     def test_class_net_width_key_rejected(self):
         with pytest.raises(ConfigError, match=r"class_net\.input_size"):
             MaskDecoder(
                 embed_dim=16,
-                num_objects=5,
+                num_queries=5,
                 num_layers=2,
                 class_net={"input_size": 16, "output_size": 3},
                 md={"n_heads": 2},
             )
 
     def test_non_positive_dims_rejected(self):
-        with pytest.raises(ConfigError, match="num_objects"):
+        with pytest.raises(ConfigError, match="num_queries"):
             MaskDecoder(
                 embed_dim=16,
-                num_objects=0,
+                num_queries=0,
                 num_layers=2,
                 class_net={"output_size": 3},
                 md={"n_heads": 2},
@@ -68,7 +68,7 @@ class TestMaskDecoder:
         with pytest.raises(ConfigError, match="num_layers"):
             MaskDecoder(
                 embed_dim=16,
-                num_objects=5,
+                num_queries=5,
                 num_layers=0,
                 class_net={"output_size": 3},
                 md={"n_heads": 2},
@@ -77,7 +77,7 @@ class TestMaskDecoder:
     def test_declare_io_keys_and_shapes(self):
         md = MaskDecoder(
             embed_dim=16,
-            num_objects=5,
+            num_queries=5,
             num_layers=2,
             class_net={"output_size": 3},
             md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
@@ -105,7 +105,7 @@ class TestMaskDecoder:
         modules = build_maskformer_decoder_modules(norm_paths[0])
         modules["mask_decoder"] = MaskDecoder(
             embed_dim=32,
-            num_objects=5,
+            num_queries=5,
             num_layers=2,
             class_net={"output_size": 3},
             md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
@@ -136,7 +136,7 @@ class TestMaskDecoder:
         # the dummy-token trick keeps a zero-length sequence from NaN-ing (ONNX)
         md = MaskDecoder(
             embed_dim=16,
-            num_objects=5,
+            num_queries=5,
             num_layers=2,
             class_net={"output_size": 3},
             md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
@@ -154,7 +154,7 @@ class TestMaskDecoder:
         # (maskformer.py:106-110)
         md = MaskDecoder(
             embed_dim=16,
-            num_objects=5,
+            num_queries=5,
             num_layers=2,
             class_net={"output_size": 1},
             md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
