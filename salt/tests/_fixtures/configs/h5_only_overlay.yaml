@@ -3,7 +3,11 @@
 # tuple at all. H5 columns are unchanged.
 
 outputs:
-  # H5-only: no RunTaskOutput opts into export, so no implicit ONNX sink is wired
+  # H5-only: no RunTaskOutput opts into export, so no ONNX leaf is minted; null
+  # the shipped config's inherited onnx_export sink too, or a zero-leaf
+  # OnnxExportSink would contradict "no ONNX tuple" (post-shim, sinks are
+  # declared unconditionally in outputs:, not implicitly wired on export opt-in).
   jets_out:
     class_path: salt.outputs.RunTaskOutput
     init_args: {modes: [test]}
+  onnx_export: null

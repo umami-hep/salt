@@ -217,7 +217,7 @@ class TestResolveInputs:
             resolve_export_config(gn2_export_cfg(track_selection="nope"), "m")
 
     def test_empty_inputs_rejected(self):
-        with pytest.raises(ConfigError, match="export.inputs"):
+        with pytest.raises(ConfigError, match="declares no input"):
             resolve_export_config(gn2_export_cfg(inputs=[]), "m")
 
 

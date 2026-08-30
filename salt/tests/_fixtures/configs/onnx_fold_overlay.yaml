@@ -31,8 +31,6 @@ outputs:
   origin_out:
     class_path: salt.outputs.RunTaskOutput
     init_args: {modes: [test]}
-
-callbacks:
   # the ONNX sink is declared (not injected) because the section opts out of
   # export; its tuple is collected from the conversion nodes' manifests. The H5
   # sink stays implicit (wired by salt test over the outputs: section).
