@@ -49,13 +49,6 @@ class InputSamples(SaltDatasetModule):
         num: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
-        # A deep dotted CLI override (e.g. --data.modules.input_samples.init_args.files.train=...)
-        # arrives as a jsonargparse Namespace, not a dict; coerce both maps so dict()
-        # and stage iteration below work either way.
-        if hasattr(files, "as_dict"):
-            files = files.as_dict()
-        if num is not None and hasattr(num, "as_dict"):
-            num = num.as_dict()
         if not files:
             raise ValueError(
                 "InputSamples requires a non-empty `files` map "
