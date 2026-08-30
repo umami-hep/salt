@@ -1,4 +1,4 @@
-"""Gate G7e: per-stage scoped callbacks.
+"""Per-stage scoped callbacks.
 
 Top-level (global) callbacks ALWAYS propagate for the whole fit and are never
 re-instantiated (Lightning fixes ``trainer.callbacks`` at fit start). A stage may
@@ -8,10 +8,10 @@ forwards Lightning's per-stage hooks to them ONLY while their stage is active, a
 tears them down at exit. The user's effective per-stage set is therefore the
 persistent globals plus the freshly-instantiated stage-scoped delegates.
 
-G7e: a stage-scoped callback receives hooks only within its stage; fresh instance
+Covered: a stage-scoped callback receives hooks only within its stage; fresh instance
 at stage entry; the combined-with-global set is correct; teardown is clean; bad
 callback specs fail at fit start, not at the boundary. All DataLoaders use
-``num_workers=0`` (agent memcg gotcha).
+``num_workers=0``.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def make_trainer(*, max_epochs: int, callbacks: list) -> Trainer:
 _PROBE = "salt.tests.integration.test_stage_callbacks.HookProbe"
 
 
-class TestG7eStageScopedCallbacks:
+class TestStageScopedCallbacks:
     SCHEDULE = {
         "stages": {
             "a": {"epochs": 2, "callbacks": [{"class_path": _PROBE, "init_args": {"tag": "A"}}]},
@@ -158,7 +158,7 @@ class TestG7eStageScopedCallbacks:
         assert ("B", 1) in setups
 
 
-class TestG7eValidation:
+class TestStageCallbackValidation:
     def test_bad_class_path_fails_at_fit_start(self, data):
         schedule = {
             "stages": {"fit": {"callbacks": [{"class_path": "salt.nonexistent.NoSuchCallback"}]}}

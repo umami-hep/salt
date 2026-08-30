@@ -1,4 +1,4 @@
-"""Regression guard: the MaskFormer TEST-mode two-phase bind must not require the"""
+"""Regression guard: the MaskFormer TEST-mode bind must not require the regression width."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def _compile(mode: Mode):
 
 
 class TestMaskFormerTestModeBind:
-    """The exp-21 TEST-mode bind defect (job 2642) and its FIT-mode counterpart."""
+    """TEST-mode bind must succeed without the regression width; FIT-mode binds it."""
 
     def test_test_mode_bind_succeeds_without_regression_width(self):
         """``SaltModule.setup('test')`` shape: TEST plan alone -> bind_all must not raise."""
@@ -88,7 +88,7 @@ class TestMaskFormerMatchedLossBindGuard:
             loss.bind(ResolvedSchema(widths={_REG_PRED_KEY: 5, _REG_TGT_KEY: 4}))
 
     def test_missing_width_lookup_still_raises_binderror(self):
-        """Sanity: ``schema.width`` on an absent key raises the exp-21 BindError shape."""
+        """Sanity: ``schema.width`` on an absent key still raises ``BindError``."""
         schema = ResolvedSchema(widths={"preds.jets.jets_classification": 3})
         with pytest.raises(BindError, match="no statically resolved width"):
             schema.width(_REG_PRED_KEY)

@@ -1,27 +1,27 @@
-"""Gates: checkpoint resume across `training_schedule` stages.
+"""Checkpoint resume across `training_schedule` stages.
 
 `salt2 fit --ckpt_path <ckpt>` must resume a multi-stage schedule from any
 epoch — inside stage 0, exactly at a stage boundary, or inside a later stage —
 producing state (weights, optimizer moments, per-step LR trace) identical to the
 uninterrupted run.
 
-Gates:
+Covered:
 
-- **probe** — pins the Lightning 2.6.5 restore order these gates rely on:
+- **probe** — pins the Lightning 2.6.5 restore order these tests rely on:
   ``setup("fit")`` -> ``on_load_checkpoint`` -> ``configure_optimizers`` ->
   optimizer-state restore. The stage restore in `SaltModule.on_load_checkpoint`
   is only correct if it runs *before* the optimizer is rebuilt.
-- **G4a** resume inside stage 0 (from a real val-loss `ModelCheckpoint`) ≡
+- resume inside stage 0 (from a real val-loss `ModelCheckpoint`) ≡
   uninterrupted: final `state_dict` bitwise-equal, optimizer moments equal.
-- **G4b** resume exactly at a stage boundary: exactly one rebuild fires
+- resume exactly at a stage boundary: exactly one rebuild fires
   post-restore; the stage-1 optimizer owns exactly the stage-1 trainable set;
   final state bitwise-equal. Covered for AdamW and HybridMuonAdamW.
-- **G4c** resume mid-stage-1: NO rebuild at the resume epoch, the restored
+- resume mid-stage-1: NO rebuild at the resume epoch, the restored
   optimizer moments are kept (not reset), frozen modules are frozen + eval from
   the first restored step; final state bitwise-equal.
-- **G4d** per-step LR trace across the resume point identical to the
-  uninterrupted run (asserted inside G4a/G4b/G4c).
-- **G4e** parity guard — a no-schedule (legacy) config resumes bitwise-identically
+- per-step LR trace across the resume point identical to the
+  uninterrupted run (asserted inside each resume case).
+- parity guard — a no-schedule (legacy) config resumes bitwise-identically
   to its uninterrupted run (the checkpoint save/restore additions do not perturb
   the desugared single-stage path).
 
@@ -32,8 +32,7 @@ batches and identical forward passes in the uninterrupted run and the resumed
 run regardless of global-RNG state. Equality therefore does NOT rely on Lightning
 restoring the global torch/numpy RNG across a fit resume (it does not by default)
 — it relies only on the deterministic loader + dropout-free model + a fixed seed
-for identical initial weights. All DataLoaders use ``num_workers=0`` (agent
-memcg gotcha).
+for identical initial weights. All DataLoaders use ``num_workers=0``.
 """
 
 from __future__ import annotations
@@ -355,7 +354,7 @@ class TestRestoreOrderProbe:
         print("RESTORE-ORDER PROBE events:", _ProbeModule.EVENTS)  # noqa: T201
         assert "setup" in names and "on_load_checkpoint" in names
         assert "configure_optimizers" in names
-        # the ordering these gates depend on: stage is restored (on_load) BEFORE the
+        # the ordering these tests depend on: stage is restored (on_load) BEFORE the
         # optimizer is (re)built (configure_optimizers), and both AFTER setup.
         assert names.index("setup") < names.index("on_load_checkpoint")
         assert names.index("on_load_checkpoint") < names.index("configure_optimizers")
@@ -365,10 +364,10 @@ class TestRestoreOrderProbe:
         assert load_events[0][3]["stage_index"] == 0  # saved end of epoch 1 = still stage 0
 
 
-# --- G4a: resume inside stage 0 from a real val-loss ModelCheckpoint ----------
+# --- resume inside stage 0 from a real val-loss ModelCheckpoint ----------
 
 
-class TestG4aResumeWithinStage0:
+class TestResumeWithinStage0:
     def test_val_loss_checkpoint_resume_within_stage0_equals_uninterrupted(self, data, tmp_path):
         max_epochs = 4  # [2,2] schedule, boundary at epoch 2
         ref = _run_uninterrupted(data, schedule=WARMUP_FULL, max_epochs=max_epochs)
@@ -393,15 +392,15 @@ class TestG4aResumeWithinStage0:
 
         assert tracer.first_epoch == 1  # resumed at epoch 1 (inside stage 0)
         assert counter.rebuild_epochs == [2]  # single boundary rebuild at epoch 2
-        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "G4a state_dict")
-        _assert_moments_equal(ref["opt_state"], got["opt_state"], "G4a optimizer moments")
-        _assert_lr_tail_matches(ref["lr"], got["lr"], "G4a LR trace")  # G4d
+        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "stage-0 resume state_dict")
+        _assert_moments_equal(ref["opt_state"], got["opt_state"], "stage-0 resume moments")
+        _assert_lr_tail_matches(ref["lr"], got["lr"], "stage-0 resume LR trace")
 
 
-# --- G4b: resume exactly at a stage boundary ---------------------------------
+# --- resume exactly at a stage boundary ---------------------------------
 
 
-class TestG4bResumeAtBoundary:
+class TestResumeAtBoundary:
     def _run(self, data, tmp_path, optimizer):
         max_epochs = 4  # [2,2], boundary at epoch 2; save at end of epoch 1 (stage-0 last)
         ref = _run_uninterrupted(
@@ -417,9 +416,9 @@ class TestG4bResumeAtBoundary:
         ref, got, tracer, counter = self._run(data, tmp_path, "AdamW")
         assert tracer.first_epoch == 2  # resumed exactly at the boundary epoch
         assert counter.rebuild_epochs == [2]  # exactly ONE rebuild, post-restore, at the boundary
-        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "G4b state_dict")
-        _assert_moments_equal(ref["opt_state"], got["opt_state"], "G4b optimizer moments")
-        _assert_lr_tail_matches(ref["lr"], got["lr"], "G4b LR trace")  # G4d
+        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "boundary state_dict")
+        _assert_moments_equal(ref["opt_state"], got["opt_state"], "boundary moments")
+        _assert_lr_tail_matches(ref["lr"], got["lr"], "boundary LR trace")
 
     def test_boundary_resume_stage1_optimizer_owns_stage1_trainable_set(self, data, tmp_path):
         # after the boundary the encoder is unfrozen, so the rebuilt stage-1
@@ -443,14 +442,14 @@ class TestG4bResumeAtBoundary:
         ref, got, tracer, counter = self._run(data, tmp_path, "HybridMuonAdamW")
         assert tracer.first_epoch == 2
         assert counter.rebuild_epochs == [2]
-        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "G4b-hybrid state_dict")
-        _assert_moments_equal(ref["opt_state"], got["opt_state"], "G4b-hybrid optimizer moments")
+        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "hybrid boundary state_dict")
+        _assert_moments_equal(ref["opt_state"], got["opt_state"], "hybrid boundary moments")
 
 
-# --- G4c: resume mid-stage-1 (after the boundary) ----------------------------
+# --- resume mid-stage-1 (after the boundary) ----------------------------
 
 
-class TestG4cResumeMidStage1:
+class TestResumeMidStage1:
     def test_mid_stage1_resume_keeps_moments_no_rebuild_and_equivalence(self, data, tmp_path):
         # [2,3] schedule over 5 epochs: stage 1 = epochs 2,3,4. Stage 1 FREEZES the
         # encoder (a freeze-backbone / head-finetune stage) so we can check the
@@ -479,17 +478,17 @@ class TestG4cResumeMidStage1:
         # entering the resumed run equals the checkpoint's saved optimizer state
         # (a fresh optimizer would have an empty `state`).
         saved = torch.load(str(ckpt), weights_only=False)["optimizer_states"][0]
-        _assert_moments_equal(saved, tracer.opt_state_at_start, "G4c restored-at-start moments")
+        _assert_moments_equal(saved, tracer.opt_state_at_start, "restored-at-start moments")
 
-        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "G4c state_dict")
-        _assert_moments_equal(ref["opt_state"], got["opt_state"], "G4c optimizer moments")
-        _assert_lr_tail_matches(ref["lr"], got["lr"], "G4c LR trace")  # G4d
-
-
-# --- G4e: parity guard — no-schedule (legacy) resume unchanged ---------------
+        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "mid-stage-1 state_dict")
+        _assert_moments_equal(ref["opt_state"], got["opt_state"], "mid-stage-1 moments")
+        _assert_lr_tail_matches(ref["lr"], got["lr"], "mid-stage-1 LR trace")
 
 
-class TestG4eLegacyParityGuard:
+# --- parity guard — no-schedule (legacy) resume unchanged ---------------
+
+
+class TestLegacyParityGuard:
     def test_no_schedule_resume_is_bitwise_equal_to_uninterrupted(self, data, tmp_path):
         max_epochs = 4
         ref = _run_uninterrupted(data, schedule=None, max_epochs=max_epochs)
@@ -498,6 +497,6 @@ class TestG4eLegacyParityGuard:
         )
         assert counter is None  # no schedule callback on the legacy path
         assert tracer.first_epoch == 2
-        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "G4e legacy state_dict")
-        _assert_moments_equal(ref["opt_state"], got["opt_state"], "G4e legacy optimizer moments")
-        _assert_lr_tail_matches(ref["lr"], got["lr"], "G4e legacy LR trace")
+        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "legacy resume state_dict")
+        _assert_moments_equal(ref["opt_state"], got["opt_state"], "legacy resume optimizer moments")
+        _assert_lr_tail_matches(ref["lr"], got["lr"], "legacy resume LR trace")

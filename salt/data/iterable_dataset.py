@@ -28,7 +28,7 @@ DEFAULT_BLOCK_ROWS = 16_384
 Throughput is flat down to here and falls off below it, while one read's
 decompressed footprint stays near 77 MB mean / 179 MB max against the
 302 / 690 MB a whole-file read costs, which is what makes many concurrent
-shards affordable. Curve and numbers: study experiment 06, job 3966.
+shards affordable.
 """
 
 

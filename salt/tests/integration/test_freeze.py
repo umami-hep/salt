@@ -1,21 +1,21 @@
-"""Gates for the module-freeze machinery.
+"""The module-freeze machinery.
 
-Gates:
+Covered:
 
-- **G2a** — a frozen module has ``requires_grad=False`` on all its params AND is
+- a frozen module has ``requires_grad=False`` on all its params AND is
   in ``eval()`` mode during training, and STAYS in eval across an epoch boundary
   (Lightning re-calls ``model.train()`` every epoch; `SaltModule.train` must
   re-assert eval on frozen modules).
-- **G2b** — the optimizer is built over TRAINABLE params only: its param set
+- the optimizer is built over TRAINABLE params only: its param set
   equals ``{p for p in model.parameters() if p.requires_grad}`` and excludes the
   frozen module's params — checked for AdamW AND HybridMuonAdamW.
-- **G2d** — no ``training_schedule`` → zero behaviour change: the optimizer holds
+- no ``training_schedule`` → zero behaviour change: the optimizer holds
   every parameter and nothing is frozen.
-- **G2e** — composition smoke: ``--init_from`` + a single-stage schedule freezing
+- composition smoke: ``--init_from`` + a single-stage schedule freezing
   every loaded module → only the new module's params reach the optimizer, and
   training runs with finite loss.
 
-All DataLoaders use ``num_workers=0`` (agent memcg gotcha).
+All DataLoaders use ``num_workers=0``.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def _module_param_ids(model: SaltModule, name: str) -> set[int]:
     return {id(p) for p in model.net[name].parameters()}
 
 
-class TestG2aFreezeAppliedAndPersists:
+class TestFreezeAppliedAndPersists:
     def test_frozen_params_requires_grad_false_and_eval(self, data):
         model = build_model(
             build_gn2v2_modules(data["nd"]),
@@ -145,7 +145,7 @@ class TestG2aFreezeAppliedAndPersists:
         assert not model.net["encoder"].training  # still eval after fit
 
 
-class TestG2bOptimizerExcludesFrozen:
+class TestOptimizerExcludesFrozen:
     @pytest.mark.parametrize("optimizer", ["AdamW", "HybridMuonAdamW"])
     def test_optimizer_param_set_is_trainable_only(self, data, optimizer):
         model = build_model(
@@ -165,7 +165,7 @@ class TestG2bOptimizerExcludesFrozen:
         assert _module_param_ids(model, "encoder")
 
 
-class TestG2dNoScheduleNoChange:
+class TestNoScheduleNoChange:
     def test_optimizer_holds_all_params(self, data):
         model = build_model(build_gn2v2_modules(data["nd"]))  # no training_schedule
         offline_bind(model, build_datamodule(data))
@@ -196,10 +196,11 @@ class TestMultiStageBindsAtFit:
         assert not any(p.requires_grad for p in model.net["encoder"].parameters())
 
 
-class TestG2eInitFromComposesWithFreeze:
+class TestInitFromComposesWithFreeze:
     @staticmethod
     def _surgery_modules(nd) -> dict:
-        # drop track_vertexing, add a new head — mirrors the G1b swap-one-head surgery
+        # drop track_vertexing, add a new head — mirrors the swap-one-head
+        # surgery in test_init_from.py
         modules = build_gn2v2_modules(nd)
         del modules["track_vertexing"]
         extra = ClassificationTaskModule(

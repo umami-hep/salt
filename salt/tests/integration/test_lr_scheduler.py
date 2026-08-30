@@ -1,23 +1,23 @@
-"""Gates: per-stage LR-scheduler class choice.
+"""Per-stage LR-scheduler class choice.
 
 A stage may declare `lr_scheduler: {class_path, init_args, interval, frequency,
 monitor}` — the scheduler class is instantiated over the freshly-rebuilt stage
 optimizer at the boundary, replacing the default per-stage OneCycleLR. Absent →
 today's OneCycle behaviour byte-identically (`has_lr_scheduler` master switch).
 
-Gates:
+Covered:
 
-- **G8a** legacy parity — a config with no `lr_scheduler:` keeps the OneCycleLR path
+- legacy parity — a config with no `lr_scheduler:` keeps the OneCycleLR path
   (the scheduler is OneCycleLR, step-interval), unchanged.
-- **G8b** two-stage, different scheduler classes (CosineAnnealingLR warmup +
+- two-stage, different scheduler classes (CosineAnnealingLR warmup +
   ReduceLROnPlateau finetune): the correct class is active per stage after the
   boundary rebuild, and the stage optimizer owns the stage's trainable set.
-- **G8c** plateau + early_stop on the same monitor in one stage — both act (the
+- plateau + early_stop on the same monitor in one stage — both act (the
   scheduler reduces LR; early_stop still advances on patience), no interference.
-- **G8d** resume — a mid-stage checkpoint restores the scheduler state (a plateau
+- resume — a mid-stage checkpoint restores the scheduler state (a plateau
   scheduler's `best`/`num_bad_epochs`) so the resumed run continues identically.
 
-All DataLoaders use ``num_workers=0`` (agent memcg gotcha). The CLI-path gate (the
+All DataLoaders use ``num_workers=0``. The CLI-path coverage (the
 scheduler spec parses through the real `salt fit`/`merge-config` surface without
 jsonargparse eager-instantiating the nested class spec) lives in
 ``test_main.py::TestLRSchedulerCLI``.
@@ -117,10 +117,10 @@ def _module_param_ids(model: SaltModule, name: str) -> set[int]:
     return {id(p) for p in model.net[name].parameters()}
 
 
-# --- G8a: legacy parity — no lr_scheduler → OneCycleLR ------------------------
+# --- legacy parity — no lr_scheduler → OneCycleLR ------------------------
 
 
-class TestG8aLegacyParity:
+class TestLegacyParity:
     def test_no_lr_scheduler_uses_onecycle(self, data):
         # a plain (no lr_scheduler) config keeps the default per-stage OneCycleLR,
         # step-interval — the byte-parity path.
@@ -131,10 +131,10 @@ class TestG8aLegacyParity:
         assert {t["sched"] for t in rec.trace} == {"OneCycleLR"}
 
 
-# --- G8b: two-stage, different scheduler classes -----------------------------
+# --- two-stage, different scheduler classes -----------------------------
 
 
-class TestG8bTwoStageSchedulers:
+class TestTwoStageSchedulers:
     SCHEDULE = {
         "stages": {
             "warmup": {
@@ -179,10 +179,10 @@ class TestG8bTwoStageSchedulers:
         assert _module_param_ids(model, "encoder") <= opt_ids
 
 
-# --- G8c: plateau scheduler + early_stop on the same monitor ------------------
+# --- plateau scheduler + early_stop on the same monitor ------------------
 
 
-class TestG8cPlateauWithEarlyStop:
+class TestPlateauWithEarlyStop:
     def test_plateau_and_early_stop_coexist(self, data):
         # one stage declares BOTH a ReduceLROnPlateau scheduler and early_stop on the
         # same monitor — both must act with independent state (scheduler reduces LR,
@@ -219,10 +219,10 @@ class TestG8cPlateauWithEarlyStop:
         assert model._current_stage_index in (0, 1)  # noqa: SLF001 - ran cleanly
 
 
-# --- G8d: resume restores scheduler state ------------------------------------
+# --- resume restores scheduler state ------------------------------------
 
 
-class TestG8dResume:
+class TestResume:
     def test_mid_stage_resume_restores_plateau_state(self, data, tmp_path):
         # a single-stage ReduceLROnPlateau schedule; save mid-stage and resume — the
         # scheduler's internal state (best/num_bad_epochs) is restored by Lightning,

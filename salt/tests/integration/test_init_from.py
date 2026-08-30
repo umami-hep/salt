@@ -1,20 +1,20 @@
-"""Gates for the ``--init_from`` weights-only warm-start path.
+"""The ``--init_from`` weights-only warm-start path.
 
-Gates:
+Covered:
 
-- **G1a** — an identical-architecture warm start yields a state_dict
+- an identical-architecture warm start yields a state_dict
   bitwise-equal to a plain strict load of the same checkpoint.
-- **G1b** — a swap-one-head config: retained modules load fully, the new head
+- a swap-one-head config: retained modules load fully, the new head
   is fresh-inited + materialised, the dropped module's keys are skipped.
-- **G1c** — partial coverage of a retained module (changed inner width) hard
+- partial coverage of a retained module (changed inner width) hard
   fails with a clear `ConfigError`.
-- **G1d** — a newly-added `Normaliser` (absent from the checkpoint) materialises
-  from its norm_dict and forward-passes (regression for materialise Wall #3);
+- a newly-added `Normaliser` (absent from the checkpoint) materialises
+  from its norm_dict and forward-passes;
   a retained `Normaliser` is NOT re-materialised (keeps loaded stats).
 
 The offline bind-then-load harness mirrors the v1->v2 converter's
 ``_strict_load_check`` (scripts/convert_v1_model.py). All DataLoaders use
-``num_workers=0`` (agent memcg gotcha).
+``num_workers=0``.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ def base_ckpt(data) -> Path:
     return ckpt
 
 
-class TestG1aIdenticalArch:
+class TestIdenticalArch:
     def test_warm_start_bitwise_equals_strict_load(self, data, base_ckpt):
         # reference: the existing data-less STRICT load
         strict = SaltModule.load_from_checkpoint(
@@ -131,7 +131,7 @@ class TestG1aIdenticalArch:
             assert torch.equal(value, warm_sd[key]), key
 
 
-class TestG1bSwapHead:
+class TestSwapHead:
     @staticmethod
     def _surgery_modules(nd) -> dict:
         # drop track_vertexing (-> a dropped ckpt module) and add a distinctly
@@ -179,7 +179,7 @@ class TestG1bSwapHead:
         assert model._init_warm_started  # noqa: SLF001
 
 
-class TestG1cPartialCoverage:
+class TestPartialCoverage:
     def test_changed_inner_width_hard_fails(self, data, base_ckpt):
         # same module names, but a wider encoder -> retained modules only
         # PARTIALLY covered -> hard ConfigError before any load
@@ -190,10 +190,10 @@ class TestG1cPartialCoverage:
             offline_bind(model, build_datamodule(data))
 
 
-class TestG1dSelectiveMaterialise:
+class TestSelectiveMaterialise:
     def test_new_normaliser_materialises_and_forward_passes(self, data, base_ckpt, tmp_path):
         # a checkpoint that never carried a normaliser (strip net.norm.*): the
-        # config's `norm` is a NEW module -> must materialise (Wall #3 regression)
+        # config's `norm` is a NEW module -> must materialise
         ckpt = torch.load(base_ckpt, map_location="cpu", weights_only=False)
         ckpt["state_dict"] = {
             k: v for k, v in ckpt["state_dict"].items() if not k.startswith("net.norm.")

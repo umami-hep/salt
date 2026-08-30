@@ -219,7 +219,7 @@ class SaltModule(lightning.LightningModule):
         ``_foreach_``-batched form, which produces bit-identical parameters and
         state to ``"lion-pytorch"`` (the per-parameter reference from the
         ``lion-pytorch`` package) at a fraction of the kernel launches. Prefer
-        ``"lion"``; ``"lion-pytorch"`` exists to gate that equivalence and to
+        ``"lion"``; ``"lion-pytorch"`` exists to verify that equivalence and to
         A/B the launch overhead. When `mup` is configured the optimizer is
         swapped to ``mup.optim.MuAdamW`` regardless of this name.
     mup : Mapping[str, Any], optional
@@ -487,7 +487,7 @@ class SaltModule(lightning.LightningModule):
             if callable(getattr(w, "bind_model_modules", None)):
                 w.bind_model_modules(model_modules)
 
-    # -- lifecycle state (read-only — gates and tests assert on these) ---------
+    # -- lifecycle state (read-only — tests assert on these) --------------------
 
     @property
     def bound(self) -> bool:
@@ -918,7 +918,7 @@ class SaltModule(lightning.LightningModule):
         # warm start (freeze composes on top of the loaded weights) and BEFORE
         # optimizer construction, so the initial `configure_optimizers` (built by
         # Lightning's strategy.setup, after this) sees stage 0's requires_grad
-        # mask — Gotcha #2. Later stage boundaries are driven by the
+        # mask. Later stage boundaries are driven by the
         # `TrainingScheduleCallback`. Fit-only.
         if stage == "fit":
             self._apply_training_schedule()
@@ -930,7 +930,7 @@ class SaltModule(lightning.LightningModule):
 
     def _apply_training_schedule(self) -> None:
         """Validate the schedule against the attached trainer and apply stage 0's
-        freeze mask at fit setup (Gotcha #2 — before the initial optimizer build).
+        freeze mask at fit setup (before the initial optimizer build).
         When any stage declares `early_stop`, also runs the early-stop preflight
         and seeds stage 0's live counters.
 
@@ -1429,7 +1429,7 @@ class SaltModule(lightning.LightningModule):
         """The `OneCycleLR.total_steps` for the active stage. A single-stage
         schedule uses the whole-run `estimated_stepping_batches` exactly (parity);
         a multi-stage schedule uses this stage's proportional per-stage allocation
-        of that estimate (Gotcha #1 — never the whole-run figure for a sub-stage).
+        of that estimate (never the whole-run figure for a sub-stage).
         Under the `early_stop` switch the envelope is sized from the stage's epoch
         cap measured from its ACTUAL start epoch (see `_early_stop_stage_total_steps`)
         so a stage that starts early — because an earlier stage early-stopped — never
@@ -1764,7 +1764,7 @@ class SaltModule(lightning.LightningModule):
         strict per-module accounting — the ``--init_from`` load path (design D4).
 
         Distinct from a resume `ckpt_path`: trainer state stays fresh, the FIT
-        plan-hash gate is NOT enforced (the checkpoint's hashes are logged for
+        plan-hash check is NOT enforced (the checkpoint's hashes are logged for
         information only, since the architecture may have been surgically
         changed), and the state-dict load is prefix-filtered by module name
         rather than strict.

@@ -1,4 +1,4 @@
-"""Tests for `SaltModule` — seeds of gates G2 and G5."""
+"""Tests for `SaltModule`."""
 
 from __future__ import annotations
 
@@ -264,7 +264,7 @@ class TestDataModuleConstruction:
 
 
 class TestFit:
-    """Gate G2 seed: a short `trainer.fit` on the dummy file, CPU."""
+    """A short `trainer.fit` on the dummy file, CPU."""
 
     def test_two_steps_finite_loss(self, fitted):
         losses = fitted["recorder"].losses
@@ -331,7 +331,7 @@ class TestTestLoop:
 
 
 class TestCheckpoint:
-    """Gate G5 seed: schema + plan hashes round-trip; resume skips materialise."""
+    """Schema + plan hashes round-trip; resume skips materialise."""
 
     def test_payload_written(self, fitted):
         ckpt = torch.load(fitted["ckpt"], weights_only=False)
@@ -403,7 +403,7 @@ class TestCheckpoint:
         assert bool(model.net["norm"].materialised)
 
     def test_resume_with_changed_graph_fails_fast(self, data, fitted):
-        """A config change between save and resume trips the FIT hash gate."""
+        """A config change between save and resume trips the FIT hash check."""
         modules = build_gn2v2_modules(data["nd"], embed_dim=24)
         modules["loss"] = LossSum()
         model = SaltModule(modules, lrs=LRS)

@@ -1,25 +1,24 @@
-"""Gates: multi-stage `training_schedule` execution + legacy desugaring.
+"""Multi-stage `training_schedule` execution + legacy desugaring.
 
-Gates:
+Covered:
 
-- **G3a** — a legacy config (no `training_schedule`) desugars to a single `fit`
-  stage and trains bitwise-identically to the pre-desugar behaviour. The
-  cross-version bitwise check against base @ 7bee757 is run out-of-suite; here
+- a legacy config (no `training_schedule`) desugars to a single `fit`
+  stage and trains bitwise-identically to the pre-desugar behaviour; here
   the structural half is covered (single-stage total_steps == the whole-run
   `estimated_stepping_batches`, optimizer holds every param).
-- **G3b** — an explicit single-`fit`-stage schedule trains bitwise-identically to
+- an explicit single-`fit`-stage schedule trains bitwise-identically to
   the no-schedule (desugared) config (same seed → equal state_dicts).
-- **G3c** — a 2-stage schedule shows two OneCycle envelopes with the boundary at
+- a 2-stage schedule shows two OneCycle envelopes with the boundary at
   the correct global step, per-stage total_steps summing to the whole-run
   estimate, the stage-2 optimizer owning the newly-unfrozen params (which move),
   while the stage-1-frozen params stayed bitwise-fixed during stage 1.
-- **G3d** — after a boundary, `trainer.optimizers`, `trainer.lr_scheduler_configs`
-  and `pl_module.optimizers()` all point at the rebuilt objects (S1 identity).
-- **G3e** — a 3-stage schedule with a per-stage `optimizer` override
+- after a boundary, `trainer.optimizers`, `trainer.lr_scheduler_configs`
+  and `pl_module.optimizers()` all point at the rebuilt objects.
+- a 3-stage schedule with a per-stage `optimizer` override
   (AdamW→lion) rebuilds the right optimizer class per stage; HybridMuonAdamW
   rebuilds its Muon/AdamW split over the new trainable set across a boundary.
 
-All DataLoaders use ``num_workers=0`` (agent memcg gotcha).
+All DataLoaders use ``num_workers=0``.
 """
 
 from __future__ import annotations
@@ -102,10 +101,10 @@ def _module_param_ids(model: SaltModule, name: str) -> set[int]:
     return {id(p) for p in model.net[name].parameters()}
 
 
-# --- G3a: legacy desugar structural parity ----------------------------------
+# --- legacy desugar structural parity ----------------------------------
 
 
-class TestG3aDesugarStructuralParity:
+class TestDesugarStructuralParity:
     def test_single_stage_total_steps_is_whole_run_estimate(self, data):
         # the desugared single `fit` stage must pass estimated_stepping_batches
         # straight into OneCycle (any per-stage allocation would break parity).
@@ -125,10 +124,10 @@ class TestG3aDesugarStructuralParity:
         assert seen["opt_params"] == seen["model_params"]  # every param optimised
 
 
-# --- G3b: explicit single-fit-stage ≡ legacy (bitwise) ----------------------
+# --- explicit single-fit-stage ≡ legacy (bitwise) ----------------------
 
 
-class TestG3bSingleStageEqualsLegacy:
+class TestSingleStageEqualsLegacy:
     @staticmethod
     def _fit_state_dict(data, training_schedule) -> dict:
         seed_everything(1234, workers=True)
@@ -145,7 +144,7 @@ class TestG3bSingleStageEqualsLegacy:
             assert torch.equal(value, explicit[key]), key
 
 
-# --- G3c / G3d: 2-stage execution + rebuild-reference tracking ---------------
+# --- 2-stage execution + rebuild-reference tracking ---------------
 
 
 class _TwoStageRecorder(Callback):
@@ -214,7 +213,7 @@ def _run_two_stage(data) -> tuple[SaltModule, _TwoStageRecorder]:
     return model, rec
 
 
-class TestG3cTwoStageEnvelopes:
+class TestTwoStageEnvelopes:
     def test_two_envelopes_boundary_allocation_and_movement(self, data):
         model, rec = _run_two_stage(data)
 
@@ -222,7 +221,8 @@ class TestG3cTwoStageEnvelopes:
         stage1 = [t for t in rec.trace if t["stage"] == 1]
         assert len(stage0) == 10 and len(stage1) == 10  # boundary at global step 10
 
-        # per-stage total_steps sum to the whole-run estimate (Gotcha #1)
+        # per-stage total_steps sum to the whole-run estimate (each stage's
+        # OneCycleLR spans only its own stage's steps, never the whole run)
         assert stage0[0]["total_steps"] == 10
         assert stage1[0]["total_steps"] == 10
         assert stage0[0]["total_steps"] + stage1[0]["total_steps"] == 20
@@ -247,7 +247,7 @@ class TestG3cTwoStageEnvelopes:
         assert _module_param_ids(model, "encoder") <= final_opt_ids
 
 
-class TestG3dRebuildReferenceTracking:
+class TestRebuildReferenceTracking:
     def test_all_refs_point_at_rebuilt_objects(self, data):
         _model, rec = _run_two_stage(data)
         assert rec.refs["trainer_is_strategy"]
@@ -255,10 +255,10 @@ class TestG3dRebuildReferenceTracking:
         assert rec.refs["sched_wraps_opt"]
 
 
-# --- G3e: per-stage optimizer override + HybridMuonAdamW across a boundary ----
+# --- per-stage optimizer override + HybridMuonAdamW across a boundary ----
 
 
-class TestG3ePerStageOptimizer:
+class TestPerStageOptimizer:
     def test_three_stage_optimizer_override_rebuilds_class(self, data):
         seed_everything(3, workers=True)
         model = build_model(

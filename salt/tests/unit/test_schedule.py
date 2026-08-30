@@ -1,6 +1,6 @@
 """Schema + instantiation-time validation for `training_schedule`.
 
-Covers gate **G2c** (an unknown module name in a freeze spec → `ConfigError` at
+Covers unknown-name validation (an unknown module name in a freeze spec → `ConfigError` at
 `SaltModule.__init__`) plus the rest of the fail-loud parse/validate surface:
 `frozen` XOR `trainable`, empty schedule, duplicate `order`, epoch allocation,
 and stage ordering. All CPU-safe — no DataLoader is built.
@@ -199,7 +199,7 @@ class TestDesugarLegacy:
 
 class TestStepAllocation:
     """Per-stage OneCycle step allocation from estimated_stepping_batches
-    (Gotcha #1: never the whole-run figure for a sub-stage)."""
+    (a sub-stage never gets the whole-run figure)."""
 
     def test_single_stage_returns_total_unchanged(self):
         sched = TrainingSchedule.desugar_legacy(MODULE_NAMES)
@@ -255,7 +255,8 @@ class TestChangesFreezeAcrossStages:
 
 
 class TestSaltModuleInstantiation:
-    """G2c + schedule storage at SaltModule.__init__ (no trainer, no DataLoader)."""
+    """Freeze-spec name validation + schedule storage at SaltModule.__init__
+    (no trainer, no DataLoader)."""
 
     def test_unknown_module_name_errors_at_init(self, norm_dict):
         modules = build_gn2v2_modules(norm_dict)

@@ -12,7 +12,7 @@ The v1 stack (the `salt.models`, `salt.data`, `salt.utils`, `salt.callbacks`,
 deleted from `main`.
 All v1↔v2 numerical parity was established and passed at the frozen commit
 **`29c67a1`** (`29c67a186f01`) — the last commit where both stacks coexist and
-the parity gates (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
+the parity suite (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
 green.
 
 **Doctrine (user decision):** comparisons against v1 (or a pinned upstream)
@@ -28,49 +28,14 @@ truth for the v1 reference. Git history is the archive.
 | v1 ↔ v2 numerical parity | `29c67a1` (`29c67a186f01`) | this repo — `git checkout 29c67a1` |
 | v2 MaskFormer ↔ upstream | `6570e85` | upstream salt — see checkout below |
 
-The upstream MaskFormer equivalence (established during the MFU wave) closes
-at the upstream pin. To reproduce the comparison:
+The upstream MaskFormer equivalence closes at the upstream pin. To
+reproduce the comparison:
 
 ```bash
 git remote add upstream ssh://gitlab.cern.ch:7999/aft/algorithms/salt.git  # if absent
 git fetch upstream
 git checkout 6570e85   # the validated upstream MaskFormer reference
 ```
-
-### Closure evidence
-
-The remaining in-tree frozen comparison artifacts were retired at this commit.
-In each case the frozen artifact IS the reference output, so the final green
-run at deletion time IS the final parity check — none was regenerated from the
-pin (redundant by construction):
-
-- **`salt/tests/_fixtures/gn2v2_dummy_oracle/`** (frozen `WriterCallback` eval
-  H5 + ckpt): the byte-parity tests consuming it were green at `b8d81bd`
-  (pipeline `#15271499`) and `fb90a7c` (pipeline `#15272018`). Retired test
-  node ids:
-  `salt/tests/integration/test_outputs_h5_parity.py::TestH5OutputWriterParity::{test_deferred_columns_present_in_oracle,test_groups_match,test_semantic_h5_parity}`
-  and `::TestCutoverCliE2E::{test_cli_groups_match_oracle,test_cli_semantic_h5_parity}`.
-  The file keeps the live single-leg CLI e2e checks (softmax-once, column
-  presence) re-anchored to a live 1-epoch fit.
-- **`salt/tests/_fixtures/upstream_mf_snapshot/`** +
-  **`salt/tests/_fixtures/mf_writer_parity/upstream_6570e85_schema.json`**
-  (vendored upstream MaskFormer modules + writer schema): the snapshot modules
-  had zero consumers left; the schema-parity assertions in
-  `salt/tests/unit/outputs/test_maskformer_fold_w6b.py::TestSchemaParityVsFixture`
-  (green in the same pipelines) were re-anchored to first-principles literals
-  and the upstream cross-checks retired. Closure at upstream pin `6570e85`.
-  Also retired: the `/tmp`-golden ONNX contract tests
-  (`test_onnx_fold_w2.py::test_folded_gn2v2_export_contract_matches_oracle`
-  re-anchored to pinned literals;
-  `test_onnx_fold_w3.py::test_maskformer_folded_contract_matches_oracle`
-  dropped — its literal twin `test_maskformer_folded_export_contract` stays).
-- **`map_v1_state_dict`** (v1→v2 checkpoint weight mapper,
-  `salt/model/state_dict.py`) + `salt/tests/_fixtures/v1_gn2_state_dict.json`
-  + `salt/tests/unit/nn/test_state_dict.py::TestStateDictMapping::*`:
-  v1-checkpoint loading is deliberately dropped — recoverable from history
-  (`fb90a7c`) or usable at the pin `29c67a1`. `SaltModule.on_load_checkpoint`
-  now detects the v1 (`ModelWrapper`) state-dict layout (`model.pool_net.*`
-  keys) and raises an explicit `ConfigError` instead of a missing-keys cascade.
 
 **Regeneration recipe** (only if the frozen-oracle check is ever wanted again):
 `generate_oracle.py` was a throwaway script never committed — reconstruct it
@@ -512,8 +477,7 @@ legacy config still carrying `export.outputs` fails with the migration
 error. A trainer config whose sink declares neither `inputs` nor
 `model_name` (and carries no deprecated top-level `export:` block either)
 keeps the section-derived sinks but WARNS that inputs/model_name were
-unchecked (promoted under `--strict` — the converter CI gate expects
-converted configs to declare the sink's `init_args`). Predictions narrowed
+unchecked (promoted to an error under `--strict`). Predictions narrowed
 out of the manifest (a
 `modes: [test]` writer, or a task listed in no export-mode
 `RunTaskOutput`) show up as info-level ONNX deadcode findings (the
@@ -691,7 +655,7 @@ How it works (no data file is touched — config + checkpoint only):
 - The **checker** runs by default after export (`--no-check` to skip):
   eager-v2-torch vs onnxruntime over the v1 sweep (L=0..39 x `--trials`,
   including L=0), outputs addressed by name; v1 bars (float 1e-4 + no-NaN
-  + no-exact-zero; int8 exact). `--float-atol 1e-6` for the gate bar.
+  + no-exact-zero; int8 exact). `--float-atol 1e-6` for a stricter bar.
 - Aliases: `{port: inputs.global, alias: inputs.jets}` binds a port from
   another input's tensor (the GN3 global stream; clone when the `Features`
   declarations match, name-resolved `index_select` gather otherwise).
@@ -708,7 +672,7 @@ How it works (no data file is touched — config + checkpoint only):
   `torch.onnx.export` — the default-on sweep checker (incl. L=0) is the
   proof the traced graph is correct.
 
-Programmatic surface for gates/tests (no checkpoint needed):
+Programmatic surface for tests (no checkpoint needed):
 `salt.outputs.sinks.onnx.export_graph(modules, export_cfg, variables, path)` — the
 output set derives from the folded `OnnxExportSink` in `modules`; passing
 a legacy reduce-manifest `outputs=` list is a hard `ConfigError` — plus
@@ -742,18 +706,6 @@ The v2 namespace was flattened from `salt.core.*` to `salt.*` (e.g.
 
 - **v1 checkpoints** (the `ModelWrapper` `model.pool_net.*` state-dict layout)
   are **not** directly loadable — `SaltModule.on_load_checkpoint` rejects them
-  with a clear error. Convert them offline via the v1→v2 weight mapper
-  (`map_v1_state_dict` / the `scripts/convert_v1_model.py` pattern) or use them
-  at the frozen pin `29c67a1` (see [Parity-closure doctrine](#parity-closure-doctrine-v1-vs-v2-comparisons)).
-
-## Parity and gate harnesses — RETIRED
-
-The standalone v1-vs-v2 migration harnesses (`parity_gn2`, `gates_m2`,
-`gates_m3`, `gates_m4`, `gates_m6` + their pytest wrappers) served the
-v1→v2 migration and are retired per the parity-closure doctrine above —
-they ran green at the frozen pin and live in git history (the m2/m3/m6
-sweep closed at `1190d7f`; `git checkout 29c67a1` for the full v1-vs-v2
-set). Live coverage of the same surfaces is the ordinary test suite:
-`salt/tests/unit` (CPU-safe) and `salt/tests/integration` (the
-end-to-end fit/test/export flows, e.g. `test_outputs_section.py`,
-`test_onnx_export.py`, `test_regression_e2e.py`).
+  with a clear error. Convert them offline with the v1→v2 weight mapper
+  (`map_v1_state_dict`, in git history at `fb90a7c`) or use them at the frozen
+  pin `29c67a1` (see [Parity-closure doctrine](#parity-closure-doctrine-v1-vs-v2-comparisons)).

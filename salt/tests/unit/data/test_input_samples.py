@@ -187,7 +187,7 @@ class TestSetupPassResolution:
         assert source_num(ctx, "reader", "train") == 200
         assert source_num(ctx, "reader", "val") == -1  # whole-dict default
 
-    def test_deepest_path_picks_pattern_in_w3a(self, data):
+    def test_deepest_path_is_pattern_when_only_pattern_registered(self, data):
         # only `pattern` exists in the registry, so deepest == pattern.
         inp = InputSamples(files={"train": data["h5"]})
         inp.name = "input_samples"

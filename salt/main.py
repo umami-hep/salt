@@ -538,7 +538,7 @@ def _section_runs_mode(section: Mapping[str, Any], mode: Any) -> bool:
 def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     """Whether any ``RunTaskOutput`` in the section opts into ``export`` (ONNX).
 
-    Gates the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
+    Drives the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
     leaves (the manifest-only writers — input copies, pad masks — do not), so a
     section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
     tuple.
@@ -915,7 +915,7 @@ class SaltCLI(LightningCLI):
             # already present, so registering first is what stops a declared
             # sink being double-wired alongside an injected one.
             self._register_section_sinks(model)
-            # plan 50 Phase B: the command wires the implicit per-command sinks
+            # the command wires the implicit per-command sinks
             # (test -> H5, export/graph -> ONNX) over the composed section — so a
             # config declaring only WHAT (writers + modes) gets the right sink
             # without ever naming H5OutputSink/OnnxExportSink.
@@ -1089,7 +1089,7 @@ class SaltCLI(LightningCLI):
             if fit_cfg.get(_INIT_FROM_ARG) and fit_cfg.get("ckpt_path"):
                 raise ConfigError(
                     "--init_from and --ckpt_path are mutually exclusive: --ckpt_path RESUMES "
-                    "(restores trainer state, strict weight load, plan-hash gate enforced) "
+                    "(restores trainer state, strict weight load, plan-hash check enforced) "
                     "while --init_from WARM-STARTS a fresh run from a possibly surgically-"
                     "changed architecture (weights-only, per-module accounting). Pick one."
                 )

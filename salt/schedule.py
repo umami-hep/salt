@@ -228,7 +228,7 @@ class TrainingSchedule:
     def stage_step_allocations(self, total_steps: int, max_epochs: int) -> list[int]:
         """Split `total_steps` (Lightning's whole-run `estimated_stepping_batches`)
         across the stages proportionally to their epoch budgets, so each stage's
-        `OneCycleLR.total_steps` spans only that stage (Gotcha #1). Boundaries are
+        `OneCycleLR.total_steps` spans only that stage. Boundaries are
         rounded at each non-final stage end and the final stage takes the exact
         remainder, so the allocations always sum to `total_steps`. A single-stage
         schedule returns ``[total_steps]`` unchanged (bitwise parity path).

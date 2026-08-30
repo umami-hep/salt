@@ -1,4 +1,4 @@
-"""Gates: per-stage early stopping.
+"""Per-stage early stopping.
 
 A stage may declare `early_stop`; the stage ends at whichever comes first — its
 epoch cap or the early-stop trigger. A non-final trigger advances to the next
@@ -9,24 +9,24 @@ resume reconstructs them (not epoch arithmetic). A config with no `early_stop`
 anywhere behaves — and checkpoints — bitwise-identically to a build without the
 early-stop machinery.
 
-Gates:
+Covered:
 
-- **G7a** legacy parity — a no-early-stop config's checkpoint `schedule` payload is
+- legacy parity — a no-early-stop config's checkpoint `schedule` payload is
   exactly ``{stage_index, stage_name}`` (no new keys); the freeze, schedule and
   resume suites cover the bitwise-state parity.
-- **G7b** two-stage: stage-0 `early_stop` triggers at epoch k < its epoch cap →
+- two-stage: stage-0 `early_stop` triggers at epoch k < its epoch cap →
   the transition fires at k, the stage-1 optimizer owns the (now-unfrozen) stage-1
   trainable set, stage-1's OneCycle envelope is sized from its own budget, and the
   boundary record reads ``reason="early_stop"``. Stage 0's OneCycle envelope was
   truncated (fewer steps taken than its `total_steps`).
-- **G7c** final-stage `early_stop` ends the fit before `max_epochs`; a non-final
+- final-stage `early_stop` ends the fit before `max_epochs`; a non-final
   early-stop never sets `trainer.should_stop` (it advances instead).
-- **G7d** resume: a mid-stage checkpoint with a partially-consumed patience counter
+- resume: a mid-stage checkpoint with a partially-consumed patience counter
   restores `best_score`/`wait_count` exactly (patience continues identically); a
   checkpoint saved after an early-stopped boundary resumes into the correct stage.
   A changed `early_stop` criterion since the checkpoint is a hard `ConfigError`.
 
-All DataLoaders use ``num_workers=0`` (agent memcg gotcha). Early-stop decisions
+All DataLoaders use ``num_workers=0``. Early-stop decisions
 are driven by an injected, fully-deterministic monitor metric (`MetricInjector`),
 so the stop epoch is independent of the toy model's actual val loss.
 """
@@ -165,10 +165,10 @@ def _module_param_ids(model: SaltModule, name: str) -> set[int]:
     return {id(p) for p in model.net[name].parameters()}
 
 
-# --- G7a: legacy parity — checkpoint payload unchanged -----------------------
+# --- legacy parity — checkpoint payload unchanged -----------------------
 
 
-class TestG7aLegacyPayloadParity:
+class TestLegacyPayloadParity:
     def _saved_schedule_payload(self, data, tmp_path, schedule, *, max_epochs: int = 1) -> dict:
         seed_everything(SEED, workers=True)
         model = build_model(data, schedule=schedule)
@@ -195,7 +195,7 @@ class TestG7aLegacyPayloadParity:
         payload = self._saved_schedule_payload(data, tmp_path, schedule, max_epochs=2)
         assert set(payload) == {"stage_index", "stage_name"}
 
-    def test_early_stop_payload_carries_w7_keys(self, data, tmp_path):
+    def test_early_stop_payload_carries_state_keys(self, data, tmp_path):
         schedule = {"stages": {"fit": {"early_stop": {"monitor": MONITOR, "patience": 5}}}}
         seed_everything(SEED, workers=True)
         model = build_model(data, schedule=schedule)
@@ -210,10 +210,10 @@ class TestG7aLegacyPayloadParity:
         assert payload["early_stop_state"]["best_score"] == 1.0
 
 
-# --- G7b: two-stage, stage-0 early-stops before its epoch cap -----------------
+# --- two-stage, stage-0 early-stops before its epoch cap -----------------
 
 
-class TestG7bStageZeroEarlyStop:
+class TestStageZeroEarlyStop:
     SCHEDULE = {
         "stages": {
             # cap = 6 epochs, but patience=2 with a flat monitor stops it at epoch 3
@@ -280,10 +280,10 @@ class TestG7bStageZeroEarlyStop:
         assert max(t["epoch"] for t in rec.trace) == 7
 
 
-# --- G7c: final-stage early-stop ends the fit --------------------------------
+# --- final-stage early-stop ends the fit --------------------------------
 
 
-class TestG7cFinalStageEarlyStop:
+class TestFinalStageEarlyStop:
     def test_single_stage_early_stop_ends_before_max_epochs(self, data):
         schedule = {"stages": {"fit": {"early_stop": {"monitor": MONITOR, "patience": 2}}}}
         seed_everything(SEED, workers=True)
@@ -318,10 +318,10 @@ class TestG7cFinalStageEarlyStop:
         assert max(t["epoch"] for t in rec.trace) < 9  # ended before max_epochs
 
 
-# --- G7d: resume across data-dependent boundaries ----------------------------
+# --- resume across data-dependent boundaries ----------------------------
 
 
-class TestG7dResume:
+class TestEarlyStopResume:
     SCHEDULE = {
         "stages": {
             "warmup": {
