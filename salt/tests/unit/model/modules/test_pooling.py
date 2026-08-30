@@ -26,7 +26,7 @@ from salt.model.modules.tasks import (
 from salt.tests._fixtures.gn2v2_fixture import (
     gn2v2_sources,
 )
-from salt.tests.unit.nn.conftest import B, T, fit_bundle
+from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 
 class TestSplitAndPooling:

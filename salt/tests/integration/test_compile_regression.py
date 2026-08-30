@@ -55,7 +55,7 @@ B, T = 6, 10
 # GN2v2 (norm -> stream embed -> concat -> encoder -> split -> pool -> three
 # task heads -> loss). torch-math attention: the flash-varlen unpad/repad seam
 # does not appear (there is no flash-attn on a CPU box, and the GPU seam has its
-# own test in salt/tests/unit/utils/test_tensor_utils_compile.py).
+# own test in salt/tests/unit/utils/test_tensor_utils.py).
 #
 # Empty. Every module either captures whole or, in the vertexing head's case,
 # captures nothing at all — see NO_GRAPH below, which is the other half of this

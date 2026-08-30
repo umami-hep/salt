@@ -273,7 +273,7 @@ class TestEdgeHeadCompileSeam:
         The dense work on both sides of the call is deliberate: dynamo counts
         breaks as ``graphs - 1``, so a traced function that is ONLY a disabled
         call captures no graph and reports a meaningless zero (the same trap
-        `test_tensor_utils_compile` documents for the flash seam).
+        `test_tensor_utils` documents for the flash seam).
         """
         head = self._head()
         x, pad_masks, labels = self._inputs(seed=3)

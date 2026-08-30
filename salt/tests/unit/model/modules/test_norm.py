@@ -23,7 +23,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
     build_gn2v2_modules,
     compile_gn2v2,
 )
-from salt.tests.unit.nn.conftest import fit_bundle
+from salt.tests.unit.model.conftest import fit_bundle
 
 # construction + declare_io per module
 

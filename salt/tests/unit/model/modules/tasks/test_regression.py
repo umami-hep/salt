@@ -30,7 +30,7 @@ from salt.tests._fixtures.v2_builders import (
     compile_regression,
     make_regression_labels,
 )
-from salt.tests.unit.nn.conftest import B, T
+from salt.tests.unit.model.conftest import B, T
 
 # RegressionTaskModule (targets/denom/norm_params/scaler, custom_output_names,
 # sequence, multi-output, mode-split de-scaling)

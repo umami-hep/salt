@@ -34,7 +34,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
     compile_gn2v2,
     gn2v2_sources,
 )
-from salt.tests.unit.nn.conftest import B, T, fit_bundle
+from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 # full plan execution (FIT + TEST), debug mode on
 

@@ -20,7 +20,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
 )
-from salt.tests.unit.nn.conftest import B, T, fit_bundle
+from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 
 class TestStreamEmbed:

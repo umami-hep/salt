@@ -14,7 +14,7 @@ from salt.data.base import WorkerCtx
 from salt.data.readers import multisample_reader as msr
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.graph.spec import Mode
-from salt.tests.unit.data.test_multisample_reader import StubReader
+from salt.tests.unit.data.readers.test_multisample_reader import StubReader
 
 _LOGGER_NAME = msr.__name__  # "salt.data.readers.multisample_reader"
 _RECORD_RE = re.compile(r"(\w+)=(\d+)/(\d+)")

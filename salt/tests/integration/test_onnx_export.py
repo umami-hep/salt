@@ -43,7 +43,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
     write_parity_norm_dict,
 )
 from salt.tests._fixtures.gn2v2_test_config import small_config
-from salt.tests.unit.onnx.test_adapter import (
+from salt.tests.unit.outputs.sinks.onnx.test_adapter import (
     VARIABLES,
     bind_producers,
     gn2_export_cfg,

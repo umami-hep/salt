@@ -20,7 +20,7 @@ from salt.model.modules import (
     BindError,
     TransformerEncoder,
 )
-from salt.tests.unit.nn.conftest import B, T, fit_bundle
+from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 
 class TestTransformerEncoder:

@@ -106,7 +106,7 @@ class TestMaterialisedTrainability:
 # bind_all / materialise_all de-duck-typing: the PRODUCTION caller argument
 # (SaltModule._graph_modules, saltmodule.py) is model-only by construction (never a terminal
 # sink — see salt.model.bind.bind_all's docstring for the audit). But at least one TEST call
-# site (salt.tests.unit.onnx.test_adapter's gn2_folded_modules fixture) calls bind_all directly
+# site (salt.tests.unit.outputs.sinks.onnx.test_adapter's gn2_folded_modules fixture) calls bind_all directly
 # on a per-mode LOCAL module dict with a terminal OnnxExportSink folded in, mirroring
 # SaltModule.compile_mode's own fold — so bind_all/materialise_all keep an explicit
 # isinstance(module, SaltModelModule) partition (not getattr/callable duck-typing) rather than

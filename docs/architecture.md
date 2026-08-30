@@ -272,7 +272,7 @@ classification (`ClassProbs`/`SeqClassProbs`/`SeqClassIndex` in
 `salt.outputs.task_output`), vertexing (in-graph union-find), and
 regression (`RegressionTaskModule.get_output` — de-scaled f4 columns in
 TEST, squeezed per-target scalars in ONNX) are all first-class in both
-modes. `salt/tests/unit/nn/test_get_output.py` carries the per-family
+modes. `salt/tests/unit/model/test_get_output.py` carries the per-family
 oracles.
 
 ### Add a custom output column

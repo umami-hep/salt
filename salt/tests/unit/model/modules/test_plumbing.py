@@ -1,4 +1,4 @@
-"""Unit tests for Concat and VectorConcat (mirror of concat.py + vector_concat.py)."""
+"""Unit tests for Concat and VectorConcat (mirror of plumbing.py)."""
 
 from __future__ import annotations
 

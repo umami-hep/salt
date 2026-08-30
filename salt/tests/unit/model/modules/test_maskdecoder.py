@@ -26,7 +26,7 @@ from salt.tests._fixtures.v2_builders import (
     build_maskformer_decoder_modules,
     compile_maskformer_decoder,
 )
-from salt.tests.unit.nn.conftest import B, T
+from salt.tests.unit.model.conftest import B, T
 
 
 class TestMaskDecoder:
