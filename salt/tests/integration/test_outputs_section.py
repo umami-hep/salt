@@ -1,12 +1,9 @@
-"""The outputs:-section + dumb-sink eval H5 — v2 self-consistency gate.
+"""The outputs:-section + dumb-sink eval H5 — v2 self-consistency checks.
 
-Historical note: this file was the FULL-PAYLOAD H5 PARITY GATE
-diffing the outputs:-section eval H5 against the legacy ``WriterCallback``
-oracle. The legacy writers path is deleted; the byte-for-byte parity was proven
-and CLOSED at git tag/hash 29c67a1 (parity-closure doctrine, docs/architecture.md).
-What remains are the v2-only checks: the section stack runs end-to-end via the
-real CLI, and the section H5's contents/order are asserted from first principles
-(config + section manifest), not from a legacy oracle.
+The section stack runs end-to-end via the real CLI, and the section H5's
+contents/order are asserted from first principles (config + section manifest).
+v1 byte-parity was closed at the frozen pin 29c67a1 (parity-closure doctrine,
+docs/architecture.md).
 """
 
 from __future__ import annotations
@@ -43,7 +40,7 @@ N_TEST = 300
 
 
 def _golden_task_columns() -> dict[str, list[str]]:
-    """Per-stream ordered flat TASK column names from the cutover34 golden."""  # noqa: DOC201
+    """Per-stream ordered flat TASK column names from the committed golden."""  # noqa: DOC201
     golden = json.loads(GOLDEN.read_text())
     per_stream: dict[str, list[str]] = {}
     for col in golden["h5"]["columns"]:
@@ -52,15 +49,13 @@ def _golden_task_columns() -> dict[str, list[str]]:
 
 
 def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The FULL ordered per-stream H5 column contract (Phase-C golden).
+    """The FULL ordered per-stream H5 column contract from the committed golden.
 
     Exact columns = input-copy source columns FIRST (in source-file order; an
-    empty golden ``copy_inputs`` means the v1 copy-ALL default, so every
-    source field is copied), then task columns in golden order — which
-    includes each task's trailing ``target_{task}`` label
+    empty golden ``copy_inputs`` means the copy-ALL default), then task columns
+    in golden order — including each task's trailing ``target_{task}`` label
     column — then the trailing pad-mask column. Asserting H5 dtype.names EQUAL
-    this (not merely contain it) enforces "no ADDED columns" beyond the
-    committed golden.
+    this (not merely contain it) enforces "no ADDED columns".
     """  # noqa: DOC201 - test helper, no Returns block per docstring policy
     h5 = json.loads(GOLDEN.read_text())["h5"]
     tasks: dict[str, list[str]] = {}
@@ -158,9 +153,8 @@ def section_h5(data, ckpt) -> Path:
 class TestSectionH5SelfConsistency:
     """The outputs:-section eval H5, asserted from first principles.
 
-    The legacy-WriterCallback parity oracle is retired (DEL-1; parity closed at
-    29c67a1) — every expectation here derives from the section config + the
-    section manifest alone.
+    Every expectation here derives from the section config + the section
+    manifest alone (v1 parity closed at the frozen pin 29c67a1).
     """
 
     def test_groups_are_the_reader_streams(self, section_h5):
@@ -174,15 +168,13 @@ class TestSectionH5SelfConsistency:
             assert f["jets"].shape[0] == N_TEST
 
     def test_task_columns_match_golden(self, data, section_h5):
-        """The eval H5's columns EQUAL the committed cutover34 golden, per stream, in order.
+        """The eval H5's columns EQUAL the committed golden, per stream, in order.
 
-        Exact-list equality (not membership): pre-Phase-C columns byte-identical
-        plus exactly the per-task ``target_{task}`` label columns the golden
-        declares (jets_classification / track_origin / track_vertexing). Any
-        OTHER added column — an un-deferred extra leaf from a bad expose merge —
-        fails here. Nothing is deferred in this config: the vertexing get_output
-        fold mints the per-token VertexIndex integer column alongside the
-        classification probs.
+        Exact-list equality (not membership): any added/removed/reordered
+        column — e.g. an un-deferred extra leaf from a bad expose merge —
+        fails here. Nothing is deferred in this config: the vertexing
+        get_output fold mints the per-token VertexIndex integer column
+        alongside the classification probs.
         """
         with h5py.File(data["h5"]) as src:
             src_cols = {
@@ -207,7 +199,7 @@ class TestSectionH5SelfConsistency:
         for s in ORIGIN_SUFFIXES:
             assert np.issubdtype(tracks[f"{RUN_NAME}_{s}"], np.floating)
         assert np.issubdtype(tracks["VertexIndex"], np.integer)
-        # Phase-C target-label columns: unprefixed (model-independent), integer
+        # target-label columns: unprefixed (model-independent), integer
         assert np.issubdtype(jets["target_jets_classification"], np.integer)
         assert np.issubdtype(tracks["target_track_origin"], np.integer)
         assert np.issubdtype(tracks["target_track_vertexing"], np.integer)
@@ -466,11 +458,9 @@ class TestSectionWriterUnits:
             RunTaskOutput(tasks=["a", "a"])
 
 
-# ONNX contract: the dumb OnnxExportSink names the section's get_output leaves.
-# PROVES the LOCKED no-double-split decision: get_output squeezes the global
-# per-class scalars, so the dumb sink ONLY names them. Expectations are
-# hand-pinned literals (the /tmp golden apparatus is retired — closure at the
-# v1 pin, see docs/architecture.md).
+# ONNX contract: the dumb OnnxExportSink names the section's get_output
+# leaves — get_output squeezes the global per-class scalars, the sink ONLY
+# names them (no double split). Expectations are hand-pinned literals.
 
 # the FULL gn2v2 contract — pb/pc/pu globals + the TrackOrigin per-token
 # argmax + the VertexIndex per-token union-find (both int8).

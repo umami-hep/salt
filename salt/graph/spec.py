@@ -432,22 +432,14 @@ class GraphModule(Protocol):
 class SinkModule(Protocol):
     """A terminal sink node: stays in `plan.steps` for render/demand, but is not a forward.
 
-    A sink is a `GraphModule` (it carries `name` + `declare_io`) whose
-    ``declare_io`` produces nothing — it is a terminal CONSUMER of
-    ``outputs.*`` that finalises a side effect (an H5 file, the ONNX output
-    tuple), not a per-batch tensor producer. The planner keeps it in the
-    plan (so it renders its own card and anchors demand), but `Executor`
-    excludes it from the per-batch forward + write-once merge loop: a sink
-    produces no tensor and is not invoked as a callable. This is the
-    inverse of the setup-only partition
-    (`salt.data.datamodule._is_setup_only`), which removes setup
-    modules from the per-batch plan entirely — a sink stays IN the plan.
-
-    The marker is the ``is_sink()`` method returning ``True`` (duck-typed,
-    runtime-checkable): `Executor.__init__` partitions plan steps into
-    forward steps vs sink steps by it. The lifecycle
-    (``consume``/``flush``) is driven by the generated Lightning bridge,
-    not by the executor.
+    A sink is a `GraphModule` whose ``declare_io`` produces nothing — a
+    terminal CONSUMER of ``outputs.*`` that finalises a side effect (an H5
+    file, the ONNX output tuple). The planner keeps it in the plan (it
+    renders its own card and anchors demand) but `Executor` excludes it from
+    the per-batch forward loop: it produces no tensor and need not be
+    callable. The marker is ``is_sink()`` returning ``True`` (duck-typed);
+    the ``consume``/``flush`` lifecycle is driven by the generated Lightning
+    bridge, not the executor.
     """
 
     name: str

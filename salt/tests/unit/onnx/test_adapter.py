@@ -281,18 +281,15 @@ class TestExportSinkOutputs:
             sink.output_names()
 
 
-# the SHIPPED reduces are RETIRED — folded into conversion nodes.
-# The argmax/maskformer math is now proven BITWISE in
-# test_onnx_fold_classification.py (SeqClassIndex/Combination) and test_onnx_fold_objects.py
-# (MaskFormerObjects) against the same v1 chains these reduces composed; the union-find
-# vertex index rides the live VertexingTaskModule.get_output path (tests/unit get_output).
-# These tests pin the RETIREMENT (no shipped reduce registered).
+# no shipped reduce is registered — the conversion math lives on the
+# conversion nodes (proven bitwise in test_onnx_fold_classification.py /
+# test_onnx_fold_objects.py) and on VertexingTaskModule.get_output.
 
 
 class TestRetiredReduces:
     def test_no_shipped_reduces_registered(self):
-        # the five shipped reduce REGISTRATIONS are gone (the conversion
-        # nodes own the math); registered_reduces() carries no shipped name
+        # registered_reduces() carries no shipped name — the conversion
+        # nodes own the math
         from salt.outputs.sinks.onnx.reduces import registered_reduces  # noqa: PLC0415
 
         shipped = {"split_scalars", "argmax", "vertex_union_find", "leading_object", "object_index"}
@@ -363,8 +360,7 @@ class TestRegisterReduce:
         assert fresh_reduce_name in cfg.KNOWN_REDUCES
 
     def test_register_and_use_a_new_reduce(self, fresh_reduce_name):
-        # (the retired `_resolve_output` manifest resolver is gone; the registry
-        # spec is the dtype/arity authority now.)
+        # the registry spec is the dtype/arity authority
         register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8", per_token=False)
         # live everywhere: registry, config view, dtype lookup
         assert fresh_reduce_name in registered_reduces()

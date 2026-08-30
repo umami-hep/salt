@@ -1,40 +1,19 @@
 """Every shipped config is exercised, by construction.
 
 Discovery is a recursive glob of ``salt/configs`` — a config added anywhere in
-the tree is picked up automatically and cannot silently go untested.
+the tree is picked up automatically and cannot silently go untested. A shipped
+file is either a **config** (has a ``model:`` AND a ``data.modules.reader`` —
+a whole run; overlays declare their bases in their own ``include:``) or a
+**fragment** (only one half). A fragment has no plan to compile, so it is NOT
+passed alone to ``graph validate``; fragments are gated by
+`test_event_tagger_readers.py` (reader constructor invariants + cross-format
+contract) and the ``ttbar_vs_hh4b_event_tagger`` pairings by
+`test_production_configs.py`.
 
-A shipped file is one of two things, decided from its own content rather than a
-list here:
-
-- a **config**: it has a ``model:`` and a ``data.modules.reader``, so it is a
-  whole run and stands alone (an overlay declares its bases in its own
-  ``include:`` block, so the stack lives in the config, not in a table that
-  could drift from it);
-- a **fragment**: it has only one half. ``readers/*`` fragments carry a reader
-  and no model; ``ttbar_vs_hh4b_event_tagger`` carries a model and no reader,
-  because pairing it with either reader fragment IS the demonstration.
-
-A fragment has no plan to compile and nothing to fit, so it is NOT passed alone
-to ``graph validate``. Making one validate standalone means giving it a model it
-does not have — that was tried on ``readers/physlite`` and reverted. Fragments
-are gated by `test_event_tagger_readers.py` instead, which instantiates their
-reader (catching every constructor invariant) and holds the cross-format
-contract; the ``ttbar_vs_hh4b_event_tagger`` pairings are additionally driven
-through the full lifecycle by `test_production_configs.py`.
-
-Two tiers, over the whole configs:
-
-**Tier A** (`test_config_plan_compiles`): all-mode ``salt graph validate``.
-
-**Tier B** (`test_config_fast_dev_run`): a real 2-batch fit for every config a
-synthetic fixture can serve. Configs whose streams the shipped dummy writer
-does not produce carry an explicit ``xfail`` naming the missing piece, so the
-gap is visible in the report and shrinks as fixtures are added — never a silent
-skip.
-
-Adding a file to ``salt/configs`` therefore forces one of four explicit
-outcomes: it compiles standalone, it declares its stack, it declares why it
-cannot yet be fitted, or it is a fragment and says so by construction.
+Two tiers: **Tier A** — all-mode ``salt graph validate`` for every config.
+**Tier B** — a real 2-batch fit for every config a synthetic fixture can
+serve; configs the dummy writer cannot serve carry an explicit ``xfail``
+naming the missing piece — never a silent skip.
 """
 
 from __future__ import annotations
@@ -84,7 +63,6 @@ NO_FIXTURE: dict[str, str] = {
     "GN3X": "fixture flow stream lacks the flow_* field prefix",
     "legacy/dips": "labels on raw HadronConeExclTruthLabelID; fixture writes PDG-like values",
     "gn2v2-opendata": "sources its files through input_samples, not data.train_file",
-    # measured, not guessed — see the diagnosis in experiment 53
     "GN3EPCLV01": "no global stream in write_dummy_file",
     "GN3/GN3_SoftE": "no global stream in write_dummy_file",
     "GN3/GN3_tracklabel": "no tracks.ftagTruthSourceLabel in write_dummy_file",

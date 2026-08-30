@@ -629,27 +629,15 @@ def _order_stages(stages: list[StageConfig]) -> list[StageConfig]:
     return [stage for _, stage in keyed]
 
 
-# ---------------------------------------------------------------------------
-# Reducer-safe freeze semantics.
-#
-# A module frozen in the INITIAL stage via ``requires_grad=False`` applied BEFORE
-# DDP wraps is permanently excluded from the reducer's fixed managed-parameter
-# set; a later unfreeze never registers a reducer hook, so its grads stay
-# rank-local and ranks silently desync. The reducer-safe
-# freeze mode fixes this by NEVER dropping ``requires_grad`` on a schedule-managed
-# param that the schedule may later unfreeze under a distributed strategy — every
-# managed param stays in the reducer at wrap. "Frozen" is then enforced by
-# (a) exclusion from the optimizer (see ``trainable_named_params``), (b) ``.eval()``
-# on the frozen module, (c) no optimizer step → bitwise-immobile even though grads
-# are computed/all-reduced, and (d) explicit grad clearing each step (see
-# ``clear_frozen_grads``) so a frozen stage's accumulated gradients cannot survive
-# to the first post-unfreeze optimizer step. Cost: wasted backward compute + comms
-# for frozen params on multi-GPU multi-stage runs — accepted, documented.
-#
-# The predicate below is the SINGLE condition governing both this mode and the
-# ``find_unused_parameters`` auto-enable (they must agree). Off DDP or for a
-# static freeze set the requires_grad-based freeze is kept (optimal, bitwise-parity).
-# ---------------------------------------------------------------------------
+# Reducer-safe freeze: a module frozen via requires_grad=False BEFORE DDP wraps
+# is permanently excluded from the reducer's managed set — a later unfreeze
+# leaves its grads rank-local and ranks silently desync. Reducer-safe mode keeps
+# requires_grad=True on every schedule-managed param; "frozen" is enforced by
+# optimizer exclusion + eval() + per-step grad clearing (clear_frozen_grads).
+# Cost: wasted backward compute/comms for frozen params — accepted. The
+# predicate below is the SINGLE condition for both this mode and the
+# find_unused_parameters auto-enable; keep them in lockstep. Off DDP / static
+# freeze, the requires_grad freeze is kept (optimal, bitwise-parity).
 
 
 def reducer_safe_freeze_required(strategy: Any, schedule: TrainingSchedule | None) -> bool:
@@ -657,15 +645,9 @@ def reducer_safe_freeze_required(strategy: Any, schedule: TrainingSchedule | Non
     schedule)`` pair: a DDP-family strategy (whose reducer fixes its managed-param
     set at wrap) combined with a schedule that changes the frozen set across
     stages (so a wrap-time-frozen module may later be unfrozen). Off a DDP-family
-    strategy, or for a static freeze set, returns ``False`` (the requires_grad
-    freeze is safe and optimal there). This is also the exact condition under
-    which ``find_unused_parameters`` is auto-enabled — keep them in lockstep.
-
-    Returns
-    -------
-    bool
-        ``True`` iff ``strategy`` exposes ``_ddp_kwargs`` (DDP-family) and
-        ``schedule`` changes its frozen set across stages.
+    strategy, or for a static freeze set, returns ``False``. True iff
+    ``strategy`` exposes ``_ddp_kwargs`` (DDP-family) and the schedule changes
+    its frozen set across stages.
     """
     if schedule is None or not schedule.changes_freeze_across_stages():
         return False
@@ -737,16 +719,11 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
             param.grad = None
 
 
-# ---------------------------------------------------------------------------
-# Per-stage early stopping.
-#
-# The tracker below owns the monitor/patience/min_delta arithmetic for the ACTIVE
-# stage so it is unit-testable in isolation and the `TrainingScheduleCallback`
-# stays stateless (all schedule state lives on the `SaltModule`). Boundaries become
-# data-dependent once a stage can early-stop, so `boundary_record` captures each
-# completed transition for the checkpoint — resume reconstructs the stage position
-# from records + the persisted tracker instead of epoch arithmetic.
-# ---------------------------------------------------------------------------
+# Per-stage early stopping: the tracker owns the monitor/patience/min_delta
+# arithmetic; all schedule state lives on the SaltModule (callback stateless).
+# Boundaries are data-dependent once a stage can early-stop, so boundary_record
+# captures each transition for the checkpoint — resume reconstructs position
+# from records + the persisted tracker, not epoch arithmetic.
 
 
 class EarlyStopTracker:

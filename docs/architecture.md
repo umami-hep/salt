@@ -15,7 +15,7 @@ All v1↔v2 numerical parity was established and passed at the frozen commit
 the parity suite (`parity_gn2`, the v1-vs-v2 fold/state-dict/ONNX tests) run
 green.
 
-**Doctrine (user decision):** comparisons against v1 (or a pinned upstream)
+**Doctrine:** comparisons against v1 (or a pinned upstream)
 are done by `git checkout <pin>` — NO frozen comparison artifacts (goldens,
 specimens, vendored snapshots) live in the tree. For v1, everything needed
 lives at `29c67a1` and passed there; the frozen pin is the single source of
@@ -282,11 +282,8 @@ classification (`ClassProbs`/`SeqClassProbs`/`SeqClassIndex` in
 `salt.outputs.task_output`), vertexing (in-graph union-find), and
 regression (`RegressionTaskModule.get_output` — de-scaled f4 columns in
 TEST, squeezed per-target scalars in ONNX) are all first-class in both
-modes. The legacy per-task rendering surface (`get_h5` / `output_names` /
-`onnx_outputs`) and the writer module family (`Writer` / `TaskWriter` /
-`ExportOnlyWriter` / `WriterCallback` under the old `salt.core.writers`) were
-retired; `salt/tests/unit/nn/test_get_output.py`
-carries the re-anchored per-family oracles.
+modes. `salt/tests/unit/nn/test_get_output.py` carries the per-family
+oracles.
 
 ### Add a custom output column
 

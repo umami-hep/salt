@@ -35,10 +35,8 @@ __all__ = [
     "WorkerCtx",
 ]
 
-# The setup-time carrier: the run `Bundle`'s write-once, dotted-key machinery
-# is leaf-type-agnostic, so it is reused as-is as the setup bundle — its
-# leaves are path strings / scalar artifacts instead of tensors. `SetupBundle`
-# is an alias (not a subclass) to keep the carrier a single implementation.
+# The run `Bundle`'s write-once, dotted-key machinery is leaf-type-agnostic,
+# so it is reused verbatim as the setup carrier (leaves are paths/scalars).
 SetupBundle = Bundle
 
 
@@ -72,11 +70,7 @@ class RowBlock:
 
 
 def _require_root_deps(who: str, extra: str) -> None:
-    """Import-time guard for the optional ROOT reader extras.
-
-    Raises a clear, actionable error pointing at the correct install command
-    instead of a bare ``ModuleNotFoundError`` from deep inside an array method.
-    Cheap when the deps are present (cached imports).
+    """Guard for the optional ROOT reader extras.
 
     Raises
     ------
@@ -128,11 +122,8 @@ class SaltDatasetModule(ABC):
     incompatible_with: tuple[str, ...] = ()
     """Class names of setup modules this module must NOT coexist with.
 
-    A reusable declarative mutual-exclusion pattern: a module names the class
-    names (strings, not types — the named class may not exist yet) it is
-    structurally incompatible with, and the setup-plan compiler — the only
-    thing that sees the full module dict — enforces it
-    (`_check_incompatibilities`). Default `()` (no exclusions). E.g. `VDS` sets
+    Strings, not types — the named class need not exist yet. Enforced by the
+    setup-plan compiler (`_check_incompatibilities`). E.g. `VDS` sets
     ``("ShmStage",)``: staging a VDS would copy h5py pointers, not data.
     """
 
@@ -151,11 +142,7 @@ class SaltDatasetModule(ABC):
         once per (worker process, plan) by `SaltDataset`.
         """
 
-    # -- setup-time face (once per stage, not per batch) ----------------------
-    # All three default to no-ops: a pure-source module (InputSamples/VDS/
-    # ShmStage) overrides only declare_setup_io/setup and inherits an empty
-    # declare_io; a pure processor inherits these no-ops; a dual-face reader
-    # overrides both.
+    # -- setup-time face (once per stage, not per batch; all default no-op) ----
 
     def declare_setup_io(self, stage: SetupStage) -> SetupIO:
         """Return the module's setup-time interface for `stage`; default empty.
@@ -171,15 +158,10 @@ class SaltDatasetModule(ABC):
     def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
         """Run this module's setup-time side-effect for `stage`; default identity.
 
-        The sole sanctioned setup-time ctx-mutation point (the setup analogue
-        of per-batch `read`). Runs once per stage inside
-        ``datamodule.setup(stage)``, reads its declared setup-`requires` off
-        `ctx`, may touch the filesystem (glob, build a VDS, copy to
-        ``/dev/shm``), and merges back only its declared setup-`produces`
-        (write-once). Same code path on every DDP rank.
-
-        The base default returns `ctx` unchanged — a no-op for per-batch-only
-        modules (processors) whose `declare_setup_io` is empty.
+        The sole sanctioned setup-time ctx-mutation point. Runs once per stage
+        inside ``datamodule.setup(stage)``, reads its declared setup-`requires`
+        off `ctx`, may touch the filesystem, and merges back only its declared
+        setup-`produces` (write-once). Same code path on every DDP rank.
         """
         del stage
         return ctx
@@ -233,12 +215,10 @@ class Reader(SaltDatasetModule):
     cuts: GlobalObjectCuts | None = None
     """Sample-axis row eligibility (index-build kept-index), when configured.
 
-    The uniform row-cut surface across readers: a `GlobalObjectCuts` evaluated once in
-    `prepare` over the reader's sample-axis scalar record, selecting which rows
-    enter the index. Changes `__len__`, and the served rows never read the dropped
-    ones. SAMPLE-AXIS ONLY (jets for jet readers, events for event readers) —
-    constituent (per-track) filtering is a separate concern and must NEVER route
-    through this engine. Default `None` (identity: every row eligible).
+    Evaluated once in `prepare` over the reader's sample-axis scalar record,
+    selecting which rows enter the index; changes `__len__`. SAMPLE-AXIS ONLY —
+    constituent (per-track) filtering must NEVER route through this engine.
+    Default `None` (every row eligible).
     """
 
     constituent_cuts: dict[str, ConstituentCuts]
@@ -255,11 +235,9 @@ class Reader(SaltDatasetModule):
     """Whether this reader builds an h5py virtual dataset for wildcard sources.
 
     The `VDS` setup module gates build-vs-identity on this flag (not an
-    `isinstance` check). Default `False` on the `Reader` base — a
-    non-`vds_capable` reader (the ROOT `UprootReader`) keeps
-    its own native glob, and the `VDS` module is an identity edge for it
-    (``vds_path == pattern``, never calling `create_vds` on a ROOT glob, which
-    would crash). `H5StructuredReader` overrides it to `True`.
+    `isinstance` check): for a non-`vds_capable` reader it is an identity edge
+    (never calling `create_vds` on e.g. a ROOT glob, which would crash).
+    `H5StructuredReader` overrides it to `True`.
     """
 
     @property
@@ -391,16 +369,11 @@ class Reader(SaltDatasetModule):
     def config_fingerprint(self) -> dict[str, Any]:
         """Everything about this reader's CONFIG that changes the rows or fields it serves.
 
-        Must be answerable WITHOUT opening a data file — it is what lets a cached
-        artifact (index cache, corpus manifest) be keyed to the configuration that
-        produced it, and a stale one detected before anything is read. Anything
-        omitted here is something a changed config will NOT invalidate.
-
+        Must be answerable WITHOUT opening a data file — anything omitted here is
+        something a changed config will NOT invalidate in a cached artifact.
         Source paths belong to the caller's key, not here: two stages of one run
-        share a config and differ only in their files.
-
-        Default: empty, meaning "cannot be fingerprinted" — a caller then keys on
-        what it knows (paths, stats) alone, exactly as before.
+        share a config and differ only in their files. Default: empty
+        ("cannot be fingerprinted").
         """
         return {}
 
@@ -418,14 +391,10 @@ class Reader(SaltDatasetModule):
         """The h5py-openable structured source file, when this reader has one.
 
         A capability advertisement (not a type tag): `H5OutputSink` opens this
-        file to probe per-stream sequence lengths (pad-mask columns) and to copy
-        input fields. A reader without a structured HDF5 source — the ROOT/uproot
-        `UprootReader` (whose source is a ROOT file and whose ``groups`` are a
-        different, non-H5 config shape), a `MultiSampleReader` (N sources, no
-        single file), or a
-        global-only custom reader — returns None, and the sink takes its
-        no-source path (task-outputs only; pad-mask columns / input-copying then
-        raise a clear ConfigError). Default None; `H5StructuredReader` overrides.
+        file to probe per-stream sequence lengths and to copy input fields.
+        Readers without one (`UprootReader`, `MultiSampleReader`) return None
+        and the sink takes its no-source path. Default None;
+        `H5StructuredReader` overrides.
         """
         return None
 
@@ -442,12 +411,9 @@ class Reader(SaltDatasetModule):
         single configured prototype.
 
         `stage` (``"train"``/``"val"``/``"test"``) is the optional per-reader
-        stage-sourcing hook: single-source readers (`H5StructuredReader`,
-        `UprootReader`) ignore it — their one ``filename`` per stage is the
-        data. Multi-source readers (`MultiSampleReader`, a future cut-based
-        reader) use it to select each sub-source's per-stage data. The
-        datamodule passes the stage it already knows; readers that don't need
-        it never look at it.
+        stage-sourcing hook: single-source readers ignore it; multi-source
+        readers (`MultiSampleReader`) use it to select each sub-source's
+        per-stage data.
 
         Raises
         ------
@@ -462,16 +428,10 @@ class Reader(SaltDatasetModule):
     def sources(self) -> list[Path]:
         """The concrete on-disk file(s) this reader will read (the staging surface).
 
-        Each reader is the file-authority: it declares which files it reads so
-        the framework can relocate them. The base default introspects a
-        ``filename`` or ``files`` attribute, returning its `Path`(s); readers
-        whose sources are not a single such attribute (`MultiSampleReader`)
-        override.
-
-        Wildcard / glob filenames are returned verbatim (a literal pattern, not
-        its expansion) — staging a wildcard reader is the caller's
-        responsibility (the shipped staging path stages already-resolved
-        single files). A reader with no bound source returns an empty list.
+        The base default introspects a ``filename`` or ``files`` attribute;
+        readers whose sources are not one such attribute (`MultiSampleReader`)
+        override. Wildcard/glob filenames are returned verbatim (a literal
+        pattern, not its expansion). No bound source -> empty list.
         """
         files = getattr(self, "files", None)
         if files is not None:
@@ -482,18 +442,11 @@ class Reader(SaltDatasetModule):
     def restage(self, root: str | Path) -> Reader:
         """Return a clone of this reader whose `sources` point at copies under `root`.
 
-        The reader-owned twin of `with_source`: rather than re-source onto a
-        different file, `restage` copies this reader's own source file(s) into
-        ``root`` (typically a RAM disk like ``/dev/shm``) and returns a clone
-        that reads the copies, so multi-file / multi-sample readers stage all
-        their files.
-
-        Base default: copy each `sources` file to ``root`` via the
-        FileLock-coordinated `salt.data.readers.vds.stage_file` (a DDP / worker
-        stampede copies each file exactly once), then clone with the new path
-        via `with_source`. A reader with a single source uses this directly;
-        multi-source readers (`MultiSampleReader`) override to restage each
-        sub-reader recursively. A reader with no source clones unchanged.
+        Base default: copy each `sources` file to ``root`` (typically a RAM
+        disk) via the FileLock-coordinated `stage_file` (a DDP/worker stampede
+        copies each file exactly once), then clone via `with_source`.
+        Multi-source readers override to restage recursively; a reader with no
+        source clones unchanged.
 
         Parameters
         ----------
@@ -540,13 +493,9 @@ class Reader(SaltDatasetModule):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Cut -> sort -> truncate -> pad jagged columns into a structured ``(B, T)`` array.
 
-        Delegates to `salt.data.readers.stream._cut_sort_truncate_pad`. Every
-        jagged-stream reader (easyjet, ftag1lite, the jagged-combine path of
-        multisample) calls this instead of re-implementing pad/sentinel logic.
-
-        With ``stream_cfg`` carrying no cuts and no sort (the default), only
-        truncate+pad+valid run; the drop-then-pad / sort machinery engages
-        only when cuts/sort are configured.
+        Delegates to `salt.data.readers.stream._cut_sort_truncate_pad` — the
+        one pad/sentinel implementation for every jagged-stream reader. With no
+        cuts and no sort configured, only truncate+pad+valid run.
 
         Parameters
         ----------

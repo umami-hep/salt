@@ -329,7 +329,7 @@ class H5StructuredReader(Reader):
 
     def prepare(self) -> None:
         """Resolve the source file (VDS for wildcards), probe row counts, and build the
-        sample-axis kept-index for the (per-stage) `CutSpec` (idempotent).
+        sample-axis kept-index for the (per-stage) `GlobalObjectCuts` (idempotent).
 
         With no cuts the kept-index is `None` — the identity sentinel that preserves
         the byte-identical contiguous read path.
@@ -354,7 +354,7 @@ class H5StructuredReader(Reader):
                 if cfg.truncate is not None and (node.ndim < 2 or cfg.truncate > node.shape[1]):
                     raise ConfigError(
                         f"group {stream!r}: truncate={cfg.truncate} exceeds the file's "
-                        f"constituent dimension {node.shape[1:]} (datasets.py:470 semantics)"
+                        f"constituent dimension {node.shape[1:]}"
                     )
             first = next(iter(self.groups.values()))
             file_rows = len(f[first.dataset])
@@ -370,7 +370,7 @@ class H5StructuredReader(Reader):
         self._resolved = path
 
     def _build_kept_index(self, f: h5py.File, first: GroupConfig) -> np.ndarray | None:
-        """Ascending kept file-row indices from the (per-stage) row `CutSpec`; None = identity.
+        """Ascending kept file-row indices from the (per-stage) row cuts; None = identity.
 
         Reads the cut fields off the first (sample-axis) group and evaluates the shared
         `_apply_row_cuts` engine. Returns `None` when no cuts engage — the sentinel that

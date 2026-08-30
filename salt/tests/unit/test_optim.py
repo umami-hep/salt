@@ -120,7 +120,6 @@ def test_hybrid_named_splits_params_by_policy() -> None:
     assert any("linear.weight" == n for n in opt.muon_param_names)
     assert all("linear.weight" != n for n in opt.adamw_param_names)
 
-    # Confirm expected AdamW members
     assert any("linear.bias" == n for n in opt.adamw_param_names)
     assert any("norm.weight" == n for n in opt.adamw_param_names)
     assert any("norm.bias" == n for n in opt.adamw_param_names)
@@ -189,16 +188,13 @@ def test_hybrid_step_updates_parameters() -> None:
     model = TinyModel()
     opt = HybridMuonAdamW(model.named_parameters(), lr=1e-2, weight_decay=0.0)
 
-    # Save copies of parameters
     before = {n: p.detach().clone() for n, p in model.named_parameters()}
 
-    # Add gradients and step
     _set_all_grads(model, value=0.01)
     opt.step()
 
     after = {n: p.detach().clone() for n, p in model.named_parameters()}
 
-    # At least one parameter must change
     changed = any(not torch.equal(before[n], after[n]) for n in before)
     assert changed is True
 
@@ -221,7 +217,6 @@ def test_hybrid_state_dict_roundtrip() -> None:
     model1 = TinyModel()
     opt1 = HybridMuonAdamW(model1.named_parameters(), lr=1e-3, weight_decay=1e-5)
 
-    # Take a step to populate internal state
     _set_all_grads(model1, value=0.01)
     opt1.step()
 
@@ -230,19 +225,16 @@ def test_hybrid_state_dict_roundtrip() -> None:
     sd = opt1.state_dict()
     assert "wrapper" in sd
 
-    # New model + optimizer with same structure
     torch.manual_seed(0)
     model2 = TinyModel()
     opt2 = HybridMuonAdamW(model2.named_parameters(), lr=1e-3, weight_decay=1e-5)
 
-    # Load state dict should not raise
     opt2.load_state_dict(sd)
 
-    # Ensure name lists were restored (informational but useful)
     assert opt2.muon_param_names == opt1.muon_param_names
     assert opt2.adamw_param_names == opt1.adamw_param_names
 
-    # Ensure wrapper state was restored and propagated to the internal optimizers.
+    # wrapper state propagated to the internal optimizers
     assert opt2.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
     assert opt2.muon.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
     assert opt2.adamw.param_groups[0]["lr"] == pytest.approx(scheduler_lr)
@@ -506,13 +498,9 @@ class TestSafePctStart:
 
 
 # --------------------------------------------------------------------------- #
-# The per-stage optimizer/scheduler rebuild
-#
-# `configure_optimizers` was rewritten by the fine-tuning work to rebuild BOTH
-# the optimizer and the scheduler at every stage boundary, off the ACTIVE
-# stage's merged `lrs`/`optimizer` and its own step allocation. Both of the
-# guarantees below were established against the pre-rebuild single-shot form, so
-# they need gating against the rebuild path they now live on.
+# The per-stage optimizer/scheduler rebuild: `configure_optimizers` rebuilds
+# BOTH the optimizer and the scheduler at every stage boundary, off the ACTIVE
+# stage's merged `lrs`/`optimizer` and its own step allocation.
 # --------------------------------------------------------------------------- #
 
 

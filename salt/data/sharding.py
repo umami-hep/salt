@@ -125,10 +125,9 @@ def interleave_plan(
 ) -> np.ndarray:
     """Group id per output row, proportionally stratified by largest remainder.
 
-    The same apportionment `MultiSampleReader._build_index` uses and that 291
-    unit tests verified at K in {3, 8, 32} over an ~180x size spread — applied
-    here to ONE shard's counts instead of the whole corpus, which is what makes
-    it affordable to recompute per epoch. At every prefix, each group's emitted
+    The same apportionment `MultiSampleReader._build_index` uses, applied to
+    ONE shard's counts instead of the whole corpus — which is what makes it
+    affordable to recompute per epoch. At every prefix, each group's emitted
     count stays within `interleave_block` of its ideal share.
 
     Parameters

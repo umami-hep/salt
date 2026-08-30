@@ -12,8 +12,7 @@ from salt.data.base import Processor
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
-# v1 operators — the conditional-replacement comparators, applied to the
-# selection label against the configured value.
+# conditional-replacement comparators, applied to the selection label
 _OPERATORS: dict[str, Callable[[Any, Any], Any]] = {
     "==": operator.eq,
     "!=": operator.ne,
@@ -89,18 +88,16 @@ class MultiTarget(Processor):
                 raise ConfigError(
                     f"MultiTarget: output {rule['output']!r} on stream {rule['stream']!r} mixes "
                     "'target' and 'custom_target' rules — all rules for one output must agree "
-                    "on the mode (v1 datasets.py:237-248)"
+                    "on the mode"
                 )
             self._outputs.setdefault(key, rule["is_custom"])
-        # a sel/source may not be an output (no chaining; v1 reads them from the
-        # file-loaded labels, never a replaced value)
+        # a sel/source may not be an output (no chaining)
         for rule in self.rules:
             for ref in ("sel_label", "source"):
                 if (rule["stream"], rule[ref]) in self._outputs:
                     raise ConfigError(
                         f"MultiTarget: rule {ref} {rule[ref]!r} on stream {rule['stream']!r} is "
-                        "itself a MultiTarget output — chaining replacements is not supported "
-                        "(v1 parity, datasets.py:695-739)"
+                        "itself a MultiTarget output — chaining replacements is not supported"
                     )
 
     @staticmethod
@@ -120,8 +117,7 @@ class MultiTarget(Processor):
         op = rule.get("op")
         if op not in _OPERATORS:
             raise ConfigError(
-                f"MultiTarget: unknown operator {op!r} — allowed operators are "
-                f"{sorted(_OPERATORS)} (v1 datasets.py:29-36)"
+                f"MultiTarget: unknown operator {op!r} — allowed operators are {sorted(_OPERATORS)}"
             )
         missing = [k for k in ("stream", "sel_label", "value", "source") if rule.get(k) is None]
         if missing:
@@ -175,16 +171,9 @@ class MultiTarget(Processor):
         running: dict[tuple[str, str], np.ndarray] = {}
         for (stream, output), is_custom in self._outputs.items():
             if is_custom:
-                # v1 inject_custom_target_placeholders: a NaN-filled column
-                # shaped/typed like the first rule's source.
-                # DEVIATION from v1: v1 uses dtype=batch[source].dtype verbatim;
-                # v2 promotes any sub-float32 source (e.g. f2) to >=float32 via
-                # np.result_type so a NaN-filled regression placeholder always has
-                # the range to hold log/ratio targets. For f4/f8 sources the two
-                # agree byte-for-byte (the only dtypes any shipped
-                # regression_multi_target.yaml source uses — HadronConeExclTruthLabelPt
-                # and pt are both f4); the divergence is reachable only with an f2
-                # source, which no shipped config has.
+                # NaN-filled placeholder shaped like the first rule's source;
+                # sub-float32 sources are promoted to >=float32 so the
+                # placeholder always has the range to hold log/ratio targets
                 src0 = next(
                     r["source"]
                     for r in self.rules

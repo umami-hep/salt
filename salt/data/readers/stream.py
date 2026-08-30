@@ -241,12 +241,10 @@ class OffsetIndex:
     """Cumulative row offsets across a file list + covering-range mapping.
 
     The simple flavour (``offsets`` only) maps a contiguous global row slice to
-    the ``(file_index, local_start, local_stop)`` runs that cover it — the
-    per-file ``entry_start``/``entry_stop`` reads the easyjet reader stitches.
-    The covering flavour (a per-entry cumulative array) maps a contiguous
-    slice over a filtered / derived index back to a covering range over an
-    underlying coarser index (the ftag1lite kept-jet -> covering-event
-    search).
+    the ``(file_index, local_start, local_stop)`` runs that cover it. The
+    covering flavour (a per-entry cumulative array) maps a contiguous slice
+    over a filtered / derived index back to a covering range over an
+    underlying coarser index (kept-row -> covering-entry).
 
     Parameters
     ----------
@@ -312,8 +310,7 @@ class OffsetIndex:
         ``cum[k]`` is the number of derived rows in the first ``k`` coarse units
         — e.g. the per-event cumulative kept-jet counts), return the smallest
         coarse range ``[c0, c1)`` whose derived rows include ``[lo, hi)``, plus
-        the offset of ``lo`` within ``c0``'s first derived row. This is the
-        ftag1lite kept-jet -> covering-event search, generalised.
+        the offset of ``lo`` within ``c0``'s first derived row.
 
         Parameters
         ----------

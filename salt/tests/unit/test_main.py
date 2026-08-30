@@ -44,10 +44,8 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # gn2v2-opendata.yaml declares its eval outputs as an outputs:
-    # section (composed onto model.net). The graph-folded section writers appear
-    # in model.net (inputs_copy is manifest-only, not folded); the standalone
-    # conversion producers (jet_probs/track_origin_probs/...) are retired.
+    # the outputs: section writers are graph-folded into model.net
+    # (inputs_copy is manifest-only, not folded).
     "jets_out",
     "origin_out",
     "pad_mask",
@@ -123,13 +121,11 @@ class TestParseAndInstantiate:
         assert isinstance(cli.model, SaltModule)
         assert isinstance(cli.datamodule, SaltDataModule)
         assert set(cli.model.net.keys()) == GN2V2_MODULES
-        # instance names were assigned from the config dict keys
         assert cli.model.net["encoder"].name == "encoder"
         # data modules in YAML order: reader -> features -> labels
         assert str(cli.datamodule.train_file) == str(data["h5"])
 
     def test_name_linked_into_model(self, data):
-        # the single surviving link of the v1 CLI glue
         cli = make_cli(data)
         assert cli.config.name == "GN2v2_dummy"
         assert cli.model.name == "GN2v2_dummy"
@@ -155,7 +151,7 @@ class TestParseAndInstantiate:
         assert section["run_tasks"].is_run_task_output()
 
 
-# --print_config round-trip (spike capability 2 at the real surface)
+# --print_config round-trip
 
 
 class TestPrintConfig:
@@ -240,7 +236,7 @@ class TestNullDeletion:
         assert set(dm_modules) == {"reader", "features", "input_samples", "vds"}
 
 
-# dotted CLI overrides into init_args (spike capability 4 at the real surface)
+# dotted CLI overrides into init_args
 
 
 class TestDottedOverrides:
@@ -839,16 +835,9 @@ class TestGraphFitConfigAdapter:
         assert "metric callback" in out
 
 
-# ===========================================================================
-# class_dict fan-out
-#
-# These exercise the --class_dict convenience flag on salt.main
-# (SaltCLI._fan_out_artifacts). Helpers/fixtures are fanout_*-prefixed to avoid
-# colliding with the CLI-surface ones above. norm_dict is NOT a fan-out flag —
-# it is the Normaliser module's own config (set on
-# model.modules.norm.init_args.norm_dict); the TestNormDictOnModule section at
-# the end pins that.
-# ===========================================================================
+# --class_dict fan-out (SaltCLI._fan_out_artifacts). Helpers are
+# fanout_*-prefixed. norm_dict is NOT a fan-out flag — it is the Normaliser
+# module's own config (pinned in TestNormDictOnModule).
 
 
 # the two classification tasks in gn2v2-opendata.yaml, both with weight_source unset
@@ -1021,22 +1010,13 @@ class TestFanOutInstantiated:
         assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(fanout_data["nd"])
 
 
-# ===========================================================================
-# TOP-LEVEL `training_schedule:` config home
-#
-# The staged-training schedule is a config-surface peer of trainer:/data:/model:,
-# NOT nested under model.init_args. salt.main._relocate_training_schedule
-# injects the resolved top-level value into the SaltModule constructor arg before
-# instantiation (mirroring the --class_dict fan-out / --init_from hand-off), and
-# rejects the retired nested home fail-loud. DeepMergeParser deep-merges the
-# schedule per-stage-by-name across stacked configs. SaltModule internals,
-# checkpoint payloads, desugaring and the callback are unchanged.
-# ===========================================================================
+# top-level `training_schedule:` — a config-surface peer of trainer:/data:/
+# model:, injected into the SaltModule constructor arg before instantiation;
+# the nested model.init_args home is rejected fail-loud.
 
 
-# A structural twin of the study example config
-# (examples/finetune_gn3large.yaml): two stages — head warm-up (only the
-# classification head trainable, per-stage lrs override) then a full-network
+# structural twin of examples/finetune_gn3large.yaml: head warm-up (only the
+# classification head trainable, per-stage lrs override) then full-network
 # fine-tune (frozen: [] = everything trainable, epochs omitted = remainder).
 TOP_LEVEL_SCHEDULE_YAML = """
 training_schedule:
@@ -1088,9 +1068,8 @@ class StageCallbackProbe(Callback):
         self.stage_name = stage_name
 
 
-# a single-`fit`-stage schedule whose stage declares a scoped callback — the exact
-# nested {class_path, init_args} spec that crashed the real CLI. ``{out}`` is
-# formatted with a tmp path per test.
+# a single-`fit`-stage schedule whose stage declares a scoped callback.
+# ``{out}`` is formatted with a tmp path per test.
 STAGE_CALLBACK_YAML = """
 training_schedule:
   stages:
@@ -1233,17 +1212,13 @@ class TestScheduleCallbackAutoInjection:
             assert cli.model.net[task].weight_source == {"from_class_dict": str(fanout_data["cd"])}
 
 
-# stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI.
-# The feature was only ever covered by direct `SaltModule(...)` construction
-# (test_stage_callbacks.py); the YAML/CLI path crashed because jsonargparse
-# eager-instantiated the nested {class_path, init_args} spec before salt's own
-# validator saw the raw dict. These lock the CLI path: parse, fit-start
-# instantiation from the raw spec, and merge-config round-trip.
+# stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI:
+# jsonargparse must NOT eager-instantiate the nested {class_path, init_args}
+# spec (regression: it once did, crashing the CLI path).
 class TestStageCallbacksCLI:
     def test_stage_callback_reaches_model_as_raw_spec(self, data, tmp_path):
-        # the exact crash repro: a stage `callbacks:` entry on the real CLI.
-        # It must now parse and arrive at the model as a RAW spec dict, NOT an
-        # eager-instantiated object.
+        # a stage `callbacks:` entry must parse and arrive at the model as a
+        # RAW spec dict, NOT an eager-instantiated object.
         text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
         override = write_yaml(tmp_path, "sched_cb.yaml", text)
         cli = make_cli(data, extra=["--config", override])
@@ -1313,9 +1288,7 @@ class TestStageCallbacksCLI:
         assert (tmp_path / "merged_stage00_fit.dot").exists()
 
 
-# a two-stage schedule whose stages choose DIFFERENT scheduler classes — the same
-# nested {class_path, init_args} spec shape the fix protects (a scheduler can
-# never be eager-instantiated: it needs the stage optimizer, built at the boundary).
+# a two-stage schedule whose stages choose DIFFERENT scheduler classes.
 LR_SCHEDULER_YAML = """
 training_schedule:
   stages:
@@ -1332,9 +1305,9 @@ training_schedule:
 """
 
 
-# per-stage `lr_scheduler:` through the REAL CLI. The scheduler spec has the
-# same nested-class-spec shape that escaped CLI coverage; CLI gating is
-# mandatory.
+# per-stage `lr_scheduler:` through the REAL CLI (same nested-class-spec
+# shape; a scheduler can never be eager-instantiated — it needs the stage
+# optimizer, built at the boundary).
 class TestLRSchedulerCLI:
     def test_lr_scheduler_specs_reach_model_unparsed(self, data, tmp_path):
         from salt.schedule import LRSchedulerConfig
@@ -1384,8 +1357,7 @@ class TestLRSchedulerCLI:
 
 
 # norm_dict is the Normaliser module's OWN config (its sole consumer): set on
-# model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag. These
-# replace the retired --norm_dict fan-out tests.
+# model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag.
 
 
 class TestNormDictOnModule:

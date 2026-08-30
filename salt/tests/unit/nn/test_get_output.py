@@ -1,4 +1,4 @@
-"""Unit gates for the task modules' ``get_output`` output rendering.
+"""Unit tests for the task modules' ``get_output`` output rendering.
 
 Every comparison is anchored on LITERAL expected schemas/values — the eval
 math written out explicitly (softmax / masked-softmax / union-find /
@@ -42,7 +42,7 @@ def _bind_classification(stream, label, class_names, sequence, *, loss=None, inp
     """Build + bind a `ClassificationTaskModule` against a hand-built schema.
 
     ``write_targets=False``: this file gates the PREDICTION rendering; the
-    Phase-C target-label emission has its own gate (test_target_labels.py).
+    Target-label emission is covered separately in test_target_labels.py.
     """
     module = ClassificationTaskModule(
         stream=stream,
@@ -73,7 +73,7 @@ def _fields_by_h5(fields):
 
 
 # ===========================================================================
-# GATE A — global (pooled) head: probs (H5) / split-scalars (ONNX)
+# global (pooled) head: probs (H5) / split-scalars (ONNX)
 # ===========================================================================
 
 
@@ -145,9 +145,8 @@ def test_global_get_output_onnx_names_are_literal_class_suffixes():
             assert f.value.shape == sink_scalars[c].shape
             torch.testing.assert_close(f.value, sink_scalars[c], rtol=0, atol=_FLOAT_TOL)
         if batch == 1:
-            # the rank divergence the un-squeezed probs[..., c] would have:
-            # this is what the OLD value=probs[..., c] produced (rank 1), proving
-            # the squeeze in get_output's ONNX branch is what closes the gap.
+            # un-squeezed probs[..., c] would be rank 1; the sink scalar is
+            # 0-dim — the squeeze in get_output's ONNX branch closes that gap.
             assert probs[..., 0].shape == (1,)
             assert sink_scalars[0].shape == ()
 
@@ -201,7 +200,7 @@ def test_global_output_time_requires_empty():
 
 
 # ===========================================================================
-# GATE B — sequence (per-token) head: probs (H5) vs argmax index (ONNX)
+# sequence (per-token) head: probs (H5) vs argmax index (ONNX)
 # ===========================================================================
 
 
@@ -398,7 +397,7 @@ def test_seq_get_output_no_pad_mask_plain_softmax():
 
 
 # ===========================================================================
-# GATE C — base default + additive guard
+# base default + additive guard
 # ===========================================================================
 
 
@@ -413,7 +412,7 @@ def test_base_get_output_raises_for_unsupported_family():
 
 
 # ===========================================================================
-# GATE D — vertexing: union-find int8 (TEST i8 / ONNX char index)
+# vertexing: union-find int8 (TEST i8 / ONNX char index)
 # ===========================================================================
 
 
@@ -567,7 +566,7 @@ def test_vtx_get_output_prefix_follows_prefix_vertex_column():
 
 
 # ===========================================================================
-# GATE E — regression: de-scale (TEST f4 / ONNX squeezed scalars)
+# regression: de-scale (TEST f4 / ONNX squeezed scalars)
 # ===========================================================================
 
 

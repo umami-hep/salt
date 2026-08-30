@@ -52,7 +52,7 @@ from salt.tests.unit.onnx.test_adapter import (
 )
 
 SWEEP = [{"tracks": length} for length in (0, 1, 2, 7, 21, 39)]
-"""Unit-scale sweep: the zero-token edge case + a spread; full sweep is gate O1."""
+"""Unit-scale sweep: the zero-token edge case + a spread (the full L-sweep runs in check_onnx)."""
 
 
 @pytest.fixture(scope="module")
@@ -80,7 +80,7 @@ def exported(tmp_path_factory):
 
 class TestExportedModel:
     def test_subset_sweep_at_1e6(self, exported):
-        # gate O1 at unit scale: v2-torch vs v2-ONNX, incl. L=0
+        # v2-torch vs v2-ONNX, incl. L=0
         result = check_onnx(
             exported.result.adapter,
             exported.result.onnx_path,
@@ -95,9 +95,8 @@ class TestExportedModel:
 
     @pytest.mark.parametrize("length", [0, 5, 39])
     def test_eager_test_plan_spot_check(self, exported, length):
-        # gate O2 at unit scale: the eager TEST-plan softmax (independent
-        # Executor path on the SAME weights) vs v2 ONNX — replaces the retired
-        # v1 forward oracle
+        # the eager TEST-plan softmax (independent Executor path on the
+        # SAME weights) vs v2 ONNX
         session = make_session(exported.result.onnx_path)
         test_plan = compile_gn2v2(exported.modules, Mode.TEST)
         gen = torch.Generator().manual_seed(7)
@@ -117,7 +116,7 @@ class TestExportedModel:
         assert np.max(np.abs(p_ref - p_onnx)) <= 1e-6
 
     def test_perturbed_weights_fail_the_checker(self, exported):
-        # negative control (gate O5 pattern): the checker must FAIL when the
+        # negative control: the checker must FAIL when the
         # eager reference and the exported graph genuinely differ. The
         # perturbation is ASYMMETRIC (one output-layer bias element): a
         # uniform first-layer shift can cancel through the softmax to ~1e-8
@@ -198,8 +197,7 @@ class TestExportedModel:
         assert again.plan.plan_hash == exported.result.plan.plan_hash
 
 
-# the two-dynamic-axes Split grid (the in-tree de-risk;
-# the release-blocker version on bigger widths is gate O3)
+# the two-dynamic-axes Split grid
 
 
 def build_two_stream_modules(norm_dict) -> dict[str, GraphModule]:
@@ -312,10 +310,10 @@ def two_stream(tmp_path_factory):
 
 class TestTwoDynamicAxes:
     def test_split_grid_including_zeros(self, two_stream):
-        # known risk: the eager Split slicing is provably WRONG under
-        # traced export with two dynamic axes (recipe spike: 15/15 grid
-        # points mismatched); the index_select export branch must agree
-        # with eager v2 on the full grid INCLUDING zero-length streams
+        # eager Split slicing is provably WRONG under traced export with
+        # two dynamic axes (15/15 grid points mismatched when tried); the
+        # index_select export branch must agree with eager v2 on the full
+        # grid INCLUDING zero-length streams
         grid = [{"tracks": lt, "electrons": le} for lt in (0, 1, 3, 11) for le in (0, 2, 5)]
         result = check_onnx(
             two_stream.result.adapter,
@@ -478,8 +476,7 @@ class TestSaltSurface:
         onnx_path = cli_run.run_dir / "network.onnx"
         assert onnx_path.is_file()
         out = capsys.readouterr().out
-        # int8 outputs get a POSITIVE verdict row (review fix: the
-        # checker table used to confirm float outputs only)
+        # int8 outputs get a POSITIVE verdict row, not only the floats
         assert "GN2v2dummy_VertexIndex" in out
         assert "int8 exact over" in out
         # the traced plan table is written next to the .onnx
@@ -494,7 +491,7 @@ class TestSaltSurface:
         assert info["ckpt_path"] == str(Path(cli_run.ckpt).resolve())
         assert info["config.yaml"]["name"] == "GN2v2_dummy"
         # without --overwrite a second export must refuse (to_onnx.py:710-711)
-        # with ONE actionable line, not a traceback (review fix)
+        # with ONE actionable line, not a traceback
         rc2 = export_main(["--ckpt_path", str(cli_run.ckpt), "--no-check"])
         assert rc2 == 1
         err = capsys.readouterr().err

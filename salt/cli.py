@@ -261,12 +261,10 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
     writer_sink_cb = _static_writer_sink_callback(cli)
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
-    # fold every callbacks-level renderable sink NODE into the planning module dict
-    # so each renders its own card and anchors demand via its declared requires
-    # (not the flat <sinks> sentinel). The H5OutputSink is active in TEST only
-    # (outputs.*/meta.rows/masks.*); the OnnxExportSink is active in ONNX only (the
-    # folded conversion leaves). In other modes a sink node's declare_io is empty
-    # so the planner collects it as inactive (no card, no plan_hash perturbation).
+    # fold renderable sink NODES into the planning dict so each renders its own
+    # card and anchors demand via declared requires. In modes where a sink's
+    # declare_io is empty the planner collects it as inactive (no plan_hash
+    # perturbation).
     sink_node = _as_sink_node(writer_sink_cb)
     onnx_sink_node = _static_onnx_export_sink(cli)
     # the export contract lives on the sink; fold the deprecated top-level
@@ -308,25 +306,17 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     sink_origins: dict[Mode, dict[str, str]] = {}
     for mode in PRIMARY_MODES:
         if mode is Mode.TEST and writer_sink_cb is not None:
-            # only the callbacks-level sink path (writer_sink_cb / sink_node)
-            # drives TEST sinks now.
             try:
-                # A renderable sink NODE anchors ALL its demand via its declared
-                # requires (folded into `modules` above) — no flat sinks needed;
-                # its terminal-consumer demand keeps the producers (and
-                # transitively their preds.*) alive. Without one, fall back to
-                # the base TEST anchor.
+                # a renderable sink NODE (folded into `modules` above) anchors all
+                # its demand via declared requires — no flat sinks; without one,
+                # fall back to the base TEST anchor.
                 keys = (
                     [] if sink_node is not None else list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
                 )
                 if writer_sink_cb is not None and sink_node is None:
-                    # a non-node persistence sink (duck-typed writer_demand
-                    # only): fold its writer_demand into the flat
-                    # sinks exactly as SaltModule._boundary_demand does at salt
-                    # test, so the in-graph conversion producers (outputs.*) stay
-                    # alive in the render instead of pruning dead. A renderable
-                    # sink NODE is instead folded into `modules` above and anchors
-                    # its own demand — no flat sink.
+                    # non-node persistence sink: fold its writer_demand into the
+                    # flat sinks exactly as SaltModule._boundary_demand does, so
+                    # conversion producers stay alive in the render.
                     sink_demand = writer_sink_cb.writer_demand(
                         model._graph_modules,  # noqa: SLF001 - same-package adapter
                         reader,
@@ -336,13 +326,9 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 mode_errors[mode] = str(err)
                 keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
         elif mode is Mode.ONNX and onnx_sink_node is not None:
-            # folded ONNX path (the sole ONNX-output authority): the OnnxExportSink
-            # node (folded into `modules` above) anchors ALL its conversion-leaf
-            # demand via its declared requires — a terminal consumer the planner
-            # keeps alive, pulling the folded conversion nodes into the ONNX plan.
-            # No flat manifest ports needed (it renders its own card). The
-            # export-only half (model_name/inputs) is validated below whenever
-            # the config declares any of it.
+            # the folded OnnxExportSink anchors all conversion-leaf demand via its
+            # declared requires; the export-only half (model_name/inputs) is
+            # validated below whenever the config declares any of it.
             keys = []
             if onnx_alias_error is not None:
                 mode_errors[mode] = onnx_alias_error
@@ -464,11 +450,9 @@ def _static_writer_sink_callback(cli: Any) -> Any | None:
     """
     from salt.outputs import is_test_persistence_sink, iter_sinks
 
-    # the SAME registry and the SAME selector the runtime uses
-    # (`SaltModule._attached_writer`), so the static render and the real run
-    # resolve the same sink: an ONNX-only sink (`OnnxExportSink`, empty TEST
-    # requires — handled by `_static_onnx_export_sink`) and an auxiliary sink
-    # that opts out (`JSONLOutputSink`) are both skipped.
+    # the SAME registry and selector the runtime uses, so static render and
+    # real run resolve the same sink; ONNX-only and opted-out auxiliary sinks
+    # are skipped.
     return next(
         (
             sink
@@ -689,12 +673,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if checked:
             console(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order")
     if cfg.model_modules is not None:
-        # muP routing validator: apply_to naming a module without a mup init_arg
-        # errors; a mup:true module outside apply_to warns. The same
-        # `validate_mup_routing` SaltModule construction runs, surfaced here as
-        # `salt graph validate` findings (warnings promotable under --strict).
-        # The hard errors would already abort the parse above; this is the
-        # first-class CI check + the warning capture.
+        # same `validate_mup_routing` as SaltModule construction, surfaced as
+        # validate findings (warnings promotable under --strict); hard errors
+        # would already abort the parse above.
         from salt.model.saltmodule import validate_mup_routing
 
         with stdlib_warnings.catch_warnings(record=True) as caught:
@@ -710,11 +691,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
                 "init_arg, no mup:true module left out"
             )
-        # edge bind-time validators: edge-stream-first + EdgeAttention-backend
-        # forcing. The same `validate_edge_port` SaltModule construction runs;
-        # surfaced here as a first-class CI check (these are hard errors — they
-        # would already abort the parse above; this captures the OK line / the
-        # error message for the validate report).
+        # same `validate_edge_port` as SaltModule construction, surfaced here for
+        # the validate report (hard errors would already abort the parse above).
         from salt.model.saltmodule import validate_edge_port
 
         try:
@@ -727,11 +705,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
                 "the attention backend is edge-compatible (no silent flash bypass)"
             )
-    # data-free module preflights: duck-typed `preflight()` checks file-backed
-    # materialise sources (e.g. the Normaliser norm dict). Warning-level here —
-    # `validate` must stay runnable on data-less machines where the documented
-    # `--set ...norm_dict=unused.yaml` override is in play; an actual
-    # `salt fit`/`test` run promotes these to hard errors (SaltModule.setup).
+    # duck-typed `preflight()` checks file-backed materialise sources. Warning-
+    # level: `validate` must stay runnable on data-less machines; a real
+    # fit/test promotes these to hard errors (SaltModule.setup).
     for name, module in cfg.modules.items():
         preflight = getattr(module, "preflight", None)
         if not callable(preflight):

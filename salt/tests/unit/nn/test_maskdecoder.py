@@ -132,9 +132,6 @@ class TestMaskDecoder:
         probs = out.get("objects.class_probs")
         assert torch.allclose(probs.sum(-1), torch.ones(B, MASKFORMER_NUM_OBJECTS), atol=1e-5)
 
-    # DEL-1: test_forward_bitwise_vs_independent_v1 retired with the v1 tree
-    # (parity-closure doctrine: v1 comparisons = git checkout 29c67a1).
-
     def test_zero_constituent_jet_is_finite(self):
         # the dummy-token trick keeps a zero-length sequence from NaN-ing (ONNX)
         md = MaskDecoder(

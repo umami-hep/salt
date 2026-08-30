@@ -24,9 +24,6 @@ PHYSLITE xAOD POOL layout is not synthesisable, so that leg is held statically b
 
 A production config in neither table fails rather than skips — adding one means
 providing data for it.
-
-This supersedes the older per-config smoke tests, which could only reach the
-handful of configs the fixed-schema ``write_dummy_file`` happened to serve.
 """
 
 from __future__ import annotations

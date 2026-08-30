@@ -1,8 +1,4 @@
-"""Exception hierarchy for the salt v2 graph kernel.
-
-Planner-stage errors (connectivity, config, cycles, ...) are appended to this
-module by the planner stage — see the anchor comment at the bottom.
-"""
+"""Exception hierarchy for the salt v2 graph kernel."""
 
 from __future__ import annotations
 
@@ -46,7 +42,7 @@ class DeclarationError(GraphError):
     """
 
 
-# planner-stage errors appended below
+# planner errors
 
 
 class ConfigError(GraphError):
@@ -110,7 +106,7 @@ class SchemaError(GraphError):
     """
 
 
-# executor-stage errors
+# executor errors
 
 
 class UndeclaredAccessError(GraphError):

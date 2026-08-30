@@ -27,16 +27,9 @@ from pathlib import Path
 from typing import Any
 
 HEAD_SHA = "d848b61+phaseC"
-"""Worktree state this golden set is anchored to (feature/one-class-per-file):
-the plan-50 Phase-C commit on top of d848b61.
-
-vs a regen at the Phase-B tip (d848b61) the diff is STRICTLY the per-task
-TEST-mode target-label additions (``target_{task}`` / ``target_{task}_{target}``
-column + TEST-manifest entries, plus TEST plan hashes where labels are newly
-demanded); every ``onnx`` block and ONNX plan hash is byte-identical (verified
-programmatically 2026-07-14, all 30 capturable configs; GN2_muP exempt — mup
-not in salt-py314.sif).
-"""
+"""Worktree state this golden set is anchored to — regenerating at a later
+HEAD requires updating this sha (last verified 2026-07-14, all 30 capturable
+configs; GN2_muP exempt — mup not in salt-py314.sif)."""
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # .../worktrees/one-class-per-file/salt
 CONFIG_DIR = REPO_ROOT / "configs"
@@ -141,7 +134,7 @@ def _load_yaml(path: Path) -> dict:
 def _norm_dict_overrides(stack_paths: list[Path]) -> list[str]:
     """``--set model.modules.<name>.init_args.norm_dict=unused.yaml`` for every
     Normaliser module in the merged stack that ships no norm_dict (data-free
-    parse; the established override pattern, see log.md 2026-07-14 08:20).
+    parse — static tooling never reads the file).
     """
     merged: dict = {}
     for path in stack_paths:
@@ -258,9 +251,8 @@ def _capture_one(spec: ConfigSpec) -> dict[str, Any]:
                 if isinstance(h5_sink.write_pad_mask, (bool, list, tuple))
                 else list(h5_sink.write_pad_mask),
                 # declarative object groups (e.g. the MaskFormer objects /
-                # object_masks / tracks-HadronIndex groups) — captured statically
-                # from their field specs (data-free, unlike the retired
-                # extra_groups reader-dependent schema).
+                # object_masks / tracks-HadronIndex groups) — captured
+                # statically (data-free) from their field specs.
                 "object_groups": [
                     {
                         "name": group.name,

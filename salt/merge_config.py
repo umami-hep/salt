@@ -86,7 +86,7 @@ def main(args: Sequence[str] | None = None) -> int:
 
 
 # the desugared schedule a config with no `training_schedule` runs under, made
-# explicit in the merged YAML (F1): a single `fit` stage with no fields set —
+# explicit in the merged YAML: a single `fit` stage with no fields set —
 # byte-for-byte the block that re-parses to `TrainingSchedule.desugar_legacy`'s
 # `StageConfig(name="fit")` (nothing frozen; optimizer/lrs inherited from the
 # model-level settings). `fit: {}` (empty map), NOT `fit: null` — a null stage

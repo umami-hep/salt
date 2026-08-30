@@ -93,9 +93,8 @@ class TestStreamEmbedVector:
         assert embed.net.output_size == 16
 
     def test_forward_rank_two_bitwise_vs_plain_dense(self):
-        """[B, F] embed forward == an INDEPENDENT no-context Dense (the module adds
-        nothing beyond its net). DEL-1: the reference was the v1 Dense; the v2
-        Dense is its verbatim port, so the assertion's teeth are unchanged."""
+        """[B, F] embed forward == an INDEPENDENT no-context Dense (the module
+        adds nothing beyond its net)."""
         torch.manual_seed(0)
         embed = StreamEmbed(stream="jets", out_dim=4, dense={"hidden_layers": [8, 8]})
         embed.name = "jet_embed"
@@ -129,10 +128,6 @@ class TestStreamEmbedMup:
         # mup is a module-level init_arg, not a dense width/option key
         with pytest.raises(ConfigError, match="set mup on the module"):
             StreamEmbed(stream="tracks", out_dim=8, dense={"mup": True})
-
-    # DEL-1: test_mup_init_matches_independent_v1_dense_mup retired with the v1
-    # tree — its essence was v1-vs-v2 muP init parity (a v2-vs-v2 rewrite would
-    # be circular). Parity closure: git checkout 29c67a1.
 
     def test_mup_forward_is_unchanged(self):
         """muP affects init only — the forward math is the standard Dense forward."""

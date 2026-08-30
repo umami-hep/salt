@@ -71,14 +71,10 @@ def _patch_jsonargparse_sys_modules_race() -> None:
 _patch_jsonargparse_sys_modules_race()
 
 
-# --- pre-de-core checkpoint/config compatibility ------------------------------
-# v2 checkpoints and their saved ``config.yaml`` written BEFORE the de-core
-# rename carry ``salt.core.*`` class_paths. This remapper resolves them to their
-# flat ``salt.*`` homes at load time so old artifacts stay loadable with no edit.
-# Ordered longest-prefix-first so the ``salt.core.nn.*`` / ``salt.core.data.*``
-# fan-out (which splits across three destination packages) is resolved before
-# the bare package facades. The ONLY sanctioned ``salt.core.*`` strings in the
-# codebase live here + the compat tests (see docs/architecture.md §Checkpoints).
+# Checkpoints/configs written before the de-core rename carry ``salt.core.*``
+# class_paths; this remapper resolves them to their flat ``salt.*`` homes at
+# load time. Ordered longest-prefix-first. The ONLY sanctioned ``salt.core.*``
+# strings live here + the compat tests (docs/architecture.md §Checkpoints).
 _CLASS_PATH_REMAP: dict[str, str] = {
     # data -> readers
     "salt.core.data.reader": "salt.data.readers.reader",
@@ -457,30 +453,14 @@ def _schedule_overrides_to_tree(overrides: Sequence[tuple[str, Any]]) -> dict[st
 
 
 def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] = ()) -> Any:
-    """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` constructor
-    arg (``model.init_args.training_schedule``) before jsonargparse instantiates
-    the model — the schedule describes the run, so it is a config-surface peer of
-    ``trainer:``/``data:``/``model:``, not a model-architecture field.
-
-    Mirrors `_fan_out_artifacts` (parser-time, per model-block scope): reads the
-    schedule from the block's scope (top-level on the run-free surface,
-    subcommand-scoped on a trainer run), deep-merges any extracted
-    ``--training_schedule.<path> <value>`` CLI overrides on top, and writes the
-    plain-dict-normalised value onto BOTH the scope key (so ``--print_config`` /
-    the saved config round-trip carries the resolved schedule) AND
-    ``model.init_args.training_schedule``. A user-authored
-    ``model.init_args.training_schedule`` with NO top-level schedule (the retired
-    home) is a fail-loud `ConfigError`. When a top-level schedule IS present the
-    nested slot is treated as ours to own — overwritten from the authoritative
-    top-level value — so a round-tripped saved config (which carries both the
-    top-level schedule and the previously-injected nested copy) re-injects without
-    error. No-op when neither is set (plain training desugars to one `fit` stage).
-
-    Raises
-    ------
-    ConfigError
-        A config nests ``training_schedule`` under ``model.init_args`` without a
-        top-level ``training_schedule:`` (the schema moved to the top level).
+    """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` ctor arg
+    (``model.init_args.training_schedule``) before jsonargparse instantiates the
+    model, deep-merging extracted ``--training_schedule.<path>`` CLI overrides.
+    Writes the normalised value onto BOTH the scope key (so saved configs
+    round-trip) and the ctor arg. A user-authored nested schedule with NO
+    top-level one raises `ConfigError` (the schema home is top-level); with a
+    top-level one present the nested slot is overwritten, so round-tripped
+    saved configs (which carry both) re-inject without error. No-op when unset.
     """
     override_tree = _schedule_overrides_to_tree(overrides)
     from salt.parser import _deep_merge_dicts
@@ -711,15 +691,10 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             f"--{_TRAINING_SCHEDULE_ARG}",
-            # BARE `dict` (not dict[str, Any]): jsonargparse recurses into a
-            # subscripted mapping's values and, under the `Any` value type, EAGERLY
-            # instantiates any nested {class_path, init_args} spec (its subclass
-            # shorthand) — which would turn a stage's raw `callbacks:`/`lr_scheduler:`
-            # specs into live objects before salt's own validator sees them, and
-            # is impossible for an LR scheduler (needs the stage optimizer,
-            # not built yet). A bare `dict` has no `__args__`, so jsonargparse treats
-            # the whole schedule as an opaque mapping and leaves the nested specs raw
-            # for `TrainingSchedule.from_config` to parse.
+            # BARE `dict` (not dict[str, Any]): a subscripted type makes jsonargparse
+            # eagerly instantiate nested {class_path, init_args} specs — impossible
+            # for a stage LR scheduler (no optimizer yet). Bare `dict` keeps the
+            # schedule opaque for `TrainingSchedule.from_config` to parse.
             type=dict | None,
             default=None,
             help="TOP-LEVEL staged-training schedule: "
@@ -870,18 +845,12 @@ class SaltCLI(LightningCLI):
                 "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
                 "sink — see gn2v2-opendata.yaml"
             )
-        # Defer the fit-stage experiment logger past the racy validation pass.
-        # jsonargparse's instantiate_classes pass validates the model: block
-        # against a runtime_checkable Protocol, which makes jsonargparse walk
-        # sys.modules.values() to resolve string forward refs. The default-ON
-        # CometLogger is instantiated in that SAME pass, and its __init__ eagerly
-        # starts comet's background upload threads, which import modules and
-        # mutate sys.modules — the two race into "RuntimeError: dictionary
-        # changed size during iteration", surfaced as "model does not validate
-        # against any Union subtype". So on `fit` we stash the logger config,
-        # null it for the parser pass (trainer built logger-less, no comet
-        # threads), then re-instantiate and attach it AFTER validation
-        # completes. Test/graph/export never carry a live logger here.
+        # Defer the fit-stage logger past the racy validation pass: jsonargparse
+        # walks sys.modules to resolve forward refs in the same pass that
+        # CometLogger.__init__ starts background threads mutating sys.modules —
+        # racing into "dictionary changed size during iteration". Stash the
+        # logger config, build the trainer logger-less, re-attach after
+        # validation. Test/graph/export never carry a live logger here.
         deferred_logger_cfg = self._detach_fit_logger()
         super().instantiate_classes()
         self._reattach_fit_logger(deferred_logger_cfg)
@@ -896,19 +865,12 @@ class SaltCLI(LightningCLI):
         writers: Any = None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
-            # compose FIRST: this partitions the section into writers (folded
-            # into the graph) and sinks (held on model._section_sinks).
+            # compose first (partitions writers vs sinks), then register the
+            # declared sinks BEFORE the implicit injection — _inject_command_sinks
+            # skips kinds already present, preventing double-wiring.
             composer(live_section)
             writers = getattr(model, "_output_section", live_section)
-            # register the section-declared sinks BEFORE the implicit injection:
-            # _inject_command_sinks reads iter_sinks and skips a kind that is
-            # already present, so registering first is what stops a declared
-            # sink being double-wired alongside an injected one.
             self._register_section_sinks(model)
-            # the command wires the implicit per-command sinks
-            # (test -> H5, export/graph -> ONNX) over the composed section — so a
-            # config declaring only WHAT (writers + modes) gets the right sink
-            # without ever naming H5OutputSink/OnnxExportSink.
             self._inject_command_sinks(writers)
             self._validate_wired_sinks(model)
         # bind both manifest sources to the registered sinks NOW: datamodule setup
@@ -1090,11 +1052,9 @@ class SaltCLI(LightningCLI):
         cfg = self.config["test"]
         self.save_config_callback = None  # no config.yaml dump on test
         cfg.trainer.logger = False
-        # the H5 persistence sink is now IMPLICIT — the command
-        # wires it in instantiate_classes over the top-level outputs: section. So
-        # the writer-less guard checks for the section (the WHAT), not a
-        # declared callbacks-level sink; a config still MAY declare its own sink
-        # (programmatic / MaskFormer), which _inject_command_sinks leaves alone.
+        # the H5 persistence sink is implicit (wired in instantiate_classes), so
+        # the guard checks for the outputs: section, not a declared sink; a
+        # config MAY still declare its own sink, which is left alone.
         has_callback_sink = _has_callback_persistence_sink(cfg.get("callbacks"))
         has_outputs_section = bool(cfg.get("outputs"))
         if not has_callback_sink and not has_outputs_section:
@@ -1196,13 +1156,7 @@ def main(args: Sequence[str] | None = None) -> int:
     dataset``/``model`` to the profiling harnesses (`salt.profiling.main`);
     everything else goes to `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
-    instead of a Python traceback.
-
-    Raises
-    ------
-    SystemExit
-        Re-raised from the parser (usage errors, ``--help`` — after the
-        see-also note when help was requested).
+    instead of a Python traceback. `SystemExit` is re-raised from the parser.
     """
     argv = list(sys.argv[1:] if args is None else args)
     if argv and argv[0] in _GRAPH_COMMANDS:

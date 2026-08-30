@@ -1,8 +1,7 @@
-"""Pure-v2 graph-fixture builders (extracted from ``regression_fixture.py`` at DEL-1).
+"""Pure-v2 graph-fixture builders.
 
-``regression_fixture.py`` mixes these v1-free builders with v1-comparison
-machinery (``build_independent_v1_*``) and dies with the v1 tree. Every builder
-here has live v2 consumers and imports NOTHING from the retired v1 namespace.
+Every builder here has live v2 consumers and imports nothing from the retired
+v1 namespace.
 """
 
 from __future__ import annotations

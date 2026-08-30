@@ -37,17 +37,12 @@ __all__ = ["INFERENCE_OUTPUT", "build_inference_sink", "inference_demand", "main
 INFERENCE_OUTPUT = "{ckpt_dir}/{ckpt_stem}__inference_{sample}.h5"
 """Default output template — ``__inference_`` so a ``salt test`` eval H5 is never clobbered."""
 
-# WHY eager per-jet (not the batched Lightning test loop): the export-mode graph
-# steps assume the Athena calling convention — batch 1, valid tokens only, an
-# all-valid pad mask. That is exactly how the eager ONNX-mode execution that
-# EXISTS today runs: `OnnxAdapter.forward` (the check_onnx torch reference and
-# the goldens generator's static selection both anchor on it). Concretely,
-# batched eager ONNX execution is UNSAFE: the seq-classification ONNX branch
-# appends a [1, 1, C] zero row (classification.py get_output) and `.squeeze(0)`s
-# to [L]; the vertexing/union-find branch `reshape(-1)`s the batch away
-# (edge.py get_output). Running the adapter per jet
-# guarantees `salt inference` == Athena semantics by construction, at the
-# check_onnx tolerance.
+# WHY eager per-jet (not the batched test loop): export-mode graph steps assume
+# the Athena calling convention — batch 1, valid tokens only, all-valid pad
+# mask. Batched eager ONNX execution is UNSAFE: the seq-classification branch
+# appends a [1, 1, C] zero row and `.squeeze(0)`s to [L]; the union-find branch
+# `reshape(-1)`s the batch away. Per-jet execution guarantees
+# `salt inference` == Athena semantics by construction, at check_onnx tolerance.
 
 
 def inference_demand(export: ExportConfig) -> list[str]:

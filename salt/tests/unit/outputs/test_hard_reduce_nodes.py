@@ -27,7 +27,7 @@ pytestmark = pytest.mark.cpu_always
 
 
 def test_maskformer_object_declares_all_cross_node_requires():
-    """ALL three maskformer reads are declared so the demand-closure keeps the decoder alive (R4)."""
+    """ALL three maskformer reads are declared so the demand-closure keeps the decoder alive."""
     node = MaskFormerObject(n_reg=3, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     io = node.declare_io(Mode.ONNX)
@@ -36,7 +36,7 @@ def test_maskformer_object_declares_all_cross_node_requires():
         "objects.masks",
         "preds.objects.regression",
     ]
-    # the two-node split (USER DESIGN 2026-06-22): the reconstruction node mints the
+    # the two-node split: the reconstruction node mints the
     # leading + per-token index folds AND exposes the reordered per-vertex leaves
     assert sorted(flatten_spec(io.produces)) == [
         "outputs.objects.leading_object",
@@ -59,7 +59,7 @@ def test_maskformer_object_non_default_regression_task_threaded():
 
 
 def test_maskformer_object_derived_widths():
-    """The index leaf collapses to 1 (R6); leading + vertices_regression keep n_reg."""
+    """The index leaf collapses to 1; leading + vertices_regression keep n_reg."""
     node = MaskFormerObject(n_reg=3, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     assert node.derived_widths({}) == {
@@ -161,7 +161,7 @@ def test_maskformer_objects_exposes_reordered_per_vertex_leaves():
     )
 
 
-# MFLeadVertexDecorator (NEW jet-level capability — NO legacy oracle; GO3 unit gate)
+# MFLeadVertexDecorator (jet-level capability with NO legacy oracle)
 
 _CP = "outputs.objects.vertices_class_probs"
 _REG = "outputs.objects.vertices_regression"
@@ -240,7 +240,7 @@ def test_lead_vertex_decorator_pnull_cut_excludes_high_pt_null_vertex():
 
 
 def test_lead_vertex_decorator_argmax_null_below_pnull_thr_excluded():
-    """argmax==null but pnull<threshold (thin-spread) is EXCLUDED (3rd cut, user 2026-06-22)."""
+    """argmax==null but pnull<threshold (thin-spread) is EXCLUDED (the third cut)."""
     class_probs = torch.tensor([[
         [0.1, 0.8, 0.1],   # v0: SV (argmax 1), pnull 0.1 < 0.5 -> qualifies, pt 3
         [0.3, 0.3, 0.4],   # v1: argmax 2 = NULL but pnull 0.4 < 0.5 -> EXCLUDED by the argmax!=null cut

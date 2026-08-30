@@ -62,9 +62,6 @@ class TestVertexingTaskModule:
         with pytest.raises(ConfigError, match="reduction"):
             task.bind(ResolvedSchema(widths={"encoded.tracks": 16}))
 
-    # DEL-1: test_default_origin_weighting_matches_v1 retired with the v1 tree
-    # (parity-closure doctrine: v1 comparisons = git checkout 29c67a1).
-
 
 def _origin_schema_reader(origin_label: str = "ftagTruthOriginLabel") -> SimpleNamespace:
     """A duck-typed reader exposing the tracks origin class names."""
@@ -104,9 +101,8 @@ class TestOriginWeightingConfig:
     def test_name_resolved_weights_match_integer_configured(self):
         # name-resolved ids produce weights bit-identical to a FRESH,
         # independently-constructed head configured with the literal default
-        # integer ids (3,4,5)/1 — never the resolved module's own head.
-        # (DEL-1: the retired v1 reference hardcoded these same ids; the
-        # id-parity itself is pinned by test_names_resolve_to_v1_default_ids.)
+        # integer ids (3,4,5)/1 — never the resolved module's own head
+        # (id-parity pinned by test_names_resolve_to_v1_default_ids).
         task = self._name_based()
         task.resolve_origin_names(_origin_schema_reader())
         task.bind(ResolvedSchema(widths={"encoded.tracks": 16}))

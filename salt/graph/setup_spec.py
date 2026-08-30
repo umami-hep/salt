@@ -23,7 +23,7 @@ __all__ = [
 ]
 
 SetupStage: TypeAlias = Literal["train", "val", "test"]
-"""Lightning-style setup stage — identical to ``CutSpec._STAGE_KEYS``.
+"""Lightning-style setup stage.
 
 NOT a `Mode`: ``datamodule.setup("fit")`` builds both the train and val
 datasets in one call, so setup granularity is coarser than the per-batch

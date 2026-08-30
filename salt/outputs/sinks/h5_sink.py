@@ -65,41 +65,23 @@ class H5OutputSink(RuntimeSink):
     writes them through one ftag `H5Writer` (FIXED mode, ``num_jets`` known
     up front — a valid empty file for an empty test set).
 
-    Responsibilities the sink owns (the producers must NOT know about these):
-
-    - **structured-array packing**: each producer leaf is a plain ``[B, C]``
-      / ``[B, L, C]`` tensor; the sink ``u2s``-packs it into the declared
-      ``{run_name}_{suffix}`` columns (`OutputColumn`).
-    - **per-token pad re-expansion**: per-token leaves and the pad-mask
-      column are zero-padded to the FILE sequence length (``_pad_to``).
-    - **input-variable copies**: optional source-file columns re-read by
-      absolute rows (``meta.rows``) through one cached handle, with SOURCE
-      dtypes/order.
-    - **pad-mask columns**: an optional boolean ``mask`` column per sequence
-      stream (True = padded); truncated-away positions read ``mask=False``.
-    - **output-group naming**: reader streams map to their FILE dataset name.
-
-    `writer_demand` returns the consumed ``outputs.*`` leaves PLUS the source
-    ``preds.*`` leaf of each producer feeding them (so the TEST dead-preds
-    gate sees those predictions as consumed, since preds.* are consumed by
-    producers, not by the sink), the ``meta.rows`` row anchor, and each
-    pad-mask stream's mask.
-
-    Note: keeping input copies / masks / pad re-expansion here means this
-    sink carries extra DataModule/reader/source-file coupling (it reads the
-    file's sequence length from ``reader.source_path``). The win is
-    composable additional sinks, not decoupling of the H5 sink itself.
+    The sink (not the producers) owns: structured-array packing of plain
+    ``[B, C]``/``[B, L, C]`` leaves into ``{run_name}_{suffix}`` columns;
+    per-token pad re-expansion to the FILE sequence length; input-variable
+    copies re-read from the source file by absolute rows (``meta.rows``) with
+    SOURCE dtypes/order; optional boolean pad-mask columns (True = padded;
+    truncated-away positions read False); and reader-stream -> FILE dataset
+    naming. `writer_demand` returns the consumed ``outputs.*`` leaves PLUS the
+    source ``preds.*`` leaf of each producer feeding them (so the TEST
+    dead-preds gate sees those predictions as consumed), ``meta.rows``, and
+    each pad-mask stream's mask.
 
     Parameters
     ----------
     outputs : None
-        RETIRED as a config surface. The H5 sink is now
-        implicit — the ``salt test`` command wires it and derives its column
-        schema from the bound top-level ``outputs:`` section (``RunTaskOutput``
-        + ``InputCopyWriter`` + ``PadMaskWriter``). Only ``None``/``[]`` is
-        accepted; any truthy value raises `ConfigError`. Do NOT wire this sink
-        in ``callbacks:`` with an explicit ``OutputColumn`` table — declare the
-        section instead (see ``gn2v2-opendata.yaml``).
+        RETIRED as a config surface — the sink is implicit and derives its
+        column schema from the bound ``outputs:`` section. Only ``None``/``[]``
+        is accepted; any truthy value raises `ConfigError`.
     copy_inputs : Mapping[str, Sequence[str]] | None, optional
         Per-stream source-file variables to copy into the eval H5, in column
         order, by default None.
@@ -175,24 +157,17 @@ class H5OutputSink(RuntimeSink):
         self.write_pad_mask = write_pad_mask
         self.output = output
         self.half_precision = half_precision
-        # declarative structured output groups fed from bundle leaves. Empty by
-        # default — the mechanism is then a strict no-op and the H5 schema is
-        # byte-identical to a plain sink. Self-contained (no section-node lookup):
-        # each field sources a bundle leaf the sink demands + packs.
+        # empty by default — then a strict no-op, H5 schema byte-identical
         self._object_groups: tuple[ObjectGroup, ...] = tuple(
             ObjectGroup.coerce(g) for g in (object_groups or ())
         )
-        # DUMB-SECTION mode: when an `outputs:` section is bound (RunTaskOutput +
-        # InputCopyWriter + PadMaskWriter), the sink dumps ALL active outputs.*
-        # leaves and derives its column schema + copy spec + mask streams from the
-        # SECTION manifest in section declaration order. The explicit constructor
-        # args are the OVERRIDE used when no section is bound. One of the two MUST
-        # resolve at run setup.
+        # dumb-section mode: with a bound outputs: section the sink derives its
+        # column schema + copy spec + mask streams from the SECTION manifest in
+        # declaration order; ctor args are the no-section override. One of the
+        # two MUST resolve at run setup.
         self._output_section: Mapping[str, Any] | None = None
-        # which section selection the columns resolve from: Mode.TEST (the
-        # `salt test` eval schema, the default) or Mode.ONNX (`salt inference`
-        # writes STRICTLY the export output set via
-        # `use_export_selection`).
+        # Mode.TEST = eval schema (default); Mode.ONNX = strictly the export
+        # output set (`use_export_selection`, salt inference).
         self._section_mode: Mode = Mode.TEST
         self._section_columns: tuple[tuple[str, OutputColumn], ...] | None = None
         # dumb-section copy resolution: None until a section binds; True means
@@ -265,11 +240,8 @@ class H5OutputSink(RuntimeSink):
         the DUMB path: it dumps ALL active ``outputs.*`` leaves and derives
         its column schema + input-copy spec + pad-mask streams from the
         SECTION manifest in SECTION DECLARATION ORDER (the H5 column-order
-        authority) — the constructor knobs are ignored. The section is bound
-        by the planner/SaltModule after the model. A copy/mask writer whose
-        ``modes:`` list excludes this sink's selection mode contributes
-        nothing (an export-only copy writer never adds ``salt test`` columns,
-        and a test-only one never adds ``salt inference`` columns).
+        authority) — the constructor knobs are ignored. A copy/mask writer
+        whose ``modes:`` exclude this sink's selection mode contributes nothing.
         """
         self._output_section = section
         self._invalidate_manifest()
@@ -286,10 +258,8 @@ class H5OutputSink(RuntimeSink):
                 spec = writer.copy_spec()
                 streams = spec.get("streams")
                 variables = spec.get("variables") or {}
-                # streams None -> the v1 default (every stream with a configured
-                # task), resolved at open_schema against the reader; encode that as
-                # the sentinel {} (empty fields = all source fields) per stream we
-                # learn at open time. We stash the spec and resolve in open_schema.
+                # streams None -> every stream with a configured task, resolved
+                # at open_schema against the reader (spec stashed until then)
                 if streams is None:
                     self._copy_all_tasked_streams = True
                     self._copy_variables = variables
@@ -311,17 +281,9 @@ class H5OutputSink(RuntimeSink):
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
         """Resolve the H5 column table — explicit, or from the bound ``outputs:`` section.
 
-        In explicit-``outputs`` mode returns the configured columns unchanged.
-        With a bound dumb ``outputs:`` section the schema comes from the
-        section's ``RunTaskOutput.manifest_fields`` in SECTION DECLARATION
-        ORDER. With neither, a sink that has no way to know its columns is a
-        config error.
-
-        Raises
-        ------
-        ConfigError
-            When neither explicit columns nor an ``outputs:`` section is
-            configured.
+        Explicit mode returns the configured columns unchanged; a bound dumb
+        section derives them from ``RunTaskOutput.manifest_fields`` in section
+        declaration order; neither is a `ConfigError`.
         """
         if self._columns_resolved:
             return self._columns
@@ -349,24 +311,13 @@ class H5OutputSink(RuntimeSink):
         """Resolve H5 columns from the bound manifest sources.
 
         Collects every FINAL field the bound producers declare for the
-        selection mode (``Mode.TEST`` unless `use_export_selection` switched to
-        ``Mode.ONNX``), narrows it by ``consumes:``, keeps the fields the
-        selection names (`_column_suffix`), and assembles ONE `OutputColumn`
-        per ``outputs.*`` leaf (suffixes in field order; export-mode leaves are
-        single-suffix by construction). The MANIFEST field order is the H5
-        column order authority (not executor topo order). Caches the resolved
-        table (run-name-stable). The section's InputCopyWriter/PadMaskWriter
-        contribute their columns through the copy / mask paths
-        (`_merge_columns`), not here.
-
-        The model-graph producers declare ONNX-only fields, so widening the
-        source set beyond the section leaves the TEST column set unchanged.
-
-        Raises
-        ------
-        ConfigError
-            When no producer mints a final task column for the selection, or
-            two leaves mint the same flat H5 column.
+        selection mode, narrows by ``consumes:``, keeps fields the selection
+        names (`_column_suffix`), and assembles ONE `OutputColumn` per
+        ``outputs.*`` leaf. MANIFEST field order (not executor topo order) is
+        the H5 column-order authority; the resolved table is cached. Copy/mask
+        writers contribute through `_merge_columns`, not here. `ConfigError`
+        when no producer mints a final column for the selection, or two leaves
+        mint the same flat H5 column.
         """
         by_key: dict[str, list[tuple[str, Any]]] = {}
         key_order: list[str] = []
@@ -448,11 +399,8 @@ class H5OutputSink(RuntimeSink):
                 req[f"masks.{stream}"] = TensorSpec(
                     shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
                 )
-        # each object-group field sources a bundle leaf the sink must demand
-        # (so its producer — a decoder head, a truth-label processor, a
-        # reconstruction node like MaskFormerObjects — stays alive in the TEST
-        # plan and its leaf threads into the consume bundle). Empty for the
-        # shipped non-object-group sinks (byte-identical no-op).
+        # demand each object-group field's source leaf so its producer stays
+        # alive in the TEST plan; empty for non-object-group sinks.
         for key, spec in self._object_group_requires().items():
             req.setdefault(key, spec)
         return IO(requires=unflatten_spec(req), produces={})
@@ -507,17 +455,11 @@ class H5OutputSink(RuntimeSink):
         input-copy / pad-mask columns into per-group dtypes/shapes, and
         creates the FIXED-mode `H5Writer`.
 
-        Raises
-        ------
-        ConfigError
-            For a missing ``ckpt_path``, a foreign datamodule, an unknown
-            output template key, a non-sequence pad-mask stream, a column
-            collision, or a missing input-copy source variable. Also when a
-            reader advertising no h5py-openable structured source
-            (``reader.h5_source is None`` — a uproot/ROOT reader, a
-            `MultiSampleReader`, or a global-only custom reader) is paired with
-            pad-mask columns or input-copying, which genuinely need that source
-            file — such a reader with neither demand is fine.
+        `ConfigError` on: missing ``ckpt_path``, foreign datamodule, unknown
+        output template key, non-sequence pad-mask stream, column collision,
+        missing input-copy source variable, or a reader with no h5py-openable
+        source (``reader.h5_source is None``) paired with pad-mask columns or
+        input-copying (which genuinely need the source file).
         """
         dm = ctx.datamodule
         dset = getattr(dm, "test_dset", None)
@@ -531,16 +473,10 @@ class H5OutputSink(RuntimeSink):
         streams = tuple(getattr(reader, "streams", ()) or ())
         groups = getattr(reader, "groups", None)
         self._mask_streams = self._pad_mask_streams()
-        # The structured-H5 path opens an h5py source to probe per-stream
-        # sequence lengths (pad-mask columns) and to copy input fields. Key on
-        # the reader's advertised CAPABILITY (`h5_source`), not its type: a
-        # reader with no h5py-openable source (`h5_source is None`) — a
-        # uproot/ROOT reader whose `.groups` are a non-H5 config shape, a
-        # MultiSampleReader wrapping any reader, or a global-only custom reader
-        # — takes the no-source path, writing task outputs only. That path is
-        # fine when NEITHER pad-mask columns NOR input-copying is demanded;
-        # both genuinely need the source file. Capability-keying
-        # (no isinstance) makes MultiSampleReader delegation work for free.
+        # key on the reader's advertised CAPABILITY (`h5_source`), not its type:
+        # a reader with no h5py-openable source takes the no-source path (task
+        # outputs only), fine unless pad-mask columns or input-copying are
+        # demanded — both genuinely need the source file.
         h5_source = getattr(reader, "h5_source", None)
         copy_requested = bool(self.copy_inputs) or self._copy_all_tasked_streams
         if h5_source is None:
@@ -630,12 +566,8 @@ class H5OutputSink(RuntimeSink):
         # pad masks last
         for stream, arr in self._mask_fragments(bundle).items():
             fragments.setdefault(stream, []).append(arr)
-        # object groups pack their declared fields from the demanded bundle
-        # leaves. NON-reader groups (e.g. `objects` / `object_masks`) are new
-        # groups; a reader-stream group (e.g. the `tracks` HadronIndex column) is
-        # re-expanded to the file token length like any per-token column.
-        # Appended AFTER the copy/output/mask fragments so the join order
-        # matches `_merge_columns` (object-group columns come last).
+        # object groups: appended AFTER copy/output/mask fragments so the join
+        # order matches `_merge_columns` (object-group columns come last).
         for stream, arr in self._object_group_fragments(bundle).items():
             fragments.setdefault(stream, []).append(arr)
         for stream, arrs in fragments.items():
@@ -825,18 +757,11 @@ class H5OutputSink(RuntimeSink):
         """Resolve each NON-reader object group's trailing per-row shape.
 
         A `shape` entry is an ``int``, or a reader stream name resolved to that
-        stream's file token length. A non-reader group name may NOT shadow a
-        reader stream, and two groups may NOT share a name. A reader-stream
-        group (``shape is None``) must name an actual reader stream. Returns
-        ``{group -> trailing shape}`` for the non-reader groups only; empty
-        ``object_groups`` -> ``{}`` (the byte-identical no-op path).
-
-        Raises
-        ------
-        ConfigError
-            For a duplicate group name, a non-reader group shadowing a reader
-            stream, a reader-stream group naming an unknown stream, or a shape
-            token naming a stream with no file token length.
+        stream's file token length. `ConfigError` on: duplicate group name, a
+        non-reader group shadowing a reader stream, a reader-stream group
+        (``shape is None``) naming an unknown stream, or a shape token naming
+        a stream with no file token length. Returns ``{group -> trailing
+        shape}`` for non-reader groups only.
         """
         shapes: dict[str, tuple[int, ...]] = {}
         seen: set[str] = set()
@@ -920,11 +845,8 @@ class H5OutputSink(RuntimeSink):
             _add(col.stream, col.np_dtype(self._run_name), f"output {col.key!r}")
         for stream in self._mask_streams:
             _add(stream, np.dtype([("mask", "?")]), f"pad mask[{stream!r}]")
-        # object-group columns — appended AFTER the copy/task/mask columns
-        # (mirroring the retired extra-group merge order). Each field declares
-        # its column dtypes from its own spec; the per-column uniqueness /
-        # attribution check is the SAME `_add` owners map a reader column rides.
-        # Dead code when object_groups is empty (byte-identical no-op).
+        # object-group columns come last; same `_add` uniqueness/attribution
+        # check as reader columns. Dead code when object_groups is empty.
         for group in self._object_groups:
             for field in group.fields:
                 _add(
@@ -1007,10 +929,7 @@ class H5OutputSink(RuntimeSink):
             ) from None
 
 
-# DEPRECATED one-window alias (design Q4): the node-shaped sink was renamed
-# H5OutputWriter -> H5OutputSink. Downstream configs that wire
-# `salt.outputs.H5OutputWriter` (incl. the H5-only overlay fixture) keep
-# working — the alias resolves to the promoted node. Remove after the migration
-# window.
+# DEPRECATED one-window alias (H5OutputWriter -> H5OutputSink rename); remove
+# after the migration window.
 H5OutputWriter = H5OutputSink
 """Deprecated alias for `H5OutputSink`."""

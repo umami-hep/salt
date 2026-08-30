@@ -258,8 +258,7 @@ class VDS(SaltDatasetModule):
         bad = [stage for stage in (out or {}) if stage not in SETUP_STAGES]
         if bad:
             raise ValueError(
-                f"VDS `out` has unknown stage(s) {bad}: must be a subset of "
-                f"{list(SETUP_STAGES)} (plan-25 O-VDS-OUT)"
+                f"VDS `out` has unknown stage(s) {bad}: must be a subset of {list(SETUP_STAGES)}"
             )
         self._out: dict[str, str | Path] = dict(out) if out is not None else {}
         # wired by SaltDataModule at assembly time, mirroring
