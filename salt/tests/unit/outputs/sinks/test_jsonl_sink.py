@@ -18,12 +18,10 @@ from salt.outputs import (
     JSONLOutputSink,
     Node,
     OnnxExportSink,
-    OutputSink,
     RuntimeSink,
     SinkContext,
     is_test_persistence_sink,
 )
-from salt.outputs.sinks.h5_sink import _SinkCallback  # noqa: PLC2701 - the alias under test
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.run_task_output import RunTaskOutput
 from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test fixtures
@@ -95,10 +93,6 @@ def _read(path: Path) -> list[dict]:
 
 
 class TestOutputSinkPromotion:
-    def test_the_private_alias_still_resolves(self):
-        """`_SinkCallback` is kept as an alias of the deprecated public `OutputSink`."""
-        assert _SinkCallback is OutputSink
-
     @pytest.mark.parametrize("cls", [H5OutputSink, OnnxExportSink, JSONLOutputSink])
     def test_shipped_sinks_subclass_the_public_base(self, cls):
         """Every shipped sink derives from the documented extension point."""
@@ -112,16 +106,6 @@ class TestOutputSinkPromotion:
     def test_the_onnx_manifest_is_declare_only(self):
         """Export runs no test loop, so its node has no lifecycle to inherit."""
         assert not issubclass(OnnxExportSink, RuntimeSink)
-
-    def test_output_sink_still_works_but_deprecates_on_subclassing(self):
-        """Third-party `class MySink(OutputSink)` keeps working, loudly."""
-        assert issubclass(OutputSink, RuntimeSink)
-        with pytest.warns(DeprecationWarning, match="deprecated alias"):
-
-            class _ThirdParty(OutputSink):
-                name = "third_party"
-
-        assert issubclass(_ThirdParty, RuntimeSink)
 
     def test_base_marks_terminal_and_defaults_to_empty_io(self):
         """The base is a terminal node declaring nothing until a subclass overrides."""

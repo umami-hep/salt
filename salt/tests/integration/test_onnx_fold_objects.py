@@ -20,7 +20,6 @@ from salt.outputs.sinks.onnx import (
     resolve_export_config,
 )
 from salt.outputs import (
-    MaskFormerObject,
     MaskFormerObjects,
     MFLeadVertexDecorator,
     OnnxExportSink,
@@ -73,17 +72,17 @@ def _bind_producers(modules) -> None:
             module.bind_model_modules(modules)
 
 
-# MaskFormerObject: ONE node mints BOTH object leaves (leading_object +
+# MaskFormerObjects: ONE node mints BOTH object leaves (leading_object +
 # object_index). Self-consistency (torch == ort) is NaN-aware because the
 # random decoder weights yield a NaN leading_object by design (null-suppression
 # semantics).
 
 
 def _build_maskformer_folded(tmp_path):
-    """Folded single-node maskformer export (MaskFormerObject -> both leaves)."""
+    """Folded single-node maskformer export (MaskFormerObjects -> both leaves)."""
     torch.manual_seed(42)
     modules = build_maskformer_writer_modules(tmp_path / "norm_dict.yaml")
-    mf = MaskFormerObject(
+    mf = MaskFormerObjects(
         n_reg=_N_REG,
         stream="objects",
         constituent_stream="tracks",

@@ -337,13 +337,6 @@ class MaskFormerObjects(SaltModelModule):
         return {self.index_key: idx}
 
 
-# One-window alias: `MaskFormerObject` was renamed `MaskFormerObjects`. The
-# promoted node is a strict superset, so an existing `MaskFormerObject`
-# config keeps working via this alias. Remove after the migration window.
-MaskFormerObject = MaskFormerObjects
-"""Deprecated alias for `MaskFormerObjects`."""
-
-
 class MFLeadVertexDecorator(SaltModelModule):
     """MaskFormer lead-vertex jet-level decorator (the decoration half of the two-node split).
 

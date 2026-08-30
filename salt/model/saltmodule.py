@@ -2034,18 +2034,3 @@ def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) ->
         if callable(resolve) and resolve(reader):
             resolved += 1
     return resolved
-
-
-def bundle_as_v1_outputs(bundle: Bundle) -> dict[str, Any]:
-    """Deprecated migration shim: bundle as the v1 ``{preds, labels, pad_masks}``
-    view. ``pad_masks`` maps each masked stream (``masks.*`` minus the
-    encoder's ``registers`` entry) to its True-is-padded mask; absent
-    namespaces map to ``{}``.
-    """
-    masks: dict[str, Tensor] = dict(bundle.subtree("masks")) if "masks" in bundle.data else {}
-    masks.pop("registers", None)
-    return {
-        "preds": bundle.subtree("preds") if "preds" in bundle.data else {},
-        "labels": bundle.subtree("labels") if "labels" in bundle.data else {},
-        "pad_masks": masks,
-    }

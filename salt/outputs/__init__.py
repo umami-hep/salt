@@ -14,7 +14,6 @@ from salt.outputs.conversion_ops import (
 )
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.maskformer import (
-    MaskFormerObject,
     MaskFormerObjects,
     MFLeadVertexDecorator,
 )
@@ -26,13 +25,12 @@ from salt.outputs.output_schema import (
 )
 from salt.outputs.pad_mask_writer import PadMaskWriter
 from salt.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
-from salt.outputs.sinks.h5_sink import H5OutputSink, H5OutputWriter
+from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.sinks.jsonl_sink import JSONLOutputSink
 from salt.outputs.sinks.onnx_sink import OnnxExportLeaf, OnnxExportSink
 from salt.outputs.sinks.registry import iter_sinks, register_sink, sink_registry
 from salt.outputs.sinks.sink import (
     Node,
-    OutputSink,
     RuntimeSink,
     SinkContext,
     is_test_persistence_sink,
@@ -50,12 +48,10 @@ __all__ = [
     "Combination",
     "ConversionOp",
     "H5OutputSink",
-    "H5OutputWriter",
     "IdentityOp",
     "InputCopyWriter",
     "JSONLOutputSink",
     "MFLeadVertexDecorator",
-    "MaskFormerObject",
     "MaskFormerObjects",
     "Node",
     "ObjectGroup",
@@ -65,7 +61,6 @@ __all__ = [
     "OutputColumn",
     "OutputField",
     "OutputSectionWriter",
-    "OutputSink",
     "PadMaskWriter",
     "RunTaskOutput",
     "RuntimeSink",

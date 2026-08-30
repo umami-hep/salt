@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fnmatch
 import functools
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -18,7 +17,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module import-li
 
 __all__ = [
     "Node",
-    "OutputSink",
     "RuntimeSink",
     "SinkContext",
     "collect_manifest_fields",
@@ -530,24 +528,3 @@ class RuntimeSink(Node):
 
     def close_if_open(self) -> None:  # pragma: no cover - overridden
         """Idempotently close any open handle (failure-cleanup)."""
-
-
-class OutputSink(RuntimeSink):
-    """Deprecated alias of `RuntimeSink`, kept for third-party subclasses.
-
-    ``class MySink(OutputSink)`` keeps working unchanged but subclassing
-    warns; the name is removed after the deprecation window. Subclass
-    `RuntimeSink` instead.
-    """
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Warn once per subclass that `OutputSink` is deprecated."""
-        super().__init_subclass__(**kwargs)
-        warnings.warn(
-            f"{cls.__name__} subclasses OutputSink, which is a deprecated alias of "
-            "RuntimeSink — subclass salt.outputs.RuntimeSink instead (a sink is no "
-            "longer a lightning Callback; the test loop drives it through a generated "
-            "adapter).",
-            DeprecationWarning,
-            stacklevel=2,
-        )

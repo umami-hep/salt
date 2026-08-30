@@ -16,7 +16,7 @@ from salt.graph import IO, Bundle, ConfigError, Mode
 from salt.model.base import SaltModelModule
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.outputs import RunTaskOutput
-from salt.model.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
+from salt.model.saltmodule import CKPT_KEY, SaltModule
 from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -323,11 +323,6 @@ class TestTestLoop:
             assert f"preds.{stream}.{task}" in bundle
         assert "meta.rows" in bundle
         assert Mode.TEST in fitted["model"].plans
-        # the migration shim exposes the v1 outputs view
-        v1_view = bundle_as_v1_outputs(bundle)
-        assert set(v1_view["preds"]) == {"jets", "tracks"}
-        assert set(v1_view["pad_masks"]) == {"tracks"}
-        assert v1_view["labels"] == {}
 
 
 class TestCheckpoint:

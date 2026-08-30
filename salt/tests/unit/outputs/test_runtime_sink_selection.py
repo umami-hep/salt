@@ -32,7 +32,7 @@ from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 _JET_OUT = "outputs.jets.jets_classification"
 _TRK_OUT = "outputs.tracks.track_origin"
 _ONNX_CLASS_PATH = "salt.outputs.OnnxExportSink"
-_H5_CLASS_PATH = "salt.outputs.H5OutputWriter"
+_H5_CLASS_PATH = "salt.outputs.H5OutputSink"
 
 _ORIGIN_SUFFIXES = [
     "pPileup",

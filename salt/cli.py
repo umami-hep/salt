@@ -444,7 +444,7 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
 
 def _static_writer_sink_callback(cli: Any) -> Any | None:
     """The configured TEST persistence sink (duck-typed on ``writer_demand``,
-    e.g. `H5OutputWriter`), or None — the static mirror of
+    e.g. `H5OutputSink`), or None — the static mirror of
     `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
     sinks.
     """

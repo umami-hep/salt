@@ -780,7 +780,6 @@ Notes for sink authors:
 | `salt.outputs.RuntimeSink` | base class for a sink with a lifecycle — the extension point |
 | `salt.outputs.Node` | its declare-only parent, for a node with no run-time work |
 | `salt.outputs.SinkContext` | the run facts `open_schema` receives |
-| `salt.outputs.OutputSink` | deprecated alias of `RuntimeSink`; subclassing it warns |
 | `salt.outputs.H5OutputSink` | the eval-H5 sink (implicit on `salt test`) |
 | `salt.outputs.OnnxExportSink` | the ONNX tuple sink (implicit on `salt export`) |
 | `salt.outputs.JSONLOutputSink` | the worked example: newline-delimited JSON |

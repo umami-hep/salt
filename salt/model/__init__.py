@@ -14,11 +14,10 @@ Model-side packages:
 from __future__ import annotations
 
 from salt.model.base import SaltModelModule
-from salt.model.saltmodule import CKPT_KEY, SaltModule, bundle_as_v1_outputs
+from salt.model.saltmodule import CKPT_KEY, SaltModule
 
 __all__ = [
     "CKPT_KEY",
     "SaltModelModule",
     "SaltModule",
-    "bundle_as_v1_outputs",
 ]

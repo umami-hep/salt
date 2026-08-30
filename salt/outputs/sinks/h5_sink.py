@@ -1,7 +1,4 @@
-"""The H5 sink — `H5OutputSink`, the eval-H5 serialiser.
-
-Keeps the deprecated one-window `H5OutputWriter` legacy alias export.
-"""
+"""The H5 sink — `H5OutputSink`, the eval-H5 serialiser."""
 
 from __future__ import annotations
 
@@ -28,13 +25,10 @@ from salt.graph.spec import (
 )
 from salt.logging import console, get_logger
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
-from salt.outputs.sinks.sink import OutputSink, RuntimeSink, SinkContext, collect_manifest_fields
+from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
 
 _LOG = get_logger(__name__)
-
-_SinkCallback = OutputSink
-"""Deprecated private alias for `OutputSink` (the sink base was made public)."""
 
 DEFAULT_OUTPUT = "{ckpt_dir}/{ckpt_stem}__test_{sample}.h5"
 """The v1-compatible output template."""
@@ -927,9 +921,3 @@ class H5OutputSink(RuntimeSink):
             raise ConfigError(
                 f"unknown H5OutputSink output template key {err} — available: {sorted(keys)}"
             ) from None
-
-
-# DEPRECATED one-window alias (H5OutputWriter -> H5OutputSink rename); remove
-# after the migration window.
-H5OutputWriter = H5OutputSink
-"""Deprecated alias for `H5OutputSink`."""
