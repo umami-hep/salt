@@ -182,7 +182,7 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false, truncate: 40}
+          tracks: {global_object: false, pad_max: 40}
     features:
       class_path: salt.data.Features
       init_args:
@@ -304,7 +304,8 @@ certainly want to revisit this, and that is the point: the tutorial trains on
 the raw imbalance so the imbalance is visible in the results rather than hidden
 behind a choice you did not make. See the exercises.
 
-**`truncate: 40`** on tracks — the files store up to 100 tracks per jet; 40 is
+**`pad_max: 40`** on tracks — the files store up to 100 tracks per jet; sequences
+shorter than 40 are padded up to 40 and longer ones truncated down to 40; 40 is
 the usual working point and keeps the attention cost down.
 
 **The training knobs** are sized for a laptop, not tuned: `batch_size: 500` and

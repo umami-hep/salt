@@ -95,7 +95,7 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false, truncate: 40}
+          tracks: {global_object: false, pad_max: 40}
     features:
       class_path: salt.data.Features
       init_args:
@@ -173,8 +173,9 @@ see the shipped file for the complete config.)
   keys.
 - **`reader`** (`H5StructuredReader`) — reads the pre-processed UPP-format H5:
   `jets` is `global_object: true` (one row per jet, like part 3's `event`
-  stream), `tracks` is a padded sequence (`truncate: 40`), matching v1's track
-  cap.
+  stream), `tracks` is a padded sequence (`pad_max: 40` — sequences shorter
+  than 40 are padded up to 40, longer ones truncated down to 40), matching
+  v1's track cap.
 - **`norm`** (`Normaliser`, not `MaskedInputNormaliser`) — this dataset ships
   a precomputed `norm_dict.yaml` (means/stds from the *training* set only), so
   the config uses the fixed-dict normaliser, not the self-normalising one from

@@ -13,7 +13,7 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false, truncate: 100}
+          tracks: {global_object: false, pad_max: 100}
     features:
       class_path: salt.data.Features
       init_args:

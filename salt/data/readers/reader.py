@@ -37,19 +37,20 @@ class GroupConfig:
 
     `dataset` is the H5 dataset name the stream maps to (``None`` — the
     default, so empty YAML group blocks parse through jsonargparse — resolves
-    to the stream name in `H5StructuredReader._parse_group`). `truncate` keeps
-    the leading N constituents. `global_object` declares a ``[B, F]`` stream
-    carrying no pad mask; None infers it from the schema artifact (no
-    ``valid`` field => global_object).
+    to the stream name in `H5StructuredReader._parse_group`). `pad_max` caps
+    the sequence at N constituents: shorter sequences are padded up to N,
+    longer sequences are truncated down to N. `global_object` declares a
+    ``[B, F]`` stream carrying no pad mask; None infers it from the schema
+    artifact (no ``valid`` field => global_object).
     """
 
     dataset: str | None = None
-    truncate: int | None = None
+    pad_max: int | None = None
     global_object: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.truncate is not None and self.truncate < 1:
-            raise ConfigError(f"group truncate must be >= 1, got {self.truncate}")
+        if self.pad_max is not None and self.pad_max < 1:
+            raise ConfigError(f"group pad_max must be >= 1, got {self.pad_max}")
 
 
 class H5StructuredReader(Reader):
@@ -58,7 +59,7 @@ class H5StructuredReader(Reader):
     Parameters
     ----------
     groups : Mapping[str, GroupConfig | Mapping | None]
-        Stream name -> group config (``{dataset:, truncate:, global_object:}``).
+        Stream name -> group config (``{dataset:, pad_max:, global_object:}``).
         A None / empty value defaults the dataset name to the stream name.
         The first group defines the reader length (rows on axis 0 are aligned
         across groups by the file format).
@@ -175,19 +176,19 @@ class H5StructuredReader(Reader):
         if isinstance(cfg, GroupConfig):
             if cfg.dataset is None:
                 return GroupConfig(
-                    dataset=stream, truncate=cfg.truncate, global_object=cfg.global_object
+                    dataset=stream, pad_max=cfg.pad_max, global_object=cfg.global_object
                 )
             return cfg
         cfg = dict(cfg or {})
-        unknown = set(cfg) - {"dataset", "truncate", "global_object"}
+        unknown = set(cfg) - {"dataset", "pad_max", "global_object"}
         if unknown:
             raise ConfigError(
                 f"group {stream!r}: unknown config keys {sorted(unknown)} — expected "
-                "dataset/truncate/global_object"
+                "dataset/pad_max/global_object"
             )
         return GroupConfig(
             dataset=str(cfg.get("dataset", stream)),
-            truncate=cfg.get("truncate"),
+            pad_max=cfg.get("pad_max"),
             global_object=cfg.get("global_object"),
         )
 
@@ -219,7 +220,7 @@ class H5StructuredReader(Reader):
                     "(global_object: false) but the schema has no 'valid' field — pad masks "
                     "cannot be derived"
                 )
-            resolved[stream] = GroupConfig(cfg.dataset, cfg.truncate, global_object)
+            resolved[stream] = GroupConfig(cfg.dataset, cfg.pad_max, global_object)
             if global_object and stream in self.constituent_cuts:
                 raise ConfigError(
                     f"constituent_cuts on stream {stream!r}, which is a global_object "
@@ -277,15 +278,15 @@ class H5StructuredReader(Reader):
         )
 
     def _stream_config(self, stream: str) -> StreamConfig | None:
-        """The `StreamConfig` for a sequence stream (``truncate`` -> ``pad_max``), else None.
+        """The `StreamConfig` for a sequence stream with `pad_max` set, else None.
 
         Carries no cuts: the structured H5 slab applies `ConstituentCuts` directly in
         `read` (both ``mask`` and ``drop``), never through the jagged awkward pipeline.
         """
         cfg = self.groups[stream]
-        if cfg.truncate is None:
+        if cfg.pad_max is None:
             return None
-        return StreamConfig(pad_max=cfg.truncate, jagged=not cfg.global_object)
+        return StreamConfig(pad_max=cfg.pad_max, jagged=not cfg.global_object)
 
     def with_source(
         self,
@@ -314,12 +315,12 @@ class H5StructuredReader(Reader):
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.<stream>``/``masks.<stream>``/``meta.rows`` (source node,
-        requires={}); sequence dims concrete when `truncate` is set, else symbolic.
+        requires={}); sequence dims concrete when `pad_max` is set, else symbolic.
         """
         del mode
         flat: dict[str, TensorSpec] = {}
         for stream, cfg in self.groups.items():
-            t_dim: int | str = cfg.truncate if cfg.truncate is not None else sym_dim("T", stream)
+            t_dim: int | str = cfg.pad_max if cfg.pad_max is not None else sym_dim("T", stream)
             shape = ("B",) if cfg.global_object else ("B", t_dim)
             flat[f"raw.{stream}"] = TensorSpec(shape=shape, kind="data")
             if not cfg.global_object:
@@ -351,9 +352,9 @@ class H5StructuredReader(Reader):
                         f"group {stream!r}: {cfg.dataset!r} in {path.name!r} is missing or "
                         f"not a structured dataset; available: {sorted(f.keys())}"
                     )
-                if cfg.truncate is not None and (node.ndim < 2 or cfg.truncate > node.shape[1]):
+                if cfg.pad_max is not None and (node.ndim < 2 or cfg.pad_max > node.shape[1]):
                     raise ConfigError(
-                        f"group {stream!r}: truncate={cfg.truncate} exceeds the file's "
+                        f"group {stream!r}: pad_max={cfg.pad_max} exceeds the file's "
                         f"constituent dimension {node.shape[1:]}"
                     )
             first = next(iter(self.groups.values()))

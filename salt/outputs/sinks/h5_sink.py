@@ -662,7 +662,7 @@ class H5OutputSink(RuntimeSink):
         token length; a NON-reader group's per-row shape is guarded against the
         schema-declared shape (raises `ConfigError` — e.g. ``object_masks``
         must span the full file constituent width, incompatible with a reader
-        ``truncate``). Empty ``object_groups`` -> ``{}`` (the no-op path).
+        ``pad_max``). Empty ``object_groups`` -> ``{}`` (the no-op path).
         """
         out: dict[str, np.ndarray] = {}
         for group in self._object_groups:
@@ -677,7 +677,7 @@ class H5OutputSink(RuntimeSink):
                     raise ConfigError(
                         f"H5OutputSink: object group {group.name!r} fragment per-row shape "
                         f"{actual} does not match the schema-declared per-row shape {declared} "
-                        "— a reader `truncate` narrower than the file width is unsupported for a "
+                        "— a reader `pad_max` narrower than the file width is unsupported for a "
                         "non-reader object group (its trailing axes must span the full file width)"
                     )
             out[group.name] = arr

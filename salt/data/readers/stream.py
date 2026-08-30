@@ -36,8 +36,8 @@ class StreamConfig:
     ----------
     pad_max : int
         The served constituent multiplicity ``T`` (the leading N kept after sort +
-        truncate). Resolved by the reader at index-build (config ``truncate`` /
-        ``pad_max`` or the file-wide max). Must be ``>= 1``.
+        truncate). Resolved by the reader at index-build (config ``pad_max`` or
+        the file-wide max). Must be ``>= 1``.
     sort : Mapping[str, str] | None, optional
         Constituent sort spec ``{"var": <field>, "mode": "ascending"|"descending"}``.
         ``None`` (default) keeps the file order — the parity-preserving path. The
