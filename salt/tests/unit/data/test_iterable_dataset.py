@@ -552,11 +552,11 @@ def test_manifest_detects_a_changed_corpus(tmp_path) -> None:  # noqa: ANN001
     assert any("schema hash" in p for p in manifest.validate(schema_hash="different"))
 
 
-def test_manifest_rejects_a_foreign_format_version(tmp_path) -> None:  # noqa: ANN001
-    """A future/older artifact is a hard error, never a partial read."""
+def test_manifest_rejects_a_foreign_salt_stamp(tmp_path) -> None:  # noqa: ANN001
+    """An artifact written by a different salt is a hard error, never a partial read."""
     path = tmp_path / "corpus.json"
-    path.write_text('{"version": 999, "entries": [], "group_names": ["default"]}')
-    with pytest.raises(ConfigError):
+    path.write_text('{"salt_version": "0.0.0", "entries": [], "group_names": ["default"]}')
+    with pytest.raises(ConfigError, match="delete"):
         CorpusManifest.load(path)
 
 

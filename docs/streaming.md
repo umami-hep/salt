@@ -29,6 +29,7 @@ things it fixes actually bites you:
 ```yaml
 data:
   iterable: true
+  manifest: /path/to/corpus_manifest.json  # required — built there when missing
   block_rows: 16384
   max_live_streams: 2
   interleave_block: 1
@@ -109,52 +110,52 @@ Resolving a reader's blocks means resolving its index, which is the expensive
 part of startup. With a manifest, shard assignment and epoch length are computed
 without opening a single data file.
 
-`manifest:` takes three values.
-
-### `manifest: auto` — let the run build it
+`manifest:` is **required** on the streaming path, and salt never chooses a
+storage location: you name the path, and the artifact lives there.
 
 ```yaml
 data:
   iterable: true
-  manifest: auto
+  manifest: /path/to/corpus_manifest.json
 ```
 
-The datamodule resolves a conventional path per stage, validates whatever is
-there, and builds it when it is missing or stale. Building happens in Lightning's
-`prepare_data()` hook, which runs on **global rank 0 only** and barriers every
-other rank before `setup()` — so one process pays for the artifact and the rest
-read it, with no lock and no stampede. Writes are atomic (temp file plus
-`os.replace`), so a half-written manifest can never be read.
+- **The file exists** → it is validated and read.
+- **The file is missing** → it is built at that path, inside Lightning's
+  `prepare_data()` hook, which runs on **global rank 0 only** and barriers every
+  other rank before `setup()` — so one process pays for the artifact and the
+  rest read it, with no lock and no stampede. Writes are atomic (temp file plus
+  `os.replace`), so a half-written manifest can never be read.
+- **The file is stale** → hard error naming the path: delete the file to
+  rebuild. It is your file, so salt never silently overwrites it.
 
-Where it lands:
+A single path is shared by every streaming stage, which is only valid when they
+read the same corpus. When train and val are different file sets — the usual
+case — give one path per stage:
 
-1. next to the corpus — the common ancestor directory of the reader's resolved
-   source files, when that directory is writable;
-2. otherwise `$SALT_MANIFEST_CACHE`, or `~/.cache/salt/manifests/`.
-
-Corpus directories on cluster storage are frequently read-only, so the fallback
-is routine. The chosen path is logged either way. Filenames are keyed by a digest
-of (source list, stage, row cap, reader class, **reader config**), so train and
-val get their own manifests and two different corpora never collide in one
-directory.
+```yaml
+data:
+  iterable: true
+  manifest:
+    train: /path/to/train_manifest.json
+    val: /path/to/val_manifest.json
+```
 
 Staleness is decided without opening a data file:
 
-- the artifact's format version;
+- the `salt.__version__` stamp — the artifact's format identity. A manifest
+  written by a different salt is stale by construction, and rebuilding is one
+  file deletion away;
 - a `stat` per recorded file (size and mtime);
 - the corpus's file list — the one change no per-file `stat` can see;
-- the **reader's config fingerprint**, which is in the filename itself. The
-  checks above all describe the files, and none of them sees a reader
-  reconfigured over the *same* files. That matters because a changed `cuts:`
-  changes row counts and therefore every block boundary, while leaving every
-  file byte-identical. Config changes are a miss by construction: they key a
-  different filename.
+- the **reader's config fingerprint**, recorded in the artifact. The checks
+  above all describe the files, and none of them sees a reader reconfigured
+  over the *same* files. That matters because a changed `cuts:` changes row
+  counts and therefore every block boundary, while leaving every file
+  byte-identical;
 - the served schema's hash, whenever the caller already has a built schema and
   can supply it for nothing. (Computing one means opening files, which is the
   cost the artifact exists to avoid — so this check is a bonus, and the config
   fingerprint is the guarantee.)
-
-A stale manifest is rebuilt, loudly.
 
 The manifest also records the **served schema** (`{stream: {field: dtype}}`).
 Plan compilation validates demanded fields against it, and both `schema_group`
@@ -164,18 +165,8 @@ to re-learn field names the manifest already had. With it, a warm `setup()`
 opens **no data file at all**. Reading still builds the index when a worker
 actually reads: the manifest seeds the schema, not the row table.
 
-!!! note "Format version 2"
-
-    `MANIFEST_VERSION` is 2: the artifact now carries the served schema, and its
-    filename key includes the reader's config. **Manifests written by an earlier
-    salt are a miss.** Under `manifest: auto` that is invisible — the run
-    rebuilds. An explicit `manifest: /path/...` **errors as stale**; rebuild it
-    with `python -m salt.data.manifest`.
-
-### `manifest: /path/to/corpus_manifest.json` — build it yourself
-
-Recommended for a large corpus, and the only option that keeps the cost out of
-the training job entirely:
+To keep even the first build out of the training job, pre-build the fit-stage
+artifact offline and point `manifest:` at it:
 
 ```bash
 python -m salt.data.manifest \
@@ -183,15 +174,6 @@ python -m salt.data.manifest \
     --set data.train_file='/path/to/corpus/*/*.pool.root*' \
     --out /path/to/corpus_manifest.json
 ```
-
-An explicit path must exist and load; it is applied to **every** streaming stage
-of the run, so build it from the corpus those stages read, or use `auto` when
-train and val are different file sets.
-
-### `manifest:` unset — no artifact
-
-Every reader process resolves its own index. Correct, and the thing that stops
-scaling first.
 
 ## Writing a reader that streams well
 

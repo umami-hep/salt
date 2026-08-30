@@ -20,9 +20,11 @@
 # more shards than files and needs no per-rank configuration.
 #
 # The corpus manifest lets every rank plan its shards without opening a data
-# file. `auto` (below) builds it on rank 0 in prepare_data and reuses it after;
-# for a large corpus, build it ONCE offline instead and point `manifest:` at the
-# artifact, so no training job ever pays for it:
+# file. `manifest:` is REQUIRED on the streaming path (set it below or on the
+# command line): an existing file is validated and read, a missing one is built
+# at that path on rank 0 in prepare_data, and a stale one is a hard error —
+# delete the file to rebuild. To keep even the first build out of the training
+# job, pre-build it offline:
 #   python -m salt.data.manifest --config readers/ftag1lite.yaml \
 #       --set data.train_file='/path/to/corpus/*/*.pool.root*' \
 #       --out /path/to/corpus_manifest.json
@@ -41,9 +43,10 @@ data:
   # counts stay within this many rows of their proportional share.
   interleave_block: 1
   shuffle_stream: true
-  # Manifest, off by default. Either of:
-  #   manifest: auto                       # resolve next to the corpus (or in
-  #                                        # ~/.cache/salt/manifests when the
-  #                                        # corpus dir is read-only) and build
-  #                                        # it on rank 0 when missing/stale
-  #   manifest: /path/to/corpus_manifest.json   # a pre-built artifact (above)
+  # REQUIRED: where each streaming stage's manifest lives (salt never chooses a
+  # storage location). A single path is valid only when every stage reads the
+  # same corpus; with different train/val file sets, name one path per stage:
+  #   manifest: /path/to/corpus_manifest.json
+  #   manifest:
+  #     train: /path/to/train_manifest.json
+  #     val: /path/to/val_manifest.json
