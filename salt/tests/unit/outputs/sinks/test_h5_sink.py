@@ -4,10 +4,11 @@ section ONNX contract.
 
 Split out of the retired ``tests/integration/test_eval_h5.py`` (re-anchored
 from ``test_outputs_explicit.py`` + ``test_outputs_section.py``): the
-schema-vs-golden and cli-writes-h5 checks that file also carried are now the
-matrix eval leg's job (``pipeline/test_pipeline.py::_assert_eval_h5_matches_golden``,
-column NAMES/order only); everything here is either a value-level check the
-matrix golden comparison does not make (dtype, softmax sum, sentinel value,
+schema-containment and cli-writes-h5 checks that file also carried are now
+the matrix eval leg's job (``pipeline/test_pipeline.py::
+_assert_eval_h5_has_expected_outputs``, column presence against the curated
+``EXPECTED_OUTPUTS`` table); everything here is either a value-level check
+that containment check does not make (dtype, softmax sum, sentinel value,
 target-label content) or pure section/writer-unit introspection with no
 config-lifecycle equivalent.
 """
@@ -93,13 +94,30 @@ def ckpt(data, tmp_path_factory) -> Path:
     return ckpts[0]
 
 
-@pytest.fixture(scope="module")
-def cli_h5(data, ckpt) -> Path:
-    """Eval H5 from ``salt test`` — the H5 sink is IMPLICIT (wired by the command).
+def _explicit_h5_sink_override(out: Path) -> str:
+    """A ``--outputs.h5_output=<JSON>`` value pinning the H5 sink to ``out``.
 
-    No ``--callbacks.h5_output`` override: the sink is injected over the outputs:
-    section and writes to the default ``{ckpt_dir}/{ckpt_stem}__test_{sample}.h5``.
+    Same pattern as ``TestNoCkptFallback`` below: a private, per-fixture
+    output path instead of the default-templated
+    ``{ckpt_dir}/{ckpt_stem}__test_{sample}.h5``. The ONLY true regression in
+    the integration-test restructure (pipeline #15650554 diagnosis item 5):
+    ``cli_h5`` and ``section_h5`` both share the same ``ckpt`` fixture, so
+    both previously wrote to the SAME implicit default path — under
+    pytest-randomly, whichever fixture ran last silently won and the other's
+    glob (``ckpt.parent.glob("*__test_*.h5")[-1]``) picked up the wrong file.
+    In the old layout this never fired: the CPU runner skipped these files
+    entirely (no integration marker), so the collision never executed.
     """
+    return f'{{"class_path": "salt.outputs.H5OutputSink", "init_args": {{"output": "{out}"}}}}'
+
+
+@pytest.fixture(scope="module")
+def cli_h5(data, ckpt, tmp_path_factory) -> Path:
+    """Eval H5 from ``salt test`` — an explicit, private H5OutputSink output
+    (own path — see ``_explicit_h5_sink_override``, not the implicit
+    default-templated one ``section_h5`` below also targets).
+    """
+    out = tmp_path_factory.mktemp("cli_h5") / "eval.h5"
     rc = main([
         "test",
         "--config",
@@ -108,21 +126,22 @@ def cli_h5(data, ckpt) -> Path:
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
         f"--trainer.default_root_dir={data['dir']}",
+        f"--outputs.h5_output={_explicit_h5_sink_override(out)}",
         *_overrides(data),
     ])
     assert rc == 0, "salt test on the shipped gn2v2-dummy config must run end-to-end"
-    evals = sorted(ckpt.parent.glob("*__test_*.h5"))
-    assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
-    return evals[-1]
+    assert out.is_file(), f"the explicit H5 sink wrote no eval H5 at {out}"
+    return out
 
 
 @pytest.fixture(scope="module")
-def section_h5(data, ckpt) -> Path:
-    """Eval H5 from the outputs:-section + IMPLICIT sinks (DUMMY_CFG + CUTOVER34_CFG).
-
-    No ``--callbacks.h5_output`` — the H5 sink is wired by the
-    command over the section and writes the default-templated eval H5.
+def section_h5(data, ckpt, tmp_path_factory) -> Path:
+    """Eval H5 from the outputs:-section (DUMMY_CFG + CUTOVER34_CFG) — an
+    explicit, private H5OutputSink output (own path — see
+    ``_explicit_h5_sink_override``, not the implicit default-templated one
+    ``cli_h5`` above also targets).
     """
+    out = tmp_path_factory.mktemp("section_h5") / "eval.h5"
     rc = main([
         "test",
         "--config",
@@ -133,12 +152,12 @@ def section_h5(data, ckpt) -> Path:
         f"--ckpt_path={ckpt}",
         f"--data.num_test={N_TEST}",
         f"--trainer.default_root_dir={data['dir']}",
+        f"--outputs.h5_output={_explicit_h5_sink_override(out)}",
         *_overrides(data),
     ])
     assert rc == 0, "salt test on the outputs:-section config must run end-to-end"
-    evals = sorted(ckpt.parent.glob("*__test_*.h5"))
-    assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
-    return evals[-1]
+    assert out.is_file(), f"the explicit H5 sink wrote no eval H5 at {out}"
+    return out
 
 
 # --------------------------------------------------- implicit-sink half (single config)
@@ -254,19 +273,15 @@ class TestNoCkptFallback:
         config = ckpt.parent.parent / "config.yaml"
         assert config.is_file(), f"no saved run config next to {ckpt.parent}"
         # declare an explicit H5 sink with a private output path so this eval
-        # cannot collide with the section_h5 fixture's file next to the ckpt
+        # cannot collide with the cli_h5/section_h5 fixtures' files
         out = tmp_path / "fallback.h5"
-        sink = (
-            '{"class_path": "salt.outputs.H5OutputSink", '
-            f'"init_args": {{"output": "{out}"}}}}'
-        )
         rc = main([
             "test",
             "--config",
             str(config),
             f"--data.test_file={data['h5']}",
             f"--data.num_test={N_TEST}",
-            f"--outputs.h5_output={sink}",
+            f"--outputs.h5_output={_explicit_h5_sink_override(out)}",
             "--callbacks.progress=null",
         ])
         assert rc == 0
@@ -323,7 +338,7 @@ class TestSectionOverlayConfigContent:
         cfg = yaml.safe_load(CUTOVER34_CFG.read_text())
         # track_vertexing is un-deferred (base defers via expose: [fit, val]) so
         # its get_output fold mints the VertexIndex eval/ONNX leaves.
-        mods = cfg["model"]["modules"]
+        mods = cfg["model"]["init_args"]["modules"]
         assert mods["track_vertexing"]["init_args"]["expose"] is None
         # no legacy writers: block
         assert "writers" not in cfg

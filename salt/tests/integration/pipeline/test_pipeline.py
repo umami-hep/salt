@@ -26,7 +26,6 @@ just not the fit/eval/export legs.
 
 from __future__ import annotations
 
-import json
 import re
 import shlex
 from dataclasses import dataclass
@@ -46,7 +45,6 @@ from salt.testing.datagen import compute_norm_dict, load_pipeline
 from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 
 RECIPES_DIR = Path(__file__).resolve().parents[3] / "testing" / "datagen" / "recipes"
-GOLDEN_DIR = Path(__file__).resolve().parents[2] / "_fixtures" / "output_goldens"
 
 # base.yaml is auto-loaded machinery, never a model in its own right.
 _MACHINERY = {"base"}
@@ -127,11 +125,20 @@ MATRIX: list[Row] = [
         True,
         True,
         (
-            # pipeline #15649957: SystemExit 2 on every leg — these three were
-            # missing `.init_args`, so jsonargparse rejected the override.
-            "--data.modules.input_samples.init_args.files.train={h5}",
-            "--data.modules.input_samples.init_args.files.val={h5}",
-            "--data.modules.input_samples.init_args.files.test={h5}",
+            # pipeline #15649957: SystemExit 2 on every leg — the old form used
+            # three deep-dotted per-stage overrides
+            # (`--...files.train=`/`.val=`/`.test=`); jsonargparse hands a dict-typed
+            # field a Namespace for a dotted key instead of merging into it, so each
+            # override wiped the other two ("Namespace given where dict expected").
+            # Fix: ONE whole-dict override. Single braces, not double — this
+            # template is expanded by this module's own `_TOKEN_RE`/`_expand_one`
+            # (a plain regex substitution over `{h5}`), not `str.format`, so a
+            # doubled brace would survive substitution unconsumed and land in the
+            # argv as a literal `{{`/`}}`, breaking the JSON. The value is
+            # single-quoted so `shlex.split` (the next step in
+            # `_expand_train_args`) does not treat the embedded double quotes as
+            # shell quoting and mangle the JSON on its internal spaces.
+            """--data.modules.input_samples.init_args.files='{"train": "{h5}", "val": "{h5}", "test": "{h5}"}'""",
         ),
     ),
     Row("gn3epclv01", "GN3EPCLV01", True, True, ()),
@@ -350,15 +357,390 @@ KNOWN_FAILURES: dict[tuple[str, str], str] = {
     ),
 }
 
-# A row that do_eval=True but has no committed output golden (generate_goldens.py)
-# names itself here with a reason, so the eval leg's schema-parity assertion
-# knows to skip rather than error looking for a file that will never exist.
-NO_GOLDEN: dict[str, str] = {
-    "event_tagger_easyjet": (
-        "ttbar_vs_hh4b_event_tagger is ROOT-fed and paired via a reader "
-        "fragment — outside the H5 dumb-section golden family generate_goldens.py "
-        "captures."
-    ),
+# A curated (not necessarily exhaustive) table of output names that MUST be
+# present in what a row's fit/eval/export/inference legs actually produce —
+# replaces the golden-snapshot machinery (user ruling, "Replace entirely").
+# Per row (keyed by test_name):
+#   "h5": {<group>: [<column name>, ...]}  — group names use the FILE-DATASET
+#     vocabulary (e.g. ``tracks_ghost``, per the reader's own `dataset:` alias
+#     in its `groups:` block), not the reader STREAM name — this dissolves the
+#     stream-vs-dataset drift a frozen snapshot could not (test_inference
+#     gn3v00_base, pipeline #15650554). Column names are the LITERAL strings
+#     ``salt test`` writes (run-name-prefixed where the field is prefixed,
+#     bare otherwise).
+#   "onnx": [<output name>, ...] — the literal ONNX graph output names
+#     (model-name-prefixed), in tuple order. Includes MaskFormer's
+#     ``leading_objects_*`` leaves — they are real expected outputs, not an
+#     oversight (user ruling 2).
+# Checked by CONTAINMENT, not equality: a declared name must be present;
+# extra columns (input copies, pad mask, object groups, undeclared
+# predictions) are fine and expected. Not necessarily exhaustive — curated,
+# and meant to stay human-readable. Seeded from the deleted per-config output
+# schema snapshots at ad8a54b, mapping each snapshot's h5-column stream
+# through the row's own reader `groups:` `dataset:` alias to the real
+# file-dataset group name.
+#
+# REQUIRED: every row with do_eval=True or do_onnx=True must have an entry
+# naming at least one output — enforced by the completeness test below
+# (test_every_eval_or_onnx_row_has_expected_outputs). gn3v00_base carries an
+# entry despite do_eval=do_onnx=False purely because test_inference.py's
+# ONNX-output-name check runs over every fit=True row with a committed
+# contract, not just the do_onnx ones — it is not required by the
+# completeness test.
+EXPECTED_OUTPUTS: dict[str, dict] = {
+    "gn2v2_opendata": {
+        "h5": {
+            "jets": [
+                "GN2v2_opendata_pb",
+                "GN2v2_opendata_pc",
+                "GN2v2_opendata_pu",
+                "GN2v2_opendata_ptau",
+                "target_jets_classification",
+            ],
+            "tracks": [
+                "GN2v2_opendata_pPileup",
+                "GN2v2_opendata_pFake",
+                "GN2v2_opendata_pPrimary",
+                "GN2v2_opendata_pFromB",
+                "GN2v2_opendata_pFromBC",
+                "GN2v2_opendata_pFromC",
+                "GN2v2_opendata_pFromTau",
+                "GN2v2_opendata_pOtherSecondary",
+                "target_track_origin",
+                "VertexIndex",
+                "target_track_vertexing",
+            ],
+        },
+        "onnx": [
+            "GN2v2opendata_pb",
+            "GN2v2opendata_pc",
+            "GN2v2opendata_pu",
+            "GN2v2opendata_ptau",
+            "GN2v2opendata_TrackOrigin",
+            "GN2v2opendata_VertexIndex",
+        ],
+    },
+    "gn3epclv01": {
+        # GN3EPCLV01.yaml's reader aliases the tracks stream to the
+        # tracks_ghost file dataset (`groups.tracks.dataset: tracks_ghost`).
+        "h5": {
+            "jets": [
+                "GN3EPCLV01_pb",
+                "GN3EPCLV01_pc",
+                "GN3EPCLV01_ps",
+                "GN3EPCLV01_pud",
+                "GN3EPCLV01_pg",
+                "GN3EPCLV01_ptau",
+                "target_jets_classification",
+                "GN3EPCLV01_ptFromTruthDressedWZJet",
+                "target_jet_pt_regression_ptFromTruthDressedWZJet",
+                "GN3EPCLV01_pbquark",
+                "GN3EPCLV01_pantibquark",
+                "GN3EPCLV01_pcquark",
+                "GN3EPCLV01_panticquark",
+                "GN3EPCLV01_pother",
+                "target_jets_bccharge",
+            ],
+            "tracks_ghost": [
+                "GN3EPCLV01_pPileup",
+                "GN3EPCLV01_pFake",
+                "GN3EPCLV01_pPrimary",
+                "GN3EPCLV01_pFromB",
+                "GN3EPCLV01_pFromBC",
+                "GN3EPCLV01_pFromC",
+                "GN3EPCLV01_pFromTau",
+                "GN3EPCLV01_pOtherSecondary",
+                "target_track_origin",
+                "VertexIndex",
+                "target_track_vertexing",
+                "GN3EPCLV01_pNoTruth",
+                "GN3EPCLV01_pOther",
+                "GN3EPCLV01_pPion",
+                "GN3EPCLV01_pKaon",
+                "GN3EPCLV01_pElectron",
+                "GN3EPCLV01_pMuon",
+                "target_track_type",
+            ],
+        },
+        "onnx": [
+            "GN3EPCLV01_pb",
+            "GN3EPCLV01_pc",
+            "GN3EPCLV01_ps",
+            "GN3EPCLV01_pud",
+            "GN3EPCLV01_pg",
+            "GN3EPCLV01_ptau",
+            "GN3EPCLV01_ptFromTruthDressedWZJet",
+            "GN3EPCLV01_pbquark",
+            "GN3EPCLV01_pantibquark",
+            "GN3EPCLV01_pcquark",
+            "GN3EPCLV01_panticquark",
+            "GN3EPCLV01_pother",
+            "GN3EPCLV01_TrackOrigin",
+            "GN3EPCLV01_VertexIndex",
+            "GN3EPCLV01_TrackType",
+        ],
+    },
+    "gn3x": {
+        # GN3X.yaml's tracks group carries no `dataset:` alias — group == stream.
+        "h5": {
+            "jets": [
+                "GN3XPV01_phtautauhad",
+                "GN3XPV01_phbb",
+                "GN3XPV01_phcc",
+                "GN3XPV01_ptop",
+                "GN3XPV01_pqcdbb",
+                "GN3XPV01_pqcdbx",
+                "GN3XPV01_pqcdcx",
+                "GN3XPV01_pqcdll",
+                "GN3XPV01_pWqq",
+                "target_jets_classification",
+            ],
+            "tracks": [
+                "GN3XPV01_pPileup",
+                "GN3XPV01_pFake",
+                "GN3XPV01_pPrimary",
+                "GN3XPV01_pFromB",
+                "GN3XPV01_pFromBC",
+                "GN3XPV01_pFromC",
+                "GN3XPV01_pFromTau",
+                "GN3XPV01_pOtherSecondary",
+                "target_track_origin",
+                "VertexIndex",
+                "target_track_vertexing",
+            ],
+        },
+        "onnx": [
+            "GN3XPV01_phtautauhad",
+            "GN3XPV01_phbb",
+            "GN3XPV01_phcc",
+            "GN3XPV01_ptop",
+            "GN3XPV01_pqcdbb",
+            "GN3XPV01_pqcdbx",
+            "GN3XPV01_pqcdcx",
+            "GN3XPV01_pqcdll",
+            "GN3XPV01_pWqq",
+            "GN3XPV01_TrackOrigin",
+            "GN3XPV01_VertexIndex",
+        ],
+    },
+    "hitz": {
+        "h5": {
+            "jets": [
+                "Hitz_TruthJetPVz",
+                "Hitz_TruthJetPVz_stddev",
+                "target_gaussian_regression_TruthJetPVz",
+            ],
+        },
+        "onnx": ["Hitz_TruthJetPVz", "Hitz_TruthJetPVz_stddev"],
+    },
+    "maskformer": {
+        # object-level groups (objects/object_masks + the tracks HadronIndex
+        # leaf) are real MaskFormer outputs too but are not curated here — the
+        # jets/tracks task columns below are the containment floor; the ONNX
+        # leaves (incl. the leading_objects_* leaves, ruling 2) are the
+        # authoritative record of the object outputs.
+        "h5": {
+            "jets": [
+                "MaskFormer_pb",
+                "MaskFormer_pc",
+                "MaskFormer_pu",
+                "target_jets_classification",
+            ],
+            "tracks": [
+                "MaskFormer_pPileup",
+                "MaskFormer_pFake",
+                "MaskFormer_pPrimary",
+                "MaskFormer_pFromB",
+                "MaskFormer_pFromBC",
+                "MaskFormer_pFromC",
+                "MaskFormer_pFromTau",
+                "MaskFormer_pOtherSecondary",
+                "target_track_origin",
+            ],
+        },
+        "onnx": [
+            "MFv2_pb",
+            "MFv2_pc",
+            "MFv2_pu",
+            "MFv2_TrackOrigin",
+            "MFv2_leading_objects_pt",
+            "MFv2_leading_objects_Lxy",
+            "MFv2_leading_objects_deta",
+            "MFv2_leading_objects_dphi",
+            "MFv2_leading_objects_mass",
+            "MFv2_HadronIndex",
+        ],
+    },
+    "event_tagger_easyjet": {
+        # do_onnx=False — no onnx entry. ROOT-fed (ttbar_vs_hh4b_event_tagger),
+        # its event-level stream carries no reader `dataset:` alias.
+        "h5": {
+            "event": [
+                "ttbar_vs_hh4b_event_tagger_pbackground",
+                "ttbar_vs_hh4b_event_tagger_psignal",
+                "target_events_classification",
+            ],
+        },
+    },
+    "regression": {
+        "h5": {
+            "jets": [
+                "regression_HadronConeExclTruthLabelPt",
+                "target_reg_normed_HadronConeExclTruthLabelPt",
+                "regression_R10TruthLabel_R22v1_TruthJetMass",
+                "regression_R10TruthLabel_R22v1_TruthJetPt",
+                "target_reg_multinorm_R10TruthLabel_R22v1_TruthJetMass",
+                "target_reg_multinorm_R10TruthLabel_R22v1_TruthJetPt",
+                "regression_pt",
+                "target_reg_ratio_HadronConeExclTruthLabelPt",
+                "regression_truthMass",
+                "regression_truthPt",
+                "target_reg_multiratio_R10TruthLabel_R22v1_TruthJetMass",
+                "target_reg_multiratio_R10TruthLabel_R22v1_TruthJetPt",
+            ],
+            "tracks": [
+                "regression_dummyOutput_dPhi",
+                "regression_dummyOutput_dEta",
+                "target_reg_seq_tracks_dphi",
+                "target_reg_seq_tracks_deta",
+            ],
+        },
+        "onnx": [
+            "regression_HadronConeExclTruthLabelPt",
+            "regression_R10TruthLabel_R22v1_TruthJetMass",
+            "regression_R10TruthLabel_R22v1_TruthJetPt",
+            "regression_pt",
+            "regression_truthMass",
+            "regression_truthPt",
+            "regression_dummyOutput_dPhi",
+            "regression_dummyOutput_dEta",
+        ],
+    },
+    "regression_gaussian": {
+        "h5": {
+            "jets": [
+                "regression_gaussian_HadronConeExclTruthLabelPt",
+                "regression_gaussian_HadronConeExclTruthLabelPt_stddev",
+                "target_gaussian_regression_HadronConeExclTruthLabelPt",
+            ],
+            "tracks": [
+                "regression_gaussian_dummyOutput_dPhi",
+                "regression_gaussian_dummyOutput_dPhi_stddev",
+                "target_gaussian_regression_no_global_object_dphi",
+            ],
+        },
+        "onnx": [
+            "regressionGaussian_HadronConeExclTruthLabelPt",
+            "regressionGaussian_HadronConeExclTruthLabelPt_stddev",
+            "regressionGaussian_dummyOutput_dPhi",
+            "regressionGaussian_dummyOutput_dPhi_stddev",
+        ],
+    },
+    "regression_weighted": {
+        "h5": {
+            "jets": [
+                "regression_weighted_HadronConeExclTruthLabelPt",
+                "target_reg_weighted_HadronConeExclTruthLabelPt",
+                "regression_weighted_R10TruthLabel_R22v1_TruthJetMass",
+                "regression_weighted_R10TruthLabel_R22v1_TruthJetPt",
+                "target_reg_weighted_multi_R10TruthLabel_R22v1_TruthJetMass",
+                "target_reg_weighted_multi_R10TruthLabel_R22v1_TruthJetPt",
+                "regression_weighted_pt",
+                "target_reg_weighted_ratio_HadronConeExclTruthLabelPt",
+                "regression_weighted_truthMass",
+                "regression_weighted_truthPt",
+                "target_reg_weighted_multi_ratio_R10TruthLabel_R22v1_TruthJetMass",
+                "target_reg_weighted_multi_ratio_R10TruthLabel_R22v1_TruthJetPt",
+            ],
+            "tracks": [
+                "regression_weighted_dummyOutput_dPhi",
+                "regression_weighted_dummyOutput_dEta",
+                "target_reg_weighted_no_global_object_dphi",
+                "target_reg_weighted_no_global_object_deta",
+            ],
+        },
+        "onnx": [
+            "regressionWeighted_HadronConeExclTruthLabelPt",
+            "regressionWeighted_R10TruthLabel_R22v1_TruthJetMass",
+            "regressionWeighted_R10TruthLabel_R22v1_TruthJetPt",
+            "regressionWeighted_pt",
+            "regressionWeighted_truthMass",
+            "regressionWeighted_truthPt",
+            "regressionWeighted_dummyOutput_dPhi",
+            "regressionWeighted_dummyOutput_dEta",
+        ],
+    },
+    "nan_regression": {
+        "h5": {
+            "jets": [
+                "nan_regression_output_std_norm",
+                "target_reg_nan_norm_HadronConeExclTruthLabelLxy",
+                "nan_regression_output_ratio",
+                "target_reg_nan_ratio_HadronConeExclTruthLabelLxy",
+            ],
+            "tracks": ["nan_regression_dummyOutput_dPhi", "target_reg_nan_seq_dphi"],
+        },
+        "onnx": [
+            "nanRegression_output_std_norm",
+            "nanRegression_output_ratio",
+            "nanRegression_dummyOutput_dPhi",
+        ],
+    },
+    "regression_multi_target": {
+        "h5": {"jets": ["regression_multi_target_pt_label_handle"]},
+        "onnx": ["regressionMultiTarget_pt_label_handle"],
+    },
+    "gn3v00_base": {
+        # do_eval=do_onnx=False in MATRIX (fit-only, warms the finetune
+        # templates) — carried here so test_inference.py's inference gate has
+        # a contract for it too. Same tracks_ghost alias as GN3EPCLV01
+        # (GN3V00.yaml `groups.tracks.dataset: tracks_ghost`).
+        "h5": {
+            "jets": [
+                "GN3V00_pb",
+                "GN3V00_pc",
+                "GN3V00_ps",
+                "GN3V00_pud",
+                "GN3V00_pg",
+                "GN3V00_ptau",
+                "target_jets_classification",
+                "GN3V00_ptFromTruthDressedWZJet",
+                "target_jet_pt_regression_ptFromTruthDressedWZJet",
+            ],
+            "tracks_ghost": [
+                "GN3V00_pPileup",
+                "GN3V00_pFake",
+                "GN3V00_pPrimary",
+                "GN3V00_pFromB",
+                "GN3V00_pFromBC",
+                "GN3V00_pFromC",
+                "GN3V00_pFromTau",
+                "GN3V00_pOtherSecondary",
+                "target_track_origin",
+                "VertexIndex",
+                "target_track_vertexing",
+                "GN3V00_pNoTruth",
+                "GN3V00_pOther",
+                "GN3V00_pPion",
+                "GN3V00_pKaon",
+                "GN3V00_pElectron",
+                "GN3V00_pMuon",
+                "target_track_type",
+            ],
+        },
+        "onnx": [
+            "GN3V00_pb",
+            "GN3V00_pc",
+            "GN3V00_ps",
+            "GN3V00_pud",
+            "GN3V00_pg",
+            "GN3V00_ptau",
+            "GN3V00_ptFromTruthDressedWZJet",
+            "GN3V00_TrackOrigin",
+            "GN3V00_VertexIndex",
+            "GN3V00_TrackType",
+        ],
+    },
 }
 
 _BY_NAME: dict[str, Row] = {r.test_name: r for r in MATRIX}
@@ -416,11 +798,6 @@ def dependencies_of(row: Row) -> set[str]:
             if key in {"ckpt", "config"} and arg:
                 deps.add(arg)
     return deps
-
-
-def golden_path(row: Row) -> Path:
-    """The committed output golden this row's eval leg is checked against."""
-    return GOLDEN_DIR / f"{Path(row.config).name}.json"
 
 
 def _load_expanded(config: str) -> dict:
@@ -817,6 +1194,24 @@ def _expand_one(name: str, template: str, ctx: dict[str, Path], tmp_path_factory
 # ---------------------------------------------------------------------------
 
 
+def _salt_main(name: str, leg: str, argv: list[str]) -> int:
+    """``salt_main(argv)``, converting an argv-parse ``SystemExit`` into ``LegFailedError``.
+
+    ``salt.main.main`` re-raises ``SystemExit`` from a failed CLI parse
+    (``except SystemExit: ... raise``) instead of returning a nonzero rc.
+    Left uncaught here, that crashes past every ``rc != 0`` check below and
+    propagates as a bare pytest error — worse, it skips the ``_ROW_CACHE``/
+    ``_INFERENCE_CACHE`` memoisation entirely, so every row chained onto a
+    dead producer (``{ckpt:NAME}``/``{config:NAME}``) re-runs the full fit
+    from scratch instead of skipping with a named reason (pipeline #15650554,
+    item B4 — gn2v2_opendata's 7 legs each re-ran the whole fit).
+    """
+    try:
+        return salt_main(argv)
+    except SystemExit as exc:
+        raise LegFailedError(name, leg, f"salt {leg} exited {exc.code} (argv parse)") from exc
+
+
 def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     """Every row's floor leg: ``graph validate`` (all modes) + ``graph plot --mode fit``.
 
@@ -847,7 +1242,7 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     argv = ["graph", "validate", *config_argv, "-c", cfg_path]
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
-    rc = salt_main([*argv, *sets])
+    rc = _salt_main(row.test_name, "validate", [*argv, *sets])
     assert rc == 0, f"{row.test_name} ({row.config}) failed graph validate"
 
     plot_path = tmp_path / f"{row.test_name}.dot"
@@ -862,7 +1257,8 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
         "-o",
         str(plot_path),
     ]
-    assert salt_main([*plot_argv, *sets]) == 0, f"{row.test_name}: graph plot failed"
+    plot_rc = _salt_main(row.test_name, "plot", [*plot_argv, *sets])
+    assert plot_rc == 0, f"{row.test_name}: graph plot failed"
     assert plot_path.is_file(), f"{row.test_name}: graph plot wrote nothing to {plot_path}"
 
 
@@ -942,7 +1338,7 @@ def _do_fit(
     # input_samples fix, ...) must win over both configs and the shared
     # defaults above.
     argv += override_argv
-    rc = salt_main(argv)
+    rc = _salt_main(row.test_name, "fit", argv)
     if rc != 0:
         raise LegFailedError(row.test_name, "fit", f"salt fit rc={rc}")
     ckpts = sorted(root.rglob("*.ckpt"))
@@ -976,7 +1372,7 @@ def run_eval(name: str, tmp_path_factory) -> Path:
     ]
     if "h5" in ctx:
         argv.append(f"--data.test_file={ctx['h5']}")
-    rc = salt_main(argv)
+    rc = _salt_main(name, "eval", argv)
     if rc != 0:
         raise LegFailedError(name, "eval", f"salt test rc={rc}")
     evals = sorted(artifacts.ckpt.parent.glob("*__test_*.h5"))
@@ -984,8 +1380,7 @@ def run_eval(name: str, tmp_path_factory) -> Path:
         raise LegFailedError(name, "eval", f"eval wrote no H5 next to {artifacts.ckpt}")
     eval_h5 = evals[-1]
     artifacts.eval_h5 = eval_h5
-    if name not in NO_GOLDEN:
-        _assert_eval_h5_matches_golden(eval_h5, row)
+    _assert_eval_h5_has_expected_outputs(eval_h5, row)
     return eval_h5
 
 
@@ -993,7 +1388,11 @@ def run_export(name: str, tmp_path_factory) -> Path:
     """Run (or fetch) row ``name``'s export leg: checked ONNX export (§4.1).
 
     Deliberately *without* ``--no-check`` — ``rc == 0`` IS the torch<->ONNX
-    parity assertion.
+    parity assertion. Additionally checks the exported graph's own output
+    names against ``EXPECTED_OUTPUTS[name]["onnx"]`` (containment) when an
+    entry exists — the export leg's own enforcement point (user ruling),
+    independent of ``test_inference.py``'s onnxruntime-session check on the
+    same file.
     """
     artifacts = run_row(name, tmp_path_factory)
     if artifacts.onnx is not None:
@@ -1001,55 +1400,65 @@ def run_export(name: str, tmp_path_factory) -> Path:
     onnx_dir = artifacts.root_dir / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = onnx_dir / f"{name}.onnx"
-    rc = salt_main([
+    rc = _salt_main(
+        name,
         "export",
-        "--config",
-        str(artifacts.saved_config),
-        f"--ckpt_path={artifacts.ckpt}",
-        f"--output={onnx_path}",
-    ])
+        [
+            "export",
+            "--config",
+            str(artifacts.saved_config),
+            f"--ckpt_path={artifacts.ckpt}",
+            f"--output={onnx_path}",
+        ],
+    )
     if rc != 0:
         raise LegFailedError(name, "export", f"salt export failed rc={rc}")
     if not sorted(onnx_dir.glob("*.onnx")):
         raise LegFailedError(name, "export", f"no ONNX written under {onnx_dir}")
+    expected_onnx = EXPECTED_OUTPUTS.get(name, {}).get("onnx")
+    if expected_onnx:
+        actual = [o.name for o in onnx.load(str(onnx_path)).graph.output]
+        missing = [n for n in expected_onnx if n not in actual]
+        if missing:
+            raise LegFailedError(
+                name,
+                "export",
+                f"exported ONNX is missing declared EXPECTED_OUTPUTS output(s) "
+                f"{missing}; actual tuple: {actual}",
+            )
     artifacts.onnx = onnx_path
     return onnx_path
 
 
-def _assert_eval_h5_matches_golden(eval_h5: Path, row: Row) -> None:
-    """The written eval H5's per-group field names/order == the committed golden.
+def _assert_eval_h5_has_expected_outputs(eval_h5: Path, row: Row) -> None:
+    """The written eval H5 carries at least the declared ``EXPECTED_OUTPUTS`` columns.
 
-    This compares what was actually written, not what was planned — strictly
-    stronger than the run-free static table check
-    (``H5OutputSink._resolve_columns`` vs the golden) that the folded
-    ``test_config_h5_schema_parity.py`` used to run for this row's config.
+    Containment, not equality (user ruling, replacing the golden-snapshot
+    exact-schema check): extra columns (input copies, pad mask, object
+    groups, undeclared predictions) are expected and fine — only a MISSING
+    declared column is a failure. Compares what was actually written, not
+    what was planned.
     """
-    golden = golden_path(row)
-    if not golden.is_file():
-        raise LegFailedError(
-            row.test_name,
-            "eval",
-            f"no committed golden at {golden} — add one via generate_goldens.py, "
-            f"or list {row.test_name!r} in NO_GOLDEN with a reason",
-        )
-    expected: dict[str, list[str]] = {}
-    for col in json.loads(golden.read_text())["h5"]["columns"]:
-        expected.setdefault(col["stream"], []).extend(col["column_names"])
+    expected = EXPECTED_OUTPUTS.get(row.test_name, {}).get("h5")
+    if not expected:
+        return
     with h5py.File(eval_h5) as f:
-        for stream, names in expected.items():
-            if stream not in f:
+        for group, names in expected.items():
+            if group not in f:
                 raise LegFailedError(
                     row.test_name,
                     "eval",
-                    f"golden expects H5 group {stream!r}, the eval H5 has none",
+                    f"EXPECTED_OUTPUTS expects H5 group {group!r}, the eval H5 has none "
+                    f"(groups present: {sorted(f)})",
                 )
-            actual = list(f[stream].dtype.names or ())
-            if actual != names:
+            actual = set(f[group].dtype.names or ())
+            missing = [n for n in names if n not in actual]
+            if missing:
                 raise LegFailedError(
                     row.test_name,
                     "eval",
-                    f"eval H5 group {stream!r} schema drifted from the committed "
-                    f"golden\n  golden: {names}\n  eval H5: {actual}",
+                    f"eval H5 group {group!r} is missing declared EXPECTED_OUTPUTS "
+                    f"column(s) {missing}; actual columns: {sorted(actual)}",
                 )
 
 
@@ -1088,7 +1497,7 @@ def test_fit(name, tmp_path_factory, request):
 
 @pytest.mark.parametrize("name", _PARAMS)
 def test_eval(name, tmp_path_factory, request):
-    """Leg 2 — ``do_eval=True`` rows: ``salt test`` + the H5-schema-vs-golden assertion."""
+    """Leg 2 — ``do_eval=True`` rows: ``salt test`` + the EXPECTED_OUTPUTS containment check."""
     row = row_by_name(name)
     if not row.do_eval:
         pytest.skip("row declares do_eval=False")
@@ -1250,22 +1659,22 @@ def test_known_failures_name_real_rows_and_legs():
         )
 
 
-def test_no_golden_table_is_honest():
-    """Every do_eval=True row has a committed golden, or a reason in NO_GOLDEN — never both."""
-    eval_rows = {r.test_name: r for r in MATRIX if r.do_eval}
-    for name in NO_GOLDEN:
-        assert name in eval_rows, f"NO_GOLDEN names a row that does not do_eval: {name!r}"
-    for name, row in eval_rows.items():
-        golden = golden_path(row)
-        if golden.is_file():
-            assert name not in NO_GOLDEN, (
-                f"{name} is in NO_GOLDEN but a golden exists at {golden} — the table is stale"
-            )
-        else:
-            assert name in NO_GOLDEN, (
-                f"{name} has do_eval=True and no golden at {golden} — add it to "
-                "NO_GOLDEN with a reason, or commit a golden"
-            )
+def test_every_eval_or_onnx_row_has_expected_outputs():
+    """Every ``do_eval=True`` or ``do_onnx=True`` row has an ``EXPECTED_OUTPUTS``
+    entry naming at least one output (user ruling — the completeness gate for
+    the curated table that replaced the deleted output-schema snapshots).
+    """
+    required = {r.test_name for r in MATRIX if r.do_eval or r.do_onnx}
+    for name in sorted(required):
+        entry = EXPECTED_OUTPUTS.get(name)
+        assert entry is not None, (
+            f"{name} has do_eval or do_onnx True and no EXPECTED_OUTPUTS entry — add one, "
+            "seeded from what `salt test`/`salt export` actually produce"
+        )
+        names = [n for cols in entry.get("h5", {}).values() for n in cols] + list(
+            entry.get("onnx") or ()
+        )
+        assert names, f"{name}'s EXPECTED_OUTPUTS entry names no outputs at all"
 
 
 # ----------------------------------------------- residual finetune assertions (§3)

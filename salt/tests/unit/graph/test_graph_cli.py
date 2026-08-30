@@ -172,7 +172,11 @@ class TestDeadcode:
 
 class TestPlot:
     def test_fit_dot_contains_expected_edges(self, tmp_path, capsys):
-        out_path = tmp_path / "graph.svg"
+        # .dot, not .svg/.png: this test asserts DOT text only, and a
+        # non-.dot suffix triggers _render_with_dot's shell-out to the
+        # Graphviz `dot` binary, which the CI image does not install
+        # (pipeline #15650554 diagnosis item 7).
+        out_path = tmp_path / "graph.dot"
         assert cli_main(["graph", "plot", "-c", TOY_CFG, "--mode", "fit", "-o", str(out_path)]) == 0
         dot = (tmp_path / "graph.dot").read_text()
         assert "digraph salt_core_fit {" in dot

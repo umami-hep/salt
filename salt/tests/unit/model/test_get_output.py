@@ -3,8 +3,8 @@
 Every comparison is anchored on LITERAL expected schemas/values — the eval
 math written out explicitly (softmax / masked-softmax / union-find /
 de-scale) and the literal column/ONNX suffix lists, cross-checked against the
-committed per-config schema goldens at
-``salt/tests/_fixtures/output_goldens/``.
+curated ``EXPECTED_OUTPUTS`` table in
+``salt/tests/integration/pipeline/test_pipeline.py``.
 """
 
 from __future__ import annotations

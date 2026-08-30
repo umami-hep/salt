@@ -119,11 +119,11 @@ class OnnxExportSink(Node):
     ``manifest_fields(Mode.ONNX)``. Flat tuple ORDER: global float scalars
     before per-token aux outputs, applied within each manifest group (section
     writers, then model graph modules), declaration order inside each block —
-    pinned by the committed per-config goldens
-    (``salt/tests/_fixtures/output_goldens/``) so a reordering is a visible
-    schema change. union_find / MaskFormer outputs are NOT folded and keep the
-    legacy `reduces` path; a config may MIX both and the adapter dispatches
-    per output without drift.
+    pinned by the curated ``EXPECTED_OUTPUTS`` table in
+    ``salt/tests/integration/pipeline/test_pipeline.py`` so a reordering is a
+    visible, actionable test failure. union_find / MaskFormer outputs are NOT
+    folded and keep the legacy `reduces` path; a config may MIX both and the
+    adapter dispatches per output without drift.
 
     Outside ``Mode.ONNX`` the node declares empty IO, so FIT/VAL/TEST prune
     it (FIT ``plan_hash`` unchanged). It is a `Node`, not a `RuntimeSink` —

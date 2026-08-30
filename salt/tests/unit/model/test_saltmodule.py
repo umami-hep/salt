@@ -217,6 +217,10 @@ class TestConstruction:
         # shipped configs never exercise this (terminal sinks are wired via
         # trainer.callbacks:, see salt.model.base.SaltModelModule docstring),
         # but the validation must not reject the protocol shape outright.
+        # By design, `compose_output_section` partitions any `is_sink()`
+        # entry OUT of `_output_section` and into `_section_sinks` — the
+        # protocol shape is accepted (no rejection), not ridden on
+        # `_output_section` (pipeline #15650554 diagnosis item 6).
         class _FakeManifestOnlySink:
             name = "fake_sink"
 
@@ -234,7 +238,7 @@ class TestConstruction:
 
         model = build_model(data)
         model.compose_output_section({"fake_sink": _FakeManifestOnlySink()})
-        assert "fake_sink" in model._output_section  # noqa: SLF001
+        assert model._section_sinks[0].name == "fake_sink"  # noqa: SLF001
 
 
 class TestDataModuleConstruction:

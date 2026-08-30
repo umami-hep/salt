@@ -84,7 +84,8 @@ def _export_cfg() -> ExportConfig:
 
 # the GN2 export contract (ClassProbs + SeqClassIndex): the vertexing head's
 # VertexIndex export rides the live VertexingTaskModule.get_output path (not a
-# conversion node), covered by the shipped-config goldens + tests/unit get_output.
+# conversion node), covered by the pipeline matrix's EXPECTED_OUTPUTS table
+# (salt/tests/integration/pipeline/test_pipeline.py) + tests/unit get_output.
 
 
 def _folded_gn2_export(tmp_path):

@@ -38,11 +38,10 @@ from salt.tests._fixtures.gn2v2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
     TRACK_VARIABLES,
-    build_gn2v2_modules,
     compile_gn2v2,
     write_parity_norm_dict,
 )
-from salt.tests._fixtures.gn2v2_test_config import small_config
+from salt.tests._fixtures.gn2v2_test_config import full_family_config, small_config
 from salt.tests.unit.outputs.sinks.onnx.test_adapter import (
     VARIABLES,
     bind_producers,
@@ -350,69 +349,103 @@ class TestTwoDynamicAxes:
 # the salt surface: export-block parsing + the CLI from a real checkpoint
 
 
-@pytest.fixture(scope="module")
-def cli_run(tmp_path_factory):
-    """A real checkpoint + saved run config for the ``salt export`` CLI tests."""
-    from lightning import Trainer
+def _real_cli_run(tmp_path_factory, config_path: Path, label: str) -> SimpleNamespace:
+    """A REAL 1-epoch ``salt fit`` of ``config_path`` — checkpoint + the
+    trainer's OWN saved config.yaml (pattern: ``test_h5_sink.py``'s
+    ``data``/``ckpt`` fixtures), relocated into the
+    ``run_dir/checkpoints/{ckpt}`` + ``run_dir/config.yaml`` layout the tests
+    in this module (which invoke ``salt export`` with no ``-c``) rely on for
+    ckpt-based config inference (``export.py``:
+    ``ckpt.parents[1] / "config.yaml"``).
 
-    from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
-    from salt.main import CONFIG_DIR
-    from salt.model.saltmodule import SaltModule
+    Kills the hand-built-fixture/config drift class (pipeline #15650554
+    diagnosis item 2): the OLD ``cli_run`` fixture wrote a checkpoint from
+    hand-built ``build_gn2v2_modules()`` (hidden layer width 16) but saved
+    ``small_config()`` VERBATIM (shipped arch [256]/[128,64,32]) — loading
+    that mismatched state_dict into the shipped architecture then failed with
+    a state_dict shape error. A real fit trains AND saves the SAME config, so
+    the two can never drift.
+    """
+    import shutil
+
+    from salt.config_utils import disable_logger_in_config
+    from salt.main import main as salt_main
+    from salt.schema import dump_schema, save_schema
     from salt.testing.inputs import write_dummy_file
 
-    tmp_path = tmp_path_factory.mktemp("onnx_cli_run")
+    tmp_path = tmp_path_factory.mktemp(label)
+    nd_path, cd_path = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
+    write_parity_norm_dict(nd_path, cd_path)
+    h5_path = tmp_path / "dummy_test_file_ttbar.h5"
+    write_dummy_file(h5_path, nd_path)
+    schema_path = tmp_path / "schema.yaml"
+    save_schema(dump_schema(h5_path), schema_path)
+
+    fit_dir = tmp_path / "fit"
+    rc = salt_main([
+        "fit",
+        "--config",
+        disable_logger_in_config(str(config_path)),
+        f"--data.train_file={h5_path}",
+        f"--data.val_file={h5_path}",
+        f"--data.modules.reader.init_args.schema={schema_path}",
+        f"--model.modules.norm.init_args.norm_dict={nd_path}",
+        "--data.num_workers=0",
+        f"--trainer.default_root_dir={fit_dir}",
+        "--trainer.accelerator=cpu",
+        "--trainer.max_epochs=1",
+        "--trainer.limit_train_batches=2",
+        "--trainer.limit_val_batches=2",
+        "--trainer.num_sanity_val_steps=0",
+        "--trainer.log_every_n_steps=1",
+        "--trainer.logger=false",
+        "--callbacks.progress=null",
+    ])
+    assert rc == 0, f"salt fit on {config_path.name} must run end-to-end"
+    ckpts = sorted(fit_dir.rglob("*.ckpt"))
+    assert ckpts, f"no checkpoint under {fit_dir}"
+    configs = sorted(fit_dir.rglob("config.yaml"))
+    assert configs, f"no saved config.yaml under {fit_dir}"
+
     run_dir = tmp_path / "run"
     (run_dir / "checkpoints").mkdir(parents=True)
-    write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
-    write_dummy_file(str(tmp_path / "dummy_test_file_ttbar.h5"), str(tmp_path / "norm_dict.yaml"))
-    torch.manual_seed(42)  # deterministic checkpoint weights (retired v1 transfer stand-in)
-    modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-    model = SaltModule(
-        modules,
-        lrs={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
-        name="GN2v2_dummy",
-    )
-    dm = SaltDataModule(
-        modules={
-            "reader": H5StructuredReader(
-                groups={"jets": {"global_object": True}, "tracks": {"global_object": False}}
-            ),
-            "features": Features(variables=VARIABLES),
-            "labels": Labels(),
-        },
-        test_file=tmp_path / "dummy_test_file_ttbar.h5",
-        batch_size=100,
-        num_test=100,
-        num_workers=0,
-        pin_memory=False,
-    )
-    trainer = Trainer(
-        accelerator="cpu",
-        devices=1,
-        logger=False,
-        enable_progress_bar=False,
-        enable_model_summary=False,
-        limit_test_batches=0,
-    )
-    trainer.test(model, datamodule=dm)
-    ckpt = run_dir / "checkpoints" / "epoch=000-loss=0.10000.ckpt"
-    trainer.save_checkpoint(ckpt)
-    config = yaml.safe_load(small_config().read_text())
-    config["model"]["init_args"]["modules"]["norm"]["init_args"]["norm_dict"] = str(
-        tmp_path / "norm_dict.yaml"
-    )
-    (run_dir / "config.yaml").write_text(yaml.dump(config, sort_keys=False))
+    ckpt = run_dir / "checkpoints" / ckpts[0].name
+    shutil.copy(ckpts[0], ckpt)
+    shutil.copy(configs[0], run_dir / "config.yaml")
+    config = yaml.safe_load((run_dir / "config.yaml").read_text())
     return SimpleNamespace(ckpt=ckpt, run_dir=run_dir, config=config)
+
+
+@pytest.fixture(scope="module")
+def cli_run(tmp_path_factory):
+    """``small_config()`` (SPLIT_OUTPUTS: flavour head H5+ONNX, track heads
+    H5-only) — see ``_real_cli_run``.
+    """
+    return _real_cli_run(tmp_path_factory, small_config(), "onnx_cli_run")
+
+
+@pytest.fixture(scope="module")
+def cli_run_full_family(tmp_path_factory):
+    """``full_family_config()`` (one ``RunTaskOutput`` over all three heads,
+    ``track_vertexing`` un-deferred) — see ``_real_cli_run``. Needed
+    separately from ``cli_run``: ``small_config()``'s SPLIT_OUTPUTS shape
+    makes ``track_origin`` H5-only and defers ``track_vertexing`` entirely,
+    so ITS ONNX manifest carries only the flavour head — a manifest test
+    asserting TrackOrigin/VertexIndex leaves needs THIS config instead
+    (pipeline #15650554 diagnosis item 3).
+    """
+    return _real_cli_run(tmp_path_factory, full_family_config(), "onnx_cli_run_full_family")
 
 
 class TestSaltSurface:
     def test_export_contract_round_trips_onto_the_dummy_sink(self):
+        from salt.config_utils import disable_logger_in_config
         from salt.main import SaltCLI
 
         cli = SaltCLI(
             args=[
                 "--config",
-                str(small_config()),
+                disable_logger_in_config(str(small_config())),
                 "--model.modules.norm.init_args.norm_dict=unused.yaml",
             ],
             run=False,
@@ -434,12 +467,13 @@ class TestSaltSurface:
     def test_export_contract_round_trips_onto_the_sink(self):
         # the contract's NEW config home is the ONNX sink: jsonargparse must
         # resolve its `inputs:` entries into ExportInput dataclasses
+        from salt.config_utils import disable_logger_in_config
         from salt.main import CONFIG_DIR, SaltCLI
 
         cli = SaltCLI(
             args=[
                 "--config",
-                str(CONFIG_DIR / "MaskFormer.yaml"),
+                disable_logger_in_config(str(CONFIG_DIR / "MaskFormer.yaml")),
                 "--model.modules.norm.init_args.norm_dict=unused.yaml",
             ],
             run=False,
@@ -461,12 +495,18 @@ class TestSaltSurface:
             salt_main(["export", "--help"])
         assert excinfo.value.code == 0
 
-    def test_cli_export_from_checkpoint(self, cli_run, capsys):
+    def test_cli_export_from_checkpoint(self, cli_run_full_family, capsys):
+        # needs the full-family config, not cli_run/small_config(): small_config()'s
+        # SPLIT_OUTPUTS makes track_origin H5-only (modes: [test]) and defers
+        # track_vertexing (expose: [fit, val]) out of its ONNX export set entirely,
+        # so its export tuple is pb/pc/pu only — zero int8 outputs, and no
+        # VertexIndex leaf for the assertions below to find (Opus review finding,
+        # same class of bug as diagnosis item 3 / the manifest test fix).
         from salt.outputs.sinks.onnx.export import main as export_main
 
         rc = export_main([
             "--ckpt_path",
-            str(cli_run.ckpt),
+            str(cli_run_full_family.ckpt),
             "--trials",
             "1",
             "--max-length",
@@ -475,14 +515,14 @@ class TestSaltSurface:
             "1e-6",
         ])
         assert rc == 0
-        onnx_path = cli_run.run_dir / "network.onnx"
+        onnx_path = cli_run_full_family.run_dir / "network.onnx"
         assert onnx_path.is_file()
         out = capsys.readouterr().out
         # int8 outputs get a POSITIVE verdict row, not only the floats
         assert "GN2v2dummy_VertexIndex" in out
         assert "int8 exact over" in out
         # the traced plan table is written next to the .onnx
-        plan_txt = cli_run.run_dir / "plan_onnx.txt"
+        plan_txt = cli_run_full_family.run_dir / "plan_onnx.txt"
         assert plan_txt.is_file()
         assert "[mode=ONNX]" in plan_txt.read_text()
         session = make_session(onnx_path)
@@ -490,11 +530,11 @@ class TestSaltSurface:
         assert meta.description == "GN2v2dummy"
         info = json.loads(meta.custom_metadata_map["gnn_config"])
         assert info["model_name"] == "GN2v2dummy"
-        assert info["ckpt_path"] == str(Path(cli_run.ckpt).resolve())
+        assert info["ckpt_path"] == str(Path(cli_run_full_family.ckpt).resolve())
         assert info["config.yaml"]["name"] == "GN2v2_dummy"
         # without --overwrite a second export must refuse (to_onnx.py:710-711)
         # with ONE actionable line, not a traceback
-        rc2 = export_main(["--ckpt_path", str(cli_run.ckpt), "--no-check"])
+        rc2 = export_main(["--ckpt_path", str(cli_run_full_family.ckpt), "--no-check"])
         assert rc2 == 1
         err = capsys.readouterr().err
         assert "Found existing file" in err
@@ -554,13 +594,17 @@ class TestSaltSurface:
         meta = make_session(out_path).get_modelmeta()
         assert meta.description == "GN2v2dummy"
 
-    def test_manifest_flag_prints_without_checkpoint(self, cli_run, capsys):
+    def test_manifest_flag_prints_without_checkpoint(self, cli_run_full_family, capsys):
         # salt export --manifest: the OnnxExportSink-derived manifest, no ckpt
         # needed (the off-graph writer manifest is retired — the sink names the
-        # folded conversion outputs.* leaves)
+        # folded conversion outputs.* leaves). Needs the full-family config
+        # (see cli_run_full_family): small_config()'s SPLIT_OUTPUTS defers
+        # track_vertexing and keeps track_origin H5-only, so its ONNX manifest
+        # never carries TrackOrigin/VertexIndex at all (pipeline #15650554
+        # diagnosis item 3).
         from salt.outputs.sinks.onnx.export import main as export_main
 
-        rc = export_main(["--manifest", "-c", str(cli_run.run_dir / "config.yaml")])
+        rc = export_main(["--manifest", "-c", str(cli_run_full_family.run_dir / "config.yaml")])
         assert rc == 0
         out = capsys.readouterr().out
         assert "ONNX output manifest (folded conversion nodes, model_name=GN2v2dummy)" in out

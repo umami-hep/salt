@@ -3,7 +3,7 @@ artifacts (user ruling: "run inference using the model checkpoints from all
 the models covered by pipeline").
 
 Consumes the matrix's explicit artifact contract (``run_row``/``run_export``/
-``MATRIX``/``row_by_name``/``LegFailedError``/``golden_path`` from
+``MATRIX``/``row_by_name``/``LegFailedError``/``EXPECTED_OUTPUTS`` from
 ``test_pipeline``) rather than relying on pytest file/collection ordering:
 ``run_row`` is memoised module-level in ``test_pipeline``, so invoking this
 file directly (``pytest salt/tests/integration/pipeline/test_inference.py``)
@@ -18,17 +18,34 @@ it is ROOT-fed (no H5 file to build a labelled/label-stripped pair from), its
 is inexpressible for it — same contract ``salt inference`` itself enforces),
 or its own fit (or a chained producer's) failed.
 
-Three gates, generalised per row wherever the committed golden
-(``golden_path``, the ``onnx`` section) supports it:
+Gates, generalised per row wherever ``EXPECTED_OUTPUTS`` (the curated
+output-schema table in ``test_pipeline``, seeded from the now-deleted
+per-config golden JSONs) names an ``"onnx"`` entry for it:
 
-(a) ``TestExportSelectionColumns`` — the inference H5's task columns
-    correspond 1:1 to the export-mode selection / ONNX tuple order, dtypes
-    included;
+(a) ``TestExportedOnnxOutputNames`` — the row's own freshly-exported ONNX
+    session's output names equal ``EXPECTED_OUTPUTS[name]["onnx"]`` (order
+    included — the tuple is an Athena contract);
 (b) ``TestGn2v2OpendataValuesMatchOnnxRuntime`` — H5 values equal
     onnxruntime outputs on the SAME real per-jet features, at check_onnx
     tolerance;
 (c) ``TestLabelStripped`` — a label-stripped copy of the row's own test file
-    runs green with identical prediction columns.
+    runs green with bit-identical prediction columns.
+
+NOTE on why ``EXPECTED_OUTPUTS["h5"]`` is NOT used here: ``salt inference``'s
+own H5 output uses the EXPORT-mode column selection
+(``H5OutputSink.use_export_selection()``, ``salt/inference.py::
+build_inference_sink``) — run-name-prefixed leaves resolved from
+``manifest_fields(Mode.ONNX)`` — which is a DIFFERENT naming convention from
+the TEST-mode eval H5 ``EXPECTED_OUTPUTS["h5"]`` encodes (e.g. a folded
+per-token classification head is one reduced ``TrackOrigin`` column here vs.
+several per-class probability columns under ``salt test``). Reconstructing
+the true inference-H5 column names generically would need per-field
+axis/dtype/prefix metadata the curated table deliberately does not carry (it
+is meant to stay a flat, human-curated name list — see ``test_pipeline``'s
+``EXPECTED_OUTPUTS`` docstring). Gate (a) above checks the ONNX tuple itself
+(unambiguous, no naming-convention translation needed); gate (c) sidesteps
+the naming question entirely by comparing the SAME row's own labelled vs.
+label-stripped output columns to each other, whatever they are named.
 
 Gate (b), and the input-copy/pad-mask structural check, are anchored to the
 single row ``gn2v2_opendata`` (the flagship default) rather than generalised:
@@ -42,7 +59,6 @@ across ~10 structurally different configs for a check ``test_pipeline``'s
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +74,7 @@ from salt.outputs.sinks.onnx import make_session
 from salt.schema import dump_schema, save_schema
 
 from .test_pipeline import (
+    EXPECTED_OUTPUTS,
     FEEDS,
     GPU_ROWS,
     MATRIX,
@@ -66,7 +83,6 @@ from .test_pipeline import (
     RootDepsMissingError,
     Row,
     _feed_context,  # noqa: PLC2701 - same-package fixture builder, see module docstring
-    golden_path,
     row_by_name,
     run_export,
     run_row,
@@ -111,28 +127,17 @@ def _strip_labels(src: Path, dst: Path) -> None:
                     out.attrs[key] = value
 
 
-def _load_golden(row: Row) -> dict | None:
-    """The committed output golden for ``row``, or ``None`` if none is committed."""
-    path = golden_path(row)
-    return json.loads(path.read_text()) if path.is_file() else None
+def _expected_onnx_or_skip(name: str) -> list[str]:
+    """``EXPECTED_OUTPUTS[name]["onnx"]``, or a skip when the row names none.
 
-
-def _golden_onnx_or_skip(name: str) -> tuple[dict, str]:
-    """``(onnx_section, run_name)`` from ``name``'s golden, or a skip.
-
-    Skips (rather than raising) both when no golden is committed and when a
-    committed golden predates this row's ONNX export block (``onnx`` key
-    absent — a tracked drift some rows currently carry, not a bug here; see
-    the study's golden-regeneration TODO).
+    Skips (rather than raising) exactly like the deleted golden lookup did:
+    a row with no committed ONNX contract (no ``do_onnx`` leg, or one that
+    simply has not been curated yet) is not this gate's business.
     """
-    row = row_by_name(name)
-    golden = _load_golden(row)
-    if golden is None or golden.get("onnx") is None:
-        pytest.skip(
-            f"{name}: no committed ONNX golden section at {golden_path(row)} "
-            "(missing file, or a golden pending regeneration for this row)"
-        )
-    return golden["onnx"], golden["provenance"]["run_name"]
+    onnx_names = (EXPECTED_OUTPUTS.get(name) or {}).get("onnx")
+    if not onnx_names:
+        pytest.skip(f"{name}: no EXPECTED_OUTPUTS['onnx'] entry (no ONNX contract to check)")
+    return onnx_names
 
 
 @dataclass
@@ -190,11 +195,22 @@ def _uses_input_samples(fit: Artifacts) -> bool:
 def _test_file_overrides(fit: Artifacts, path: Path) -> list[str]:
     """The ``--set`` overrides that route ``path``/``N_TEST`` to wherever
     ``fit``'s config actually reads its test file and row cap from.
+
+    Whole-dict JSON, not a deep-dotted per-key override (pipeline #15650554,
+    item B2 — same jsonargparse defect as ``test_pipeline.MATRIX``'s
+    gn2v2_opendata row: a dotted ``--...files.test=`` hands the ``files``
+    dict field a bare ``Namespace`` instead of merging into it). These are
+    plain f-strings (unlike the MATRIX row templates, which go through
+    ``test_pipeline._expand_one``'s regex substitution) consumed directly as
+    single ``KEY=VALUE`` list entries by ``salt.outputs.sinks.onnx.export.
+    _run_free_cli`` (``args.append(f"--{entry}")`` — no ``shlex`` re-split),
+    so the doubled braces here are genuine f-string escapes for a literal
+    ``{``/``}``, not tokens for a second substitution pass.
     """
     if _uses_input_samples(fit):
         return [
-            f"data.modules.input_samples.init_args.files.test={path}",
-            f"data.modules.input_samples.init_args.num.test={N_TEST}",
+            f'data.modules.input_samples.init_args.files={{"test": "{path}"}}',
+            f'data.modules.input_samples.init_args.num={{"test": {N_TEST}}}',
         ]
     return [f"data.num_test={N_TEST}"]
 
@@ -254,74 +270,27 @@ def _artifacts_or_skip(name: str, tmp_path_factory) -> InferenceArtifacts:
 
 
 # ---------------------------------------------------------------------------
-# gate (a): task columns == the ONNX tuple, per row
+# gate (a): the exported ONNX tuple's own output names
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", _PARAMS)
-class TestExportSelectionColumns:
-    """Gate (a): inference H5 columns == the export-mode selection, 1:1 with
-    the ONNX tuple, checked against each row's own committed golden.
+class TestExportedOnnxOutputNames:
+    """Gate (a): the row's own freshly-exported ONNX graph's output names
+    equal ``EXPECTED_OUTPUTS[name]["onnx"]`` — order included, since the
+    tuple order IS the Athena contract (``salt.outputs.sinks.onnx_sink``'s
+    "globals before per-token" rule).
     """
 
-    def test_task_columns_are_the_onnx_tuple(self, name, tmp_path_factory):
-        """Every golden ONNX output has exactly one H5 column, right stream/order,
-        and no other run-prefixed task column exists.
-        """
-        onnx, run_name = _golden_onnx_or_skip(name)
-        artifacts = _artifacts_or_skip(name, tmp_path_factory)
-        model_name = onnx["model_name"]
-        manifest = onnx["task_manifest_onnx"]
-        global_names = [
-            f"{model_name}_{m['resolved_onnx_name']}" for m in manifest if m["axis"] == "global"
-        ]
-        per_token_names = [
-            f"{model_name}_{m['resolved_onnx_name']}" for m in manifest if m["axis"] == "per_token"
-        ]
-        assert global_names + per_token_names == onnx["output_names"], (
-            f"{name}: golden self-consistency (globals-then-per-token tuple)"
-        )
-        expected: dict[str, list[str]] = {}
-        for entry in manifest:
-            stream = entry["leaf_key"].split(".")[1]
-            col_name = (
-                f"{run_name}_{entry['resolved_onnx_name']}"
-                if entry["prefix"]
-                else entry["resolved_onnx_name"]
-            )
-            expected.setdefault(stream, []).append(col_name)
-        with h5py.File(artifacts.labelled_output) as f:
-            groups = {g: list(f[g].dtype.names or ()) for g in f}
-        for stream, cols in expected.items():
-            assert stream in groups, f"{name}: golden expects H5 group {stream!r}, none in output"
-            present = [c for c in groups[stream] if c in set(cols)]
-            assert present == cols, (
-                f"{name}/{stream}: export-selection columns {present} != golden tuple {cols}"
-            )
-            extras = [
-                c
-                for c in groups[stream]
-                if c.startswith((f"{run_name}_", "target_")) and c not in set(cols)
-            ]
-            assert not extras, f"{name}/{stream}: columns beyond the export selection: {extras}"
-
-    def test_dtypes_match_onnx_tuple_dtypes(self, name, tmp_path_factory):
-        """f4 columns for float32 tuple entries, integer for int8."""
-        onnx, run_name = _golden_onnx_or_skip(name)
-        artifacts = _artifacts_or_skip(name, tmp_path_factory)
-        with h5py.File(artifacts.labelled_output) as f:
-            dtypes = {g: f[g].dtype for g in f}
-        for entry in onnx["task_manifest_onnx"]:
-            stream = entry["leaf_key"].split(".")[1]
-            col_name = (
-                f"{run_name}_{entry['resolved_onnx_name']}"
-                if entry["prefix"]
-                else entry["resolved_onnx_name"]
-            )
-            if entry["onnx_dtype"] == "int8":
-                assert np.issubdtype(dtypes[stream][col_name], np.integer), f"{name}: {col_name}"
-            else:
-                assert np.issubdtype(dtypes[stream][col_name], np.floating), f"{name}: {col_name}"
+    def test_onnx_output_names_match_expected(self, name, tmp_path_factory):
+        expected = _expected_onnx_or_skip(name)
+        try:
+            onnx_path = run_export(name, tmp_path_factory)
+        except LegFailedError as exc:
+            pytest.skip(f"{name}: export failed: {exc}")
+        session = make_session(onnx_path)
+        actual = [o.name for o in session.get_outputs()]
+        assert actual == expected, f"{name}: exported ONNX tuple != EXPECTED_OUTPUTS['onnx']"
 
 
 # ---------------------------------------------------------------------------
@@ -335,10 +304,42 @@ class TestGn2v2OpendataValuesMatchOnnxRuntime:
     just check_onnx's random-input sweep (already covered per-row by
     ``test_pipeline.test_export``). See the module docstring for why this is
     not generalised across the whole matrix.
+
+    The per-field manifest below (suffix/axis/dtype) is deliberately
+    hardcoded to this ONE row's own known, shipped contract (config
+    ``name: GN2v2_opendata``, ``outputs.export.model_name: GN2v2opendata``)
+    rather than read from a golden JSON — this test was already anchored to
+    a single row (not generalised), so its contract belongs directly in code.
+    ``salt inference`` names H5 columns by the RUN name
+    (``salt/inference.py::build_inference_sink``); the exported ONNX tuple by
+    the MODEL name (``salt/outputs/sinks/onnx_sink.py``) — same suffixes,
+    different prefixes. ``test_manifest_matches_expected_outputs`` below
+    locks this table's suffixes against ``EXPECTED_OUTPUTS["onnx"]`` so the
+    two cannot silently drift apart.
     """
 
     ROW = "gn2v2_opendata"
     N = N_TEST
+    RUN_NAME = "GN2v2_opendata"
+    MODEL_NAME = "GN2v2opendata"
+    # (onnx/h5 suffix, axis, onnx dtype)
+    FIELDS: tuple[tuple[str, str, str], ...] = (
+        ("pb", "global", "float32"),
+        ("pc", "global", "float32"),
+        ("pu", "global", "float32"),
+        ("ptau", "global", "float32"),
+        ("TrackOrigin", "per_token", "int8"),
+        ("VertexIndex", "per_token", "int8"),
+    )
+
+    def test_manifest_matches_expected_outputs(self):
+        """This class's hardcoded FIELDS names exactly EXPECTED_OUTPUTS['onnx']."""
+        expected = EXPECTED_OUTPUTS[self.ROW]["onnx"]
+        derived = [f"{self.MODEL_NAME}_{suffix}" for suffix, _, _ in self.FIELDS]
+        assert derived == expected, (
+            "TestGn2v2OpendataValuesMatchOnnxRuntime.FIELDS drifted from "
+            f"EXPECTED_OUTPUTS['{self.ROW}']['onnx']: {derived} != {expected}"
+        )
 
     @pytest.fixture(scope="class")
     def artifacts(self, tmp_path_factory) -> InferenceArtifacts:
@@ -356,8 +357,6 @@ class TestGn2v2OpendataValuesMatchOnnxRuntime:
         convention) and compare against the H5 — floats at check_onnx
         tolerance (1e-4), int8 exact; padded H5 positions read 0.
         """
-        onnx, run_name = _golden_onnx_or_skip(self.ROW)
-        model_name = onnx["model_name"]
         fit = run_row(self.ROW, tmp_path_factory)
         cfg = yaml.safe_load(fit.saved_config.read_text())
         variables = cfg["data"]["modules"]["features"]["init_args"]["variables"]
@@ -375,7 +374,8 @@ class TestGn2v2OpendataValuesMatchOnnxRuntime:
             tracks_out = f["tracks"][: self.N]
         session = make_session(onnx_path)
         ort_names = [o.name for o in session.get_outputs()]
-        assert ort_names == onnx["output_names"], f"{self.ROW}: exported tuple != golden tuple"
+        expected = EXPECTED_OUTPUTS[self.ROW]["onnx"]
+        assert ort_names == expected, f"{self.ROW}: exported tuple != EXPECTED_OUTPUTS['onnx']"
         n_mismatch_checked = 0
         for i in range(self.N):
             ort_out = dict(
@@ -391,29 +391,23 @@ class TestGn2v2OpendataValuesMatchOnnxRuntime:
                     strict=True,
                 )
             )
-            for entry in onnx["task_manifest_onnx"]:
-                stream = entry["leaf_key"].split(".")[1]
-                col_name = (
-                    f"{run_name}_{entry['resolved_onnx_name']}"
-                    if entry["prefix"]
-                    else entry["resolved_onnx_name"]
-                )
-                ref = ort_out[f"{model_name}_{entry['resolved_onnx_name']}"]
-                if entry["axis"] == "global":
-                    assert stream == "jets", f"global export leaf on unexpected stream {stream}"
+            for suffix, axis, dtype in self.FIELDS:
+                h5_col = f"{self.RUN_NAME}_{suffix}"
+                ref = ort_out[f"{self.MODEL_NAME}_{suffix}"]
+                if axis == "global":
                     np.testing.assert_allclose(
-                        np.float64(jets_out[col_name][i]),
+                        np.float64(jets_out[h5_col][i]),
                         np.ravel(ref)[0],
                         rtol=1e-4,
                         atol=1e-4,
-                        err_msg=f"{col_name} jet {i}",
+                        err_msg=f"{h5_col} jet {i}",
                     )
                 else:
                     n_valid = int(valid[i].sum())
-                    got_tokens = tracks_out[col_name][i]
-                    if entry["onnx_dtype"] == "int8":
+                    got_tokens = tracks_out[h5_col][i]
+                    if dtype == "int8":
                         np.testing.assert_array_equal(
-                            got_tokens[:n_valid], ref, err_msg=f"{col_name} jet {i}"
+                            got_tokens[:n_valid], ref, err_msg=f"{h5_col} jet {i}"
                         )
                     else:
                         np.testing.assert_allclose(
@@ -421,9 +415,9 @@ class TestGn2v2OpendataValuesMatchOnnxRuntime:
                             ref,
                             rtol=1e-4,
                             atol=1e-4,
-                            err_msg=f"{col_name} jet {i}",
+                            err_msg=f"{h5_col} jet {i}",
                         )
-                    assert (got_tokens[n_valid:] == 0).all(), f"{col_name} jet {i}: pad not zero"
+                    assert (got_tokens[n_valid:] == 0).all(), f"{h5_col} jet {i}: pad not zero"
                     n_mismatch_checked += 1
         assert n_mismatch_checked > 0, "no per-token comparison ran (degenerate fixture)"
 
@@ -431,7 +425,7 @@ class TestGn2v2OpendataValuesMatchOnnxRuntime:
 class TestGn2v2OpendataStructuralAnchor:
     """Anchored structural checks that depend on per-config writer wiring
     (which streams get an ``InputCopyWriter``/``PadMaskWriter``) rather than
-    anything the committed golden encodes — see the module docstring.
+    anything a committed golden ever encoded — see the module docstring.
     """
 
     ROW = "gn2v2_opendata"
@@ -459,8 +453,10 @@ class TestGn2v2OpendataStructuralAnchor:
 @pytest.mark.parametrize("name", _PARAMS)
 class TestLabelStripped:
     """Gate (c): a label-stripped copy of the row's own test file runs green
-    with identical prediction columns (H5-fed rows only — ROOT-fed rows skip
-    upstream in ``_artifacts_or_skip``).
+    with bit-identical prediction columns (H5-fed rows only — ROOT-fed rows
+    skip upstream in ``_artifacts_or_skip``). Generic — compares the row's OWN
+    two outputs to each other, so it needs no per-row expected-name table at
+    all (unlike gates (a)/(b), see the module docstring).
     """
 
     def test_stripped_input_lacks_label_fields(self, name, tmp_path_factory):
@@ -471,26 +467,21 @@ class TestLabelStripped:
                 assert not set(f[group].dtype.names or ()) & LABEL_FIELDS, group
 
     def test_prediction_columns_identical(self, name, tmp_path_factory):
-        """Every export-selection column (and any pad mask) is bit-identical
-        between the labelled and stripped runs — labels contribute nothing.
+        """Every column present in the labelled output (and any pad mask) is
+        bit-identical in the stripped output — labels contribute nothing.
+        Compares whatever columns the row actually produced, not a curated
+        name list — the two files are the SAME row's own two runs.
         """
-        onnx, run_name = _golden_onnx_or_skip(name)
         artifacts = _artifacts_or_skip(name, tmp_path_factory)
         with h5py.File(artifacts.labelled_output) as fa, h5py.File(artifacts.stripped_output) as fb:
-            for entry in onnx["task_manifest_onnx"]:
-                stream = entry["leaf_key"].split(".")[1]
-                col_name = (
-                    f"{run_name}_{entry['resolved_onnx_name']}"
-                    if entry["prefix"]
-                    else entry["resolved_onnx_name"]
-                )
-                a, b = fa[stream][col_name][:], fb[stream][col_name][:]
-                assert np.array_equal(a, b), f"{name}: {stream}/{col_name} differs when stripped"
-            for stream in fa:
-                if "mask" in (fa[stream].dtype.names or ()):
-                    assert np.array_equal(fa[stream]["mask"][:], fb[stream]["mask"][:]), (
-                        f"{name}: {stream}/mask differs when stripped"
-                    )
+            assert set(fa) == set(fb), f"{name}: group sets differ between labelled and stripped"
+            for group in fa:
+                a_names = set(fa[group].dtype.names or ())
+                b_names = set(fb[group].dtype.names or ())
+                assert a_names == b_names, f"{name}/{group}: column sets differ when stripped"
+                for col in a_names:
+                    a, b = fa[group][col][:], fb[group][col][:]
+                    assert np.array_equal(a, b), f"{name}: {group}/{col} differs when stripped"
 
     def test_stripped_output_carries_no_label_columns(self, name, tmp_path_factory):
         """The stripped-run H5 carries no label copy and no target_* column."""
