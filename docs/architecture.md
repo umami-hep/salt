@@ -160,7 +160,6 @@ implicit one over the section — `salt test` instantiates the H5 sink
 `OnnxExportSink` naming the export-mode leaves. A config declares a sink
 only when it carries a manifest the command cannot guess (`MaskFormer.yaml`)
 or when it is a third-party one; the implicit wiring then leaves it alone.
-A sink declared under `callbacks:` is accepted for one deprecation window.
 
 Every model config defines its own section (`base.yaml` ships none) —
 **writer dict order = per-group column order**, the v1 layout being:
@@ -189,9 +188,8 @@ sink is a hard error — narrowing a `RunTaskOutput` `tasks:`
 list and forgetting a task fails loudly instead of silently dropping
 columns. The same error fires statically from
 `salt graph validate`/`deadcode`. A `salt test` config without an
-`outputs:` section is refused, and a config still carrying the retired
-top-level `writers:` block fails with a clean migration `ConfigError`. A
-train-only aux task opts out of eval with the per-task
+`outputs:` section is refused. A train-only aux task opts out of eval
+with the per-task
 `expose: [fit, val]` config: it stays trained (the loss is
 FIT/VAL anyway) while its `preds.*` port is gated out of the TEST/ONNX
 plans, so the planner prunes the task and the dead-preds error never

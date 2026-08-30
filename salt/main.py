@@ -333,14 +333,14 @@ def _instantiate_class_config(cfg: Any) -> Any:
 
 def _is_persistence_sink(class_path: str) -> bool:
     """Whether a callback ``class_path`` names a TEST persistence sink: an
-    `H5OutputWriter` (or subclass, or any callback exposing duck-typed
+    `H5OutputSink` (or subclass, or any callback exposing duck-typed
     ``writer_demand``), EXCLUDING `OnnxExportSink` (ONNX-only, persists
     nothing in TEST). False for an unimportable path or a plain callback.
     """
     import importlib
 
     from salt.outputs import (
-        H5OutputWriter,
+        H5OutputSink,
         OnnxExportSink,
     )
 
@@ -355,7 +355,7 @@ def _is_persistence_sink(class_path: str) -> bool:
         return False
     if issubclass(cls, OnnxExportSink):  # ONNX-only sink: no TEST persistence
         return False
-    return issubclass(cls, H5OutputWriter) or callable(getattr(cls, "writer_demand", None))
+    return issubclass(cls, H5OutputSink) or callable(getattr(cls, "writer_demand", None))
 
 
 def _has_callback_persistence_sink(callbacks: Any) -> bool:

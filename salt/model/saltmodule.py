@@ -683,7 +683,7 @@ class SaltModule(lightning.LightningModule):
                 if not consumed:
                     raise ConfigError(
                         "[mode=TEST] the configured writers consume nothing the model "
-                        "produces — check writers.modules"
+                        "produces — check the outputs: section"
                     )
                 return consumed
         # the ONNX output manifest is not writer-derived — the folded OnnxExportSink
@@ -1766,7 +1766,7 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         if len(parts := key.split(KEY_SEP)) > 2  # preds.<stream>.<task>
     }
     hints = [
-        f"writers.modules.{wname}.init_args.tasks: {list(tasks)} currently excludes {excluded}"
+        f"outputs.{wname}.init_args.tasks: {list(tasks)} currently excludes {excluded}"
         for wname, writer in (getattr(writers, "writers", None) or {}).items()
         if (tasks := getattr(writer, "tasks", None)) is not None
         and (excluded := sorted(dead_tasks - set(tasks)))

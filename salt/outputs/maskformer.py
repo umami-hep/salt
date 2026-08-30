@@ -1,5 +1,5 @@
-"""MaskFormer output nodes: `MaskFormerObjects` reconstruction node (+ deprecated
-alias) and `MFLeadVertexDecorator` lead-vertex jet-level decorator.
+"""MaskFormer output nodes: `MaskFormerObjects` reconstruction node and
+`MFLeadVertexDecorator` lead-vertex jet-level decorator.
 """
 
 from __future__ import annotations

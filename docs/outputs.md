@@ -187,16 +187,7 @@ Setting an entry to `null` deletes it, which is how a stacked config drops a
 writer or a sink it inherited.
 
 Every model config declares its own section; `base.yaml` ships none. A
-`salt test` config with no `outputs:` section is refused, and a config still
-carrying the retired top-level `writers:` block fails with a migration error
-pointing here.
-
-!!! note "Sinks used to live under `callbacks:`"
-
-    A sink declared under `callbacks:` still works, with a deprecation
-    warning, for one release. Move it into `outputs:` — a sink is not a
-    Lightning callback, and splitting one concept across two top-level blocks
-    is what the section unifies.
+`salt test` config with no `outputs:` section is refused.
 
 ### Modes: eval, export, or both
 
