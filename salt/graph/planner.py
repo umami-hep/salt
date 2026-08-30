@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any, Literal, NoReturn, TypeAlias
 
 from salt.graph.errors import (
-    _SUGGESTION_CUTOFF,
+    SUGGESTION_CUTOFF,
     AllModesDeadError,
     ConfigError,
     ConnectivityError,
@@ -60,17 +60,11 @@ __all__ = [
     "deadcode",
 ]
 
-SOURCES = "<sources>"
-"""Edge producer sentinel: the key is provided a priori by the framework."""
-
-SINKS = "<sinks>"
-"""Edge consumer sentinel: the key is demanded by a sink (writer/export/loss boundary)."""
+SOURCES = "<sources>"  # edge producer sentinel: key provided a priori by the framework
+SINKS = "<sinks>"  # edge consumer sentinel: key demanded by a sink
 
 Sinks: TypeAlias = "Iterable[str] | Mapping[Mode, Iterable[str]] | None"
 """Sink keys: flat iterable (compiled mode only) or per-mode mapping."""
-
-_MAX_SHOWN_KEYS = 12
-
 
 # ---------------------------------------------------------------------------
 # public dataclasses
@@ -684,7 +678,7 @@ def _narrow_wildcards(
                     consumers = ", ".join(
                         _describe_consumer(c, key, sink_origins) for c in demand[key]
                     )
-                    near = get_close_matches(key, sorted(schema), n=3, cutoff=_SUGGESTION_CUTOFF)
+                    near = get_close_matches(key, sorted(schema), n=3, cutoff=SUGGESTION_CUTOFF)
                     hint = f"\n  nearest schema keys: {', '.join(near)}" if near else ""
                     raise ConnectivityError(
                         f"[mode={mode.name}] key {key!r} (demanded by {consumers}) is not in "
@@ -1078,11 +1072,11 @@ def _raise_missing_producer(
         fix = f"fix: correct the require in module {consumer!r}, or add a module producing {key!r}"
     lines = [head]
     available = sorted(producer_of)
-    near = get_close_matches(key, available, n=3, cutoff=_SUGGESTION_CUTOFF)
+    near = get_close_matches(key, available, n=3, cutoff=SUGGESTION_CUTOFF)
     if near:
         lines.append(f"  did you mean: {', '.join(repr(k) for k in near)}?")
     if available:
-        shown = available[:_MAX_SHOWN_KEYS]
+        shown = available[:12]
         more = f" (+{len(available) - len(shown)} more)" if len(available) > len(shown) else ""
         lines.append(f"  available keys: {', '.join(shown)}{more}")
     lines.extend(f"  {note}" for note in _other_mode_producers(modules, sources, key, mode))

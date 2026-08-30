@@ -20,8 +20,6 @@ __all__ = ["DEFAULT_LEVEL", "LEVEL_ENV_VAR", "ROOT_NAME", "console", "get_logger
 _CONFIGURED = False
 _EXPLICIT_LEVEL: int | str | None = None
 
-_FORMAT = "%(levelname)s %(name)s: %(message)s"
-
 
 def _style(level: str, text: str) -> str:  # noqa: ARG001 - the two-arg signature is the seam's contract; a colour implementation branches on `level`
     """Colour hook. Identity today; the single seam to add colour later.
@@ -96,7 +94,7 @@ def _ensure_configured() -> None:
     root = logging.getLogger(ROOT_NAME)
     if not any(getattr(h, "_salt_handler", False) for h in root.handlers):
         handler = _StderrHandler()
-        handler.setFormatter(_SaltFormatter(_FORMAT))
+        handler.setFormatter(_SaltFormatter("%(levelname)s %(name)s: %(message)s"))
         root.addHandler(handler)
     level = _EXPLICIT_LEVEL if _EXPLICIT_LEVEL is not None else _env_level()
     root.setLevel(_resolve_level(level))

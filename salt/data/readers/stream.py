@@ -23,8 +23,6 @@ INT_PAD_SENTINEL = -1
 ``ignore_index=-1`` downstream. Floats pad to 0.0; unsigned/counts pad to 0; bool
 pads to False; the ``valid`` field is set explicitly, never via these fills."""
 
-_SORT_MODES = ("ascending", "descending")
-
 
 @dataclass(frozen=True)
 class StreamConfig:
@@ -81,9 +79,10 @@ class StreamConfig:
             mode = self.sort.get("mode", "descending")
             if not var:
                 raise ConfigError("StreamConfig.sort: 'var' must be a non-empty field name")
-            if mode not in _SORT_MODES:
+            if mode not in {"ascending", "descending"}:
                 raise ConfigError(
-                    f"StreamConfig.sort: unknown mode {mode!r} — expected one of {_SORT_MODES}"
+                    f"StreamConfig.sort: unknown mode {mode!r} — "
+                    "expected one of ('ascending', 'descending')"
                 )
             # normalise (frozen dataclass — set via object.__setattr__)
             object.__setattr__(self, "sort", {"var": str(var), "mode": str(mode)})

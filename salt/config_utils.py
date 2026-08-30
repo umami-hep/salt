@@ -58,10 +58,6 @@ def disable_logger_in_config(config_path: str) -> str:
     return str(cached_path)
 
 
-INCLUDE_KEY = "include"
-"""Top-level key listing configs to merge underneath this one."""
-
-
 class IncludeError(ValueError):
     """A config's ``include:`` could not be resolved."""
 
@@ -118,7 +114,7 @@ def _expand(path: Path, config_dir: Path, stack: tuple[Path, ...]) -> tuple[dict
     if not isinstance(raw, dict):
         raise IncludeError(f"{path}: config is not a mapping")
 
-    refs = raw.pop(INCLUDE_KEY, None) or []
+    refs = raw.pop("include", None) or []
     if isinstance(refs, str):
         refs = [refs]
 

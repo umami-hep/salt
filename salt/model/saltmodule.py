@@ -86,9 +86,6 @@ _LOG = get_logger(__name__)
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "lion-pytorch", "HybridMuonAdamW")
 _MUP_KEYS = frozenset({"apply_to", "shape_path"})
-# dataset-boundary demand is declared for the three runtime modes; ONNX
-# export feeds the model directly and has no dataset plan.
-_DEMAND_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
 
 
 def safe_pct_start(pct_start: float, total_steps: int) -> float:
@@ -544,7 +541,8 @@ class SaltModule(lightning.LightningModule):
         demand keys or a demand key outside the dataset-served namespaces.
         """
         out: dict[Mode, tuple[list[str], dict[str, str]]] = {}
-        for mode in _DEMAND_MODES:
+        # ONNX export feeds the model directly and has no dataset plan
+        for mode in (Mode.FIT, Mode.VAL, Mode.TEST):
             required: dict[str, list[str]] = {}
             produced: set[str] = set()
             for name, module in self._graph_modules.items():

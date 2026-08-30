@@ -25,10 +25,6 @@ __all__ = ["MultiSampleReader", "SampleConfig"]
 
 _LOG = get_logger(__name__)
 
-_LABEL_DTYPE = "int64"
-"""Injected label dtype: int64 so downstream ``Labels``/`ClassificationTaskModule`
-consume it directly without a cast."""
-
 _STAGE_KEYS = ("train", "val", "test")
 
 _EXHAUSTION_LOG_EVERY = 50
@@ -312,7 +308,7 @@ class MultiSampleReader(Reader):
                             f"MultiSampleReader: injected label_field {self.label_field!r} "
                             f"collides with an existing field on {self.label_stream!r}"
                         )
-                    fields[self.label_field] = _LABEL_DTYPE
+                    fields[self.label_field] = "int64"
                 groups[stream] = GroupSchema(fields=fields)
             self.schema = Schema(groups=groups)
 
@@ -714,7 +710,7 @@ class MultiSampleReader(Reader):
         names = list(ref.dtype.names or ())
         dtype_fields = [(nm, ref.dtype[nm]) for nm in names]
         if inject:
-            dtype_fields.append((self.label_field, np.dtype(_LABEL_DTYPE)))
+            dtype_fields.append((self.label_field, np.dtype("int64")))
         combined = np.empty((b,), dtype=np.dtype(dtype_fields))
         for positions, sid, block in blocks:
             for nm in names:

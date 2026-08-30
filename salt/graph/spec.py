@@ -13,7 +13,9 @@ __all__ = [
     "IO",
     "KEY_SEP",
     "KINDS",
+    "OBJECT_STREAM",
     "PRIMARY_MODES",
+    "UNNAMED",
     "GraphModule",
     "Kind",
     "Mode",
@@ -32,7 +34,6 @@ __all__ = [
 ]
 
 KEY_SEP = "."
-"""Separator for dotted bundle keys."""
 
 
 class Mode(Flag):
@@ -47,13 +48,11 @@ class Mode(Flag):
 
 
 PRIMARY_MODES: tuple[Mode, ...] = (Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX)
-"""The four atomic modes, in canonical order (composites excluded)."""
 
 Kind: TypeAlias = Literal["data", "pad_mask", "label", "loss", "meta"]
 """Port kinds: a consumer port can only bind a producer leaf of the same kind."""
 
 KINDS: tuple[Kind, ...] = get_args(Kind)
-"""All valid `Kind` values, for runtime validation."""
 
 
 # ---------------------------------------------------------------------------
@@ -138,13 +137,10 @@ def join_key(parts: tuple[str, ...] | list[str]) -> str:
 # wildcard key patterns (shared by planner, CLI, renderer, SaltModule)
 # ---------------------------------------------------------------------------
 
-_WILDCARD_PARTS = frozenset({"*", "**"})
-"""Wildcard key components: ``"*"`` matches exactly one component, ``"**"`` one or more."""
-
 
 def _has_wildcard(key: str) -> bool:
     """Check whether a dotted key contains a wildcard component (``"*"`` or ``"**"``)."""
-    return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
+    return any(part in {"*", "**"} for part in key.split(KEY_SEP))
 
 
 def _pattern_matches(pattern: str, key: str) -> bool:
@@ -405,11 +401,11 @@ class IO:
         flatten_spec(self.produces)
 
 
-_UNNAMED = "unnamed"
+UNNAMED = "unnamed"
 """Placeholder `GraphModule.name` — the instance name (the config dict key) is
 assigned before compile."""
 
-_OBJECT_STREAM = "objects"
+OBJECT_STREAM = "objects"
 """The maskformer object-stream key component — the ``labels.objects.*`` /
 ``matched.objects.*`` contract shared by the data-side target builder
 (`salt.data.processors.maskformer_targets`) and the nn-side matched loss

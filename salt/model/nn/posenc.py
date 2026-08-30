@@ -8,10 +8,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.graph.errors import ConfigError
-from salt.graph.spec import _UNNAMED
-
-_POSENC_SYM_VARS: frozenset[str] = frozenset({"phi"})
-"""Variables whose positional encoding is symmetric (sin/cos of the sin/cos)."""
+from salt.graph.spec import UNNAMED
 
 
 class PositionalEncoder(nn.Module):
@@ -24,7 +21,7 @@ class PositionalEncoder(nn.Module):
 
     def __init__(self, variables: Sequence[str], dim: int, alpha: int = 100) -> None:
         super().__init__()
-        self.name = _UNNAMED
+        self.name = UNNAMED
         self.variables = tuple(variables)
         if not self.variables:
             raise ConfigError("PositionalEncoder: variables must be a non-empty sequence")
@@ -43,7 +40,7 @@ class PositionalEncoder(nn.Module):
         """Encode each coordinate column (in ``variables`` order); concat along the last dim."""
         encodings: list[Tensor] = []
         for i, var in enumerate(self.variables):
-            symmetric = var in _POSENC_SYM_VARS
+            symmetric = var == "phi"  # phi gets the symmetric encoding
             encodings.append(self.pos_enc(inputs[..., i], self.per_input_dim, symmetric=symmetric))
         if self.last_dim > 0:
             encodings.append(torch.zeros_like(encodings[0][..., : self.last_dim]))

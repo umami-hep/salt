@@ -200,10 +200,6 @@ CONFIG_DIR = Path(__file__).parent / "configs"
 """Directory shipping ``base.yaml`` and the worked GN2v2 configs."""
 
 _GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
-_EXPORT_COMMAND = "export"
-_INFERENCE_COMMAND = "inference"
-_MERGE_CONFIG_COMMAND = "merge-config"
-_PROFILE_COMMAND = "profile"
 
 
 def _needs_logger(callback: Any) -> bool:
@@ -276,9 +272,6 @@ def _best_checkpoint(config_path: Path) -> str:
     return best
 
 
-_CLASS_DICT_ARG = "class_dict"
-"""Top-level convenience flag name (``--class_dict``)."""
-
 _INIT_FROM_ARG = "init_from"
 """Top-level warm-start flag name (``--init_from``)."""
 
@@ -289,9 +282,6 @@ Its canonical home is the config top level (peer of ``trainer:``/``data:``/
 ``model:``), NOT ``model.init_args``; `_relocate_training_schedule` injects the
 resolved value into the `SaltModule` constructor arg before instantiation.
 """
-
-_CLASS_DICT_CLASS = "ClassificationTaskModule"
-"""Class-name suffix of the only ``class_dict``/``weight_source`` consumer."""
 
 
 def _entry_get(entry: Any, key: str) -> Any:
@@ -400,7 +390,7 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     )
 
     for scope, model in _iter_model_blocks(cfg):
-        class_dict = scope.get(_CLASS_DICT_ARG)
+        class_dict = scope.get("class_dict")
         if not class_dict:
             continue
         init_args = getattr(model, "init_args", None)
@@ -415,7 +405,7 @@ def _fan_out_artifacts(cfg: Any) -> Any:
             if module_args is None:
                 continue
             if (
-                class_path.endswith(_CLASS_DICT_CLASS)
+                class_path.endswith("ClassificationTaskModule")
                 and _entry_get(module_args, "weight_source") is None
             ):
                 _entry_set(
@@ -699,7 +689,7 @@ class SaltCLI(LightningCLI):
             "unpad/repad handling — see docs/training.md.",
         )
         parser.add_argument(
-            f"--{_CLASS_DICT_ARG}",
+            "--class_dict",
             type=str | None,
             default=None,
             help="convenience flag: fanned out to weight_source="
@@ -1217,20 +1207,20 @@ def main(args: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if args is None else args)
     if argv and argv[0] in _GRAPH_COMMANDS:
         return graph_cli.main(argv)
-    if argv and argv[0] == _EXPORT_COMMAND:
+    if argv and argv[0] == "export":
         # local import: the exporter pulls onnx/onnxruntime — not needed at
         # fit/test/graph startup
         from salt.outputs.sinks.onnx import export as onnx_export
 
         return onnx_export.main(argv[1:])
-    if argv and argv[0] == _INFERENCE_COMMAND:
+    if argv and argv[0] == "inference":
         # trainer-free like export: inference executes the export-mode plan
         # eagerly per jet, so it dispatches to its own main
         # rather than a Lightning Trainer subcommand.
         from salt import inference as inference_cli
 
         return inference_cli.main(argv[1:])
-    if argv and argv[0] == _PROFILE_COMMAND:
+    if argv and argv[0] == "profile":
         # its own dispatch: `dataset` iterates the datamodule in-process under
         # line_profiler, `model` drives a short capped fit through SaltCLI
         from salt import profiling as profiling_cli
@@ -1238,7 +1228,7 @@ def main(args: Sequence[str] | None = None) -> int:
         return profiling_cli.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
-        if argv and argv[0] == _MERGE_CONFIG_COMMAND:
+        if argv and argv[0] == "merge-config":
             # trainer-free like export: merge the fit config stack + render the
             # per-stage freeze graphs, no data/checkpoints touched. Kept
             # inside this try so a GraphError reuses the one-block handler below.

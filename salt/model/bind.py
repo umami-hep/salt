@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 
-from salt.graph.errors import _SUGGESTION_CUTOFF, GraphError
+from salt.graph.errors import SUGGESTION_CUTOFF, GraphError
 from salt.graph.planner import Plan
 from salt.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
 from salt.model.base import SaltModelModule
@@ -46,7 +46,7 @@ class ResolvedSchema:
         try:
             return self.widths[key]
         except KeyError:
-            near = get_close_matches(key, sorted(self.widths), n=3, cutoff=_SUGGESTION_CUTOFF)
+            near = get_close_matches(key, sorted(self.widths), n=3, cutoff=SUGGESTION_CUTOFF)
             hint = f"; nearest: {', '.join(near)}" if near else ""
             raise BindError(
                 f"no statically resolved width for bundle key {key!r} — the key is either "

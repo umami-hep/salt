@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 
-from salt.graph.spec import _UNNAMED, IO, Mode
+from salt.graph.spec import IO, UNNAMED, Mode
 
 if TYPE_CHECKING:
     from salt.graph.bundle import Bundle
@@ -51,7 +51,7 @@ class SaltModelModule(nn.Module):
     def __init__(self) -> None:
         """Initialise the instance name placeholder (assigned from the config key)."""
         super().__init__()
-        self.name: str = _UNNAMED
+        self.name: str = UNNAMED
 
     def declare_io(self, mode: Mode) -> IO:
         """Return the declared requires/produces for the given mode.

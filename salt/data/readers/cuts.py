@@ -17,7 +17,6 @@ from salt.graph.errors import ConfigError
 
 __all__ = ["ConstituentCuts", "Cut", "CutSpec", "GlobalObjectCuts"]
 
-_ON_FAIL = ("mask", "drop")
 VALID_FIELD = "valid"
 """The per-constituent validity field every jagged stream carries."""
 
@@ -372,9 +371,9 @@ class ConstituentCuts:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cuts", _parse_cuts(tuple(self.cuts), "ConstituentCuts.cuts"))
-        if self.on_fail not in _ON_FAIL:
+        if self.on_fail not in {"mask", "drop"}:
             raise ConfigError(
-                f"ConstituentCuts: on_fail must be set explicitly to one of {list(_ON_FAIL)}, "
+                f"ConstituentCuts: on_fail must be set explicitly to one of ['mask', 'drop'], "
                 f"got {self.on_fail!r} — 'mask' blanks a failing constituent in place, 'drop' "
                 "removes it and re-pads"
             )

@@ -18,7 +18,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.planner import PlanStep
 from salt.graph.setup_spec import SetupIO, SetupStage
-from salt.graph.spec import _UNNAMED, IO, KEY_SEP, Mode
+from salt.graph.spec import IO, KEY_SEP, UNNAMED, Mode
 from salt.schema import GroupSchema, Schema
 
 if TYPE_CHECKING:
@@ -40,9 +40,6 @@ __all__ = [
 # leaves are path strings / scalar artifacts instead of tensors. `SetupBundle`
 # is an alias (not a subclass) to keep the carrier a single implementation.
 SetupBundle = Bundle
-
-RAW_NAMESPACE = "raw"
-"""Bundle namespace for post-selection structured arrays."""
 
 
 @dataclass(frozen=True)
@@ -141,7 +138,7 @@ class SaltDatasetModule(ABC):
 
     def __init__(self) -> None:
         """Initialise the instance name placeholder (assigned from the config key)."""
-        self.name: str = _UNNAMED
+        self.name: str = UNNAMED
 
     @abstractmethod
     def declare_io(self, mode: Mode) -> IO:
@@ -206,7 +203,7 @@ class SaltDatasetModule(ABC):
         out: dict[str, dict[str, str]] = {}
         for key, spec in step.requires.items():
             parts = key.split(KEY_SEP)
-            if parts[0] != RAW_NAMESPACE or len(parts) != 2 or spec.fields is None:
+            if parts[0] != "raw" or len(parts) != 2 or spec.fields is None:
                 continue
             stream = parts[1]
             for field in spec.fields:

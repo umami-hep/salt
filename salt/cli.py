@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, GraphError
+from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, GraphError
 from salt.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
 from salt.graph.render import dot_source, plan_table
 from salt.graph.spec import (
@@ -46,7 +46,6 @@ from salt.schema import dump_schema, load_schema, save_schema
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]
 
-_MODE_CHOICES = ("fit", "val", "test", "onnx")
 _SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"})
 
 
@@ -1102,7 +1101,7 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
         console("\n".join(lines))
         return 0
     universe |= set(cfg.schema or ())
-    near = get_close_matches(key, sorted(universe), n=3, cutoff=_SUGGESTION_CUTOFF)
+    near = get_close_matches(key, sorted(universe), n=3, cutoff=SUGGESTION_CUTOFF)
     hint = f"\n  did you mean: {', '.join(repr(k) for k in near)}?" if near else ""
     return _fail(f"[mode={mode.name}] {key!r}: no module or source produces it in any mode.{hint}")
 
@@ -1188,7 +1187,7 @@ def _add_mode_arg(parser: argparse.ArgumentParser, default: str | None) -> None:
     """Add the shared ``--mode`` argument (None default = all primary modes)."""
     parser.add_argument(
         "--mode",
-        choices=_MODE_CHOICES,
+        choices=("fit", "val", "test", "onnx"),
         default=default,
         help="primary mode" + ("" if default else " (default: all modes)"),
     )

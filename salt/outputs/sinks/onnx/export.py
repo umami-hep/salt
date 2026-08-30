@@ -472,9 +472,6 @@ def _features_variables(cli: Any) -> dict[str, list[str]]:
 _ALIAS_KEYS = ("model_name", "inputs", "track_selection", "rename", "combine")
 """The export-contract keys the deprecated top-level ``export:`` block still fills."""
 
-_TRACK_SELECTION_DEFAULT = ExportConfig().track_selection
-"""The unset sentinel for the one non-empty-defaulted alias key."""
-
 _ALIAS_MERGED = "_salt_export_alias_merged"
 """Marks a sink the alias already folded onto, so a second merge is a no-op
 rather than a spurious both-homes error."""
@@ -483,7 +480,7 @@ rather than a spurious both-homes error."""
 def _alias_is_set(key: str, value: Any) -> bool:
     """Whether an export-contract field carries a user-set value, not its default."""
     if key == "track_selection":
-        return value != _TRACK_SELECTION_DEFAULT
+        return value != ExportConfig().track_selection
     return bool(value)
 
 

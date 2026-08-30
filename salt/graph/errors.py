@@ -7,6 +7,7 @@ module by the planner stage — see the anchor comment at the bottom.
 from __future__ import annotations
 
 __all__ = [
+    "SUGGESTION_CUTOFF",
     "AllModesDeadError",
     "ConfigError",
     "ConnectivityError",
@@ -21,7 +22,7 @@ __all__ = [
     "UndeclaredAccessError",
 ]
 
-_SUGGESTION_CUTOFF = 0.5
+SUGGESTION_CUTOFF = 0.5
 """`difflib.get_close_matches` cutoff for did-you-mean suggestions in error messages."""
 
 

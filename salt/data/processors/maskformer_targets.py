@@ -10,7 +10,7 @@ import numpy as np
 
 from salt.data.base import Processor
 from salt.graph.errors import ConfigError, SchemaError
-from salt.graph.spec import _OBJECT_STREAM, IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.graph.spec import IO, OBJECT_STREAM, Mode, TensorSpec, sym_dim, unflatten_spec
 
 
 @dataclass(frozen=True)
@@ -369,15 +369,15 @@ class MaskFormerTargets(Processor):
         m: int | str = self.num_objects if self.num_objects is not None else sym_dim("M", self.name)
         tok = sym_dim("T", self.constituent_stream)
         produces: dict[str, TensorSpec] = {
-            f"labels.{_OBJECT_STREAM}.object_class": TensorSpec(
+            f"labels.{OBJECT_STREAM}.object_class": TensorSpec(
                 shape=("B", m), dtype="int64", kind="label"
             ),
-            f"labels.{_OBJECT_STREAM}.masks": TensorSpec(
+            f"labels.{OBJECT_STREAM}.masks": TensorSpec(
                 shape=("B", m, tok), dtype="bool", kind="label"
             ),
         }
         for target in self.regression_targets:
-            produces[f"labels.{_OBJECT_STREAM}.{target}"] = TensorSpec(
+            produces[f"labels.{OBJECT_STREAM}.{target}"] = TensorSpec(
                 shape=("B", m), dtype="float32", kind="label"
             )
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
@@ -509,7 +509,7 @@ class MaskFormerTargets(Processor):
         if self.max_lxy_mm is not None:
             lxy = np.asarray(obj[self.lxy_field])
             object_class[np.abs(lxy) > self.max_lxy_mm] = self.null_index
-        out[f"labels.{_OBJECT_STREAM}.object_class"] = object_class
+        out[f"labels.{OBJECT_STREAM}.object_class"] = object_class
 
         # masks: constituent_id == object_id, [B, M] x [B, T] -> [B, M, T]. v1
         # build_target_masks substitutes -1 ids with -999 IN PLACE before the
@@ -520,11 +520,9 @@ class MaskFormerTargets(Processor):
         object_ids[object_ids == -1] = -999
         constituent_ids = np.asarray(con[self.constituent_id])
         # [B, M, 1] == [B, 1, T] -> [B, M, T]
-        out[f"labels.{_OBJECT_STREAM}.masks"] = (
-            object_ids[:, :, None] == constituent_ids[:, None, :]
-        )
+        out[f"labels.{OBJECT_STREAM}.masks"] = object_ids[:, :, None] == constituent_ids[:, None, :]
 
         # raw per-object regression labels (float32; the task stacks + scales them)
         for target in self.regression_targets:
-            out[f"labels.{_OBJECT_STREAM}.{target}"] = np.asarray(obj[target], dtype=np.float32)
+            out[f"labels.{OBJECT_STREAM}.{target}"] = np.asarray(obj[target], dtype=np.float32)
         return out

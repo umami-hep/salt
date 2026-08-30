@@ -21,7 +21,7 @@ from salt.data.base import Reader, WorkerCtx
 from salt.data.dtypes import get_dtype
 from salt.data.readers.stream import StreamConfig
 from salt.data.readers.vds import create_vds, has_wildcard
-from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, SchemaError
+from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema, load_schema
 
@@ -198,7 +198,7 @@ class H5StructuredReader(Reader):
             gschema = self.schema.groups.get(cfg.dataset) if self.schema is not None else None
             if self.schema is not None and gschema is None:
                 near = get_close_matches(
-                    cfg.dataset, sorted(self.schema.groups), n=3, cutoff=_SUGGESTION_CUTOFF
+                    cfg.dataset, sorted(self.schema.groups), n=3, cutoff=SUGGESTION_CUTOFF
                 )
                 hint = f"; nearest: {', '.join(near)}" if near else ""
                 raise SchemaError(
@@ -233,7 +233,7 @@ class H5StructuredReader(Reader):
                 for field in config_fields:
                     if field not in gschema.fields:
                         near = get_close_matches(
-                            field, sorted(gschema.fields), n=3, cutoff=_SUGGESTION_CUTOFF
+                            field, sorted(gschema.fields), n=3, cutoff=SUGGESTION_CUTOFF
                         )
                         hint = f"; nearest: {', '.join(near)}" if near else ""
                         raise SchemaError(
@@ -447,7 +447,7 @@ class H5StructuredReader(Reader):
             for field, who in demanded.items():
                 if field not in file_fields:
                     near = get_close_matches(
-                        field, sorted(file_fields), n=1, cutoff=_SUGGESTION_CUTOFF
+                        field, sorted(file_fields), n=1, cutoff=SUGGESTION_CUTOFF
                     )
                     hint = f"; nearest: {near[0]}" if near else ""
                     raise SchemaError(

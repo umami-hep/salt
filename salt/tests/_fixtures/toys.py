@@ -20,14 +20,14 @@ __all__ = [
     "ToyWriter",
 ]
 
-_UNNAMED = "unnamed"  # overwritten by the CLI loader (or the test)
+UNNAMED = "unnamed"  # overwritten by the CLI loader (or the test)
 
 
 class ToySource:
     """Reader stand-in: turns the framework source leaf into inputs + pad mask."""
 
     def __init__(self, n_features: int = 8) -> None:
-        self.name = _UNNAMED
+        self.name = UNNAMED
         self.n_features = n_features
 
     def declare_io(self, mode: Mode) -> IO:
@@ -58,7 +58,7 @@ class ToyEmbed(nn.Module):
 
     def __init__(self, in_dim: int = 8, out_dim: int = 16) -> None:
         super().__init__()
-        self.name = _UNNAMED
+        self.name = UNNAMED
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.linear = nn.Linear(in_dim, out_dim)
@@ -93,7 +93,7 @@ class ToyWildcardLabels:
     allow_wildcards: ClassVar[bool] = True  # framework wildcard capability
 
     def __init__(self, fields: tuple[str, ...] = ("x",), n_classes: int = 3) -> None:
-        self.name = _UNNAMED
+        self.name = UNNAMED
         self.fields = tuple(fields)
         self.n_classes = n_classes
 
@@ -128,7 +128,7 @@ class ToyHead:
     def __init__(
         self, in_dim: int = 16, n_classes: int = 3, embed_key: str = "embed.x"
     ) -> None:
-        self.name = _UNNAMED
+        self.name = UNNAMED
         self.in_dim = in_dim
         self.n_classes = n_classes
         self.embed_key = embed_key
@@ -164,7 +164,7 @@ class ToyWriter:
     """Test-only sink: a terminal consumer (requires, no produces)."""
 
     def __init__(self, key: str = "preds.x") -> None:
-        self.name = _UNNAMED
+        self.name = UNNAMED
         self.key = key
         self.collected: list[torch.Tensor] = []
 
@@ -184,7 +184,7 @@ class ToyDead:
     """Produces a key nothing consumes in any mode."""
 
     def __init__(self) -> None:
-        self.name = _UNNAMED
+        self.name = UNNAMED
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare a produced leaf with no consumer anywhere."""

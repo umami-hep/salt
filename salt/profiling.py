@@ -44,7 +44,6 @@ __all__ = [
 ]
 
 DEFAULT_STEPS = 100
-"""Train batches both ``salt profile`` subcommands consume unless ``--steps`` says otherwise."""
 
 # The capture window `resolve_schedule` aims for; everything left over becomes
 # `wait`, so the recorded steps are the LAST ones of the run — the most
@@ -62,7 +61,6 @@ DEFAULT_DATASET_FUNCTIONS: tuple[str, ...] = (
     "salt.data.processors.labels.Labels.process",
     "salt.graph.bundle.Bundle.merge",
 )
-"""The read path profiled by ``salt profile dataset`` unless ``--functions`` overrides it."""
 
 _BATCH_SCOPE = "salt.batch"
 _BACKWARD_SCOPE = "salt.backward"
