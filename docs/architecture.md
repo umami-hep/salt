@@ -37,16 +37,6 @@ git fetch upstream
 git checkout 6570e85   # the validated upstream MaskFormer reference
 ```
 
-**Regeneration recipe** (only if the frozen-oracle check is ever wanted again):
-`generate_oracle.py` was a throwaway script never committed — reconstruct it
-from `provenance.json` and the retired oracle test, both in git history at
-`93a29ed^` (`salt/tests/_fixtures/gn2v2_dummy_oracle/provenance.json`,
-`salt/tests/integration/test_outputs_h5_parity.py`). Parameters recorded there:
-commit `a9e2ac2`, salt-py314 container, `salt/configs/gn2v2-opendata.yaml`;
-synthetic data from `write_dummy_file` (1000 jets × 40 tracks, module-level
-`np.random.default_rng(42)`); training `max_epochs=1`, `limit_train_batches=2`,
-`limit_val_batches=2`, `batch_size=100`, `seed_everything=42`; `N_TEST=300`.
-
 ## Quickstart: train GN2v2 on a dummy file
 
 One-time setup: if the container's installed salt predates the modular `salt` package,

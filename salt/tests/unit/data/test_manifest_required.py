@@ -51,7 +51,7 @@ class FileStubReader(BlockStubReader):
 
     opens = 0
 
-    def __init__(self, files, offset: int = 0, seed: int = 0, fingerprint=None) -> None:  # noqa: ANN001
+    def __init__(self, files, offset: int = 0, seed: int = 0, fingerprint=None) -> None:
         self.files = [Path(f) for f in files]
         self._fingerprint = dict(fingerprint) if fingerprint else {}
         super().__init__(
@@ -63,8 +63,7 @@ class FileStubReader(BlockStubReader):
         )
         # the (path, row_start) duck type `build_manifest` reads block paths from
         self._table = [
-            SimpleNamespace(path=f, row_start=i * ROWS_PER_FILE)
-            for i, f in enumerate(self.files)
+            SimpleNamespace(path=f, row_start=i * ROWS_PER_FILE) for i, f in enumerate(self.files)
         ]
 
     @classmethod
@@ -102,7 +101,7 @@ class FileStubReader(BlockStubReader):
         """Stands in for a real reader's cuts/groups config."""
         return dict(self._fingerprint)
 
-    def with_source(self, filename, num=-1, vds_path=None, stage=None):  # noqa: ANN001
+    def with_source(self, filename, num=-1, vds_path=None, stage=None):
         """Re-source onto the glob's expansion — the per-stage clone."""
         del num, vds_path, stage
         return FileStubReader(
@@ -129,7 +128,7 @@ def _corpus(root: Path, names: list[str]) -> str:
     return str(root / "*.root")
 
 
-def _dm(train: str, manifest, val: str | None = None, reader=None, **kwargs) -> SaltDataModule:  # noqa: ANN001
+def _dm(train: str, manifest, val: str | None = None, reader=None, **kwargs) -> SaltDataModule:
     """A streaming datamodule over the stub reader, planning from `manifest`."""
     modules = {
         "reader": reader if reader is not None else FileStubReader(files=[]),
@@ -162,7 +161,7 @@ def _reset_opens():
 
 def test_streaming_requires_a_manifest_path(tmp_path) -> None:
     """No manifest on the streaming path is a configuration error, not a fallback."""
-    with pytest.raises(ConfigError, match="data.manifest is required"):
+    with pytest.raises(ConfigError, match=r"data.manifest is required"):
         _dm(_corpus(tmp_path / "corpus", ["a.root"]), manifest=None)
 
 
@@ -271,6 +270,43 @@ def test_setup_builds_when_prepare_data_never_ran(tmp_path) -> None:
     assert dm.train_dset.manifest.n_rows == 2 * ROWS_PER_FILE  # type: ignore[union-attr]
 
 
+def test_a_sourceless_reader_still_streams(tmp_path) -> None:
+    """A reader that cannot name its files must still run.
+
+    Its manifest carries path-less entries (size/mtime ``-1``), which
+    `validate` skips, and an empty recorded source list that a later run
+    matches with its own.
+    """
+
+    class SourcelessReader(FileStubReader):
+        def __init__(self, files, **kwargs) -> None:
+            super().__init__(files, **kwargs)
+            self._table = None  # blocks correspond to no on-disk paths
+
+        def sources(self) -> list[Path]:
+            return []
+
+        def with_source(self, filename, num=-1, vds_path=None, stage=None):
+            del num, vds_path, stage
+            return SourcelessReader(files=sorted(_glob.glob(str(filename))))
+
+    corpus = _corpus(tmp_path / "corpus", ["a.root", "b.root"])
+    target = tmp_path / "m.json"
+    dm = _dm(corpus, manifest=target, reader=SourcelessReader(files=[]))
+    dm.prepare_data()
+    dm.setup("fit")
+    assert isinstance(dm.train_dset, IterableSaltDataset)
+    assert dm.train_dset.manifest.n_rows == 2 * ROWS_PER_FILE  # type: ignore[union-attr]
+    manifest = CorpusManifest.load(target)
+    assert manifest.meta["sources"] == []
+    assert all(not e.path and e.size == -1 for e in manifest.entries)
+
+    again = _dm(corpus, manifest=target, reader=SourcelessReader(files=[]))
+    again.prepare_data()  # validates ([] == [] sources, no stat loop) and reuses
+    again.setup("fit")
+    assert again.train_dset.manifest.n_rows == 2 * ROWS_PER_FILE  # type: ignore[union-attr]
+
+
 # --------------------------------------------------------------------------- #
 # per-stage paths
 # --------------------------------------------------------------------------- #
@@ -284,16 +320,15 @@ def test_a_mapping_gives_each_stage_its_own_manifest(tmp_path) -> None:
     dm = _dm(train, manifest=paths, val=val)
     dm.prepare_data()
     dm.setup("fit")
-    assert paths["train"].exists() and paths["val"].exists()
+    assert paths["train"].exists()
+    assert paths["val"].exists()
     assert dm.train_dset.manifest.n_rows == 3 * ROWS_PER_FILE  # type: ignore[union-attr]
     assert dm.val_dset.manifest.n_rows == ROWS_PER_FILE  # type: ignore[union-attr]
 
 
 def test_a_mapping_missing_a_stage_is_an_error(tmp_path) -> None:
     """Every streaming stage must be named — no silent fallback path."""
-    dm = _dm(
-        _corpus(tmp_path / "corpus", ["a.root"]), manifest={"train": tmp_path / "train.json"}
-    )
+    dm = _dm(_corpus(tmp_path / "corpus", ["a.root"]), manifest={"train": tmp_path / "train.json"})
     with pytest.raises(ConfigError, match="'val'"):
         dm.prepare_data()
 
@@ -320,7 +355,7 @@ def test_a_resized_source_file_is_a_hard_error(tmp_path) -> None:
     _dm(corpus, manifest=target).prepare_data()
     (root / "a.root").write_bytes(b"y" * 4096)
 
-    with pytest.raises(ConfigError, match="delete .* to rebuild") as err:
+    with pytest.raises(ConfigError, match=r"delete .* to rebuild") as err:
         _dm(corpus, manifest=target).prepare_data()
     assert "size changed" in str(err.value)
     assert str(target) in str(err.value)

@@ -29,14 +29,18 @@ things it fixes actually bites you:
 ```yaml
 data:
   iterable: true
-  manifest: /path/to/corpus_manifest.json  # required — built there when missing
+  manifest:  # required — one path per streaming stage, built there when missing
+    train: /path/to/train_manifest.json
+    val: /path/to/val_manifest.json
   block_rows: 16384
   max_live_streams: 2
   interleave_block: 1
   shuffle_stream: true
 ```
 
-Nothing else changes: no sampler to configure, no per-rank settings. A shipped
+Nothing else changes: no sampler to configure, no per-rank settings. A single
+scalar `manifest:` path is accepted only when every streaming stage reads the
+same corpus — see [The corpus manifest](#the-corpus-manifest). A shipped
 overlay is at `salt/configs/readers/ftag1lite_streaming.yaml`.
 
 ## How sharding works

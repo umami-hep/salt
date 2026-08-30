@@ -1,9 +1,12 @@
 # Overlay — stream DAOD_FTAG1LITE instead of reading windowed batches.
 #
-# Stackable ON TOP of a reader fragment:
+# Stackable ON TOP of a reader fragment (`manifest:` is required on the
+# streaming path, so name the per-stage paths on the command line — or set
+# them in your own overlay, see the comment at the bottom):
 #   salt fit --config readers/ftag1lite.yaml \
 #            --config readers/ftag1lite_streaming.yaml \
-#            --config <model>.yaml
+#            --config <model>.yaml \
+#            --data.manifest '{train: /path/to/train_manifest.json, val: /path/to/val_manifest.json}'
 #
 # What changes: the datamodule builds `IterableSaltDataset` instead of
 # `SaltDataset`. Rows arrive in a different ORDER; the batch object, the plan
