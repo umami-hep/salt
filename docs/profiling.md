@@ -96,7 +96,7 @@ alongside each other, so the H5 slab read, the constituent cuts, the
 by line rather than by function.
 
 The default function list is `salt.profiling.DEFAULT_DATASET_FUNCTIONS`
-(`GraphDataset.__getitem__` / `_to_torch`, `H5StructuredReader.read` /
+(`SaltDataset.__getitem__` / `_to_torch`, `H5StructuredReader.read` /
 `_read_kept`, `ConstituentCuts.apply`, `Features.process`, `Labels.process`,
 `Bundle.merge`). Extend or replace it:
 
@@ -112,7 +112,7 @@ salt profile dataset --config my.yaml \
 
 Note that salt has **no collate step**: `batch_size=None` plus
 `RandomBatchSampler` means the dataset returns whole batches, so the
-numpy→torch conversion in `GraphDataset._to_torch` is what a conventional
+numpy→torch conversion in `SaltDataset._to_torch` is what a conventional
 pipeline would call collation.
 
 ## 3. Model side — `salt profile model`

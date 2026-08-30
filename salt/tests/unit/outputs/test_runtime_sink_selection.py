@@ -141,7 +141,7 @@ def cutover_data(tmp_path_factory):
     """A dummy H5 + norm dict + schema for a real ``model.setup('test')`` (CPU)."""
     from salt.data import (  # noqa: PLC0415
         Features,
-        GraphDataModule,
+        SaltDataModule,
         H5StructuredReader,
         Labels,
     )
@@ -157,7 +157,7 @@ def cutover_data(tmp_path_factory):
     save_schema(dump_schema(h5_path), schema_path)
     return SimpleNamespace(
         Features=Features,
-        GraphDataModule=GraphDataModule,
+        SaltDataModule=SaltDataModule,
         H5StructuredReader=H5StructuredReader,
         Labels=Labels,
         nd=nd_path,
@@ -186,7 +186,7 @@ def _cutover_model(nd_path: Path) -> SaltModule:
 def test_setup_test_does_not_crash_regardless_of_order(cutover_data, onnx_first):
     """``model.setup('test')`` (the real ``compile_mode(Mode.TEST)``) succeeds in BOTH orders."""
     d = cutover_data
-    dm = d.GraphDataModule(
+    dm = d.SaltDataModule(
         {
             "reader": d.H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=d.schema),
             "features": d.Features(

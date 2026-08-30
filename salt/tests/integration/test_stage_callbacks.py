@@ -22,7 +22,7 @@ import pytest
 from lightning import Callback, Trainer, seed_everything
 
 from salt.callbacks.schedule import StageScopedCallbacks, TrainingScheduleCallback
-from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.model.saltmodule import SaltModule
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
@@ -79,7 +79,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     return {"h5": h5_path, "nd": nd_path, "schema": schema_path}
 
 
-def build_dm(data) -> GraphDataModule:
+def build_dm(data) -> SaltDataModule:
     modules = {
         "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
         "features": Features(
@@ -87,7 +87,7 @@ def build_dm(data) -> GraphDataModule:
         ),
         "labels": Labels(),
     }
-    return GraphDataModule(
+    return SaltDataModule(
         modules, batch_size=100, num_workers=0,
         train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
     )

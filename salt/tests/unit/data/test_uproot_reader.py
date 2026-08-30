@@ -274,6 +274,20 @@ class _FakeTree:
     def __getitem__(self, name):
         return self._b[name]
 
+    def arrays(self, expressions, entry_start=None, entry_stop=None, library="ak", how=None):  # noqa: ARG002
+        """The grouped read the reader uses: same values as N per-branch `array()` calls.
+
+        Only ``how=dict`` is modelled, because that is the only form the reader
+        asks for — anything else would be a silent behaviour change rather than a
+        double that has fallen behind its subject.
+        """
+        if how is not dict:
+            raise NotImplementedError(f"_FakeTree.arrays only models how=dict, got {how!r}")
+        return {
+            name: self._b[name].array(entry_start=entry_start, entry_stop=entry_stop)
+            for name in expressions
+        }
+
 
 def _linked_reader():
     return UprootReader(
@@ -722,3 +736,393 @@ def test_open_trees_are_dropped_on_pickle(ej_file) -> None:
 
     revived = pickle.loads(pickle.dumps(reader))
     assert revived._open_trees == {}
+
+
+# --------------------------------------------------------------------------- #
+# 7. prepare() probes the schema from metadata, once, on the first file
+# --------------------------------------------------------------------------- #
+
+_TREE = "AnalysisMiniTree"
+
+
+class _RecordingBranch:
+    """A branch proxy that records every ``array()`` call's entry bound."""
+
+    def __init__(self, branch, calls: list, tag: int, name: str) -> None:
+        self._branch, self._calls, self._tag, self._name = branch, calls, tag, name
+
+    def __getattr__(self, attr):
+        return getattr(self._branch, attr)
+
+    def array(self, *args, **kwargs):
+        self._calls.append({
+            "file": self._tag,
+            "branch": self._name,
+            "entry_stop": kwargs.get("entry_stop"),
+        })
+        return self._branch.array(*args, **kwargs)
+
+
+class _RecordingTree:
+    """A TTree proxy handing out `_RecordingBranch`es (dunders must be explicit)."""
+
+    def __init__(self, tree, calls: list, tag: int) -> None:
+        self._tree, self._calls, self._tag = tree, calls, tag
+
+    def __getattr__(self, attr):
+        return getattr(self._tree, attr)
+
+    def __getitem__(self, name):
+        return _RecordingBranch(self._tree[name], self._calls, self._tag, name)
+
+    def __enter__(self):
+        self._tree.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._tree.__exit__(*exc)
+
+
+def _record_prepare(reader: UprootReader, monkeypatch) -> tuple[list, list]:
+    """Run `prepare` with every `uproot.open` and branch read recorded."""
+    calls: list = []
+    opens: list = []
+    real_open = uproot.open
+
+    def recording_open(spec, *args, **kwargs):
+        opens.append(str(spec))
+        return _RecordingTree(real_open(spec, *args, **kwargs), calls, len(opens) - 1)
+
+    monkeypatch.setattr(uproot, "open", recording_open)
+    reader.prepare()
+    return calls, opens
+
+
+def _probe_reader(source, truncate: int | None = 8, **kwargs) -> UprootReader:
+    jets: dict = {"branches": dict(_JET), "jagged": True}
+    if truncate is not None:
+        jets["truncate"] = truncate
+    return UprootReader(
+        groups={"jets": jets, "event": {"branches": dict(_EVENT), "jagged": False}},
+        filename=source,
+        tree=_TREE,
+        **kwargs,
+    )
+
+
+def _two_files(tmp_path: Path, second: dict | None = None) -> Path:
+    """A directory of two minitrees (the second optionally re-shaped)."""
+    d = tmp_path / "pair"
+    d.mkdir()
+    write_minitree(d / "a.root", build_fixture_arrays(seed=99))
+    write_minitree(d / "b.root", second if second is not None else build_fixture_arrays(seed=7))
+    return d
+
+
+def test_prepare_makes_no_unbounded_reads_when_pad_max_is_set(ej_file, monkeypatch) -> None:
+    """The schema probe must not decompress whole branches to learn their type."""
+    path, _ = ej_file
+    calls, opens = _record_prepare(_probe_reader(path), monkeypatch)
+    unbounded = [c for c in calls if c["entry_stop"] is None]
+    assert unbounded == [], f"prepare read whole branches: {unbounded}"
+    assert len(opens) == 1
+
+
+def test_prepare_opens_each_file_once(tmp_path, monkeypatch) -> None:
+    """One open per file — the max-multiplicity scan must not re-open."""
+    _, opens = _record_prepare(_probe_reader(_two_files(tmp_path), truncate=None), monkeypatch)
+    assert len(opens) == 2
+
+
+def test_prepare_reads_one_branch_for_an_unresolved_pad_max(ej_file, monkeypatch) -> None:
+    """An unset ``pad_max`` is the one legitimate bulk read: a single branch, once."""
+    path, _ = ej_file
+    calls, opens = _record_prepare(_probe_reader(path, truncate=None), monkeypatch)
+    unbounded = [c for c in calls if c["entry_stop"] is None]
+    assert [c["branch"] for c in unbounded] == [_JET["pt"]]
+    assert len(opens) == 1
+
+
+def test_prepare_probes_the_schema_only_on_the_first_file(tmp_path, monkeypatch) -> None:
+    """With the metadata fast path disabled, only file 0 pays a (bounded) probe read."""
+    monkeypatch.setattr(
+        "salt.data.readers.uproot_reader._interpretation_type", lambda _interp: None
+    )
+    calls, opens = _record_prepare(_probe_reader(_two_files(tmp_path)), monkeypatch)
+    assert len(opens) == 2
+    assert {c["file"] for c in calls} == {0}
+    assert all(c["entry_stop"] == 1 for c in calls)
+    assert {c["branch"] for c in calls} == set(_JET.values()) | set(_EVENT.values())
+
+
+def test_prepare_rejects_a_later_file_missing_a_configured_branch(tmp_path) -> None:
+    short = build_fixture_arrays(seed=7)
+    del short["recojet_antikt4PFlow_eta"]
+    with pytest.raises(SchemaError, match="present in the first file but not"):
+        _probe_reader(_two_files(tmp_path, second=short)).prepare()
+
+
+def test_prepare_rejects_a_later_file_with_a_retyped_branch(tmp_path) -> None:
+    retyped = build_fixture_arrays(seed=7)
+    retyped["eventNumber"] = retyped["eventNumber"].astype(np.float64)
+    with pytest.raises(SchemaError, match="in the first file"):
+        _probe_reader(_two_files(tmp_path, second=retyped)).prepare()
+
+
+def test_prepare_schema_dtypes_match_a_full_read_oracle(ej_file) -> None:
+    """The probed dtypes are exactly what a whole-branch read would have reported."""
+    import awkward as ak
+
+    path, _ = ej_file
+    reader = _probe_reader(path)
+    reader.prepare()
+    with uproot.open(f"{path}:{_TREE}") as tree:
+        for stream, branches in (("jets", _JET), ("event", _EVENT)):
+            for fieldname, bare in branches.items():
+                flat = ak.flatten(tree[bare].array(library="ak"), axis=None)
+                want = np.dtype(np.asarray(ak.to_numpy(flat)).dtype.newbyteorder("=")).name
+                assert reader.schema.groups[stream].fields[fieldname] == want
+
+
+def test_metadata_and_bounded_probe_agree_field_by_field(ej_file, monkeypatch) -> None:
+    """The interpretation fast path and the one-entry fallback are interchangeable."""
+    path, _ = ej_file
+    reader = _probe_reader(path)
+    names = list(_JET.values()) + list(_EVENT.values())
+    with uproot.open(f"{path}:{_TREE}") as tree:
+        n = int(tree.num_entries)
+        via_meta = {b: reader._field_type(tree, b, n) for b in names}
+        monkeypatch.setattr(
+            "salt.data.readers.uproot_reader._interpretation_type", lambda _interp: None
+        )
+        via_read = {b: reader._field_type(tree, b, n) for b in names}
+    assert via_meta == via_read
+
+
+def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
+    """Row index, per-file kept counts and resolved multiplicity survive the probe change."""
+    from salt.data import Cut, CutSpec
+
+    directory = _two_files(tmp_path)
+    reader = UprootReader(
+        groups={"jets": {"branches": dict(_JET), "jagged": False}},
+        filename=directory,
+        tree=_TREE,
+        unroll="jets",
+        cuts=CutSpec(global_cuts=(Cut("pt", ">", 100_000.0),)),
+    )
+    reader.prepare()
+    total = 0
+    for entry, seed in zip(reader._table, (99, 7), strict=True):
+        arrays = build_fixture_arrays(seed=seed)
+        pt = [np.asarray(v) for v in arrays["recojet_antikt4PFlow_pt_NOSYS"]]
+        expected_kept = np.flatnonzero(np.concatenate(pt) > 100_000.0)
+        np.testing.assert_array_equal(entry.kept, expected_kept)
+        np.testing.assert_array_equal(entry.orig_counts, [len(v) for v in pt])
+        np.testing.assert_array_equal(
+            entry.per_row_kept, [int((v > 100_000.0).sum()) for v in pt]
+        )
+        total += int(expected_kept.size)
+    assert len(reader) == total
+
+
+class _CountingTree(_FakeTree):
+    """A `_FakeTree` that records how many grouped reads it was asked for."""
+
+    def __init__(self, branches):
+        super().__init__(branches)
+        self.calls: list[list[str]] = []
+
+    def arrays(self, expressions, entry_start=None, entry_stop=None, library="ak", how=None):
+        self.calls.append(list(expressions))
+        return super().arrays(
+            expressions, entry_start=entry_start, entry_stop=entry_stop, library=library, how=how
+        )
+
+
+def _grouped_read_tree():
+    import awkward as ak
+
+    return _CountingTree({
+        f"AnalysisJetsAuxDyn.f{i}": ak.Array([[float(i), float(i) + 1.0], [float(i) + 2.0]])
+        for i in range(5)
+    })
+
+
+def test_grouped_read_returns_every_requested_branch():
+    """One grouped call serves the same values a per-branch read would."""
+    reader = _linked_reader()
+    tree = _grouped_read_tree()
+    names = [f"AnalysisJetsAuxDyn.f{i}" for i in range(5)]
+
+    got = reader._read_branches(tree, names, 0, 2)
+
+    assert sorted(got) == sorted(names)
+    assert len(tree.calls) == 1  # 5 branches, default cap 64 -> a single read
+    for name in names:
+        expected = tree[name].array(entry_start=0, entry_stop=2)
+        assert got[name].to_list() == expected.to_list()
+
+
+def test_grouped_read_is_chunked_by_max_branches(monkeypatch):
+    """The group size is bounded: 5 branches at a cap of 2 is three calls, not one."""
+    from salt.data.readers import uproot_reader as ur
+
+    monkeypatch.setattr(ur, "MAX_BRANCHES_PER_READ", 2)
+    reader = _linked_reader()
+    tree = _grouped_read_tree()
+    names = [f"AnalysisJetsAuxDyn.f{i}" for i in range(5)]
+
+    got = reader._read_branches(tree, names, 0, 2)
+
+    assert [len(c) for c in tree.calls] == [2, 2, 1]
+    assert sorted(got) == sorted(names)
+
+
+def test_grouped_read_deduplicates_repeated_branches():
+    """A branch named twice is read once, and still served under its name."""
+    reader = _linked_reader()
+    tree = _grouped_read_tree()
+    name = "AnalysisJetsAuxDyn.f0"
+
+    got = reader._read_branches(tree, [name, name, name], 0, 2)
+
+    assert tree.calls == [[name]]
+    assert list(got) == [name]
+
+
+def test_grouped_read_raises_when_a_branch_is_not_returned():
+    """A silently dropped/renamed expression must fail loudly, not serve wrong values."""
+
+    class _DroppingTree(_FakeTree):
+        def arrays(self, expressions, entry_start=None, entry_stop=None, library="ak", how=None):
+            out = super().arrays(
+                expressions,
+                entry_start=entry_start,
+                entry_stop=entry_stop,
+                library=library,
+                how=how,
+            )
+            out.pop("AnalysisJetsAuxDyn.f1", None)
+            return out
+
+    import awkward as ak
+
+    reader = _linked_reader()
+    tree = _DroppingTree({
+        f"AnalysisJetsAuxDyn.f{i}": ak.Array([[1.0, 2.0], [3.0]]) for i in range(3)
+    })
+
+    with pytest.raises(SchemaError, match="did not return branch"):
+        reader._read_branches(tree, [f"AnalysisJetsAuxDyn.f{i}" for i in range(3)], 0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# index_cache — persist the built index instead of rebuilding it every run
+# --------------------------------------------------------------------------- #
+
+
+def _cached_reader(path, cache_dir, branches=None):
+    return UprootReader(
+        groups={"jets": {"branches": dict(branches or _JET), "jagged": False}},
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+        index_cache=cache_dir,
+    )
+
+
+def test_index_cache_round_trips_the_index(ej_file, tmp_path) -> None:
+    """A cached prepare serves exactly what the built one did."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+
+    cold = _cached_reader(path, cache)
+    cold.prepare()
+    n_cold = len(cold)
+    served_cold = cold.read(slice(0, n_cold), Mode.FIT)["raw.jets"]
+
+    # The EXACT path prepare is going to look for on the next run. A glob would
+    # have accepted `uproot_index_<key>.npz.tmp.npz`, which is what np.savez
+    # produced when handed a non-".npz" temp path — an artifact written where
+    # nothing would ever read it, so every "warm" run silently rebuilt.
+    key = cold._index_cache_key(cold._resolve_files())
+    expected = cache / f"uproot_index_{key}.npz"
+    assert expected.is_file(), sorted(p.name for p in cache.iterdir())
+    assert not list(cache.glob("*.tmp*")), "temp artifact left behind"
+
+    warm = _cached_reader(path, cache)
+    assert warm._index_cache_key(warm._resolve_files()) == key  # same inputs -> same key
+    assert warm._load_index_cache(warm._resolve_files(), key), "artifact did not load"
+    warm._table = None  # re-run the real entry point now the load is proven
+    warm.prepare()
+    assert len(warm) == n_cold
+    assert warm._mult == cold._mult
+    assert warm.schema.groups["jets"].fields == cold.schema.groups["jets"].fields
+    served_warm = warm.read(slice(0, len(warm)), Mode.FIT)["raw.jets"]
+    np.testing.assert_array_equal(served_warm["pt"], served_cold["pt"])
+    for entry_c, entry_w in zip(cold._table, warm._table, strict=True):
+        np.testing.assert_array_equal(entry_w.kept, entry_c.kept)
+        np.testing.assert_array_equal(entry_w.per_row_kept, entry_c.per_row_kept)
+        np.testing.assert_array_equal(entry_w.orig_counts, entry_c.orig_counts)
+
+
+def test_index_cache_misses_on_a_different_config(ej_file, tmp_path) -> None:
+    """A different reader config is a different key, not a stale hit."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+
+    _cached_reader(path, cache).prepare()
+    (first_artifact,) = [p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]
+
+    other = _cached_reader(path, cache, branches={"pt": _JET["pt"]})
+    other.prepare()
+    artifacts = sorted(p.name for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name)
+    assert len(artifacts) == 2, artifacts
+    assert first_artifact.name in artifacts
+    assert other.schema.groups["jets"].fields.keys() == {"pt"}
+
+
+def test_index_cache_misses_when_the_file_changes(ej_file, tmp_path) -> None:
+    """Size/mtime are in the key, so a re-derived file at the same path is a miss."""
+    path, arrays = ej_file
+    cache = tmp_path / "idxcache"
+    _cached_reader(path, cache).prepare()
+
+    import os
+
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    _cached_reader(path, cache).prepare()
+    assert len([p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]) == 2
+
+
+def test_index_cache_survives_a_corrupt_artifact(ej_file, tmp_path) -> None:
+    """A cache is never the reason a run fails: garbage is a miss, not an exception."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+    built = _cached_reader(path, cache)
+    built.prepare()
+    (artifact,) = [p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]
+    artifact.write_bytes(b"not an npz at all")
+
+    recovered = _cached_reader(path, cache)
+    recovered.prepare()
+    assert len(recovered) == len(built)
+
+
+def test_index_cache_off_by_default_writes_nothing(ej_file, tmp_path) -> None:
+    """Without index_cache the reader behaves exactly as before."""
+    path, _ = ej_file
+    cache = tmp_path / "idxcache"
+    cache.mkdir()
+    reader = UprootReader(
+        groups={"jets": {"branches": dict(_JET), "jagged": False}},
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+    )
+    reader.prepare()
+    assert reader.index_cache is None
+    assert not list(cache.iterdir())

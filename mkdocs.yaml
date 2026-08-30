@@ -38,6 +38,7 @@ nav:
   - Architecture: architecture.md
   - Evaluation: evaluation.md
   - Outputs: outputs.md
+  - Streaming datasets: streaming.md
   - Deployment:
       - Export to ONNX: deployment/export.md
       - Run it in Python: deployment/python.md

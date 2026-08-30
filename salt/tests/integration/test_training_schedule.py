@@ -31,7 +31,7 @@ import torch
 from lightning import Callback, Trainer, seed_everything
 
 from salt.callbacks.schedule import TrainingScheduleCallback
-from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.optim import HybridMuonAdamW
 from salt.model.saltmodule import SaltModule
 from salt.schema import dump_schema, save_schema
@@ -60,7 +60,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
 
 
-def build_datamodule(data) -> GraphDataModule:
+def build_datamodule(data) -> SaltDataModule:
     modules = {
         "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
         "features": Features(
@@ -68,7 +68,7 @@ def build_datamodule(data) -> GraphDataModule:
         ),
         "labels": Labels(),
     }
-    return GraphDataModule(
+    return SaltDataModule(
         modules, batch_size=100, num_workers=0,
         train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
     )

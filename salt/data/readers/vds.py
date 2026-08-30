@@ -262,7 +262,7 @@ class VDS(SaltDatasetModule):
                 f"{list(SETUP_STAGES)} (plan-25 O-VDS-OUT)"
             )
         self._out: dict[str, str | Path] = dict(out) if out is not None else {}
-        # wired by GraphDataModule at assembly time, mirroring
+        # wired by SaltDataModule at assembly time, mirroring
         # InputSamples._reader. `_reader` is the source.<reader>.* component;
         # `_vds_capable` gates build-vs-identity (the reader's flag, not an
         # isinstance check). Unset until assembly; declare_setup_io and setup
@@ -282,7 +282,7 @@ class VDS(SaltDatasetModule):
         if self._reader is None:
             raise RuntimeError(
                 f"VDS {self.name!r} has no reader name wired — it must be assembled "
-                "by GraphDataModule (which sets `_reader`/`_vds_capable` after the "
+                "by SaltDataModule (which sets `_reader`/`_vds_capable` after the "
                 "single-Reader guard)"
             )
         return self._reader

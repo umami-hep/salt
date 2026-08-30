@@ -83,7 +83,7 @@ class InputSamples(SaltDatasetModule):
         # None => emit on no stage (the cap is already in a shared ctx from an
         # earlier pass); a SetupStage => emit the whole-dict on exactly that stage.
         self._num_stage: SetupStage | None = self._first_stage
-        # wired by GraphDataModule.__init__ after the single-Reader guard: the
+        # wired by SaltDataModule.__init__ after the single-Reader guard: the
         # source.<reader>.* component the reader's handoff later resolves.
         # Unset until assembly; declare_setup_io needs it.
         self._reader: str | None = None
@@ -124,7 +124,7 @@ class InputSamples(SaltDatasetModule):
         if self._reader is None:
             raise RuntimeError(
                 f"InputSamples {self.name!r} has no reader name wired — it must be assembled "
-                "by GraphDataModule (which sets `_reader` after the single-Reader guard)"
+                "by SaltDataModule (which sets `_reader` after the single-Reader guard)"
             )
         return self._reader
 

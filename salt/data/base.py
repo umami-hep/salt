@@ -28,6 +28,7 @@ __all__ = [
     "OffsetIndex",
     "Processor",
     "Reader",
+    "RowBlock",
     "SaltDatasetModule",
     "SetupBundle",
     "StreamConfig",
@@ -42,6 +43,35 @@ SetupBundle = Bundle
 
 RAW_NAMESPACE = "raw"
 """Bundle namespace for post-selection structured arrays."""
+
+
+@dataclass(frozen=True)
+class RowBlock:
+    """One sequential read unit: a contiguous row range within one sample.
+
+    The streaming dataset's only view of a reader's physical layout. `group` is
+    the sample index (always 0 for a single-sample reader); `start`/`stop` are
+    rows in the coordinates that group's reader reads in, so
+    ``reader.read_block(block, mode)`` is well defined without the streaming
+    layer knowing what a file is.
+    """
+
+    group: int
+    start: int
+    stop: int
+
+    def __post_init__(self) -> None:
+        if self.stop < self.start:
+            raise ConfigError(f"RowBlock stop {self.stop} precedes start {self.start}")
+
+    @property
+    def n_rows(self) -> int:
+        """Rows covered by this block."""
+        return self.stop - self.start
+
+    def subrange(self, start: int, stop: int) -> RowBlock:
+        """The sub-block spanning absolute rows ``[start, stop)`` of the same group."""
+        return RowBlock(group=self.group, start=start, stop=stop)
 
 
 def _require_root_deps(who: str, extra: str) -> None:
@@ -72,7 +102,7 @@ def _require_root_deps(who: str, extra: str) -> None:
 class WorkerCtx:
     """Per-worker binding context handed to `SaltDatasetModule.bind`.
 
-    Built by `GraphDataset` once per (worker, plan): `read_fields` is the
+    Built by `SaltDataset` once per (worker, plan): `read_fields` is the
     demand-narrowed per-stream read set computed from the compiled plan,
     mapping ``stream -> {field: demanding module}`` in demand order. `step` is
     the receiving module's own plan step, so wildcard producers (`Labels`)
@@ -121,7 +151,7 @@ class SaltDatasetModule(ABC):
         """Per-worker lazy setup (open handles, allocate buffers); default no-op.
 
         This is the only place dataset modules may touch data files. Called
-        once per (worker process, plan) by `GraphDataset`.
+        once per (worker process, plan) by `SaltDataset`.
         """
 
     # -- setup-time face (once per stage, not per batch) ----------------------
@@ -255,6 +285,30 @@ class Reader(SaltDatasetModule):
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Read one contiguous batch and return the produced keys (flat dotted dict)."""
 
+    # -- sequential streaming surface (IterableSaltDataset) ------------------
+
+    def row_blocks(self) -> list[RowBlock]:
+        """The reader's natural sequential read units, ascending and covering
+        ``[0, len(self))`` exactly once.
+
+        The default is one block for the whole reader, which is correct for any
+        reader and is all the streaming dataset needs to be correct — blocks
+        only decide where reads may be SPLIT, never which rows exist. Readers
+        whose storage has a coarser grain override it so a shard's reads stay
+        contiguous on disk: `UprootReader` returns one block per file,
+        `MultiSampleReader` returns its sub-readers' blocks tagged by sample.
+        """
+        return [RowBlock(group=0, start=0, stop=len(self))]
+
+    def read_block(self, block: RowBlock, mode: Mode) -> dict[str, np.ndarray]:
+        """Read one `RowBlock` — by default the plain row-slice `read`.
+
+        The seam a multi-sample reader needs: it maps ``block.group`` to a
+        sub-reader and injects its per-sample label, so the streaming layer
+        never has to know that samples exist.
+        """
+        return self.read(slice(block.start, block.stop), mode)
+
     # -- shared row-cut engine (sample-axis, index-build only) ----------------
 
     @staticmethod
@@ -331,11 +385,27 @@ class Reader(SaltDatasetModule):
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema for one served stream, when a schema artifact is configured.
 
-        Used by `GraphDataset` to statically validate demanded raw fields.
+        Used by `SaltDataset` to statically validate demanded raw fields.
         Default: None (no static validation possible).
         """
         del stream
         return None
+
+    def config_fingerprint(self) -> dict[str, Any]:
+        """Everything about this reader's CONFIG that changes the rows or fields it serves.
+
+        Must be answerable WITHOUT opening a data file — it is what lets a cached
+        artifact (index cache, corpus manifest) be keyed to the configuration that
+        produced it, and a stale one detected before anything is read. Anything
+        omitted here is something a changed config will NOT invalidate.
+
+        Source paths belong to the caller's key, not here: two stages of one run
+        share a config and differ only in their files.
+
+        Default: empty, meaning "cannot be fingerprinted" — a caller then keys on
+        what it knows (paths, stats) alone, exactly as before.
+        """
+        return {}
 
     def label_universe(self) -> tuple[str, ...] | None:
         """The ``labels.<stream>.<field>`` universe for wildcard narrowing.
@@ -371,7 +441,7 @@ class Reader(SaltDatasetModule):
     ) -> Reader:
         """Clone this reader onto another source file (config-only, no file I/O).
 
-        `GraphDataModule` uses this to derive the per-stage readers from the
+        `SaltDataModule` uses this to derive the per-stage readers from the
         single configured prototype.
 
         `stage` (``"train"``/``"val"``/``"test"``) is the optional per-reader
@@ -389,7 +459,7 @@ class Reader(SaltDatasetModule):
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement with_source(); it cannot be used "
-            "as a GraphDataModule reader prototype"
+            "as a SaltDataModule reader prototype"
         )
 
     def sources(self) -> list[Path]:

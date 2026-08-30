@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 from lightning import Callback, LightningModule, Trainer
 
-from salt.data.dataset import GraphDataset
+from salt.data.dataset import SaltDataset
 from salt.graph.errors import GraphError
 from salt.graph.planner import Plan
 from salt.graph.render import dot_source, plan_table
@@ -35,7 +35,7 @@ class GraphArtifacts(Callback):
     - ``resolved_io.yaml`` — machine-readable: per mode, the plan sources
       and every module's flattened requires/produces with resolved specs.
     - ``graph_<stage>.dot`` + ``graph_<stage>.<image_format>`` (and
-      ``graph_<stage>_dataset.*`` when a `GraphDataModule` is attached):
+      ``graph_<stage>_dataset.*`` when a `SaltDataModule` is attached):
       Graphviz DOT rasterised via the ``dot`` binary, kept alongside for
       manual re-rendering.
 
@@ -143,7 +143,7 @@ class GraphArtifacts(Callback):
 
     @staticmethod
     def _plan_text(
-        plan: Plan, dataset: GraphDataset | None, writer_sinks: list[str] | None = None
+        plan: Plan, dataset: SaltDataset | None, writer_sinks: list[str] | None = None
     ) -> str:
         """Build one ``plan_<mode>.txt`` payload: dataset plan + model plan, with
         `writer_sinks` lines (TEST only) appended as a writer-sinks section.
@@ -167,7 +167,7 @@ class GraphArtifacts(Callback):
     ) -> str:
         """The ``resolved_io.yaml`` YAML payload: per mode, plan ``sources`` + each
         module's flattened requires/produces, plus dataset-plan modules when a
-        `GraphDataModule` stage dataset exists.
+        `SaltDataModule` stage dataset exists.
         """
         payload: dict[str, Any] = {}
         for mode_name in mode_names:
@@ -217,8 +217,8 @@ class GraphArtifacts(Callback):
             )
 
     @staticmethod
-    def _stage_dataset(trainer: Trainer, mode_name: str) -> GraphDataset | None:
-        """The stage's `GraphDataset` from the attached datamodule matching `mode_name`,
+    def _stage_dataset(trainer: Trainer, mode_name: str) -> SaltDataset | None:
+        """The stage's `SaltDataset` from the attached datamodule matching `mode_name`,
         or None for non-Graph datamodules.
         """
         dm = getattr(trainer, "datamodule", None)

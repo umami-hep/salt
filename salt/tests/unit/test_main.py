@@ -15,7 +15,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
 from salt.callbacks import Checkpoint, ProgressBar
 from salt.config_utils import disable_logger_in_config
-from salt.data import GraphDataModule
+from salt.data import SaltDataModule
 from salt.graph.errors import ConfigError
 from salt.main import (
     CONFIG_DIR,
@@ -121,7 +121,7 @@ class TestParseAndInstantiate:
     def test_dummy_config_instantiates_saltmodule(self, data):
         cli = make_cli(data)
         assert isinstance(cli.model, SaltModule)
-        assert isinstance(cli.datamodule, GraphDataModule)
+        assert isinstance(cli.datamodule, SaltDataModule)
         assert set(cli.model.net.keys()) == GN2V2_MODULES
         # instance names were assigned from the config dict keys
         assert cli.model.net["encoder"].name == "encoder"

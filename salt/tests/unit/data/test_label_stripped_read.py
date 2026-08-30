@@ -1,7 +1,7 @@
 """A label-stripped inference read serves batches (RUN level).
 
 The static half of the gate (`output_time_requires(ONNX)` names no labels) lives in
-``test_target_labels.py``; here the demand actually DRIVES a `GraphDataset` over a
+``test_target_labels.py``; here the demand actually DRIVES a `SaltDataset` over a
 real H5 file whose label fields have been physically removed, proving no label
 dataset is demanded or read. The full command-level run is covered separately
 by the ``salt inference`` gate on a label-stripped copy.
@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from numpy.lib.recfunctions import repack_fields
 
-from salt.data import Features, GraphDataset, H5StructuredReader, Labels
+from salt.data import Features, SaltDataset, H5StructuredReader, Labels
 from salt.graph.errors import GraphError
 from salt.graph.spec import Mode
 from salt.model.bind import ResolvedSchema
@@ -100,8 +100,8 @@ def _label_demand(mode: Mode) -> list[str]:
     ]
 
 
-def _dataset(data: dict[str, Path], file_key: str, sinks: list[str]) -> GraphDataset:
-    return GraphDataset(
+def _dataset(data: dict[str, Path], file_key: str, sinks: list[str]) -> SaltDataset:
+    return SaltDataset(
         modules={
             "reader": H5StructuredReader(
                 groups={"jets": {}, "tracks": {}},
@@ -125,7 +125,7 @@ def test_stripped_file_really_lacks_label_fields(data):
 
 def test_label_stripped_read_serves_batches_under_inference_demand(data):
     """The run-level gate: with the tasks' export-mode (label-free) demand, a
-    GraphDataset over the label-stripped file narrows its read set to input
+    SaltDataset over the label-stripped file narrows its read set to input
     fields only and serves real batches with no ``labels.*`` leaf.
     """
     assert _label_demand(Mode.ONNX) == []  # export/inference demands no labels

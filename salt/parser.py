@@ -128,7 +128,7 @@ class DeepMergeParser(LightningArgumentParser):
     ``None`` markers are KEPT through the merge rather than dropped (dropping
     them under subclass-mode ``model`` lets the outer merge resurrect a
     deleted entry from an earlier file). Deletion therefore happens at
-    assembly time everywhere: `SaltModule`/`GraphDataModule` filter module
+    assembly time everywhere: `SaltModule`/`SaltDataModule` filter module
     dicts, `SaltCLI` filters the callbacks dict.
     """
 

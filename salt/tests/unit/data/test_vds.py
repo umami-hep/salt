@@ -11,7 +11,7 @@ import torch
 from salt.data import (
     VDS,
     Features,
-    GraphDataModule,
+    SaltDataModule,
     H5StructuredReader,
     InputSamples,
     Labels,
@@ -311,7 +311,7 @@ def build_modules(data) -> dict:
 
 class TestDatamoduleAutoInjection:
     def test_vds_auto_injected_and_wired(self, data):
-        dm = GraphDataModule(modules=build_modules(data), sinks=SINKS, pin_memory=False)
+        dm = SaltDataModule(modules=build_modules(data), sinks=SINKS, pin_memory=False)
         assert "vds" in dm._setup_modules
         injected = dm._setup_modules["vds"]
         assert isinstance(injected, VDS)
@@ -322,7 +322,7 @@ class TestDatamoduleAutoInjection:
         assert "vds" not in dm._batch_modules
 
     def test_vds_path_in_resolved_ctx(self, data):
-        dm = GraphDataModule(modules=build_modules(data), sinks=SINKS, pin_memory=False)
+        dm = SaltDataModule(modules=build_modules(data), sinks=SINKS, pin_memory=False)
         dm.setup("fit")
         assert dm._setup_ctx is not None
         # both pattern (InputSamples) AND vds_path (VDS) present; non-wildcard identity
@@ -332,7 +332,7 @@ class TestDatamoduleAutoInjection:
     def test_explicit_vds_overrides_auto_injection(self, data):
         modules = build_modules(data)
         modules["vds"] = VDS()
-        dm = GraphDataModule(modules=modules, sinks=SINKS, pin_memory=False)
+        dm = SaltDataModule(modules=modules, sinks=SINKS, pin_memory=False)
         # the explicit VDS is used and wired (not a second auto-injected one)
         assert dm._setup_modules["vds"] is modules["vds"]
         assert dm._vds is modules["vds"]
@@ -344,11 +344,11 @@ class TestDatamoduleAutoInjection:
         modules["vds"] = VDS()
         modules["vds2"] = VDS()
         with pytest.raises(ConfigError, match="at most one VDS"):
-            GraphDataModule(modules=modules, sinks=SINKS)
+            SaltDataModule(modules=modules, sinks=SINKS)
 
     def test_auto_injected_vds_carries_legacy_out_paths(self, data):
         explicit_out = data["dir"] / "my_train_vds.h5"
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules(data),
             train_vds_path=explicit_out,
             sinks=SINKS,
@@ -368,19 +368,19 @@ class TestDatamoduleAutoInjection:
             ),
             "labels": Labels(),
         }
-        dm = GraphDataModule(modules=modules, sinks=SINKS, pin_memory=False)
+        dm = SaltDataModule(modules=modules, sinks=SINKS, pin_memory=False)
         assert "vds" not in dm._setup_modules
         assert dm._vds is None
 
     def test_first_batch_byte_identical_to_trunk(self, data):
         """Served bytes via the VDS-resolved path == via the alias trunk path."""
-        dm_vds = GraphDataModule(
+        dm_vds = SaltDataModule(
             modules=build_modules(data), batch_size=128, sinks=SINKS, pin_memory=False
         )
         dm_vds.setup("fit")
         # the trunk path: deprecated train_file/val_file aliases, reader bound
         # directly (no explicit InputSamples module in the dict).
-        dm_trunk = GraphDataModule(
+        dm_trunk = SaltDataModule(
             modules={
                 "reader": H5StructuredReader(
                     groups={"jets": {}, "tracks": {}}, schema=data["schema"], filename=data["h5"]

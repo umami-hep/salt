@@ -1,4 +1,4 @@
-"""`GraphDataModule` — Lightning wiring for the v2 dataset pipeline.
+"""`SaltDataModule` — Lightning wiring for the v2 dataset pipeline.
 
 Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
 (no collate); declared setup graph for VDS resolution and optional staging.
@@ -9,13 +9,25 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import lightning
 from torch.utils.data import DataLoader
 
 from salt.data.base import Reader, SaltDatasetModule, SetupBundle
-from salt.data.dataset import GraphDataset
+from salt.data.dataset import SaltDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
+from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableSaltDataset
+from salt.data.manifest import (
+    AUTO_MANIFEST,
+    CorpusManifest,
+    apply_schema,
+    built_schema_hash,
+    ensure_manifest,
+    is_auto,
+    read_manifest,
+    resolve_manifest_path,
+)
 from salt.data.readers.vds import VDS
 from salt.data.samplers import RandomBatchSampler
 from salt.graph.errors import ConfigError
@@ -24,9 +36,90 @@ from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import PRIMARY_MODES, Mode
 from salt.logging import get_logger
 
-__all__ = ["GraphDataModule"]
+__all__ = ["AUTO_PREFETCH_CAP", "SaltDataModule", "auto_prefetch_factor"]
 
 _LOG = get_logger(__name__)
+
+AUTO_PREFETCH_CAP = 8
+"""Upper bound on the prefetch depth derived for a streaming loader.
+
+A streaming worker's output is BURSTY: it spends one long reader call filling a
+`block_rows`-row block, then emits ``block_rows / batch_size`` batches almost
+free. A `DataLoader` returns batches in strict round-robin worker order, so if a
+worker can only buffer a couple of them it blocks on the queue, and the consumer
+then waits out the NEXT worker's whole block read while every other worker sits
+full and idle. Covering roughly one block of batches is what removes that stall.
+
+The cap exists because the depth is paid in shared memory: torch's
+``file_descriptor`` sharing strategy holds ``num_workers * prefetch_factor *
+batch_bytes`` of ``/dev/shm`` in flight, and that scales with the worker count on
+every rank. Measured on the FTAG1LITE corpus (8-file subset, 19.4 MB batches,
+`block_rows` 16,384, so a full block is 17 batches):
+
+===========  ============  ============  ============  ============
+prefetch     nw4 jets/s    nw4 shm       nw8 jets/s    nw8 shm
+===========  ============  ============  ============  ============
+2 (old)      6,940         150 MB        8,182         311 MB
+8 (cap)      8,762         505 MB        13,170        1,127 MB
+17 (block)   9,983         1,030 MB      14,056        2,338 MB
+24           10,148        1,419 MB      14,915        3,012 MB
+===========  ============  ============  ============  ============
+
+The cap takes 88-89% of the deepest rate for 37% of its memory, which is the
+right side of that trade when the target is many ranks each running several
+workers. Raise `prefetch_factor` explicitly to buy the remainder.
+
+Note what the table does NOT show: shrinking `block_rows` does not shrink this.
+Shared memory holds prefetched BATCHES, so at a fixed depth it is unchanged
+(``block_rows`` 8,192 at depth 8 measured 1,108 MB against 16,384's 1,127 MB) —
+a shorter block only lowers the depth NEEDED, and measured 13,214 jets/s against
+13,170, i.e. no gain. Below that, 4,096-row blocks cost read rate (11,691 at
+nw8), matching the read-range curve. So depth, not block size, is the knob.
+"""
+
+
+def auto_prefetch_factor(
+    explicit: int | None,
+    iterable: bool,
+    block_rows: int | None,
+    batch_size: int,
+) -> int:
+    """Batches to prefetch per worker, deriving the streaming depth when unset.
+
+    An `explicit` value is returned untouched — a user who has sized their own
+    shared memory is never overridden. ``None`` derives: 2 for the map-style
+    path, whose workers produce at a steady cadence so extra depth buys nothing,
+    and for `iterable` enough depth to cover one reader block
+    (``ceil(block_rows / batch_size)``), clamped to ``[2, AUTO_PREFETCH_CAP]``.
+
+    ``block_rows=None`` means the reader's own blocks are read whole; that is at
+    least as bursty as any configured block, so it takes the cap.
+
+    Parameters
+    ----------
+    explicit : int | None
+        The configured `prefetch_factor`, or ``None`` to derive one.
+    iterable : bool
+        Whether the streaming dataset is in use.
+    block_rows : int | None
+        Rows per reader call on the streaming path.
+    batch_size : int
+        Rows per emitted batch.
+
+    Returns
+    -------
+    int
+        The prefetch depth to hand the `DataLoader` (always >= 2).
+    """
+    if explicit is not None:
+        return int(explicit)
+    if not iterable:
+        return 2
+    if block_rows is None:
+        return AUTO_PREFETCH_CAP
+    per_block = -(-int(block_rows) // int(batch_size))  # ceil
+    return max(2, min(AUTO_PREFETCH_CAP, per_block))
+
 
 # Map the per-stage Mode to the stage key passed through Reader.with_source(stage=...).
 # Single-source readers ignore it; MultiSampleReader uses it to select each
@@ -56,7 +149,7 @@ def _is_setup_only(module: SaltDatasetModule) -> bool:
     return not has_batch
 
 
-class GraphDataModule(lightning.LightningDataModule):
+class SaltDataModule(lightning.LightningDataModule):
     """LightningDataModule running the v2 dataset pipeline.
 
     Parameters
@@ -98,14 +191,46 @@ class GraphDataModule(lightning.LightningDataModule):
     persistent_workers : bool, optional
         Keep worker processes (and their H5 handles) alive between epochs,
         by default True.
-    prefetch_factor : int, optional
-        Batches prefetched per worker, by default 2.
+    prefetch_factor : int | None, optional
+        Batches prefetched per worker. ``None`` (the default) derives it: 2 for
+        the map-style path, and for `iterable` enough depth to cover one reader
+        block (see `AUTO_PREFETCH_CAP`). An explicit integer always wins.
     multiprocessing_context : str | None, optional
         Worker start method (``"fork"`` / ``"spawn"`` / ``"forkserver"``).
     seed : int, optional
         Base augmentation seed for non-worker reads, by default 42.
     debug : bool, optional
         Enable the boundary non-aliasing assertion.
+    iterable : bool, optional
+        Build `IterableSaltDataset` (sequential, sharded streaming) instead of
+        the map-style `SaltDataset`, by default False. The streaming path reads
+        large contiguous blocks and shards across ranks x workers by row
+        interval, which is what lets a run scale past the point where every
+        reader process can hold a row-granular corpus index. Downstream is
+        identical — same plan, same batch object.
+    block_rows : int | None, optional
+        Rows per reader call when `iterable`, by default `DEFAULT_BLOCK_ROWS`
+        (16,384 — the measured knee of the read-range curve); ``None`` reads
+        each of the reader's own blocks whole.
+    interleave_block : int, optional
+        Rows per turn of the per-shard sample round robin when `iterable`, by
+        default 1.
+    max_live_streams : int | None, optional
+        Samples holding a resident block at once when `iterable`, by default 2.
+        Peak resident rows per worker is ``max_live_streams * block_rows``.
+    manifest : str | Path | None, optional
+        `CorpusManifest` for `iterable` runs. With one, shard planning and epoch
+        length need no reader index and open no data file. ``None`` (default):
+        no artifact, every reader process resolves its own index. A path: that
+        artifact, for every streaming stage. ``"auto"``: resolve a conventional
+        path per stage (next to the corpus when writable, else
+        ``$SALT_MANIFEST_CACHE`` / ``~/.cache/salt/manifests``), validate it, and
+        build it in `prepare_data` when missing or stale — convenient rather
+        than optimal, since `python -m salt.data.manifest` pre-builds it offline
+        and a large corpus wants that.
+    shuffle_stream : bool, optional
+        Shuffle block order and within-batch row order on the fit streaming
+        loader, by default True. Val/test always stream in order.
 
     Raises
     ------
@@ -133,10 +258,16 @@ class GraphDataModule(lightning.LightningDataModule):
         sinks: Mapping[Mode, Iterable[str]] | None = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
-        prefetch_factor: int = 2,
+        prefetch_factor: int | None = None,
         multiprocessing_context: str | None = None,
         seed: int = 42,
         debug: bool = False,
+        iterable: bool = False,
+        block_rows: int | None = DEFAULT_BLOCK_ROWS,
+        interleave_block: int = 1,
+        max_live_streams: int | None = 2,
+        manifest: str | Path | None = None,
+        shuffle_stream: bool = True,
     ) -> None:
         super().__init__()
         # a None module entry (config-file or CLI override) deletes the module.
@@ -154,7 +285,7 @@ class GraphDataModule(lightning.LightningDataModule):
         readers = [(name, m) for name, m in modules.items() if isinstance(m, Reader)]
         if len(readers) != 1:
             raise ConfigError(
-                f"GraphDataModule needs exactly one Reader in modules, got {len(readers)} "
+                f"SaltDataModule needs exactly one Reader in modules, got {len(readers)} "
                 f"({[name for name, _ in readers]})"
             )
         self._reader_name, self._reader_proto = readers[0]
@@ -179,14 +310,18 @@ class GraphDataModule(lightning.LightningDataModule):
         self.test_vds_path = test_vds_path
         self._wire_vds(modules)
         # Partition setup-only modules OUT before the per-batch dataset deepcopy:
-        # they never reach GraphDataset, so neither the dead-module check nor
-        # GraphDataset's single-Reader guard miscounts them.
+        # they never reach SaltDataset, so neither the dead-module check nor
+        # SaltDataset's single-Reader guard miscounts them.
         self._setup_modules = {name: m for name, m in modules.items() if _is_setup_only(m)}
         self._batch_modules = {
             name: m for name, m in modules.items() if name not in self._setup_modules
         }
         self._modules = modules
         self._setup_ctx: SetupBundle | None = None
+        # stages already run into `_setup_ctx`. The ctx is write-once, so a
+        # stage may be planned exactly once — and `prepare_data` runs the same
+        # pass `setup` would, before it.
+        self._setup_done: set[str] = set()
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.test_suff = test_suff
@@ -203,9 +338,21 @@ class GraphDataModule(lightning.LightningDataModule):
         self.multiprocessing_context = multiprocessing_context
         self.seed = seed
         self.debug = debug
-        self.train_dset: GraphDataset | None = None
-        self.val_dset: GraphDataset | None = None
-        self.test_dset: GraphDataset | None = None
+        self.iterable = bool(iterable)
+        self.block_rows = block_rows
+        self.interleave_block = int(interleave_block)
+        self.max_live_streams = max_live_streams
+        self.manifest = manifest
+        self.shuffle_stream = bool(shuffle_stream)
+        # `manifest: auto` writes ONE artifact to shared storage, so exactly one
+        # process in the job builds it — not one per node, which is Lightning's
+        # default and is right only for a per-node download. Without a shared
+        # filesystem set this back to True; the atomic write makes that race
+        # wasteful, never corrupting.
+        self.prepare_data_per_node = False
+        self.train_dset: SaltDataset | IterableSaltDataset | None = None
+        self.val_dset: SaltDataset | IterableSaltDataset | None = None
+        self.test_dset: SaltDataset | IterableSaltDataset | None = None
 
     def _wire_input_samples(self, modules: dict[str, SaltDatasetModule]) -> None:
         """Assemble the data-sourcing setup graph (mutates `modules` in place).
@@ -219,7 +366,7 @@ class GraphDataModule(lightning.LightningDataModule):
         existing = [(name, m) for name, m in modules.items() if isinstance(m, InputSamples)]
         if len(existing) > 1:
             raise ConfigError(
-                f"GraphDataModule allows at most one InputSamples, got {len(existing)} "
+                f"SaltDataModule allows at most one InputSamples, got {len(existing)} "
                 f"({[name for name, _ in existing]}); one InputSamples owns the single "
                 "Reader's source chain"
             )
@@ -262,7 +409,7 @@ class GraphDataModule(lightning.LightningDataModule):
         existing = [(name, m) for name, m in modules.items() if isinstance(m, VDS)]
         if len(existing) > 1:
             raise ConfigError(
-                f"GraphDataModule allows at most one VDS, got {len(existing)} "
+                f"SaltDataModule allows at most one VDS, got {len(existing)} "
                 f"({[name for name, _ in existing]}); one VDS owns the single Reader's "
                 "wildcard resolution"
             )
@@ -347,12 +494,19 @@ class GraphDataModule(lightning.LightningDataModule):
         ``setup("fit")`` covers both "train" and "val"); `_make_dataset` reads
         the resolved deepest path off this ctx. No-op with no setup modules.
         DDP-safe: every rank runs the identical pass (no filesystem touched).
+
+        Idempotent per stage: the ctx is write-once, so an already-planned stage
+        is skipped rather than re-planned — `prepare_data` runs this pass for
+        the stages it must resolve sources for, and `setup` then runs whatever
+        is left.
         """
         if self._setup_ctx is None:
             self._setup_ctx = SetupBundle()
         if not self._setup_modules:
             return
-        stage_tuple = tuple(stages)
+        stage_tuple = tuple(s for s in stages if s not in self._setup_done)
+        if not stage_tuple:
+            return
         # The whole-dict `num` scalar is written once per ctx: tell InputSamples
         # which pass stage carries it, and whether a prior pass already wrote it
         # into this shared ctx (so a `test` pass after `fit` doesn't re-emit the
@@ -365,6 +519,7 @@ class GraphDataModule(lightning.LightningDataModule):
         for stage in stage_tuple:
             plan = compile_setup_plan(self._setup_modules, stage)  # type: ignore[arg-type]
             run_setup_plan(plan, stage, self._setup_ctx)  # type: ignore[arg-type]
+            self._setup_done.add(stage)
 
     def _resolve_source(self, mode: Mode) -> tuple[str | Path | None, int]:
         """Resolve the stage's source path + row cap from the setup ctx.
@@ -387,46 +542,80 @@ class GraphDataModule(lightning.LightningDataModule):
         }
         return legacy[mode]
 
-    def _make_dataset(
-        self,
-        mode: Mode,
-        filename: str | Path | None,
-        num: int,
-        vds_path: str | Path | None,
-    ) -> GraphDataset:
+    def _stage_reader(self, mode: Mode) -> tuple[Reader | None, int]:
+        """The stage's reader clone (config-only, unstaged, unprepared) and its row cap.
+
+        Shared by `prepare_data` and `_make_dataset` so both key a manifest off
+        exactly the same reader. `None` when the stage has no source configured.
+        """
+        filename, num = self._resolve_source(mode)
+        if filename is None:
+            return None, num
+        vds = {
+            Mode.FIT: self.train_vds_path,
+            Mode.VAL: self.val_vds_path,
+            Mode.TEST: self.test_vds_path,
+        }[mode]
+        reader = self._reader_proto.with_source(
+            filename=filename, num=num, vds_path=vds, stage=_STAGE_OF_MODE[mode]
+        )
+        return reader, num
+
+    def _make_dataset(self, mode: Mode) -> SaltDataset | IterableSaltDataset:
         """Clone the reader prototype onto a stage file and build its dataset.
 
         Deep-copies processors per stage — bind-time state (e.g. Labels'
         narrowed key set) must not leak across train/val/test plans sharing
         this module dict.
         """
-        if filename is None:
+        reader, num = self._stage_reader(mode)
+        if reader is None:
             raise ConfigError(f"no file configured for mode {mode.name}")
         if self._sinks is None:
             raise ConfigError(
-                "GraphDataModule has no sinks — pass sinks= or call set_sinks() with the "
+                "SaltDataModule has no sinks — pass sinks= or call set_sinks() with the "
                 "model boundary's demanded keys before setup"
             )
-        reader = self._reader_proto.with_source(
-            filename=filename, num=num, vds_path=vds_path, stage=_STAGE_OF_MODE[mode]
-        )
+        # Resolved BEFORE staging: an auto manifest is keyed by the corpus the
+        # user configured, not by the /dev/shm copies a staged run reads, so
+        # staging never invalidates it (the blocks are the same rows either way).
+        manifest = self._manifest_for(mode, reader, num)
         reader = self._stage(reader)
-        # deep-copy the processors per stage: bind-time state (e.g. the Labels
-        # narrowed key set) is per-(dataset, mode) and must not leak between
-        # the train/val/test plans sharing this module dict. Only
-        # `_batch_modules` are copied — setup-only modules are never handed to
-        # GraphDataset.
+        if isinstance(manifest, CorpusManifest) and apply_schema(manifest, reader):
+            _LOG.info(
+                f"manifest: seeded the {_STAGE_OF_MODE[mode]} reader's schema from the manifest "
+                "— plan compilation opens no data file"
+            )
+        # only `_batch_modules` are copied — setup-only modules never reach a dataset
         modules = {
             name: (reader if name == self._reader_name else deepcopy(module))
             for name, module in self._batch_modules.items()
         }
-        return GraphDataset(
+        common = {
+            "mode": mode,
+            "sinks": self._sinks,
+            "seed": self.seed,
+            "debug": self.debug,
+            "sink_origins": (self._sink_origins or {}).get(mode),
+        }
+        if not self.iterable:
+            return SaltDataset(modules, **common)
+        # Streaming: shuffle and drop-last are FIT-only. Val/test stream in
+        # order and keep the ragged tail, which is the eval writers'
+        # row-alignment contract — the same split the map-style loaders make
+        # through the sampler, expressed on the dataset because an
+        # IterableDataset has no sampler to make it.
+        fit = mode == Mode.FIT
+        return IterableSaltDataset(
             modules,
-            mode=mode,
-            sinks=self._sinks,
-            seed=self.seed,
-            debug=self.debug,
-            sink_origins=(self._sink_origins or {}).get(mode),
+            batch_size=self.batch_size,
+            shuffle=self.shuffle_stream and fit,
+            drop_last=fit,
+            block_rows=self.block_rows,
+            interleave_block=self.interleave_block,
+            max_live_streams=self.max_live_streams,
+            manifest=manifest,
+            **common,
         )
 
     def _resolve_stage_root(self, stage: str) -> Path | None:
@@ -451,6 +640,66 @@ class GraphDataModule(lightning.LightningDataModule):
             return reader
         return reader.restage(self._stage_root)
 
+    # -- manifest: auto -------------------------------------------------------
+
+    def prepare_data(self) -> None:
+        """Build the corpus manifest for ``manifest: "auto"`` — once, on rank 0.
+
+        Lightning calls this hook on global rank 0 alone
+        (``prepare_data_per_node = False``) and barriers every rank before
+        ``setup``, which is exactly the coordination an auto-built artifact
+        needs: one writer, no lock, and everyone else finds a finished file.
+        `setup` therefore only ever READS a manifest. Idempotent — a second call
+        finds the artifact the first one wrote.
+        """
+        if not is_auto(self.manifest):
+            return
+        if not self.iterable:
+            _LOG.warning(
+                f"data.manifest={AUTO_MANIFEST!r} is ignored on the map-style path — a corpus "
+                "manifest plans streaming shards, and this run has data.iterable=false"
+            )
+            return
+        # the hook takes no stage argument; the trainer's entry point is what
+        # says whether a test corpus is about to be read or is merely configured
+        fn = getattr(getattr(self.trainer, "state", None), "fn", None)
+        stage = "test" if str(getattr(fn, "value", "")).startswith("test") else "fit"
+        modes = self._modes_for_stage(stage)
+        self._run_setup_pass(_STAGE_OF_MODE[m] for m in modes)
+        for mode in modes:
+            reader, num = self._stage_reader(mode)
+            if reader is None or not reader.sources():
+                continue
+            path, where = resolve_manifest_path(reader, stage=_STAGE_OF_MODE[mode], num=num)
+            ensure_manifest(reader, path, _STAGE_OF_MODE[mode], where)
+
+    def _manifest_for(self, mode: Mode, reader: Reader, num: int) -> Any:
+        """The manifest this stage's streaming dataset plans from.
+
+        An explicit path passes through untouched — it is the user's assertion,
+        and a bad one must fail loudly downstream. ``"auto"`` re-derives the path
+        `prepare_data` wrote (resolution is pure, so ranks agree without sharing
+        state) and validates it; a miss means `prepare_data` never ran — a
+        datamodule driven outside a `Trainer` — so it degrades to reader-index
+        planning rather than failing a run over a cache artifact.
+        """
+        if not is_auto(self.manifest):
+            return self.manifest
+        if not self.iterable:
+            return None
+        stage = _STAGE_OF_MODE[mode]
+        path, _where = resolve_manifest_path(reader, stage=stage, num=num)
+        manifest, problems = read_manifest(
+            path, sources=reader.sources(), schema_hash=built_schema_hash(reader)
+        )
+        if manifest is None:
+            _LOG.warning(
+                f"manifest: no usable {stage} manifest at {path} ({'; '.join(problems)}) — "
+                "planning from the reader index instead. prepare_data() builds it inside a "
+                "Trainer run; offline, `python -m salt.data.manifest` writes one for any config."
+            )
+        return manifest
+
     def setup(self, stage: str) -> None:
         """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST.
 
@@ -463,20 +712,15 @@ class GraphDataModule(lightning.LightningDataModule):
         # reads the deepest path off this ctx (pure path arithmetic, no FS I/O).
         self._run_setup_pass(_STAGE_OF_MODE[m] for m in self._modes_for_stage(stage))
         if stage == "fit":
-            train_file, num_train = self._resolve_source(Mode.FIT)
-            val_file, num_val = self._resolve_source(Mode.VAL)
-            self.train_dset = self._make_dataset(
-                Mode.FIT, train_file, num_train, self.train_vds_path
-            )
-            self.val_dset = self._make_dataset(Mode.VAL, val_file, num_val, self.val_vds_path)
+            self.train_dset = self._make_dataset(Mode.FIT)
+            self.val_dset = self._make_dataset(Mode.VAL)
             if self.trainer is None or self.trainer.is_global_zero:
                 _LOG.info(f"Created training dataset with {len(self.train_dset):,} entries")
                 _LOG.info(f"Created validation dataset with {len(self.val_dset):,} entries")
         if stage == "test":
-            test_file, num_test = self._resolve_source(Mode.TEST)
-            if test_file is None:
+            if self._resolve_source(Mode.TEST)[0] is None:
                 raise ConfigError("No test file specified, see --data.test_file")
-            self.test_dset = self._make_dataset(Mode.TEST, test_file, num_test, self.test_vds_path)
+            self.test_dset = self._make_dataset(Mode.TEST)
             _LOG.info(f"Created test dataset with {len(self.test_dset):,} entries")
 
     @staticmethod
@@ -488,24 +732,48 @@ class GraphDataModule(lightning.LightningDataModule):
             return (Mode.TEST,)
         return ()
 
-    def get_dataloader(self, stage: str, dataset: GraphDataset, shuffle: bool) -> DataLoader:
-        """Build a batch-sampler dataloader over a stage dataset.
+    def resolved_prefetch_factor(self) -> int:
+        """The effective prefetch depth for this datamodule (see `auto_prefetch_factor`)."""
+        return auto_prefetch_factor(
+            explicit=self.prefetch_factor,
+            iterable=self.iterable,
+            block_rows=self.block_rows,
+            batch_size=self.batch_size,
+        )
 
-        ``batch_size=None`` + `RandomBatchSampler`: the dataset receives
-        contiguous slices and returns complete batches; there is no collate step.
-        ``drop_last`` only for fit.
+    def get_dataloader(
+        self, stage: str, dataset: SaltDataset | IterableSaltDataset, shuffle: bool
+    ) -> DataLoader:
+        """Build a dataloader over a stage dataset.
+
+        Map-style: ``batch_size=None`` + `RandomBatchSampler` — the dataset
+        receives contiguous slices and returns complete batches; there is no
+        collate step, and ``drop_last`` applies only to fit.
+
+        Streaming: NO sampler at all. An `IterableDataset` yields whole batches
+        itself and resolves its own shard from the worker/rank context, so a
+        sampler would be both meaningless and (under DDP) actively wrong. The
+        epoch is pushed onto the dataset here, because that is the one thing the
+        map-style path gets from the sampler and streaming has nowhere else to
+        get.
         """
         drop_last = stage == "fit"
+        sampler: Any = None
+        if isinstance(dataset, IterableSaltDataset):
+            if self.trainer is not None:
+                dataset.epoch = int(self.trainer.current_epoch)
+        else:
+            sampler = RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last)
         return DataLoader(
             dataset=dataset,
             batch_size=None,
             collate_fn=None,
-            sampler=RandomBatchSampler(dataset, self.batch_size, shuffle, drop_last=drop_last),
+            sampler=sampler,
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers and self.num_workers > 0,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            prefetch_factor=self.resolved_prefetch_factor() if self.num_workers > 0 else None,
             multiprocessing_context=self.multiprocessing_context,
         )
 

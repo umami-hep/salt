@@ -523,7 +523,7 @@ class H5OutputSink(RuntimeSink):
         dset = getattr(dm, "test_dset", None)
         if dset is None:
             raise ConfigError(
-                "H5OutputSink needs a GraphDataModule with a built test dataset — "
+                "H5OutputSink needs a SaltDataModule with a built test dataset — "
                 f"got {type(dm).__name__}"
             )
         reader = dset.reader

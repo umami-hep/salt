@@ -53,8 +53,8 @@ _DEFAULT_ACTIVE = 20
 _DEFAULT_WARMUP = 5
 
 DEFAULT_DATASET_FUNCTIONS: tuple[str, ...] = (
-    "salt.data.dataset.GraphDataset.__getitem__",
-    "salt.data.dataset.GraphDataset._to_torch",
+    "salt.data.dataset.SaltDataset.__getitem__",
+    "salt.data.dataset.SaltDataset._to_torch",
     "salt.data.readers.reader.H5StructuredReader.read",
     "salt.data.readers.reader.H5StructuredReader._read_kept",
     "salt.data.readers.cuts.ConstituentCuts.apply",

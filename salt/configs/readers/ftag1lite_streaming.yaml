@@ -1,0 +1,49 @@
+# Overlay — stream DAOD_FTAG1LITE instead of reading windowed batches.
+#
+# Stackable ON TOP of a reader fragment:
+#   salt fit --config readers/ftag1lite.yaml \
+#            --config readers/ftag1lite_streaming.yaml \
+#            --config <model>.yaml
+#
+# What changes: the datamodule builds `IterableSaltDataset` instead of
+# `SaltDataset`. Rows arrive in a different ORDER; the batch object, the plan
+# and everything downstream are unchanged.
+#
+# Why: the map-style path reads one batch-sized window at a time and holds a
+# row-granular index of the whole corpus in every reader process. On a
+# 236-file / 20M-jet FTAG1LITE corpus that window is ~212 tree entries, which
+# raw uproot serves at 4,853 jets/s against 9,052 for a 16k-row range, and the
+# index rules out sharding to hundreds of ranks.
+#
+# Sharding is automatic: shard = rank x num_workers + worker_id, and each shard
+# takes the same PROPORTION of every sample by row interval, so it works with
+# more shards than files and needs no per-rank configuration.
+#
+# The corpus manifest lets every rank plan its shards without opening a data
+# file. `auto` (below) builds it on rank 0 in prepare_data and reuses it after;
+# for a large corpus, build it ONCE offline instead and point `manifest:` at the
+# artifact, so no training job ever pays for it:
+#   python -m salt.data.manifest --config readers/ftag1lite.yaml \
+#       --set data.train_file='/path/to/corpus/*/*.pool.root*' \
+#       --out /path/to/corpus_manifest.json
+
+data:
+  iterable: true
+  # 16,384 rows/read is the measured knee: 99.8% of the whole-file rate for a
+  # quarter of the memory (77 MB mean / 179 MB max per read, vs 302/690 MB for
+  # a whole file). Raise it only with a measurement.
+  block_rows: 16384
+  # Samples resident at once. Peak buffered rows per worker is
+  # max_live_streams x block_rows — with 77 samples this is what stops the
+  # scheduler from holding 77 open files and 77 decompressed buffers.
+  max_live_streams: 2
+  # Rows per turn of the per-sample round robin. Every batch's per-sample
+  # counts stay within this many rows of their proportional share.
+  interleave_block: 1
+  shuffle_stream: true
+  # Manifest, off by default. Either of:
+  #   manifest: auto                       # resolve next to the corpus (or in
+  #                                        # ~/.cache/salt/manifests when the
+  #                                        # corpus dir is read-only) and build
+  #                                        # it on rank 0 when missing/stale
+  #   manifest: /path/to/corpus_manifest.json   # a pre-built artifact (above)

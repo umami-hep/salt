@@ -263,7 +263,7 @@ class TestNamespaceSplit:
     def test_setup_only_module_absent_from_per_batch_plan_no_dead_error(self):
         # The core blocker: a setup-only module in the per-batch module dict
         # must be partitioned out so compile_plan never sees it (else
-        # AllModesDeadError). We emulate the GraphDataModule partition and
+        # AllModesDeadError). We emulate the SaltDataModule partition and
         # assert the surviving per-batch compile is clean AND excludes it.
         a = BatchToy("a", requires={"inputs.x": TensorSpec()}, produces={"preds.x": TensorSpec()})
         setup_mod = SetupToy("inp", produces={"source.r.train.pattern": src()})

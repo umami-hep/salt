@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from salt.data.base import Reader, WorkerCtx, _require_root_deps
+from salt.data.base import Reader, RowBlock, WorkerCtx, _require_root_deps
 from salt.data.readers.cuts import VALID_FIELD, GlobalObjectCuts
 from salt.data.readers.expressions import Aggregation
 from salt.data.readers.stream import OffsetIndex, StreamConfig
@@ -25,6 +25,32 @@ from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema
 
 __all__ = ["UprootGroupConfig", "UprootReader"]
+
+INDEX_CACHE_VERSION = 1
+"""Format version of the `index_cache` artifact.
+
+Bump whenever what `prepare` stores changes shape or meaning. It is part of the
+cache key, so a bump makes every existing artifact a miss rather than something
+to be migrated or — worse — read under the wrong interpretation.
+"""
+
+MAX_BRANCHES_PER_READ = 64
+"""How many branches one batch read may ask `uproot` for at a time.
+
+A batch needs every configured branch over the same entry range, and `uproot`
+merges the resulting basket byte-ranges into as few source requests as it can
+(``uproot.source.coalesce``: adjacent ranges within ``max_range_gap``, capped by
+``max_request_bytes``). That merge runs **once per ``arrays()`` call**, so asking
+for the branches together is what lets ranges from *different* branches coalesce
+— which is the whole point on storage where seeking dominates.
+
+Grouping is bounded rather than unbounded because one call holds every requested
+branch's decompressed baskets at once: transient memory grows with the group, and
+uproot's own request packing stops paying off past a few MB anyway. 64 keeps a
+155-branch GN3-style read at three calls instead of 155, with a bounded working
+set. Sizing is empirical — see experiment 05's T2 group-size sweep — so this is a
+plain module constant a benchmark can monkeypatch, not a config surface.
+"""
 
 _GROUP_KEYS = {
     "branches",
@@ -229,6 +255,18 @@ class UprootReader(Reader):
         this reader — ``mask`` is H5-first (a follow-up on the awkward path).
     stage : str | None, optional
         The bound stage (``"train"``/``"val"``/``"test"``); selects per-split cuts.
+    index_cache : str | Path | None, optional
+        Directory to persist the built index in. ``None`` (default) rebuilds it
+        every run. `prepare` has to open every file and read the unroll carrier's
+        counts to know which row lives where, which is a fixed startup cost paid
+        again on every run over an unchanged dataset — 200.7 s for a 236-file
+        corpus, of which ~75% is the counts read waiting on disk. With a
+        directory set, that result is written once and restored on later runs.
+        The cache key covers the reader config, the resolved file list with each
+        file's size and mtime, and the salt/uproot/awkward versions, so a changed
+        config or a re-derived file is a miss rather than a stale hit; a corrupt
+        or unreadable artifact is also a miss. Writes are atomic
+        (temp file + replace), so concurrent runs cannot read a partial artifact.
 
     Raises
     ------
@@ -255,11 +293,13 @@ class UprootReader(Reader):
         cuts: GlobalObjectCuts | None = None,
         constituent_cuts: Mapping[str, Any] | None = None,
         stage: str | None = None,
+        index_cache: str | Path | None = None,
     ) -> None:
         super().__init__()
         if not groups:
             raise ConfigError("UprootReader needs at least one group")
         self.filename = str(filename) if filename is not None else None
+        self.index_cache = str(index_cache) if index_cache is not None else None
         self.tree = str(tree)
         self.unroll = str(unroll) if unroll is not None else None
         self.num = num
@@ -575,6 +615,7 @@ class UprootReader(Reader):
             cuts=self.cuts,
             constituent_cuts=self.constituent_cuts,
             stage=stage,
+            index_cache=self.index_cache,
         )
 
     def with_source(
@@ -590,20 +631,218 @@ class UprootReader(Reader):
         clone.name = self.name
         return clone
 
+    # -- index cache ----------------------------------------------------------
+
+    def config_fingerprint(self) -> dict[str, Any]:
+        """The config facts that decide which rows and fields this reader serves.
+
+        Everything here is set at construction, so it costs no file open. `cuts`
+        and `constituent_cuts` go in by `repr` — they are config objects, and what
+        matters is that a changed cut yields a changed string.
+        """
+        return {
+            "tree": self.tree,
+            "unroll": self.unroll,
+            "num": self.num,
+            "stage": self.stage,
+            "cuts": repr(self.cuts),
+            "constituent_cuts": repr(self.constituent_cuts),
+            "groups": {
+                stream: {
+                    "branches": cfg.branches,
+                    "prefix": cfg.prefix,
+                    "jagged": cfg.jagged,
+                    "pad_max": cfg.pad_max,
+                    "link_branch": cfg.link_branch,
+                    "target_prefix": cfg.target_prefix,
+                    "join_branch": cfg.join_branch,
+                    "join_prefix": cfg.join_prefix,
+                    "join_branches": cfg.join_branches,
+                }
+                for stream, cfg in self.groups.items()
+            },
+        }
+
+    def _index_cache_key(self, files: list[Path]) -> str:
+        """A digest of everything the built index depends on.
+
+        Anything that could change the index must be in here, or a stale artifact
+        gets served as if it were current: the resolved file list with each file's
+        size and mtime (a re-derived file at the same path is a different file),
+        the reader's `config_fingerprint`, the cache format version, and the
+        versions of the libraries whose output is being cached. Cheap to compute —
+        it is `stat` plus a hash, never a file read.
+        """
+        import hashlib
+        import json
+
+        import awkward
+        import uproot
+
+        import salt
+
+        payload = {
+            "format": INDEX_CACHE_VERSION,
+            "salt": getattr(salt, "__version__", "unknown"),
+            "uproot": uproot.__version__,
+            "awkward": awkward.__version__,
+            **self.config_fingerprint(),
+            "files": [
+                {"path": str(p), "size": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
+                for p in files
+            ],
+        }
+        blob = json.dumps(payload, sort_keys=True, default=str).encode()
+        return hashlib.sha256(blob).hexdigest()
+
+    def _index_cache_path(self, key: str) -> Path:
+        """Where the artifact for `key` lives under the configured cache root."""
+        assert self.index_cache is not None
+        return Path(self.index_cache) / f"uproot_index_{key}.npz"
+
+    def _load_index_cache(self, files: list[Path], key: str) -> bool:
+        """Restore the index from the artifact for `key`; False when there is nothing usable.
+
+        The key already covers config, library versions and each file's
+        size/mtime, so a hit means the inputs are the same ones the artifact was
+        built from. What is re-checked here is only what a corrupt or truncated
+        artifact could get wrong — the file list and the row total it claims —
+        because those are what the rest of the reader indexes against. Any
+        failure returns False and lets `prepare` rebuild: a cache is never
+        allowed to be the reason a run fails.
+        """
+        import json
+
+        path = self._index_cache_path(key)
+        if not path.is_file():
+            return False
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                meta = json.loads(str(z["meta"].item()))
+                if meta.get("format") != INDEX_CACHE_VERSION:
+                    return False
+                if meta["paths"] != [str(p) for p in files]:
+                    return False
+                table: list[_FileEntry] = []
+                for i, p in enumerate(files):
+                    orig_counts = z[f"orig_counts_{i}"]
+                    kept = (
+                        np.arange(int(meta["kept_size"][i]), dtype=np.int64)
+                        if meta["identity_kept"][i]
+                        else z[f"kept_{i}"]
+                    )
+                    per_row_kept = (
+                        orig_counts if meta["identity_per_row_kept"][i] else z[f"per_row_kept_{i}"]
+                    )
+                    table.append(
+                        _FileEntry(
+                            path=p,
+                            n_events=int(meta["n_events"][i]),
+                            event_start=int(meta["event_start"][i]),
+                            row_start=int(meta["row_start"][i]),
+                            kept=kept,
+                            per_row_kept=per_row_kept,
+                            orig_counts=orig_counts,
+                            fields={s: dict(f) for s, f in meta["fields"].items()},
+                        )
+                    )
+                num_rows = int(meta["num_rows"])
+                if sum(int(e.kept.size) for e in table) != int(meta["num_available"]):
+                    return False
+                self._table = table
+                self._num_rows = num_rows
+                self._mult = {str(k): int(v) for k, v in meta["mult"].items()}
+                self.schema = Schema(
+                    groups={s: GroupSchema(fields=dict(f)) for s, f in meta["schema"].items()}
+                )
+        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+            return False
+        return True
+
+    def _save_index_cache(self, key: str) -> None:
+        """Write the built index to the artifact for `key` (best effort).
+
+        Failure to write is never fatal — the index is in memory and correct; a
+        missing cache costs time on the next run and nothing else.
+        """
+        import json
+
+        assert self._table is not None
+        assert self.schema is not None
+        path = self._index_cache_path(key)
+        meta = {
+            "format": INDEX_CACHE_VERSION,
+            "paths": [str(e.path) for e in self._table],
+            "n_events": [e.n_events for e in self._table],
+            "event_start": [e.event_start for e in self._table],
+            "row_start": [e.row_start for e in self._table],
+            "fields": self._table[0].fields if self._table else {},
+            "mult": self._mult,
+            "schema": {s: dict(g.fields) for s, g in self.schema.groups.items()},
+            "num_rows": self._num_rows,
+            "num_available": sum(int(e.kept.size) for e in self._table),
+        }
+        arrays: dict[str, Any] = {}
+        # With no row cuts, `kept` is just arange(n) and `per_row_kept` equals
+        # `orig_counts` — for the 236-file corpus that alone is a 160 MB int64
+        # copy of the row numbers 0..19,977,488. Record those two identities as
+        # flags and rebuild them on load; a cut index still stores its arrays.
+        identity_kept: list[bool] = []
+        identity_prk: list[bool] = []
+        for i, e in enumerate(self._table):
+            is_id = bool(np.array_equal(e.kept, np.arange(e.kept.size, dtype=e.kept.dtype)))
+            identity_kept.append(is_id)
+            if not is_id:
+                arrays[f"kept_{i}"] = e.kept
+            same = bool(np.array_equal(e.per_row_kept, e.orig_counts))
+            identity_prk.append(same)
+            if not same:
+                arrays[f"per_row_kept_{i}"] = e.per_row_kept
+            arrays[f"orig_counts_{i}"] = e.orig_counts
+        meta["identity_kept"] = identity_kept
+        meta["identity_per_row_kept"] = identity_prk
+        meta["kept_size"] = [int(e.kept.size) for e in self._table]
+        arrays["meta"] = np.array(json.dumps(meta, default=str))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Write through an OPEN FILE, not a path: `np.savez` appends ".npz"
+            # to any path that does not already end in it, so a ".tmp" path would
+            # be written as "<name>.tmp.npz" and the rename below would then fail
+            # on a file that was never created — leaving a cache that is written
+            # but never found. A file object is written verbatim.
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("wb") as fh:
+                np.savez(fh, **arrays)
+            tmp.replace(path)  # atomic: a reader never sees a half-written artifact
+        except OSError:
+            pass
+
     # -- index build (prepare) ------------------------------------------------
 
     def prepare(self) -> None:
         """Resolve files, build the entry->row offset index (post-cut) and the schema
         (idempotent); evaluates the (per-stage) `GlobalObjectCuts` over row-axis scalars to keep
         only passing rows, then resolves each jagged stream's served ``pad_max``.
+
+        The served schema is probed ONCE, on the first file, from branch METADATA
+        (`uproot`'s ``interpretation``/``typename``) plus — only where the
+        interpretation is not one this reader maps directly — a single-entry
+        bounded read. Later files are checked for branch presence and for an
+        identical ``typename`` per configured branch, which is a pure metadata
+        comparison. Nothing here reads a whole branch: the only bulk reads
+        `prepare` performs are the ones it genuinely needs — the unroll carrier's
+        counts, the cut scalars, and (for a jagged stream with no ``pad_max``)
+        one multiplicity-carrying branch.
         """
         if self._table is not None:
             return
         self._require_deps()
-        import awkward as ak
         import uproot
 
         files = self._resolve_files()
+        cache_key = self._index_cache_key(files) if self.index_cache is not None else None
+        if cache_key is not None and self._load_index_cache(files, cache_key):
+            return
         cut_fields = self.cuts.fields() if self.cuts is not None else ()
         cut_aggs = self.cuts.aggregations() if self.cuts is not None else ()
         table: list[_FileEntry] = []
@@ -611,6 +850,8 @@ class UprootReader(Reader):
         row_offset = 0
         max_mult: dict[str, int] = {s: 0 for s, c in self.groups.items() if c.jagged}
         schema_groups: dict[str, GroupSchema] | None = None
+        probed_fields: dict[str, dict[str, str]] | None = None
+        probed_typenames: dict[str, str] | None = None
 
         for path in files:
             with uproot.open(f"{path}:{self.tree}") as t:
@@ -619,29 +860,37 @@ class UprootReader(Reader):
                 entry = _FileEntry(
                     path=path, n_events=n_events, event_start=event_offset, row_start=row_offset
                 )
-                for stream, cfg in self.groups.items():
-                    entry.fields[stream] = self._probe_stream_fields(t, avail, path, stream, cfg)
+                if probed_fields is None:
+                    probed_fields = {
+                        stream: self._probe_stream_fields(t, avail, path, stream, cfg, n_events)
+                        for stream, cfg in self.groups.items()
+                    }
+                    probed_typenames = self._branch_typenames(t, avail)
+                else:
+                    assert probed_typenames is not None
+                    self._validate_file_schema(t, avail, path, probed_typenames)
+                entry.fields = {s: dict(f) for s, f in probed_fields.items()}
                 row_scalars, orig_counts = self._read_index_scalars(
                     t, avail, path, cut_fields, cut_aggs
                 )
 
-            kept, per_row_kept = self._apply_cuts(row_scalars, orig_counts)
-            entry.kept = kept
-            entry.per_row_kept = per_row_kept
-            entry.orig_counts = orig_counts
-            n_kept = int(kept.size)
-            if n_kept > 0:
-                for stream, cfg in self.groups.items():
-                    if cfg.jagged and cfg.pad_max is None:
-                        m = self._stream_max_mult(path, stream, kept)
-                        max_mult[stream] = max(max_mult[stream], m)
+                kept, per_row_kept = self._apply_cuts(row_scalars, orig_counts)
+                entry.kept = kept
+                entry.per_row_kept = per_row_kept
+                entry.orig_counts = orig_counts
+                n_kept = int(kept.size)
+                if n_kept > 0:
+                    for stream, cfg in self.groups.items():
+                        if cfg.jagged and cfg.pad_max is None:
+                            m = self._stream_max_mult(t, stream, kept)
+                            max_mult[stream] = max(max_mult[stream], m)
+
             if schema_groups is None:
                 schema_groups = {s: GroupSchema(fields=dict(entry.fields[s])) for s in self.groups}
             table.append(entry)
             event_offset += n_events
             row_offset += n_kept
 
-        del ak
         num_available = row_offset
         if self.num > num_available:
             raise ValueError(
@@ -657,9 +906,17 @@ class UprootReader(Reader):
         self.schema = Schema(groups=schema_groups)
         self._table = table
         self._num_rows = num_available if self.num < 0 else self.num
+        if cache_key is not None:
+            self._save_index_cache(cache_key)
 
     def _probe_stream_fields(
-        self, t: Any, avail: set[str], path: Path, stream: str, cfg: UprootGroupConfig
+        self,
+        t: Any,
+        avail: set[str],
+        path: Path,
+        stream: str,
+        cfg: UprootGroupConfig,
+        n_events: int,
     ) -> dict[str, str]:
         """Validate a stream's branches + capture per-field dtypes (linked or direct).
 
@@ -683,8 +940,7 @@ class UprootReader(Reader):
                         f"in {path.name!r}; ElementLink target fields live under "
                         f"{cfg.target_prefix!r}"
                     )
-                arr = t[branch].array(library="ak")  # [entry][obj]
-                fdtypes[fieldname] = self._array_dtype_name(arr)
+                fdtypes[fieldname] = self._field_dtype(t, branch, n_events)  # [entry][obj]
             fdtypes["valid"] = "bool"
             return fdtypes
         threshold = 2 + (1 if self.unroll is not None else 0)
@@ -695,23 +951,29 @@ class UprootReader(Reader):
                     f"group {stream!r}: branch {branch!r} (field {fieldname!r}) not "
                     f"in {path.name!r}; tree {self.tree!r} has {len(avail)} branches"
                 )
-            arr = t[branch].array(library="ak")
-            is_jagged = arr.ndim >= threshold
+            dtype_name, ndim = self._field_type(t, branch, n_events)
+            is_jagged = ndim >= threshold
             if is_jagged != cfg.jagged:
                 kind = "sequence (jagged)" if is_jagged else "scalar"
                 raise SchemaError(
                     f"group {stream!r}: branch {branch!r} reads as {kind} (ndim="
-                    f"{arr.ndim}) but config says jagged={cfg.jagged}"
+                    f"{ndim}) but config says jagged={cfg.jagged}"
                 )
-            fdtypes[fieldname] = self._array_dtype_name(arr)
+            fdtypes[fieldname] = dtype_name
         if cfg.is_joined:
-            fdtypes.update(self._probe_join_fields(t, avail, path, stream, cfg))
+            fdtypes.update(self._probe_join_fields(t, avail, path, stream, cfg, n_events))
         if cfg.jagged:
             fdtypes["valid"] = "bool"
         return fdtypes
 
     def _probe_join_fields(
-        self, t: Any, avail: set[str], path: Path, stream: str, cfg: UprootGroupConfig
+        self,
+        t: Any,
+        avail: set[str],
+        path: Path,
+        stream: str,
+        cfg: UprootGroupConfig,
+        n_events: int,
     ) -> dict[str, str]:
         """Validate a 1:1 join's link + target branches and capture the joined field dtypes.
 
@@ -733,8 +995,98 @@ class UprootReader(Reader):
                     f"group {stream!r}: join target branch {branch!r} (field {fieldname!r}) "
                     f"not in {path.name!r}; joined fields live under {cfg.join_prefix!r}"
                 )
-            fdtypes[fieldname] = self._array_dtype_name(t[branch].array(library="ak"))
+            fdtypes[fieldname] = self._field_dtype(t, branch, n_events)
         return fdtypes
+
+    # -- schema probing (metadata first, one bounded entry as the fallback) ----
+
+    def _configured_branches(self) -> list[str]:
+        """Every on-disk branch name this reader's groups address, in config order."""
+        names: list[str] = []
+        for cfg in self.groups.values():
+            if cfg.is_linked:
+                names.append(self._link_branch(cfg))
+                names += [self._target_branch(cfg, b) for b in cfg.branches.values()]
+                continue
+            names += [self._on_disk(cfg, b) for b in cfg.branches.values()]
+            if cfg.is_joined:
+                names.append(self._on_disk(cfg, cfg.join_branch or ""))
+                names += [self._join_branch(cfg, b) for b in cfg.join_branches.values()]
+        return list(dict.fromkeys(names))
+
+    def _branch_typenames(self, t: Any, avail: set[str]) -> dict[str, str]:
+        """``{on-disk branch: uproot typename}`` for every configured branch present.
+
+        The typename is the C++ type string uproot reads off the streamers — free
+        (no basket touched) and exactly the thing that has to agree across files
+        for one schema to describe all of them. Branches absent here were already
+        rejected by `_probe_stream_fields` on this same (first) file.
+        """
+        return {b: _typename(t[b]) for b in self._configured_branches() if b in avail}
+
+    def _validate_file_schema(
+        self, t: Any, avail: set[str], path: Path, reference: dict[str, str]
+    ) -> None:
+        """Check a non-first file carries the same configured branches, at the same type.
+
+        Metadata only — no basket is read. The schema itself was probed on the
+        first file; this is the guard that stops a later file with a missing or
+        re-typed branch being served under it.
+
+        Raises
+        ------
+        SchemaError
+            When a configured branch is absent from this file, or its
+            ``typename`` differs from the first file's.
+        """
+        for branch, want in reference.items():
+            if branch not in avail:
+                raise SchemaError(
+                    f"branch {branch!r} is configured and present in the first file but not "
+                    f"in {path.name!r}; tree {self.tree!r} has {len(avail)} branches"
+                )
+            got = _typename(t[branch])
+            if got != want:
+                raise SchemaError(
+                    f"branch {branch!r} reads as {got!r} in {path.name!r} but {want!r} in the "
+                    "first file — one reader serves one schema, so the files must agree"
+                )
+
+    def _field_type(self, t: Any, branch: str, n_events: int) -> tuple[str, int]:
+        """``(dtype name, awkward ndim)`` for one branch, without reading the branch.
+
+        `uproot`'s ``interpretation`` already carries both for the two shapes this
+        reader meets most often (a flat ``AsDtype`` column and an ``AsJagged`` one);
+        anything else — ``AsObjects`` over nested ``std::vector``, fixed-size
+        ``AsDtype`` sub-arrays, custom interpretations — falls back to a
+        ONE-ENTRY read. Both are exact: awkward's ``ndim`` and leaf dtype are
+        properties of the array TYPE, so a single entry (even an empty one)
+        describes the branch as well as all of it does.
+        """
+        from_meta = _interpretation_type(getattr(t[branch], "interpretation", None))
+        if from_meta is not None:
+            dtype, ndim = from_meta
+            return np.dtype(dtype.newbyteorder("=")).name, ndim
+        arr = self._probe_array(t, branch, n_events)
+        return self._array_dtype_name(arr), int(arr.ndim)
+
+    def _field_dtype(self, t: Any, branch: str, n_events: int) -> str:
+        """The dtype name of one branch (the ndim half of `_field_type` discarded)."""
+        return self._field_type(t, branch, n_events)[0]
+
+    def _probe_array(self, t: Any, branch: str, n_events: int) -> Any:
+        """A ONE-ENTRY read of `branch`, widened only if that entry types as ``unknown``.
+
+        awkward reports a concrete leaf type for an empty typed array, so one entry
+        normally suffices even when it holds no constituents. The widening is the
+        pathological case where it does not (an interpretation that yields an
+        `EmptyArray` layout) — reading everything then is still correct, and it is
+        a per-branch last resort rather than the default.
+        """
+        arr = t[branch].array(entry_stop=min(1, n_events), library="ak")
+        if "unknown" in str(arr.type):
+            arr = t[branch].array(library="ak")
+        return arr
 
     def _read_index_scalars(
         self,
@@ -850,16 +1202,19 @@ class UprootReader(Reader):
         per_row_kept = np.where(orig_counts == 0, 0, per_row_kept).astype(np.int64)
         return kept, per_row_kept
 
-    def _stream_max_mult(self, path: Path, stream: str, kept: np.ndarray) -> int:
-        """Max per-row constituent multiplicity over kept rows.
+    def _stream_max_mult(self, t: Any, stream: str, kept: np.ndarray) -> int:
+        """Max per-row constituent multiplicity over kept rows, off the OPEN tree.
 
         Direct stream: per-row constituent count of the stream's first branch;
         linked stream: per-row NON-NULL link count. ``unroll`` flattens the outer
         collection level away first (``[entry][obj][const] -> [row][const]``);
-        ``unroll=None`` reads per-entry constituents directly.
+        ``unroll=None`` reads per-entry constituents directly. This is the one
+        part of `prepare` that legitimately reads bulk data, and only for a
+        jagged stream whose ``pad_max`` the config left unset — it takes the
+        tree handle `prepare` already has open rather than re-opening the file
+        (re-parsing streamers + re-reading a branch step 1 had in hand).
         """
         import awkward as ak
-        import uproot
 
         cfg = self.groups[stream]
         branch = (
@@ -867,8 +1222,7 @@ class UprootReader(Reader):
             if cfg.is_linked
             else self._on_disk(cfg, next(iter(cfg.branches.values())))
         )
-        with uproot.open(f"{path}:{self.tree}") as t:
-            arr = t[branch].array(library="ak")
+        arr = t[branch].array(library="ak")
         if self.unroll is not None:
             arr = ak.flatten(arr, axis=1)  # [entry][obj][...] -> [row][...]
         if cfg.is_linked:
@@ -912,9 +1266,13 @@ class UprootReader(Reader):
         start, stop = rows.start, rows.stop
         b = stop - start
         out: dict[str, np.ndarray] = {}
+        wanted = {stream: self._served_fields(stream) for stream in self.groups}
+        # ONE pass over the files for ALL streams, so their branches share a
+        # grouped read instead of costing a separate covering pass each
+        all_cols = self._read_streams_columns(wanted, start, stop)
         for stream, cfg in self.groups.items():
-            fields = self._served_fields(stream)
-            cols = self._read_stream_columns(stream, fields, start, stop)
+            fields = wanted[stream]
+            cols = all_cols[stream]
             if cfg.jagged:
                 raw, valid = self._assemble_jagged(stream, fields, cols, b)
                 out[f"raw.{stream}"] = raw
@@ -924,6 +1282,27 @@ class UprootReader(Reader):
         if mode == Mode.TEST:
             out["meta.rows"] = np.array([start, stop], dtype=np.int64)
         return out
+
+    def row_blocks(self) -> list[RowBlock]:
+        """One block per file, from the `prepare`-built table.
+
+        A file is this reader's largest contiguous unit: reading within one
+        file's row range keeps `_read_stream_columns` on a single covering entry
+        range, i.e. one grouped `arrays()` call per stream instead of one per
+        file touched. Files contributing no rows (fully cut) are omitted, so the
+        blocks still tile ``[0, len(self))`` without gaps.
+        """
+        n_rows = len(self)  # resolves prepare(); honours the `num` cap
+        assert self._table is not None
+        blocks = []
+        for entry in self._table:
+            start = entry.row_start
+            stop = min(start + int(entry.kept.size), n_rows)  # `num` truncates the tail
+            if stop > start:
+                blocks.append(RowBlock(group=0, start=start, stop=stop))
+            if stop >= n_rows:
+                break
+        return blocks
 
     def _served_fields(self, stream: str) -> list[str]:
         """The field names served for a stream (demanded subset or all configured)."""
@@ -962,17 +1341,43 @@ class UprootReader(Reader):
     def _read_stream_columns(
         self, stream: str, fields: list[str], start: int, stop: int
     ) -> dict[str, Any]:
-        """Read a stream's demanded branches over a global row range (multi-file): per
-        file, reads the covering entry range, flattens (when unrolling), applies the
-        kept-row mask and slices to the file's contribution; blocks concat in row order.
-        Linked streams dereference the target container by ``m_persIndex`` per row.
+        """One stream's columns over a global row range — `_read_streams_columns` for one."""
+        return self._read_streams_columns({stream: fields}, start, stop)[stream]
+
+    def _read_streams_columns(
+        self, wanted: dict[str, list[str]], start: int, stop: int
+    ) -> dict[str, dict[str, Any]]:
+        """Read SEVERAL streams' demanded branches over a global row range (multi-file).
+
+        Per file: resolve the covering entry range, read, flatten (when
+        unrolling), apply the kept-row mask and slice to the file's
+        contribution; blocks concat in row order. Linked streams dereference the
+        target container by ``m_persIndex`` per row.
+
+        Every stream is read in ONE pass over the files, and within a file every
+        non-linked stream's direct branches go out as a SINGLE grouped request.
+        That is the point of taking a dict rather than one stream at a time: the
+        covering entry range is a property of the FILE and the row range, not of
+        the stream (it is computed from ``entry.per_row_kept``), so all streams
+        want exactly the same entries — and `uproot` coalesces basket byte-ranges
+        within one ``arrays()`` call but not across calls. Reading stream by
+        stream therefore made a 155-branch block into 7 independent covering
+        passes over the same entries, one per stream, each seeking its own
+        baskets.
+
+        Linked streams keep their own reads: `_read_linked_block` dereferences an
+        ElementLink into a different container, so its branches do not live on
+        this group's axis and cannot share the request. Joined fields likewise
+        stay on `_read_joined_cols`, which already groups the link with its
+        targets.
         """
         self._require_deps()
         import awkward as ak
 
         assert self._table is not None
-        cfg = self.groups[stream]
-        per_field_chunks: dict[str, list[Any]] = {f: [] for f in fields}
+        per_field_chunks: dict[str, dict[str, list[Any]]] = {
+            s: {f: [] for f in fs} for s, fs in wanted.items()
+        }
 
         for entry in self._table:
             file_rlo = entry.row_start
@@ -994,29 +1399,116 @@ class UprootReader(Reader):
             )
             sel = in_block[row_off : row_off + (hi - lo)]
             t = self._tree(entry.path)
-            if cfg.is_linked:
-                block = self._read_linked_block(t, cfg, fields, e0, e1)
-            else:
-                block = self._read_group_cols(t, cfg, fields, e0, e1)
+
+            # the shared request: every non-linked stream's direct branches
+            direct_names: dict[str, dict[str, str]] = {}
+            union: list[str] = []
+            for stream, fields in wanted.items():
+                cfg = self.groups[stream]
+                if cfg.is_linked:
+                    continue
+                names = {
+                    f: self._on_disk(cfg, cfg.branches[f]) for f in fields if f in cfg.branches
+                }
+                direct_names[stream] = names
+                union.extend(names.values())
+            shared = self._read_branches(t, union, e0, e1) if union else {}
+            # two streams may serve the same on-disk branch; flatten it once
+            unrolled: dict[str, Any] = {}
+
+            for stream, fields in wanted.items():
+                cfg = self.groups[stream]
+                if cfg.is_linked:
+                    block = self._read_linked_block(t, cfg, fields, e0, e1)
+                else:
+                    block = {}
+                    for f, branch in direct_names[stream].items():
+                        if branch not in unrolled:
+                            unrolled[branch] = self._unrolled(shared[branch])
+                        block[f] = unrolled[branch]
+                    joined = [f for f in fields if f in cfg.join_branches]
+                    if joined:
+                        block.update(self._read_joined_cols(t, cfg, joined, e0, e1))
+                for f in fields:
+                    per_field_chunks[stream][f].append(block[f][sel])
+
+        cols: dict[str, dict[str, Any]] = {}
+        for stream, fields in wanted.items():
+            cols[stream] = {}
             for f in fields:
-                per_field_chunks[f].append(block[f][sel])
-        cols: dict[str, Any] = {}
-        for f in fields:
-            chunks = per_field_chunks[f]
-            cols[f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+                chunks = per_field_chunks[stream][f]
+                cols[stream][f] = ak.concatenate(chunks) if len(chunks) > 1 else chunks[0]
         return cols
+
+    def _read_branches(self, t: Any, branches: list[str], e0: int, e1: int) -> dict[str, Any]:
+        """Read several branches over entry block ``[e0, e1)`` in as few reads as possible.
+
+        One ``arrays()`` call per bounded group of branches instead of one
+        ``array()`` call per branch. The served values are the same either way —
+        both go through the same per-branch interpretation — but the number of
+        *source requests* is not: `uproot` coalesces basket byte-ranges inside a
+        single call, so grouping lets ranges from different branches merge, and a
+        155-branch batch stops being 155 independent seek-read round trips into
+        the file.
+
+        `array_cache` is deliberately left at uproot's ``"inherit"`` default, the
+        same as the per-branch call this replaces: whether reads are cached stays
+        a property of how the file was opened, so a caller that opened with
+        ``array_cache=None`` still gets no cache and nothing about the existing
+        cache-off path changes.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{on-disk branch name: awkward array}``, unflattened (the caller
+            applies the unroll).
+
+        Raises
+        ------
+        SchemaError
+            If a requested branch is missing from what `uproot` returned — a
+            guard against an expression being silently renamed or dropped rather
+            than serving another branch's values under its name.
+        """
+        out: dict[str, Any] = {}
+        if not branches:
+            return out
+        unique = list(dict.fromkeys(branches))
+        step = max(1, int(MAX_BRANCHES_PER_READ))
+        for start in range(0, len(unique), step):
+            chunk = unique[start : start + step]
+            got = t.arrays(chunk, entry_start=e0, entry_stop=e1, library="ak", how=dict)
+            missing = [b for b in chunk if b not in got]
+            if missing:
+                raise SchemaError(
+                    f"grouped read of entries [{e0}, {e1}) did not return branch(es) {missing} "
+                    f"— asked for {len(chunk)}, got {sorted(got)[:8]}..."
+                )
+            out.update({b: got[b] for b in chunk})
+        return out
+
+    def _unrolled(self, arr: Any) -> Any:
+        """Flatten the outer collection level away when unrolling; identity otherwise."""
+        import awkward as ak
+
+        return ak.flatten(arr, axis=1) if self.unroll is not None else arr
 
     def _read_group_cols(
         self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int
     ) -> dict[str, Any]:
         """Read a (non-ElementLink) group's fields over entry block ``[e0, e1)``.
 
-        Direct fields come off the group's own prefix; joined fields are gathered
-        through the group's 1:1 link. Both come back on the same axis.
+        Direct fields come off the group's own prefix and are read as ONE grouped
+        request (see `_read_branches`); joined fields are gathered through the
+        group's 1:1 link. Both come back on the same axis.
         """
         direct = [f for f in fields if f in cfg.branches]
         joined = [f for f in fields if f in cfg.join_branches]
-        block = {f: self._read_col(t, cfg, f, e0, e1) for f in direct}
+        block: dict[str, Any] = {}
+        if direct:
+            names = {f: self._on_disk(cfg, cfg.branches[f]) for f in direct}
+            raw = self._read_branches(t, list(names.values()), e0, e1)
+            block = {f: self._unrolled(raw[b]) for f, b in names.items()}
         if joined:
             block.update(self._read_joined_cols(t, cfg, joined, e0, e1))
         return block
@@ -1024,13 +1516,12 @@ class UprootReader(Reader):
     def _read_col(self, t: Any, cfg: UprootGroupConfig, f: str, e0: int, e1: int) -> Any:
         """Read one normal branch over entry block ``[e0, e1)`` as ``[row]`` / ``[row][const]``
         (flattening the outer collection level away when unrolling).
-        """
-        import awkward as ak
 
-        arr = t[self._on_disk(cfg, cfg.branches[f])].array(
-            entry_start=e0, entry_stop=e1, library="ak"
-        )
-        return ak.flatten(arr, axis=1) if self.unroll is not None else arr
+        The single-branch form of `_read_group_cols`' grouped read; kept because a
+        one-branch read is still occasionally the whole request.
+        """
+        branch = self._on_disk(cfg, cfg.branches[f])
+        return self._unrolled(self._read_branches(t, [branch], e0, e1)[branch])
 
     def _read_joined_cols(
         self, t: Any, cfg: UprootGroupConfig, fields: list[str], e0: int, e1: int
@@ -1047,7 +1538,12 @@ class UprootReader(Reader):
         import awkward as ak
 
         link_branch = self._on_disk(cfg, cfg.join_branch or "")
-        links = t[link_branch].array(entry_start=e0, entry_stop=e1, library="ak")  # [entry][elem]
+        # link + every join target in ONE grouped request (see `_read_branches`):
+        # they cover the same entry range, so reading them together lets uproot
+        # coalesce their basket ranges instead of seeking once per branch.
+        tgt_names = {f: self._join_branch(cfg, cfg.join_branches[f]) for f in fields}
+        raw = self._read_branches(t, [link_branch, *tgt_names.values()], e0, e1)
+        links = raw[link_branch]  # [entry][elem]
         pidx = _pers_index(links)
         pkey = _pers_key(links)
         _check_single_pers_key(pkey, link_branch)
@@ -1065,8 +1561,8 @@ class UprootReader(Reader):
 
         block: dict[str, Any] = {}
         for f in fields:
-            branch = self._join_branch(cfg, cfg.join_branches[f])
-            tgt = t[branch].array(entry_start=e0, entry_stop=e1, library="ak")  # [entry][target]
+            branch = tgt_names[f]
+            tgt = raw[branch]  # [entry][target]
             counts = ak.to_numpy(ak.num(tgt, axis=1)).astype(np.int64)
             if counts.size != per_elem.size:
                 raise SchemaError(
@@ -1100,9 +1596,15 @@ class UprootReader(Reader):
         """
         import awkward as ak
 
-        links = t[self._link_branch(cfg)].array(
-            entry_start=e0, entry_stop=e1, library="ak"
-        )  # [event][obj][link] (struct m_persKey/m_persIndex, or plain int for synthetic)
+        # link vector + every demanded target column in ONE grouped request
+        # (see `_read_branches`) — same entry range, so their basket ranges
+        # coalesce instead of costing a seek each.
+        link_branch = self._link_branch(cfg)
+        tgt_names = {f: self._target_branch(cfg, cfg.branches[f]) for f in fields}
+        raw = self._read_branches(t, [link_branch, *tgt_names.values()], e0, e1)
+        links = raw[
+            link_branch
+        ]  # [event][obj][link] (struct m_persKey/m_persIndex, or plain int for synthetic)
         pidx = _pers_index(links)  # [event][obj][link] int (m_persIndex into the target)
         pkey = _pers_key(links)  # [event][obj][link] uint | None
         _check_single_pers_key(pkey, cfg.link_branch)  # type: ignore[arg-type]
@@ -1115,9 +1617,7 @@ class UprootReader(Reader):
         # numpy-gather + re-impose the [obj][link] grouping (avoids nested ak fancy-index).
         block: dict[str, Any] = {}
         for f in fields:
-            tgt = t[self._target_branch(cfg, cfg.branches[f])].array(
-                entry_start=e0, entry_stop=e1, library="ak"
-            )  # [event][track]
+            tgt = raw[tgt_names[f]]  # [event][track]
             counts = ak.to_numpy(ak.num(tgt, axis=1))
             offsets = np.concatenate([[0], np.cumsum(counts)])[:-1]  # (n_events,) event starts
             global_idx = pidx + ak.Array(offsets)  # broadcast [event] over [event][obj][link]
@@ -1181,6 +1681,42 @@ class UprootReader(Reader):
             "schema": None,
         })
         return state
+
+
+def _typename(branch: Any) -> str:
+    """A branch's C++ type string — the cross-file schema fingerprint.
+
+    Falls back to the interpretation's repr for branch objects that carry no
+    ``typename`` (hand-built test trees), which still compares equal across
+    files of the same shape.
+    """
+    name = getattr(branch, "typename", None)
+    if name is not None:
+        return str(name)
+    return str(getattr(branch, "interpretation", "<no typename>"))
+
+
+def _interpretation_type(interp: Any) -> tuple[np.dtype, int] | None:
+    """``(leaf dtype, awkward ndim)`` for the interpretations mapped directly, else None.
+
+    Only the two unambiguous shapes are claimed here — a flat numeric column and a
+    single-level jagged one. Fixed-size sub-arrays, ``AsObjects`` over nested
+    ``std::vector``, ElementLink records and anything custom return None so the
+    caller falls back to reading one entry and asking awkward.
+    """
+    if interp is None:
+        return None
+    from uproot.interpretation.jagged import AsJagged
+    from uproot.interpretation.numerical import AsDtype
+
+    if isinstance(interp, AsJagged):
+        content = interp.content
+        if isinstance(content, AsDtype) and not content.to_dtype.shape:
+            return np.dtype(content.to_dtype), 2
+        return None
+    if isinstance(interp, AsDtype) and not interp.to_dtype.shape:
+        return np.dtype(interp.to_dtype), 1
+    return None
 
 
 def _link_member(links: Any, member: str) -> Any | None:

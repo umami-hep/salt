@@ -48,7 +48,7 @@ from lightning import Callback, Trainer, seed_everything
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from salt.callbacks.schedule import TrainingScheduleCallback
-from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.model.saltmodule import CKPT_KEY, SaltModule
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
@@ -88,8 +88,8 @@ def data(tmp_path_factory) -> dict[str, Path]:
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
 
 
-class _DeterministicDataModule(GraphDataModule):
-    """A GraphDataModule whose train loader does NOT shuffle — so epoch e yields
+class _DeterministicDataModule(SaltDataModule):
+    """A SaltDataModule whose train loader does NOT shuffle — so epoch e yields
     the same batches every run (resume-equivalence needs a deterministic loader).
     """
 
