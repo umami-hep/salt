@@ -1,4 +1,4 @@
-"""`GraphDataset` — the map-style dataset that runs the compiled dataset plan;
+"""`SaltDataset` — the map-style dataset that runs the compiled dataset plan;
 one ``__getitem__`` = one full batch, ending at the numpy->torch boundary.
 """
 
@@ -10,10 +10,10 @@ from torch.utils.data import Dataset
 
 from salt.data.plan_runner import MODEL_VISIBLE_NAMESPACES, _PlanRunner
 
-__all__ = ["MODEL_VISIBLE_NAMESPACES", "GraphDataset"]
+__all__ = ["MODEL_VISIBLE_NAMESPACES", "SaltDataset"]
 
 
-class GraphDataset(_PlanRunner, Dataset):
+class SaltDataset(_PlanRunner, Dataset):
     """Map-style dataset executing a compiled dataset plan per batch slice.
 
     Constructor parameters and their errors are documented on `_PlanRunner`;
@@ -33,7 +33,7 @@ class GraphDataset(_PlanRunner, Dataset):
         """
         if not isinstance(rows, slice) or rows.start is None or rows.stop is None:
             raise TypeError(
-                f"GraphDataset is indexed by contiguous slices with start/stop, got {rows!r} "
+                f"SaltDataset is indexed by contiguous slices with start/stop, got {rows!r} "
                 "(samplers.py:41-55 contract)"
             )
         self._maybe_bind()

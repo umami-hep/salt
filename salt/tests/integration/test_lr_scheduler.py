@@ -33,7 +33,7 @@ from lightning import Callback, Trainer, seed_everything
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from salt.callbacks.schedule import TrainingScheduleCallback
-from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.model.saltmodule import SaltModule
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file
@@ -64,7 +64,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
 
 
-class _DeterministicDataModule(GraphDataModule):
+class _DeterministicDataModule(SaltDataModule):
     def train_dataloader(self):  # noqa: D102 - shuffle=False for resume determinism
         return self.get_dataloader(dataset=self.train_dset, stage="fit", shuffle=False)
 

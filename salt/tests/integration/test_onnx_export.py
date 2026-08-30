@@ -357,7 +357,7 @@ def cli_run(tmp_path_factory):
     """A real checkpoint + saved run config for the ``salt export`` CLI tests."""
     from lightning import Trainer
 
-    from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+    from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
     from salt.main import CONFIG_DIR
     from salt.model.saltmodule import SaltModule
     from salt.testing.inputs import write_dummy_file
@@ -374,7 +374,7 @@ def cli_run(tmp_path_factory):
         lrs={"initial": 1e-7, "max": 1e-3, "end": 1e-5, "pct_start": 0.01},
         name="GN2v2_dummy",
     )
-    dm = GraphDataModule(
+    dm = SaltDataModule(
         modules={
             "reader": H5StructuredReader(
                 groups={"jets": {"global_object": True}, "tracks": {"global_object": False}}

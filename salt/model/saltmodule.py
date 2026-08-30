@@ -16,8 +16,8 @@ import torch
 from torch import Tensor, nn
 from torch.optim import AdamW, Optimizer
 
-from salt.data.datamodule import GraphDataModule
-from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
+from salt.data.datamodule import SaltDataModule
+from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, SaltDataset
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
@@ -511,7 +511,7 @@ class SaltModule(lightning.LightningModule):
 
         For each runtime mode, every non-optional required key that no
         sibling module produces must come from the dataset. ``meta.rows`` is
-        added in TEST for writer row alignment. `GraphDataModule.setup`
+        added in TEST for writer row alignment. `SaltDataModule.setup`
         adopts this automatically when no explicit sinks were configured.
 
         Returns
@@ -819,7 +819,7 @@ class SaltModule(lightning.LightningModule):
             A primary mode.
         boundary : Mapping[str, TensorSpec]
             Flat ``{dotted key: spec}`` sources — the matching
-            `GraphDataset.boundary_specs()`.
+            `SaltDataset.boundary_specs()`.
 
         Returns
         -------
@@ -1159,7 +1159,7 @@ class SaltModule(lightning.LightningModule):
                 module.compile(**self._compile_kwargs)
         self._compiled = True
 
-    def _validate_writer_specs(self, test_dset: GraphDataset) -> None:
+    def _validate_writer_specs(self, test_dset: SaltDataset) -> None:
         """Static writer-input validation on the TEST path.
 
         Hands the attached `WriterCallback` (if any) the union of the model
@@ -1204,21 +1204,21 @@ class SaltModule(lightning.LightningModule):
                 "(VAL-divergent module ports would need an exemption mechanism)"
             )
 
-    def _graph_datamodule(self) -> GraphDataModule:
-        """The attached `GraphDataModule` (model plans need its boundary); raises
-        `ConfigError` when none is attached or it is not a `GraphDataModule`.
+    def _graph_datamodule(self) -> SaltDataModule:
+        """The attached `SaltDataModule` (model plans need its boundary); raises
+        `ConfigError` when none is attached or it is not a `SaltDataModule`.
         """
         dm = getattr(self._trainer, "datamodule", None) if self._trainer is not None else None
-        if not isinstance(dm, GraphDataModule):
+        if not isinstance(dm, SaltDataModule):
             raise ConfigError(
-                "SaltModule compiles its plans against a GraphDataModule's dataset boundary — "
+                "SaltModule compiles its plans against a SaltDataModule's dataset boundary — "
                 f"pass one to trainer.fit/test (got {type(dm).__name__}; raw dataloaders are "
                 "not supported)"
             )
         return dm
 
     @staticmethod
-    def _boundary(dset: GraphDataset | None, stage: str) -> dict[str, TensorSpec]:
+    def _boundary(dset: SaltDataset | None, stage: str) -> dict[str, TensorSpec]:
         """A stage dataset's model-visible boundary specs; raises `ConfigError`
         if the stage dataset was never built.
         """

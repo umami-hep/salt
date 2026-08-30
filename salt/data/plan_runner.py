@@ -44,8 +44,8 @@ class _PlanRunner:
     Carries everything that does not depend on HOW rows are addressed — plan
     compilation and static schema validation, the demand-narrowed read set,
     per-worker binding, step execution, the numpy->torch boundary, and the
-    pickling contract. `GraphDataset` adds map-style ``__getitem__``;
-    `IterableGraphDataset` adds streaming ``__iter__``. Both run the SAME plan
+    pickling contract. `SaltDataset` adds map-style ``__getitem__``;
+    `IterableSaltDataset` adds streaming ``__iter__``. Both run the SAME plan
     through `_run_plan`, which is what makes a streaming batch and a map-style
     batch the same object downstream.
 

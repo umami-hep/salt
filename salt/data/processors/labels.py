@@ -47,7 +47,7 @@ class Labels(Processor):
     ----------
     streams : Sequence[str] | None, optional
         The streams this producer can serve (its ``raw.<stream>`` requires).
-        None (the config default) defers to the framework: `GraphDataset`
+        None (the config default) defers to the framework: `SaltDataset`
         calls `bind_streams` with the reader's stream list before plan
         compilation (config-derived, static).
     dtype_policy : Literal["int64-for-int", "file"], optional
@@ -97,7 +97,7 @@ class Labels(Processor):
     def bind_streams(self, streams: Sequence[str]) -> None:
         """Framework hook: adopt the reader's stream list when ``streams`` is unset.
 
-        Called by `GraphDataset` before plan compilation (config-derived,
+        Called by `SaltDataset` before plan compilation (config-derived,
         static — no file I/O). A no-op when streams were configured
         explicitly.
         """
@@ -112,7 +112,7 @@ class Labels(Processor):
         if self._streams is None:
             raise ConfigError(
                 f"Labels module {self.name!r} has no streams — set streams: explicitly or "
-                "compile via GraphDataset (which forwards the reader's streams)"
+                "compile via SaltDataset (which forwards the reader's streams)"
             )
         requires = {f"raw.{stream}": TensorSpec(kind="data") for stream in self._streams}
         produces = {"labels.**": TensorSpec(kind="label")}

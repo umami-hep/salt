@@ -5,8 +5,8 @@
 #            --config readers/ftag1lite_streaming.yaml \
 #            --config <model>.yaml
 #
-# What changes: the datamodule builds `IterableGraphDataset` instead of
-# `GraphDataset`. Rows arrive in a different ORDER; the batch object, the plan
+# What changes: the datamodule builds `IterableSaltDataset` instead of
+# `SaltDataset`. Rows arrive in a different ORDER; the batch object, the plan
 # and everything downstream are unchanged.
 #
 # Why: the map-style path reads one batch-sized window at a time and holds a

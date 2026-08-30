@@ -31,7 +31,7 @@ REMAP_CASES = [
     ("salt.core.data.H5StructuredReader", "salt.data.H5StructuredReader"),
     ("salt.core.data.reader.H5StructuredReader", "salt.data.readers.reader.H5StructuredReader"),
     ("salt.core.data.features.Features", "salt.data.processors.features.Features"),
-    ("salt.core.data.datamodule.GraphDataModule", "salt.data.datamodule.GraphDataModule"),
+    ("salt.core.data.datamodule.SaltDataModule", "salt.data.datamodule.SaltDataModule"),
     ("salt.core.callbacks.Checkpoint", "salt.callbacks.Checkpoint"),
     ("salt.core.graph.planner.compile_plan", "salt.graph.planner.compile_plan"),
     ("salt.core.optim.HybridMuonAdamW", "salt.optim.HybridMuonAdamW"),

@@ -16,8 +16,8 @@ from numpy.lib.recfunctions import repack_fields
 
 import salt.inference as inference_mod
 from salt.cli import load_config
-from salt.data import Features, GraphDataset, H5StructuredReader, Labels
-from salt.data.datamodule import GraphDataModule
+from salt.data import Features, SaltDataset, H5StructuredReader, Labels
+from salt.data.datamodule import SaltDataModule
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan
@@ -269,7 +269,7 @@ class TestInferenceCoreLoop:
         write_dummy_file(h5_path, nd)
         schema = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5_path), schema)
-        dset = GraphDataset(
+        dset = SaltDataset(
             modules={
                 "reader": H5StructuredReader(
                     groups={"jets": {}, "tracks": {}}, schema=schema,
@@ -412,7 +412,7 @@ class TestUnlabelledDatasetPath:
         return {"h5": stripped, "schema": schema}
 
     def test_datamodule_serves_label_free_batches(self, stripped):
-        """GraphDataModule + the inference demand: the label-stripped file binds and
+        """SaltDataModule + the inference demand: the label-stripped file binds and
         serves batches with no labels leaf — the exact command data path.
         """
         export = ExportConfig(
@@ -422,7 +422,7 @@ class TestUnlabelledDatasetPath:
                 ExportInput(port="inputs.tracks", name="track_features", sequence=True),
             ],
         )
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules={
                 "reader": H5StructuredReader(
                     groups={"jets": {}, "tracks": {}}, schema=stripped["schema"]

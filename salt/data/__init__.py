@@ -1,14 +1,14 @@
 """salt.data — the v2 dataset pipeline: readers, processors, the
-`GraphDataset` runtime and `GraphDataModule` Lightning wiring, VDS helpers.
+`SaltDataset` runtime and `SaltDataModule` Lightning wiring, VDS helpers.
 """
 
 from __future__ import annotations
 
 from salt.data.base import Processor, Reader, RowBlock, SaltDatasetModule, WorkerCtx
-from salt.data.datamodule import GraphDataModule
-from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, GraphDataset
+from salt.data.datamodule import SaltDataModule
+from salt.data.dataset import MODEL_VISIBLE_NAMESPACES, SaltDataset
 from salt.data.input_samples import InputSamples
-from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
+from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableSaltDataset
 from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
 from salt.data.processors.features import Features
 from salt.data.processors.ftag_labeller import FtagLabeller
@@ -33,12 +33,10 @@ __all__ = [
     "Features",
     "FtagLabeller",
     "GlobalObjectCuts",
-    "GraphDataModule",
-    "GraphDataset",
     "GroupConfig",
     "H5StructuredReader",
     "InputSamples",
-    "IterableGraphDataset",
+    "IterableSaltDataset",
     "Labels",
     "ManifestEntry",
     "MaskFormerTargets",
@@ -48,6 +46,8 @@ __all__ = [
     "Processor",
     "Reader",
     "RowBlock",
+    "SaltDataModule",
+    "SaltDataset",
     "SaltDatasetModule",
     "SampleConfig",
     "StreamConfig",

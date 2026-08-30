@@ -1,7 +1,7 @@
 """``salt`` entry point — the jsonargparse YAML CLI for salt v2.
 
 ``salt fit``/``test`` go through `SaltCLI` (`LightningCLI` over `SaltModule`
-+ `GraphDataModule`); ``salt graph``/``schema``/``export``/``inference``/
++ `SaltDataModule`); ``salt graph``/``schema``/``export``/``inference``/
 ``merge-config``/``profile``/muP tooling dispatch to their own mains.
 """
 
@@ -26,7 +26,7 @@ from lightning.pytorch.loggers.comet import CometLogger
 from lightning.pytorch.trainer import Trainer
 
 from salt import cli as graph_cli
-from salt.data.datamodule import GraphDataModule
+from salt.data.datamodule import SaltDataModule
 from salt.graph.errors import ConfigError, GraphError
 from salt.logging import console, get_logger
 from salt.model.saltmodule import SaltModule
@@ -571,7 +571,7 @@ def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
 class SaltCLI(LightningCLI):
     """The salt v2 `LightningCLI`.
 
-    Wires `SaltModule` (subclass mode) and `GraphDataModule` through
+    Wires `SaltModule` (subclass mode) and `SaltDataModule` through
     `DeepMergeParser`, auto-loads ``configs/base.yaml``, and adds the salt
     top-level namespaces:
 
@@ -607,7 +607,7 @@ class SaltCLI(LightningCLI):
         kwargs.setdefault("save_config_kwargs", {"overwrite": True})
         super().__init__(
             model_class=SaltModule,
-            datamodule_class=GraphDataModule,
+            datamodule_class=SaltDataModule,
             subclass_mode_model=True,
             parser_class=DeepMergeParser,
             parser_kwargs=parser_kwargs,

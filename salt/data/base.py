@@ -102,7 +102,7 @@ def _require_root_deps(who: str, extra: str) -> None:
 class WorkerCtx:
     """Per-worker binding context handed to `SaltDatasetModule.bind`.
 
-    Built by `GraphDataset` once per (worker, plan): `read_fields` is the
+    Built by `SaltDataset` once per (worker, plan): `read_fields` is the
     demand-narrowed per-stream read set computed from the compiled plan,
     mapping ``stream -> {field: demanding module}`` in demand order. `step` is
     the receiving module's own plan step, so wildcard producers (`Labels`)
@@ -151,7 +151,7 @@ class SaltDatasetModule(ABC):
         """Per-worker lazy setup (open handles, allocate buffers); default no-op.
 
         This is the only place dataset modules may touch data files. Called
-        once per (worker process, plan) by `GraphDataset`.
+        once per (worker process, plan) by `SaltDataset`.
         """
 
     # -- setup-time face (once per stage, not per batch) ----------------------
@@ -285,7 +285,7 @@ class Reader(SaltDatasetModule):
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Read one contiguous batch and return the produced keys (flat dotted dict)."""
 
-    # -- sequential streaming surface (IterableGraphDataset) ------------------
+    # -- sequential streaming surface (IterableSaltDataset) ------------------
 
     def row_blocks(self) -> list[RowBlock]:
         """The reader's natural sequential read units, ascending and covering
@@ -385,7 +385,7 @@ class Reader(SaltDatasetModule):
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema for one served stream, when a schema artifact is configured.
 
-        Used by `GraphDataset` to statically validate demanded raw fields.
+        Used by `SaltDataset` to statically validate demanded raw fields.
         Default: None (no static validation possible).
         """
         del stream
@@ -441,7 +441,7 @@ class Reader(SaltDatasetModule):
     ) -> Reader:
         """Clone this reader onto another source file (config-only, no file I/O).
 
-        `GraphDataModule` uses this to derive the per-stage readers from the
+        `SaltDataModule` uses this to derive the per-stage readers from the
         single configured prototype.
 
         `stage` (``"train"``/``"val"``/``"test"``) is the optional per-reader
@@ -459,7 +459,7 @@ class Reader(SaltDatasetModule):
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement with_source(); it cannot be used "
-            "as a GraphDataModule reader prototype"
+            "as a SaltDataModule reader prototype"
         )
 
     def sources(self) -> list[Path]:

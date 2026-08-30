@@ -91,7 +91,7 @@ def _merge(base: Any, over: Any) -> Any:
     """``DeepMergeParser`` semantics: dicts union key-by-key, lists replace.
 
     ``None`` markers are KEPT, not treated as deletions here — deletion happens
-    at assembly time, where ``SaltModule``/``GraphDataModule``/``SaltCLI``
+    at assembly time, where ``SaltModule``/``SaltDataModule``/``SaltCLI``
     filter their module dicts. Resolving them earlier would let a later config
     resurrect an entry an earlier one deleted.
     """

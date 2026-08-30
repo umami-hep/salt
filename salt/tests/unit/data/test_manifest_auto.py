@@ -21,9 +21,9 @@ from types import SimpleNamespace
 import pytest
 
 from salt.data.base import RowBlock
-from salt.data.datamodule import GraphDataModule
-from salt.data.dataset import GraphDataset
-from salt.data.iterable_dataset import IterableGraphDataset
+from salt.data.datamodule import SaltDataModule
+from salt.data.dataset import SaltDataset
+from salt.data.iterable_dataset import IterableSaltDataset
 from salt.data.manifest import (
     CorpusManifest,
     ManifestEntry,
@@ -133,7 +133,7 @@ def _corpus(root: Path, names: list[str]) -> str:
     return str(root / "*.root")
 
 
-def _dm(train: str, val: str | None = None, **kwargs) -> GraphDataModule:
+def _dm(train: str, val: str | None = None, **kwargs) -> SaltDataModule:
     """A streaming datamodule over the stub reader, `manifest: auto` by default."""
     modules = {
         "reader": FileStubReader(files=[]),
@@ -141,7 +141,7 @@ def _dm(train: str, val: str | None = None, **kwargs) -> GraphDataModule:
     }
     kwargs.setdefault("manifest", "auto")
     kwargs.setdefault("iterable", True)
-    return GraphDataModule(
+    return SaltDataModule(
         modules=modules,
         train_file=train,
         val_file=val if val is not None else train,
@@ -158,7 +158,7 @@ def _manifests(directory: Path) -> list[Path]:
     return sorted(directory.glob("salt_manifest_*.json"))
 
 
-def _uids(dataset: IterableGraphDataset) -> list[int]:
+def _uids(dataset: IterableSaltDataset) -> list[int]:
     """Every uid the streaming dataset emits, via the reader-level batches."""
     from salt.tests.unit.data.test_iterable_dataset import _batch_uids
 
@@ -322,7 +322,7 @@ def test_second_run_reuses_it_and_setup_opens_nothing(tmp_path) -> None:
     again.prepare_data()
     again.setup("fit")
     assert FileStubReader.opens == 0
-    assert isinstance(again.train_dset, IterableGraphDataset)
+    assert isinstance(again.train_dset, IterableSaltDataset)
     assert isinstance(again.train_dset.manifest, CorpusManifest)
     assert len(again.train_dset) == (2 * ROWS_PER_FILE) // 5
 
@@ -523,7 +523,7 @@ def test_auto_is_ignored_on_the_map_style_path(tmp_path) -> None:
     dm.prepare_data()
     dm.setup("fit")
     assert _manifests(root) == []
-    assert isinstance(dm.train_dset, GraphDataset)
+    assert isinstance(dm.train_dset, SaltDataset)
 
 
 def test_a_sourceless_reader_degrades_instead_of_failing(tmp_path) -> None:
@@ -542,7 +542,7 @@ def test_a_sourceless_reader_degrades_instead_of_failing(tmp_path) -> None:
         "feats": Features(variables={"event": ["val"]}),
     }
     corpus = _corpus(tmp_path / "corpus", ["a.root"])
-    dm = GraphDataModule(
+    dm = SaltDataModule(
         modules=modules,
         train_file=corpus,
         val_file=corpus,

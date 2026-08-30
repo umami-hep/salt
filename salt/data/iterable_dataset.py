@@ -1,4 +1,4 @@
-"""`IterableGraphDataset` — file-sharded sequential streaming over any `Reader`,
+"""`IterableSaltDataset` — file-sharded sequential streaming over any `Reader`,
 with per-shard proportional interleaving and bounded buffers.
 """
 
@@ -20,7 +20,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import Sinks
 from salt.graph.spec import Mode
 
-__all__ = ["DEFAULT_BLOCK_ROWS", "IterableGraphDataset"]
+__all__ = ["DEFAULT_BLOCK_ROWS", "IterableSaltDataset"]
 
 DEFAULT_BLOCK_ROWS = 16_384
 """Rows per reader call — the measured knee of the FTAG1LITE read-range curve.
@@ -32,14 +32,14 @@ shards affordable. Curve and numbers: study experiment 06, job 3966.
 """
 
 
-class IterableGraphDataset(_PlanRunner, IterableDataset):
+class IterableSaltDataset(_PlanRunner, IterableDataset):
     """Streaming dataset: sequential blocks, sharded across ranks x workers.
 
     Reads large contiguous `RowBlock`s from the reader instead of one
     batch-sized window at a time, fills batches from them, and interleaves
     groups with the proportional stratification `MultiSampleReader` already
     uses. Downstream is unchanged — the same compiled plan produces the same
-    batch object as `GraphDataset`; only the order and the read granularity
+    batch object as `SaltDataset`; only the order and the read granularity
     differ.
 
     Sharding is by ROW INTERVAL, not by file: shard ``s`` of ``S`` takes
@@ -51,7 +51,7 @@ class IterableGraphDataset(_PlanRunner, IterableDataset):
 
     `modules`, `mode`, `sinks`, `seed`, `debug` and `sink_origins` are the
     `_PlanRunner` constructor's, documented there. The user-facing spelling of
-    the streaming knobs below is `GraphDataModule`'s (``data.block_rows`` and
+    the streaming knobs below is `SaltDataModule`'s (``data.block_rows`` and
     friends), which is where they are set in a config.
 
     Parameters

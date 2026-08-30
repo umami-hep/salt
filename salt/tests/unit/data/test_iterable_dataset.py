@@ -1,4 +1,4 @@
-"""Reader-agnostic tests for `IterableGraphDataset` — stubs only, no uproot, no ROOT.
+"""Reader-agnostic tests for `IterableSaltDataset` — stubs only, no uproot, no ROOT.
 
 Every guarantee the streaming path claims is checked here against an in-memory
 stub reader whose rows carry a unique id, so coverage, disjointness, epoch
@@ -18,7 +18,7 @@ import pytest
 
 from salt.data.base import Reader, RowBlock, WorkerCtx
 from salt.data.datamodule import AUTO_PREFETCH_CAP, auto_prefetch_factor
-from salt.data.iterable_dataset import IterableGraphDataset
+from salt.data.iterable_dataset import IterableSaltDataset
 from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
 from salt.data.processors.features import Features, _all_finite
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
@@ -158,14 +158,14 @@ def _multisample(sizes: list[int], t: int = 4, n_blocks: int = 3) -> MultiSample
     return MultiSampleReader(samples=samples, label_stream="event", label_field="process")
 
 
-def _dataset(reader: Reader, batch_size: int = 8, **kwargs) -> IterableGraphDataset:
+def _dataset(reader: Reader, batch_size: int = 8, **kwargs) -> IterableSaltDataset:
     """A streaming dataset over `reader` producing the event uid + label."""
     modules = {
         "reader": reader,
         "feats": Features(variables={"event": ["val"]}),
     }
     kwargs.setdefault("block_rows", None)
-    return IterableGraphDataset(
+    return IterableSaltDataset(
         modules,
         mode=Mode.FIT,
         sinks=["inputs.event"],
@@ -280,7 +280,7 @@ def _stream_uids(reader_factory, n_shards: int, batch_size: int = 8, **kwargs) -
     return out
 
 
-def _batch_uids(dataset: IterableGraphDataset) -> list[int]:
+def _batch_uids(dataset: IterableSaltDataset) -> list[int]:
     """Flatten a shard's stream into uids by reading the reader's raw output directly."""
     uids: list[int] = []
     for batch in _raw_batches(dataset):
@@ -288,7 +288,7 @@ def _batch_uids(dataset: IterableGraphDataset) -> list[int]:
     return uids
 
 
-def _raw_batches(dataset: IterableGraphDataset) -> list[dict]:
+def _raw_batches(dataset: IterableSaltDataset) -> list[dict]:
     """The reader-level batches the dataset assembles, before the torch boundary.
 
     Monkey-free: `_run_plan` is the only step between assembly and torch, so the
@@ -573,7 +573,7 @@ def test_manifest_rejects_a_foreign_format_version(tmp_path) -> None:  # noqa: A
 def test_rejects_impossible_configuration(kwargs: dict) -> None:
     """Bad knobs fail at construction (or at shard resolution), never silently."""
     with pytest.raises(ConfigError):
-        dataset = IterableGraphDataset(
+        dataset = IterableSaltDataset(
             {"reader": BlockStubReader(n=10), "feats": Features(variables={"event": ["val"]})},
             mode=Mode.FIT,
             sinks=["inputs.event"],

@@ -10,7 +10,7 @@ import torch
 
 from salt.data import (
     Features,
-    GraphDataModule,
+    SaltDataModule,
     H5StructuredReader,
     InputSamples,
     Labels,
@@ -203,7 +203,7 @@ class TestSetupPassResolution:
 
 class TestDatamoduleBinding:
     def test_setup_binds_reader_from_ctx(self, data):
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules_with_input_samples(data),
             batch_size=256,
             sinks=SINKS,
@@ -221,7 +221,7 @@ class TestDatamoduleBinding:
         assert dm._setup_ctx.get("source.reader.val.pattern") == str(data["h5"])
 
     def test_num_cap_applies_from_input_samples(self, data):
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules_with_input_samples(data, num={"train": 300, "val": 400}),
             batch_size=64,
             sinks=SINKS,
@@ -232,7 +232,7 @@ class TestDatamoduleBinding:
         assert len(dm.val_dset) == 400
 
     def test_input_samples_is_setup_only_not_in_batch_dict(self, data):
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules_with_input_samples(data), sinks=SINKS, pin_memory=False
         )
         assert "input_samples" in dm._setup_modules
@@ -242,7 +242,7 @@ class TestDatamoduleBinding:
         assert "input_samples" not in dm.train_dset.plan.module_names
 
     def test_test_stage_resolves(self, data):
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules_with_input_samples(data, num={"test": 250}),
             sinks=SINKS,
             pin_memory=False,
@@ -255,7 +255,7 @@ class TestDatamoduleBinding:
         modules = build_modules_with_input_samples(data)
         modules["input_samples2"] = InputSamples(files={"train": data["h5"]})
         with pytest.raises(ConfigError, match="at most one InputSamples"):
-            GraphDataModule(modules=modules, sinks=SINKS)
+            SaltDataModule(modules=modules, sinks=SINKS)
 
 
 # deprecated-alias path (implicit InputSamples) + byte-identity parity
@@ -263,7 +263,7 @@ class TestDatamoduleBinding:
 
 class TestAliasMigrationWindow:
     def test_alias_synthesises_implicit_input_samples(self, data):
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules_no_input_samples(data),
             train_file=data["h5"],
             val_file=data["h5"],
@@ -278,7 +278,7 @@ class TestAliasMigrationWindow:
         assert len(dm.val_dset) == N_JETS
 
     def test_alias_num_cap_carried_through(self, data):
-        dm = GraphDataModule(
+        dm = SaltDataModule(
             modules=build_modules_no_input_samples(data),
             train_file=data["h5"],
             val_file=data["h5"],
@@ -293,14 +293,14 @@ class TestAliasMigrationWindow:
 
     def test_byte_identical_input_samples_vs_alias(self, data):
         """The parity-preserving default: served bytes identical via either path."""
-        dm_is = GraphDataModule(
+        dm_is = SaltDataModule(
             modules=build_modules_with_input_samples(data),
             batch_size=128,
             sinks=SINKS,
             pin_memory=False,
         )
         dm_is.setup("fit")
-        dm_alias = GraphDataModule(
+        dm_alias = SaltDataModule(
             modules=build_modules_no_input_samples(data),
             train_file=data["h5"],
             val_file=data["h5"],

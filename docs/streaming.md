@@ -5,7 +5,7 @@ plan, run the same processors and produce the same batch object; they differ
 only in how rows are addressed and how much of the corpus a reader process has
 to know about.
 
-| | `GraphDataset` (map-style, default) | `IterableGraphDataset` (streaming) |
+| | `SaltDataset` (map-style, default) | `IterableSaltDataset` (streaming) |
 |---|---|---|
 | addressing | a sampler hands it contiguous row slices | it yields whole batches itself |
 | read size | one batch (e.g. 1,000 rows) | one block (default 16,384 rows) |

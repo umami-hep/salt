@@ -1,4 +1,4 @@
-"""`GraphDataModule` — Lightning wiring for the v2 dataset pipeline.
+"""`SaltDataModule` — Lightning wiring for the v2 dataset pipeline.
 
 Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
 (no collate); declared setup graph for VDS resolution and optional staging.
@@ -15,9 +15,9 @@ import lightning
 from torch.utils.data import DataLoader
 
 from salt.data.base import Reader, SaltDatasetModule, SetupBundle
-from salt.data.dataset import GraphDataset
+from salt.data.dataset import SaltDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
-from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableGraphDataset
+from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableSaltDataset
 from salt.data.manifest import (
     AUTO_MANIFEST,
     CorpusManifest,
@@ -36,7 +36,7 @@ from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import PRIMARY_MODES, Mode
 from salt.logging import get_logger
 
-__all__ = ["AUTO_PREFETCH_CAP", "GraphDataModule", "auto_prefetch_factor"]
+__all__ = ["AUTO_PREFETCH_CAP", "SaltDataModule", "auto_prefetch_factor"]
 
 _LOG = get_logger(__name__)
 
@@ -149,7 +149,7 @@ def _is_setup_only(module: SaltDatasetModule) -> bool:
     return not has_batch
 
 
-class GraphDataModule(lightning.LightningDataModule):
+class SaltDataModule(lightning.LightningDataModule):
     """LightningDataModule running the v2 dataset pipeline.
 
     Parameters
@@ -202,8 +202,8 @@ class GraphDataModule(lightning.LightningDataModule):
     debug : bool, optional
         Enable the boundary non-aliasing assertion.
     iterable : bool, optional
-        Build `IterableGraphDataset` (sequential, sharded streaming) instead of
-        the map-style `GraphDataset`, by default False. The streaming path reads
+        Build `IterableSaltDataset` (sequential, sharded streaming) instead of
+        the map-style `SaltDataset`, by default False. The streaming path reads
         large contiguous blocks and shards across ranks x workers by row
         interval, which is what lets a run scale past the point where every
         reader process can hold a row-granular corpus index. Downstream is
@@ -285,7 +285,7 @@ class GraphDataModule(lightning.LightningDataModule):
         readers = [(name, m) for name, m in modules.items() if isinstance(m, Reader)]
         if len(readers) != 1:
             raise ConfigError(
-                f"GraphDataModule needs exactly one Reader in modules, got {len(readers)} "
+                f"SaltDataModule needs exactly one Reader in modules, got {len(readers)} "
                 f"({[name for name, _ in readers]})"
             )
         self._reader_name, self._reader_proto = readers[0]
@@ -310,8 +310,8 @@ class GraphDataModule(lightning.LightningDataModule):
         self.test_vds_path = test_vds_path
         self._wire_vds(modules)
         # Partition setup-only modules OUT before the per-batch dataset deepcopy:
-        # they never reach GraphDataset, so neither the dead-module check nor
-        # GraphDataset's single-Reader guard miscounts them.
+        # they never reach SaltDataset, so neither the dead-module check nor
+        # SaltDataset's single-Reader guard miscounts them.
         self._setup_modules = {name: m for name, m in modules.items() if _is_setup_only(m)}
         self._batch_modules = {
             name: m for name, m in modules.items() if name not in self._setup_modules
@@ -350,9 +350,9 @@ class GraphDataModule(lightning.LightningDataModule):
         # filesystem set this back to True; the atomic write makes that race
         # wasteful, never corrupting.
         self.prepare_data_per_node = False
-        self.train_dset: GraphDataset | IterableGraphDataset | None = None
-        self.val_dset: GraphDataset | IterableGraphDataset | None = None
-        self.test_dset: GraphDataset | IterableGraphDataset | None = None
+        self.train_dset: SaltDataset | IterableSaltDataset | None = None
+        self.val_dset: SaltDataset | IterableSaltDataset | None = None
+        self.test_dset: SaltDataset | IterableSaltDataset | None = None
 
     def _wire_input_samples(self, modules: dict[str, SaltDatasetModule]) -> None:
         """Assemble the data-sourcing setup graph (mutates `modules` in place).
@@ -366,7 +366,7 @@ class GraphDataModule(lightning.LightningDataModule):
         existing = [(name, m) for name, m in modules.items() if isinstance(m, InputSamples)]
         if len(existing) > 1:
             raise ConfigError(
-                f"GraphDataModule allows at most one InputSamples, got {len(existing)} "
+                f"SaltDataModule allows at most one InputSamples, got {len(existing)} "
                 f"({[name for name, _ in existing]}); one InputSamples owns the single "
                 "Reader's source chain"
             )
@@ -409,7 +409,7 @@ class GraphDataModule(lightning.LightningDataModule):
         existing = [(name, m) for name, m in modules.items() if isinstance(m, VDS)]
         if len(existing) > 1:
             raise ConfigError(
-                f"GraphDataModule allows at most one VDS, got {len(existing)} "
+                f"SaltDataModule allows at most one VDS, got {len(existing)} "
                 f"({[name for name, _ in existing]}); one VDS owns the single Reader's "
                 "wildcard resolution"
             )
@@ -561,7 +561,7 @@ class GraphDataModule(lightning.LightningDataModule):
         )
         return reader, num
 
-    def _make_dataset(self, mode: Mode) -> GraphDataset | IterableGraphDataset:
+    def _make_dataset(self, mode: Mode) -> SaltDataset | IterableSaltDataset:
         """Clone the reader prototype onto a stage file and build its dataset.
 
         Deep-copies processors per stage — bind-time state (e.g. Labels'
@@ -573,7 +573,7 @@ class GraphDataModule(lightning.LightningDataModule):
             raise ConfigError(f"no file configured for mode {mode.name}")
         if self._sinks is None:
             raise ConfigError(
-                "GraphDataModule has no sinks — pass sinks= or call set_sinks() with the "
+                "SaltDataModule has no sinks — pass sinks= or call set_sinks() with the "
                 "model boundary's demanded keys before setup"
             )
         # Resolved BEFORE staging: an auto manifest is keyed by the corpus the
@@ -599,14 +599,14 @@ class GraphDataModule(lightning.LightningDataModule):
             "sink_origins": (self._sink_origins or {}).get(mode),
         }
         if not self.iterable:
-            return GraphDataset(modules, **common)
+            return SaltDataset(modules, **common)
         # Streaming: shuffle and drop-last are FIT-only. Val/test stream in
         # order and keep the ragged tail, which is the eval writers'
         # row-alignment contract — the same split the map-style loaders make
         # through the sampler, expressed on the dataset because an
         # IterableDataset has no sampler to make it.
         fit = mode == Mode.FIT
-        return IterableGraphDataset(
+        return IterableSaltDataset(
             modules,
             batch_size=self.batch_size,
             shuffle=self.shuffle_stream and fit,
@@ -742,7 +742,7 @@ class GraphDataModule(lightning.LightningDataModule):
         )
 
     def get_dataloader(
-        self, stage: str, dataset: GraphDataset | IterableGraphDataset, shuffle: bool
+        self, stage: str, dataset: SaltDataset | IterableSaltDataset, shuffle: bool
     ) -> DataLoader:
         """Build a dataloader over a stage dataset.
 
@@ -759,7 +759,7 @@ class GraphDataModule(lightning.LightningDataModule):
         """
         drop_last = stage == "fit"
         sampler: Any = None
-        if isinstance(dataset, IterableGraphDataset):
+        if isinstance(dataset, IterableSaltDataset):
             if self.trainer is not None:
                 dataset.epoch = int(self.trainer.current_epoch)
         else:

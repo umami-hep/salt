@@ -27,7 +27,7 @@ import pytest
 import torch
 from lightning import Callback, Trainer
 
-from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.model.modules.losses import LossSum
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
@@ -57,7 +57,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
 
 
-def build_datamodule(data) -> GraphDataModule:
+def build_datamodule(data) -> SaltDataModule:
     modules = {
         "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
         "features": Features(
@@ -65,7 +65,7 @@ def build_datamodule(data) -> GraphDataModule:
         ),
         "labels": Labels(),
     }
-    return GraphDataModule(
+    return SaltDataModule(
         modules, batch_size=100, num_workers=0,
         train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
     )
@@ -87,7 +87,7 @@ def make_trainer(**kwargs) -> Trainer:
     )
 
 
-def offline_bind(model: SaltModule, dm: GraphDataModule, max_epochs: int = 10) -> None:
+def offline_bind(model: SaltModule, dm: SaltDataModule, max_epochs: int = 10) -> None:
     """Bind a model against a datamodule WITHOUT a training loop, with a stub
     trainer exposing the fields `configure_optimizers`/schedule-setup read.
     """

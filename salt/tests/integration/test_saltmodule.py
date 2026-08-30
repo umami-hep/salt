@@ -11,7 +11,7 @@ import yaml
 from lightning import Callback, Trainer
 from torch import nn
 
-from salt.data import Features, GraphDataModule, H5StructuredReader, Labels
+from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.graph import IO, Bundle, ConfigError, Mode
 from salt.model.base import SaltModelModule
 from salt.model.modules.losses import LossGLS, LossSum
@@ -52,7 +52,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
 
 
-def build_datamodule(data, **kwargs) -> GraphDataModule:
+def build_datamodule(data, **kwargs) -> SaltDataModule:
     # fresh data modules per call — the dm clones/copies them per stage
     modules = {
         "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
@@ -64,7 +64,7 @@ def build_datamodule(data, **kwargs) -> GraphDataModule:
     kwargs.setdefault("train_file", data["h5"])
     kwargs.setdefault("val_file", data["h5"])
     kwargs.setdefault("test_file", data["h5"])
-    return GraphDataModule(modules, batch_size=100, num_workers=0, **kwargs)
+    return SaltDataModule(modules, batch_size=100, num_workers=0, **kwargs)
 
 
 def build_model(data, norm_dict=None, **kwargs) -> SaltModule:
@@ -155,7 +155,7 @@ class TestConstruction:
             build_model(data, optimizer="SGD")
 
     def test_setup_without_datamodule_rejected(self, data):
-        with pytest.raises(ConfigError, match="GraphDataModule"):
+        with pytest.raises(ConfigError, match="SaltDataModule"):
             build_model(data).setup("fit")
 
     def test_unsupported_stage_rejected(self, data):
@@ -238,7 +238,7 @@ class TestConstruction:
 
 
 class TestDataModuleConstruction:
-    """GraphDataModule validates its module dict against SaltDatasetModule."""
+    """SaltDataModule validates its module dict against SaltDatasetModule."""
 
     def test_raw_object_in_data_modules_rejected(self, data):
         class _NotADatasetModule:
@@ -253,7 +253,7 @@ class TestDataModuleConstruction:
             "bogus": _NotADatasetModule(),
         }
         with pytest.raises(ConfigError, match=r"bogus.*not a SaltDatasetModule"):
-            GraphDataModule(
+            SaltDataModule(
                 modules,
                 train_file=data["h5"],
                 val_file=data["h5"],
@@ -300,7 +300,7 @@ class TestFit:
         assert torch.allclose(norm.stds_jets, expect_stds)
 
     def test_sinks_auto_adopted_by_datamodule(self, fitted):
-        """GraphDataModule.setup adopted the model's sink_demand (no set_sinks call)."""
+        """SaltDataModule.setup adopted the model's sink_demand (no set_sinks call)."""
         dm = fitted["dm"]
         assert dm._sinks is not None  # noqa: SLF001 - asserting the auto-wiring itself
         assert set(dm._sinks[Mode.FIT]) == FIT_DEMAND  # noqa: SLF001
@@ -721,7 +721,7 @@ class TestOriginWeightingResolvedAtSetup:
         )
         return Schema(groups=groups, attrs=dict(schema.attrs))
 
-    def _datamodule_with_origin_schema(self, data) -> GraphDataModule:
+    def _datamodule_with_origin_schema(self, data) -> SaltDataModule:
         schema = self._schema_with_origin_attr(data)
         modules = {
             "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=schema),
@@ -730,7 +730,7 @@ class TestOriginWeightingResolvedAtSetup:
             ),
             "labels": Labels(),
         }
-        return GraphDataModule(
+        return SaltDataModule(
             modules,
             batch_size=100,
             num_workers=0,

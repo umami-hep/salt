@@ -1,4 +1,4 @@
-"""Pure sharding + interleave arithmetic for `IterableGraphDataset` — no reader, no
+"""Pure sharding + interleave arithmetic for `IterableSaltDataset` — no reader, no
 torch, no I/O, so the streaming guarantees are testable without a dataset.
 """
 
