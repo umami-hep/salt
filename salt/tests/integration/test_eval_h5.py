@@ -1,9 +1,10 @@
-"""The outputs:-section + dumb-sink eval H5 — v2 self-consistency checks.
+"""Eval-H5 output checks: implicit-sink CLI wiring, outputs:-section self-consistency.
 
-The section stack runs end-to-end via the real CLI, and the section H5's
-contents/order are asserted from first principles (config + section manifest).
-v1 byte-parity was closed at the frozen pin 29c67a1 (parity-closure doctrine,
-docs/architecture.md).
+Two halves of one story, merged from ``test_outputs_explicit.py`` +
+``test_outputs_section.py``: the SAME gn2v2-dummy config and fit fixture,
+stacked with (section half) or without (explicit half) the full-family
+overlay, each checked against its own committed golden. Also the eval-H5
+column-order + section-writer-unit + section-ONNX-contract home.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import pytest
 import yaml
 
 from salt.graph.spec import Mode
-from salt.main import CONFIG_DIR, main
+from salt.main import main
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.pad_mask_writer import PadMaskWriter
 from salt.outputs.run_task_output import RunTaskOutput
@@ -32,46 +33,11 @@ from salt.tests._fixtures.gn2v2_test_config import full_family_config, small_con
 
 DUMMY_CFG = small_config()
 CUTOVER34_CFG = full_family_config()
-GOLDEN = (
-    Path(__file__).resolve().parents[1] / "_fixtures/output_goldens/gn2v2-dummy-cutover34.json"
-)
+_GOLDEN_DIR = Path(__file__).resolve().parents[1] / "_fixtures/output_goldens"
+EXPLICIT_GOLDEN = _GOLDEN_DIR / "gn2v2-dummy.json"
+SECTION_GOLDEN = _GOLDEN_DIR / "gn2v2-dummy-cutover34.json"
 RUN_NAME = "GN2v2_dummy"
 N_TEST = 300
-
-
-def _golden_task_columns() -> dict[str, list[str]]:
-    """Per-stream ordered flat TASK column names from the committed golden."""  # noqa: DOC201
-    golden = json.loads(GOLDEN.read_text())
-    per_stream: dict[str, list[str]] = {}
-    for col in golden["h5"]["columns"]:
-        per_stream.setdefault(col["stream"], []).extend(col["column_names"])
-    return per_stream
-
-
-def _expected_full_columns(src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The FULL ordered per-stream H5 column contract from the committed golden.
-
-    Exact columns = input-copy source columns FIRST (in source-file order; an
-    empty golden ``copy_inputs`` means the copy-ALL default), then task columns
-    in golden order — including each task's trailing ``target_{task}`` label
-    column — then the trailing pad-mask column. Asserting H5 dtype.names EQUAL
-    this (not merely contain it) enforces "no ADDED columns".
-    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
-    h5 = json.loads(GOLDEN.read_text())["h5"]
-    tasks: dict[str, list[str]] = {}
-    for col in h5["columns"]:
-        tasks.setdefault(col["stream"], []).extend(col["column_names"])
-    copy_cfg = h5["copy_inputs"]
-    pad_streams = set(h5["write_pad_mask"])
-    per_stream: dict[str, list[str]] = {}
-    for stream, file_fields in src_cols.items():
-        cols = list(copy_cfg.get(stream) or file_fields)
-        cols += tasks.get(stream, [])
-        if stream in pad_streams:
-            cols.append("mask")
-        per_stream[stream] = cols
-    return per_stream
-
 
 JET_SUFFIXES = ["pb", "pc", "pu"]
 ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
@@ -79,9 +45,46 @@ ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
 # integer column + ONNX int8 leaf). Nothing is deferred in this config.
 
 
+def _golden_task_columns(golden: Path) -> dict[str, list[str]]:
+    """Per-stream ordered flat TASK column names from a committed golden."""  # noqa: DOC201
+    data = json.loads(golden.read_text())
+    per_stream: dict[str, list[str]] = {}
+    for col in data["h5"]["columns"]:
+        per_stream.setdefault(col["stream"], []).extend(col["column_names"])
+    return per_stream
+
+
+def _expected_full_columns(golden: Path, src_cols: dict[str, list[str]]) -> dict[str, list[str]]:
+    """The FULL ordered per-stream H5 column contract from a committed golden.
+
+    Exact columns = input-copy source columns FIRST (in source-file order; an
+    empty golden ``copy_inputs`` means the copy-ALL default), then task
+    columns in golden order — including each task's trailing
+    ``target_{task}`` label column — then the trailing pad-mask column.
+    Asserting the H5 dtype.names EQUAL this list (not merely contain it)
+    enforces "no ADDED columns" beyond the committed golden.
+    """  # noqa: DOC201 - test helper, no Returns block per docstring policy
+    h5 = json.loads(golden.read_text())["h5"]
+    tasks: dict[str, list[str]] = {}
+    for col in h5["columns"]:
+        tasks.setdefault(col["stream"], []).extend(col["column_names"])
+    copy_cfg = h5["copy_inputs"]
+    pad_streams = set(h5["write_pad_mask"])
+    per_stream: dict[str, list[str]] = {}
+    for stream, file_fields in src_cols.items():
+        # input copies: explicit golden subset, else copy-all (source order)
+        cols = list(copy_cfg.get(stream) or file_fields)
+        cols += tasks.get(stream, [])  # task columns in golden order
+        if stream in pad_streams:
+            cols.append("mask")  # pad mask written last
+        per_stream[stream] = cols
+    return per_stream
+
+
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("w34_parity")
+    """Synthetic norm dict + dummy H5 + schema artifact — shared by both halves."""
+    base = tmp_path_factory.mktemp("eval_h5_data")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
     h5_path = base / "pp_output_test_ttbar.h5"
@@ -103,7 +106,8 @@ def _overrides(data) -> list[str]:
 
 @pytest.fixture(scope="module")
 def ckpt(data, tmp_path_factory) -> Path:
-    fit_dir = tmp_path_factory.mktemp("w34_fit")
+    """A live 1-epoch fit of the shipped gn2v2-dummy config — shared by both halves."""
+    fit_dir = tmp_path_factory.mktemp("eval_h5_fit")
     rc = main([
         "fit",
         "--config",
@@ -118,15 +122,38 @@ def ckpt(data, tmp_path_factory) -> Path:
         "--trainer.num_sanity_val_steps=0",
         "--trainer.log_every_n_steps=1",
     ])
-    assert rc == 0
+    assert rc == 0, "salt fit on the shipped gn2v2-dummy config must run end-to-end"
     ckpts = sorted(fit_dir.rglob("*.ckpt"))
     assert ckpts, f"no checkpoint under {fit_dir}"
     return ckpts[0]
 
 
 @pytest.fixture(scope="module")
+def cli_h5(data, ckpt) -> Path:
+    """Eval H5 from ``salt test`` — the H5 sink is IMPLICIT (wired by the command).
+
+    No ``--callbacks.h5_output`` override: the sink is injected over the outputs:
+    section and writes to the default ``{ckpt_dir}/{ckpt_stem}__test_{sample}.h5``.
+    """
+    rc = main([
+        "test",
+        "--config",
+        str(DUMMY_CFG),
+        f"--data.test_file={data['h5']}",
+        f"--ckpt_path={ckpt}",
+        f"--data.num_test={N_TEST}",
+        f"--trainer.default_root_dir={data['dir']}",
+        *_overrides(data),
+    ])
+    assert rc == 0, "salt test on the shipped gn2v2-dummy config must run end-to-end"
+    evals = sorted(ckpt.parent.glob("*__test_*.h5"))
+    assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
+    return evals[-1]
+
+
+@pytest.fixture(scope="module")
 def section_h5(data, ckpt) -> Path:
-    """Eval H5 from the outputs:-section + IMPLICIT sinks (via the real CLI).
+    """Eval H5 from the outputs:-section + IMPLICIT sinks (DUMMY_CFG + CUTOVER34_CFG).
 
     No ``--callbacks.h5_output`` — the H5 sink is wired by the
     command over the section and writes the default-templated eval H5.
@@ -147,6 +174,85 @@ def section_h5(data, ckpt) -> Path:
     evals = sorted(ckpt.parent.glob("*__test_*.h5"))
     assert evals, f"the implicit H5 sink wrote no eval H5 next to {ckpt}"
     return evals[-1]
+
+
+# --------------------------------------------------- implicit-sink half (single config)
+
+
+class TestImplicitSinkCliE2E:
+    """The shipped gn2v2-dummy config drives the implicit H5 sink end-to-end."""
+
+    def test_cli_writes_eval_h5(self, cli_h5):
+        """``salt test`` writes a non-empty eval H5 with the reader-stream groups."""
+        with h5py.File(cli_h5) as f:
+            assert set(f.keys()) >= {"jets", "tracks"}
+            assert f["jets"].shape[0] == N_TEST
+
+    def test_task_columns_match_golden(self, data, cli_h5):
+        """The eval H5's columns EQUAL the committed Phase-C golden, per stream, in order.
+
+        Exact-list equality (not membership): pre-Phase-C columns byte-identical,
+        plus exactly the per-task ``target_{task}`` label columns the golden
+        declares. Any OTHER added column fails here.
+        """
+        with h5py.File(data["h5"]) as src:
+            src_cols = {
+                "jets": list(src["jets"].dtype.names),
+                "tracks": list(src["tracks"].dtype.names),
+            }
+        expected = _expected_full_columns(EXPLICIT_GOLDEN, src_cols)
+        with h5py.File(cli_h5) as f:
+            present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
+        assert present.keys() == expected.keys(), (
+            f"H5 streams {sorted(present)} != golden streams {sorted(expected)}"
+        )
+        for stream, cols in expected.items():
+            assert present[stream] == cols, (
+                f"{stream} columns diverge from golden (added/removed/reordered): "
+                f"got {present[stream]}, golden {cols}"
+            )
+
+    def test_probs_are_softmaxed_not_double_converted(self, cli_h5):
+        """The prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
+        expected = _golden_task_columns(EXPLICIT_GOLDEN)
+        with h5py.File(cli_h5) as f:
+            jets = f["jets"][:]
+            tracks = f["tracks"][:]
+            valid = ~tracks["mask"]
+        # the golden task columns include the Phase-C target_{task} label
+        # columns — only the prob columns participate in the sum-to-1 check
+        jet_cols = [c for c in expected["jets"] if not c.startswith("target_")]
+        prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
+        assert np.allclose(prob_sum, 1.0, atol=1e-3)
+        # padded track positions read 0.0 (masked softmax), valid sum to ~1
+        origin_cols = [c for c in expected["tracks"] if not c.startswith("target_")]
+        origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
+        assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
+        assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
+
+    def test_target_label_columns_match_source_labels(self, data, cli_h5):
+        """Phase-C gate: the target_{task} columns EQUAL the source-file labels.
+
+        gn2v2-opendata has no label_map, so the consumed global label is the raw
+        flavour_label; the per-token origin target reads the raw label on
+        valid positions and -1 on padded ones.
+        """
+        with h5py.File(data["h5"]) as src:
+            src_flav = src["jets"]["flavour_label"][:N_TEST].astype("i4")
+            src_origin = src["tracks"]["ftagTruthOriginLabel"][:N_TEST].astype("i4")
+            src_valid = src["tracks"]["valid"][:N_TEST].astype(bool)
+        with h5py.File(cli_h5) as f:
+            got_flav = f["jets"]["target_jets_classification"][:]
+            got_origin = f["tracks"]["target_track_origin"][:]
+        assert (got_flav == src_flav).all()
+        # valid positions read the raw label, except label==-2 which the loss
+        # (and hence the target column) masks to -1 (MR!60199 workaround)
+        v_got, v_src = got_origin[src_valid], src_origin[src_valid]
+        assert ((v_got == v_src) | ((v_src == -2) & (v_got == -1))).all()
+        assert (got_origin[~src_valid] == -1).all()
+
+
+# --------------------------------------------------- outputs:-section half (DUMMY+CUTOVER34)
 
 
 @pytest.mark.cpu_always
@@ -181,7 +287,7 @@ class TestSectionH5SelfConsistency:
                 "jets": list(src["jets"].dtype.names),
                 "tracks": list(src["tracks"].dtype.names),
             }
-        expected = _expected_full_columns(src_cols)
+        expected = _expected_full_columns(SECTION_GOLDEN, src_cols)
         with h5py.File(section_h5) as f:
             present = {"jets": list(f["jets"].dtype.names), "tracks": list(f["tracks"].dtype.names)}
             jets, tracks = f["jets"].dtype, f["tracks"].dtype

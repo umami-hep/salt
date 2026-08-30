@@ -10,11 +10,13 @@ the same stream names, the same field names and the same jaggedness — and betw
 them must cover every variable the model declares. A drift on either side is a
 config error, not a training failure discovered hours later.
 
-**Dynamically** the easyjet leg trains, on the synthetic ``AnalysisMiniTree``
-fixture. PHYSLITE deliberately has no dynamic leg: its xAOD POOL layout (
-``ElementLink`` structs resolving into separate containers) is not worth faking,
-so a real file is needed and the static contract is what CI can hold. That
-asymmetry is recorded here rather than left as a silent gap.
+**Dynamically** the easyjet leg trains — as matrix row 6 (`event_tagger_easyjet`)
+in ``pipeline.py``/``test_pipeline.py``, on the same synthetic
+``AnalysisMiniTree`` fixture this module's static gates use. PHYSLITE
+deliberately has no dynamic leg, here or in the matrix: its xAOD POOL layout
+(``ElementLink`` structs resolving into separate containers) is not worth
+faking, so a real file is needed and the static contract below is what CI can
+hold. That asymmetry is recorded here rather than left as a silent gap.
 """
 
 from __future__ import annotations
@@ -25,7 +27,6 @@ import pytest
 import yaml
 
 from salt.main import CONFIG_DIR
-from salt.main import main as salt_main
 
 pytestmark = pytest.mark.cpu_always
 
@@ -179,51 +180,8 @@ def test_no_shipped_config_uses_a_label_leaking_branch():
     ]
     assert not offenders, f"label-leaking branch named in a shipped config: {offenders}"
 
-
-# --------------------------------------------------------------- dynamic gate
-
-
-def test_easyjet_leg_trains(tmp_path):
-    """The model + easyjet fragment fit end-to-end on the synthetic minitree pair.
-
-    ``salt/tests/_fixtures/easyjet_minitree.py`` writes a real ``AnalysisMiniTree``
-    with ``uproot.recreate``, so the easyjet leg needs no download. The PHYSLITE
-    leg has no equivalent by design — see the module docstring.
-    """
-    pytest.importorskip("awkward", reason="the easyjet leg needs `pip install 'salt[root]'`")
-    pytest.importorskip("uproot", reason="the easyjet leg needs `pip install 'salt[root]'`")
-    from salt.tests._fixtures.easyjet_minitree import (  # noqa: PLC0415
-        write_jets_norm_dict,
-        write_sample_pair,
-        write_sourced_fragment,
-    )
-
-    signal, background = write_sample_pair(tmp_path)
-    fragment = write_sourced_fragment(
-        _load(EASYJET),
-        tmp_path / "easyjet_sourced.yaml",
-        {"signal": signal, "background": background},
-    )
-    variables = _load(MODEL)["data"]["modules"]["features"]["init_args"]["variables"]["jets"]
-    nd = write_jets_norm_dict(tmp_path / "norm_dict.yaml", variables)
-
-    rc = salt_main([
-        "fit",
-        "--config",
-        str(CONFIG_DIR / f"{MODEL}.yaml"),
-        "--config",
-        str(fragment),
-        f"--model.modules.norm.init_args.norm_dict={nd}",
-        f"--trainer.default_root_dir={tmp_path}",
-        # auto, not cpu: on a GPU runner this must exercise the GPU path
-        "--trainer.accelerator=auto",
-        "--trainer.logger=false",
-        "--trainer.fast_dev_run=2",
-        # the fixture holds 6 events per sample; the shipped batch size is 1000
-        "--data.batch_size=2",
-        "--data.num_workers=0",
-        # null-delete the base ProgressBar: the stock enable_progress_bar=false
-        # cannot coexist with a configured bar
-        "--callbacks.progress=null",
-    ])
-    assert rc == 0, "model + readers/easyjet_events failed fast_dev_run fit"
+# The dynamic gate — the model + easyjet fragment training end-to-end on the
+# synthetic minitree pair — now lives as matrix row 6 (`event_tagger_easyjet`)
+# in pipeline.py/test_pipeline.py (`_paired_root_context`, same
+# write_sample_pair/write_sourced_fragment fixtures). No dynamic PHYSLITE leg
+# exists there either, for the same reason given in the module docstring.

@@ -34,7 +34,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     "salt/callbacks/schedule.py": (
         "salt/tests/integration/test_training_schedule.py",
         "salt/tests/integration/test_schedule_resume.py",
-        "salt/tests/integration/test_stage_callbacks.py",
     ),
     # reader/dataset ABCs asserted throughout unit/data
     "salt/data/base.py": (
@@ -57,7 +56,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/data/test_manifest.py",
     ),
     # map-style batch sampler engaged by every fit/test lifecycle run
-    "salt/data/samplers.py": ("salt/tests/integration/test_end_to_end.py",),
+    "salt/data/samplers.py": ("salt/tests/integration/test_graph_cli.py",),
     "salt/data/sharding.py": ("salt/tests/unit/data/test_iterable_dataset.py",),
     "salt/data/processors/features.py": (
         "salt/tests/unit/data/test_iterable_dataset.py",
@@ -70,7 +69,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/model/modules/test_maskdecoder.py",
         "salt/tests/integration/test_shipped_configs.py",
     ),
-    "salt/data/processors/multi_target.py": ("salt/tests/integration/test_regression_configs.py",),
+    "salt/data/processors/multi_target.py": ("salt/tests/integration/test_pipeline.py",),
     "salt/data/readers/reader.py": (
         "salt/tests/unit/data/readers/test_uproot_reader.py",
         "salt/tests/unit/test_profiling.py",
@@ -136,7 +135,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/outputs/test_hard_reduce_nodes.py",
         "salt/tests/unit/outputs/sinks/onnx/test_adapter.py",
     ),
-    "salt/utils/array_utils.py": ("salt/tests/integration/test_finetune_templates.py",),
+    "salt/utils/array_utils.py": ("salt/tests/integration/pipeline.py",),
     "salt/utils/file_utils.py": ("salt/tests/unit/data/readers/test_vds.py",),
     "salt/utils/loss_history.py": ("salt/tests/unit/test_ckpt_compat.py",),
     "salt/utils/mask_utils.py": ("salt/tests/unit/outputs/test_maskformer_eval_h5.py",),

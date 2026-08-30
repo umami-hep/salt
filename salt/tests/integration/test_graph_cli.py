@@ -1,4 +1,9 @@
-"""Toy end-to-end integration test for the graph kernel (validate/plan/execute/plot)."""
+"""``salt graph`` (validate/plan/execute/plot/why) against the toy fixture configs.
+
+Renamed from ``test_end_to_end.py``: this is not an end-to-end anything — it
+never trains a model or touches a shipped config — it is the graph kernel's
+own CLI surface, exercised against ``salt/tests/_fixtures/configs/toy*.yaml``.
+"""
 
 from pathlib import Path
 
