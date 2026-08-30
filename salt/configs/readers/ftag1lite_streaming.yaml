@@ -26,11 +26,8 @@
 # file. `manifest:` is REQUIRED on the streaming path (set it below or on the
 # command line): an existing file is validated and read, a missing one is built
 # at that path on rank 0 in prepare_data, and a stale one is a hard error —
-# delete the file to rebuild. To keep even the first build out of the training
-# job, pre-build it offline:
-#   python -m salt.data.manifest --config readers/ftag1lite.yaml \
-#       --set data.train_file='/path/to/corpus/*/*.pool.root*' \
-#       --out /path/to/corpus_manifest.json
+# delete the file to rebuild. Just point `manifest:` at a path; the first run
+# builds it there.
 
 data:
   iterable: true

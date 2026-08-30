@@ -980,12 +980,6 @@ def _dataset_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"batches to profile (default {DEFAULT_STEPS})",
     )
-    parser.add_argument(
-        "--batches",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,  # deprecated alias for --steps
-    )
     parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
     parser.add_argument("--tag", default="dataset", help="output filename prefix")
     parser.add_argument(
@@ -1067,15 +1061,7 @@ _USAGE = (
 def _run_dataset(args: Sequence[str]) -> int:
     """``salt profile dataset``."""
     parsed = _dataset_parser().parse_args(args)
-    if parsed.batches is not None and parsed.steps is not None:
-        console("salt profile dataset: pass --steps or --batches, not both", file=sys.stderr)
-        return 1
     steps = parsed.steps
-    if steps is None and parsed.batches is not None:
-        console(
-            "salt profile dataset: --batches is a deprecated alias for --steps", file=sys.stderr
-        )
-        steps = parsed.batches
     if steps is None:
         steps = DEFAULT_STEPS
     functions: Iterable[str] = _split(parsed.functions) or DEFAULT_DATASET_FUNCTIONS

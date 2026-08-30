@@ -83,8 +83,6 @@ The harness:
    `@profile` decorators in the source), iterates `--steps` batches, and
    restores the originals.
 
-(`--batches` still works as a deprecated alias for `--steps`.)
-
 Outputs land in `--out`: `dataset_profile.txt` (the classic annotated listing),
 `dataset_profile.lprof` (for `python -m line_profiler`), and
 `dataset_summary.json` (per-function totals and the ranked hot lines).

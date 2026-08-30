@@ -15,7 +15,7 @@ from salt.data.processors.multi_target import _OPERATORS
 from salt.data.readers.expressions import Aggregation, parse_expression
 from salt.graph.errors import ConfigError
 
-__all__ = ["ConstituentCuts", "Cut", "CutSpec", "GlobalObjectCuts"]
+__all__ = ["ConstituentCuts", "Cut", "GlobalObjectCuts"]
 
 VALID_FIELD = "valid"
 """The per-constituent validity field every jagged stream carries."""
@@ -331,10 +331,6 @@ class GlobalObjectCuts:
             for agg in c.aggregations:
                 seen.setdefault(agg.key, agg)
         return tuple(seen.values())
-
-
-CutSpec = GlobalObjectCuts
-"""Deprecated alias kept so pre-rename ``cuts:`` config/class paths keep resolving."""
 
 
 @dataclass(frozen=True)

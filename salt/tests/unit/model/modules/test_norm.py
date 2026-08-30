@@ -140,15 +140,6 @@ class TestMaskedInputNormaliser:
         norm.bind(schema)
         return norm
 
-    def test_init_does_no_file_io(self, tmp_path):
-        """__init__ records config only; norm_dict is ignored (no file read)."""
-        norm = MaskedInputNormaliser(streams=["tracks"], norm_dict=tmp_path / "absent.yaml")
-        norm.name = "norm"
-        io = norm.declare_io(Mode.FIT)
-        # FIT (training) declares the pad mask require alongside the input
-        assert set(flatten_spec(io.requires)) == {"inputs.tracks", "masks.tracks"}
-        assert set(flatten_spec(io.produces)) == {"normed.tracks"}
-
     def test_mask_require_is_training_only(self):
         """masks.<stream> is required in FIT/VAL but NOT TEST/ONNX (no mask at inference)."""
         norm = MaskedInputNormaliser(streams=["jets", "tracks"], global_object="jets")

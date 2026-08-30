@@ -44,7 +44,6 @@ _GROUP_KEYS = {
     "truncate",
     "link_branch",
     "target_prefix",
-    "target_collection",
     "join_branch",
     "join_prefix",
     "join_branches",
@@ -80,8 +79,7 @@ class UprootGroupConfig:
     target_prefix : str | None, optional
         The aux-store prefix of the ElementLink target container
         (``InDetTrackParticlesAuxDyn.``); this group's ``branches`` map onto it.
-        Set together with ``link_branch``. (``target_collection`` is a deprecated
-        alias meaning ``f"{target_collection}AuxDyn."``.)
+        Set together with ``link_branch``.
     join_branch : str | None, optional
         A **1:1** ElementLink carried by this group's own elements
         (``btaggingLink``, resolved with this group's ``prefix``), used to JOIN
@@ -398,9 +396,7 @@ class UprootReader(Reader):
     def _parse_group(
         stream: str, cfg: UprootGroupConfig | Mapping[str, Any] | Any
     ) -> UprootGroupConfig:
-        """Normalise a group config entry (``truncate``->``pad_max``,
-        ``target_collection``->``target_prefix``).
-        """
+        """Normalise a group config entry (``truncate``->``pad_max``)."""
         if isinstance(cfg, UprootGroupConfig):
             return cfg
         cfg = dict(cfg or {})
@@ -408,8 +404,8 @@ class UprootReader(Reader):
         if unknown:
             raise ConfigError(
                 f"group {stream!r}: unknown config keys {sorted(unknown)} — expected "
-                "branches/prefix/jagged/pad_max/link_branch/target_prefix (truncate, "
-                "target_collection accepted as aliases)"
+                "branches/prefix/jagged/pad_max/link_branch/target_prefix (truncate "
+                "accepted as an alias)"
             )
         if "branches" not in cfg:
             raise ConfigError(
@@ -419,14 +415,6 @@ class UprootReader(Reader):
             raise ConfigError(
                 f"group {stream!r}: give either 'pad_max' or 'truncate' (its alias), not both"
             )
-        if "target_prefix" in cfg and "target_collection" in cfg:
-            raise ConfigError(
-                f"group {stream!r}: give either 'target_prefix' or 'target_collection' (its "
-                "alias), not both"
-            )
-        target_prefix = cfg.get("target_prefix")
-        if target_prefix is None and cfg.get("target_collection") is not None:
-            target_prefix = f"{cfg['target_collection']}AuxDyn."
         join_branches = dict(cfg.get("join_branches") or {})
         return UprootGroupConfig(
             branches={str(k): str(v) for k, v in dict(cfg["branches"]).items()},
@@ -434,7 +422,7 @@ class UprootReader(Reader):
             jagged=bool(cfg.get("jagged", True)),
             pad_max=cfg.get("pad_max", cfg.get("truncate")),
             link_branch=cfg.get("link_branch"),
-            target_prefix=target_prefix,
+            target_prefix=cfg.get("target_prefix"),
             join_branch=cfg.get("join_branch"),
             join_prefix=cfg.get("join_prefix"),
             join_branches={str(k): str(v) for k, v in join_branches.items()},

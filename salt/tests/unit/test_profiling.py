@@ -134,14 +134,8 @@ class TestCli:
         from salt.profiling import _dataset_parser, _model_parser
 
         assert _model_parser().parse_args(["--config", "x.yaml"]).steps == DEFAULT_STEPS
-        # the dataset parser defaults to None so --batches can still win; the
-        # dispatcher is what applies DEFAULT_STEPS
+        # the dataset parser defaults to None; the dispatcher applies DEFAULT_STEPS
         assert _dataset_parser().parse_args(["--config", "x.yaml"]).steps is None
-
-    def test_dataset_rejects_steps_and_batches_together(self, capsys):
-        rc = main(["dataset", "--config", "x.yaml", "--steps", "5", "--batches", "5"])
-        assert rc == 1
-        assert "not both" in capsys.readouterr().err
 
     def test_model_reports_a_schedule_that_cannot_fit(self, capsys):
         rc = main(["model", "--config", "x.yaml", "--steps", "4", "--active", "10"])

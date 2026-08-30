@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from salt.data import ConstituentCuts, Cut, CutSpec, GlobalObjectCuts
+from salt.data import ConstituentCuts, Cut, GlobalObjectCuts
 from salt.graph.errors import ConfigError
 
 
@@ -76,27 +76,27 @@ def test_cut_mask_unknown_field_raises_keyerror() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CutSpec
+# GlobalObjectCuts
 # --------------------------------------------------------------------------- #
 
 
-def test_cutspec_empty_keeps_all() -> None:
+def test_global_object_cuts_empty_keeps_all() -> None:
     jets = _jets(pt=[10.0, 20.0, 30.0], label=[0, 4, 5])
-    keep = CutSpec().eligible(jets, None)
+    keep = GlobalObjectCuts().eligible(jets, None)
     assert keep.dtype == bool
     np.testing.assert_array_equal(keep, [True, True, True])
 
 
-def test_cutspec_global_cuts_and_combined() -> None:
+def test_global_object_cuts_global_cuts_and_combined() -> None:
     jets = _jets(pt=[10.0, 25.0, 30.0, 40.0], label=[0, 5, 4, 5])
-    spec = CutSpec(global_cuts=(Cut("pt", ">=", 20.0), Cut("flavour_label", "==", 5)))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">=", 20.0), Cut("flavour_label", "==", 5)))
     # pt>=20 AND label==5 -> indices 1 and 3
     np.testing.assert_array_equal(spec.eligible(jets, None), [False, True, False, True])
 
 
-def test_cutspec_per_split_adds_to_global() -> None:
+def test_global_object_cuts_per_split_adds_to_global() -> None:
     jets = _jets(pt=[10.0, 25.0, 30.0, 40.0], label=[0, 5, 4, 5])
-    spec = CutSpec(
+    spec = GlobalObjectCuts(
         global_cuts=(Cut("pt", ">=", 20.0),),
         per_split={"train": (Cut("flavour_label", "==", 5),)},
     )
@@ -107,36 +107,36 @@ def test_cutspec_per_split_adds_to_global() -> None:
     np.testing.assert_array_equal(spec.eligible(jets, "train"), [False, True, False, True])
 
 
-def test_cutspec_for_split_returns_global_plus_split() -> None:
+def test_global_object_cuts_for_split_returns_global_plus_split() -> None:
     g = Cut("pt", ">=", 20.0)
     t = Cut("flavour_label", "==", 5)
-    spec = CutSpec(global_cuts=(g,), per_split={"train": (t,)})
+    spec = GlobalObjectCuts(global_cuts=(g,), per_split={"train": (t,)})
     assert spec.for_split(None) == (g,)
     assert spec.for_split("val") == (g,)
     assert spec.for_split("train") == (g, t)
 
 
-def test_cutspec_unknown_stage_key_raises() -> None:
+def test_global_object_cuts_unknown_stage_key_raises() -> None:
     with pytest.raises(ConfigError):
-        CutSpec(per_split={"validation": (Cut("pt", ">", 0),)})
+        GlobalObjectCuts(per_split={"validation": (Cut("pt", ">", 0),)})
 
 
-def test_cutspec_rejects_non_cut_entries() -> None:
+def test_global_object_cuts_rejects_non_cut_entries() -> None:
     with pytest.raises(ConfigError):
-        CutSpec(global_cuts=("not a cut",))  # type: ignore[arg-type]
+        GlobalObjectCuts(global_cuts=("not a cut",))  # type: ignore[arg-type]
     with pytest.raises(ConfigError):
-        CutSpec(per_split={"train": ("not a cut",)})  # type: ignore[dict-item]
+        GlobalObjectCuts(per_split={"train": ("not a cut",)})  # type: ignore[dict-item]
 
 
-def test_cutspec_eligible_unknown_field_raises_keyerror() -> None:
+def test_global_object_cuts_eligible_unknown_field_raises_keyerror() -> None:
     jets = _jets(pt=[10.0], label=[0])
-    spec = CutSpec(global_cuts=(Cut("missing", ">", 0),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("missing", ">", 0),))
     with pytest.raises(KeyError):
         spec.eligible(jets, None)
 
 
-def test_cutspec_fields_union_and_per_split() -> None:
-    spec = CutSpec(
+def test_global_object_cuts_fields_union_and_per_split() -> None:
+    spec = GlobalObjectCuts(
         global_cuts=(Cut("pt", ">=", 20.0),),
         per_split={"train": (Cut("flavour_label", "==", 5),), "test": (Cut("eta", "<", 2.5),)},
     )
@@ -147,20 +147,16 @@ def test_cutspec_fields_union_and_per_split() -> None:
     assert spec.fields("val") == ("pt",)
 
 
-def test_cutspec_count_parity_invariant() -> None:
+def test_global_object_cuts_count_parity_invariant() -> None:
     """Passing + failing == total (the index-build count-parity guarantee)."""
     rng = np.random.default_rng(0)
     pt = rng.uniform(0, 100, size=500)
     label = rng.integers(0, 6, size=500)
     jets = _jets(pt=list(pt), label=list(label))
-    spec = CutSpec(global_cuts=(Cut("pt", ">=", 50.0),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">=", 50.0),))
     keep = spec.eligible(jets, None)
     assert int(keep.sum()) + int((~keep).sum()) == len(jets)
     assert int(keep.sum()) == int((pt >= 50.0).sum())
-
-
-def test_cutspec_is_the_global_object_cuts_alias() -> None:
-    assert CutSpec is GlobalObjectCuts
 
 
 def test_global_object_cuts_accept_expression_strings() -> None:

@@ -263,7 +263,7 @@ class TestNoCkptFallback:
             str(config),
             f"--data.test_file={data['h5']}",
             f"--data.num_test={N_TEST}",
-            f"--callbacks.h5_output={sink}",
+            f"--outputs.h5_output={sink}",
             "--callbacks.progress=null",
         ])
         assert rc == 0

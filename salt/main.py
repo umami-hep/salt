@@ -549,8 +549,6 @@ class SaltCLI(LightningCLI):
     - ``callbacks:`` — dict-keyed, deep-mergeable; assembled into
       ``trainer.callbacks`` ahead of the stock list entries (``None`` values
       are filtered = deleted).
-    - ``writers:`` — ``output`` template + ``half_precision`` + the
-      deep-mergeable ``modules`` dict, assembled into ONE `WriterCallback`.
 
     ``auto_configure_optimizers`` is off (`SaltModule.configure_optimizers`
     owns the OneCycleLR schedule) and Lightning's
@@ -618,20 +616,11 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             "--callbacks",
-            type=dict[str, Callback | Node | None] | None,
+            type=dict[str, Callback | None] | None,
             default={},
             help="dict-keyed callbacks, deep-mergeable; assembled into trainer.callbacks "
-            "(an entry set to null is removed). An output SINK declared here "
-            "is accepted for one deprecation window and wired through the sink registry "
-            "instead — declare sinks in the `outputs:` section.",
-        )
-        parser.add_argument(
-            "--writers.modules",
-            type=dict[str, Any] | None,
-            default=None,
-            help="REMOVED — migrate to an ``outputs:``/``callbacks:`` sink; "
-            "a non-null entry here raises ConfigError at instantiate_classes "
-            "(see gn2v2-opendata.yaml)",
+            "(an entry set to null is removed). Output sinks belong in the "
+            "`outputs:` section, not here.",
         )
         parser.add_argument(
             "--outputs",
@@ -740,56 +729,16 @@ class SaltCLI(LightningCLI):
         ahead of the stock ``trainer.callbacks`` list. Drops the default
         ``lr_monitor`` LearningRateMonitor when no experiment logger is
         attached (it hard-raises on a logger-less trainer).
-
-        Output SINKS declared under ``callbacks:`` are PARTITIONED out — a
-        sink is not a Lightning callback any more. They are wired onto the
-        built trainer through the sink registry (and, for a runtime sink, a
-        generated adapter), which is the deprecation window for the old
-        placement; the ``outputs:`` section is where sinks belong.
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         has_logger = bool(self._get(self.config_init, "trainer.logger"))
         live = [(key, cb) for key, cb in callbacks_dict.items() if cb is not None]
-        aliased_sinks = [(key, cb) for key, cb in live if isinstance(cb, Node)]
-        assembled = [
-            cb
-            for key, cb in live
-            if not isinstance(cb, Node) and (has_logger or not _needs_logger(cb))
-        ]
+        assembled = [cb for _key, cb in live if has_logger or not _needs_logger(cb)]
         stock = self._get(self.config_init, "trainer.callbacks") or []
         assembled = self._maybe_add_schedule_callback(assembled, stock)
         if assembled:
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
-        trainer = super().instantiate_trainer(**kwargs)
-        self._attach_aliased_sinks(trainer, aliased_sinks)
-        return trainer
-
-    @staticmethod
-    def _attach_aliased_sinks(trainer: Trainer, aliased: Sequence[tuple[str, Any]]) -> None:
-        """Wire ``callbacks:``-declared sinks onto `trainer` (the alias window).
-
-        Each sink is registered and, if it has a lifecycle, given its adapter.
-        Node names are left exactly as the class defaults them, which is what
-        the callbacks placement always did, so a config left alone keeps its
-        plan hash. Warns once per config: sinks belong in ``outputs:``.
-        """
-        if not aliased:
-            return
-        from salt.callbacks.sink_adapter import (
-            attach_runtime_sink,
-        )
-
-        warnings.warn(
-            "declaring output sink(s) "
-            + ", ".join(repr(key) for key, _ in aliased)
-            + " under `callbacks:` is deprecated — a sink is no longer a lightning "
-            "Callback. Move them to the top-level `outputs:` section; the callbacks: "
-            "placement is accepted for one release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        for _key, sink in aliased:
-            attach_runtime_sink(trainer, sink)
+        return super().instantiate_trainer(**kwargs)
 
     def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
         """Auto-inject the schedule driver callbacks on ``fit``; the user never
@@ -828,23 +777,8 @@ class SaltCLI(LightningCLI):
         """Instantiate, then compose the top-level ``outputs:`` section onto the
         model (folding section writers into the planning module dict) — done
         here rather than via ``link_arguments`` since a subclass-mode model
-        link target grabs the whole namespace. Raises `ConfigError` if a live
-        ``writers:`` block remains (removed; migrate to
-        ``outputs:``/``callbacks:``).
+        link target grabs the whole namespace.
         """
-        # writers: block with live modules is no longer supported. Null-delete
-        # overrides (writers.modules.X: null) are exempt — they produce an empty
-        # dict here.
-        live_writer_modules = {
-            name: writer
-            for name, writer in (self._get(self.config, "writers.modules") or {}).items()
-            if writer is not None
-        }
-        if live_writer_modules:
-            raise ConfigError(
-                "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
-                "sink — see gn2v2-opendata.yaml"
-            )
         # Defer the fit-stage logger past the racy validation pass: jsonargparse
         # walks sys.modules to resolve forward refs in the same pass that
         # CometLogger.__init__ starts background threads mutating sys.modules —
@@ -962,9 +896,8 @@ class SaltCLI(LightningCLI):
           and the exporter see the same implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
 
-        A sink already registered — declared in the ``outputs:`` section (the
-        documented form), left in ``callbacks:`` through the deprecation
-        alias, or built programmatically — is left alone; never double-wired.
+        A sink already registered — declared in the ``outputs:`` section or
+        built programmatically — is left alone; never double-wired.
         """
         from salt.callbacks.sink_adapter import attach_runtime_sink
         from salt.graph.spec import Mode

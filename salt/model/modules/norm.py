@@ -266,22 +266,19 @@ class MaskedInputNormaliser(SaltModelModule):
     frozen running buffers (even in train mode); the buffers are updated from
     masked batch moments separately, only when training and off tracing —
     so eval/inference/ONNX is a pure affine transform with no mask
-    dependency. The legacy ``norm_dict`` constructor arg is accepted for
-    config compatibility but ignored.
+    dependency.
     """
 
     def __init__(
         self,
         streams: Sequence[str],
         global_object: str | None = None,
-        norm_dict: str | Path | None = None,
         momentum: float | None = 0.1,
         eps: float = 1e-5,
     ) -> None:
         """Capture config only (no file I/O here).
 
-        ``norm_dict`` is deprecated/ignored. ``momentum=None`` gives a
-        cumulative moving average instead of an EMA.
+        ``momentum=None`` gives a cumulative moving average instead of an EMA.
         """
         super().__init__()
         if not streams:
@@ -299,9 +296,6 @@ class MaskedInputNormaliser(SaltModelModule):
             )
         if eps <= 0.0:
             raise ConfigError(f"MaskedInputNormaliser: eps must be positive, got {eps}")
-        # norm_dict is intentionally ignored (stats are learned online); kept in
-        # the signature only so existing configs / CLI overrides still parse.
-        del norm_dict
         self.streams = tuple(streams)
         self.global_object = global_object
         self.momentum = None if momentum is None else float(momentum)

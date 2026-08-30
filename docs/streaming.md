@@ -169,15 +169,9 @@ to re-learn field names the manifest already had. With it, a warm `setup()`
 opens **no data file at all**. Reading still builds the index when a worker
 actually reads: the manifest seeds the schema, not the row table.
 
-To keep even the first build out of the training job, pre-build the fit-stage
-artifact offline and point `manifest:` at it:
-
-```bash
-python -m salt.data.manifest \
-    --config salt/configs/readers/ftag1lite.yaml \
-    --set data.train_file='/path/to/corpus/*/*.pool.root*' \
-    --out /path/to/corpus_manifest.json
-```
+No separate build step is needed: point `manifest:` at a path (existing or
+not) and the first run builds it there, on rank 0, before any worker reads
+data.
 
 ## Writing a reader that streams well
 

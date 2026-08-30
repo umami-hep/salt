@@ -108,7 +108,7 @@ def test_jet_rows_flattens_events_to_jets(ej_file) -> None:
 
 
 def test_jet_rows_cut_on_pt(ej_file) -> None:
-    from salt.data import Cut, CutSpec
+    from salt.data import Cut, GlobalObjectCuts
 
     path, arrays = ej_file
     thresh = 100_000.0
@@ -117,7 +117,7 @@ def test_jet_rows_cut_on_pt(ej_file) -> None:
         filename=path,
         tree="AnalysisMiniTree",
         unroll="jets",
-        cuts=CutSpec(global_cuts=(Cut("pt", ">", thresh),)),
+        cuts=GlobalObjectCuts(global_cuts=(Cut("pt", ">", thresh),)),
     )
     all_pt = np.concatenate([
         arrays["recojet_antikt4PFlow_pt_NOSYS"][ev] for ev in range(arrays["n_events"])
@@ -179,19 +179,6 @@ def test_group_order_independent(ej_file) -> None:
 def test_truncate_alias_maps_to_pad_max() -> None:
     g = UprootReader._parse_group("jets", {"branches": {"pt": "pt"}, "truncate": 12})
     assert g.pad_max == 12
-
-
-def test_target_collection_alias_maps_to_target_prefix() -> None:
-    g = UprootReader._parse_group(
-        "tracks",
-        {
-            "branches": {"d0": "d0"},
-            "jagged": True,
-            "link_branch": "GhostTrack",
-            "target_collection": "InDetTrackParticles",
-        },
-    )
-    assert g.target_prefix == "InDetTrackParticlesAuxDyn."
 
 
 def test_unknown_unroll_group_raises() -> None:
@@ -901,7 +888,7 @@ def test_metadata_and_bounded_probe_agree_field_by_field(ej_file, monkeypatch) -
 
 def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
     """Row index, per-file kept counts and resolved multiplicity survive the probe change."""
-    from salt.data import Cut, CutSpec
+    from salt.data import Cut, GlobalObjectCuts
 
     directory = _two_files(tmp_path)
     reader = UprootReader(
@@ -909,7 +896,7 @@ def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
         filename=directory,
         tree=_TREE,
         unroll="jets",
-        cuts=CutSpec(global_cuts=(Cut("pt", ">", 100_000.0),)),
+        cuts=GlobalObjectCuts(global_cuts=(Cut("pt", ">", 100_000.0),)),
     )
     reader.prepare()
     total = 0
