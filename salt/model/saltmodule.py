@@ -111,7 +111,7 @@ _is_test_persistence_sink = is_test_persistence_sink
 
 def _resolve_lr_scheduler_class(class_path: str) -> type:
     """Import a stage `lr_scheduler.class_path` to its class. Reuses the
-    CLI's `salt.core.*`-aware resolver (local import avoids a load-time cycle).
+    CLI's class-path resolver (local import avoids a load-time cycle).
 
     Raises
     ------

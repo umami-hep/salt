@@ -671,22 +671,19 @@ Data-less loading: `SaltModule.load_from_checkpoint(path, modules=...)`.
 
 The v2 namespace was flattened from `salt.core.*` to `salt.*` (e.g.
 `salt.core.nn.StreamEmbed` → `salt.model.modules.StreamEmbed`,
-`salt.core.SaltModule` → `salt.model.SaltModule`). Two loading policies:
+`salt.core.SaltModule` → `salt.model.SaltModule`). One loading policy applies
+to everything:
 
-- **Pre-rename v2 checkpoints** (and their saved `config.yaml`, which embed
-  `salt.core.*` class_paths) **load unmodified.** A load-time remapper in
-  `salt/main.py` (`_remap_class_path`, a longest-prefix `salt.core.* → salt.*`
-  table) is applied at every class-path resolution site: the salt-owned
-  `_resolve_class_path`/`_is_persistence_sink`, and — via a wrapper installed on
-  jsonargparse's `import_object` — the top-level model **subclass resolution
-  during config parse**. So `salt test --config <old_run>/config.yaml
-  --ckpt_path …` just works. The `salt_core` checkpoint **metadata key** is a
-  plain dict key (not an import path) and is intentionally unchanged.
-  The remapper table + its tests (`salt/tests/unit/test_ckpt_compat.py`) are the
-  only sanctioned `salt.core.*` strings in the codebase.
+- **Only current-format checkpoints/configs load** — class_paths must already
+  name their flat `salt.*` home. There is no load-time remapping: a
+  pre-rename checkpoint or saved `config.yaml` still embedding `salt.core.*`
+  class_paths is **not loadable** and must be re-created from a current
+  config (no converter is provided). The `salt_core` checkpoint **metadata
+  key** is an unrelated plain dict key (not an import path) and was never
+  part of this rename.
 
 - **v1 checkpoints** (the `ModelWrapper` `model.pool_net.*` state-dict layout)
-  are **not** directly loadable — `SaltModule.on_load_checkpoint` rejects them
-  with a clear error. Convert them offline with the v1→v2 weight mapper
-  (`map_v1_state_dict`, in git history at `fb90a7c`) or use them at the frozen
-  pin `29c67a1` (see [Parity-closure doctrine](#parity-closure-doctrine-v1-vs-v2-comparisons)).
+  are **not** directly loadable either — `SaltModule.on_load_checkpoint`
+  rejects them with a clear error. Convert them offline with the v1→v2 weight
+  mapper (`map_v1_state_dict`, in git history at `fb90a7c`) or use them at the
+  frozen pin `29c67a1` (see [Parity-closure doctrine](#parity-closure-doctrine-v1-vs-v2-comparisons)).
