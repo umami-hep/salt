@@ -11,17 +11,20 @@ stacked on top of a reader fragment + model at fit time). None of the three
 has a plan to compile, so none is passed alone to ``graph validate``: reader
 fragments are gated by `test_reader_fragment_instantiates` below plus
 `test_event_tagger_readers.py` (cross-format contract); the one model
-fragment (``ttbar_vs_hh4b_event_tagger``'s pairings) is gated by
-`test_production_configs.py`; overlays are named in ``OVERLAY_GATED_BY`` with
-a reason, checked for completeness by `test_every_overlay_is_gated`.
+fragment (``ttbar_vs_hh4b_event_tagger``'s pairings) is gated by matrix row 6
+(``event_tagger_easyjet``, ``pipeline.py`` ``FEEDS``); overlays are named in
+``OVERLAY_GATED_BY`` with a reason, checked for completeness by
+`test_every_overlay_is_gated`.
 
 Two tiers: **Tier A** — all-mode ``salt graph validate`` for every whole
 config, plus a ``salt graph plot --mode fit`` render (all 38 shipped files get
 some Tier-A-level gate; the ~32 whole configs get validate+plot, the
 remaining ~6 fragments/overlays get the instantiation/completeness checks
 above). **Tier B** — a real 2-batch fit for every config a synthetic fixture
-can serve; configs the dummy writer cannot serve carry an explicit ``xfail``
-naming the missing piece — never a silent skip.
+can serve and that has no matrix row (a matrix fit strictly dominates a
+fast_dev_run, so a config fed by a row skips here instead, naming the row —
+§4.4); configs the dummy writer cannot serve AND have no matrix row carry an
+explicit ``xfail`` naming the missing piece — never a silent skip.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from salt.main import CONFIG_DIR
 from salt.main import main as salt_main
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests.integration.pipeline import MATRIX
 
 pytestmark = pytest.mark.cpu_always
 
@@ -62,26 +66,27 @@ FIXTURE_FLAVOUR: dict[str, str] = {
 
 # Configs no synthetic fixture can yet serve, and exactly what is missing. Each
 # entry is a promise to a future fixture author, not a permanent excuse.
+# gn2v2-opendata/GN3EPCLV01/GN3X/hitz and the two finetune templates used to be
+# here too (their fixture gaps are real), but they now have a matrix row
+# (pipeline.py MATRIX) that feeds them properly — MATRIX_ROW_FOR below routes
+# them to a "covered by row X" skip instead (§4.4), so they are not also an
+# xfail-with-an-excuse here.
 NO_FIXTURE: dict[str, str] = {
     "legacy/Dipz": "no super_tracks stream in write_dummy_file",
-    "hitz": "no hits stream in write_dummy_file",
     "GN2/GN2emu": "no soft-muon global stream in write_dummy_file",
     "GN2/GN2XE": "config truncates tracks to 100; the fixture writes 40",
     "GN2/GN2X_qcdsplit": "fixture flow stream lacks the flow_* field prefix",
-    "GN3X": "fixture flow stream lacks the flow_* field prefix",
     "legacy/dips": "labels on raw HadronConeExclTruthLabelID; fixture writes PDG-like values",
-    "gn2v2-opendata": "sources its files through input_samples, not data.train_file",
-    "GN3EPCLV01": "no global stream in write_dummy_file",
     "GN3/GN3_SoftE": "no global stream in write_dummy_file",
     "GN3/GN3_tracklabel": "no tracks.ftagTruthSourceLabel in write_dummy_file",
-    # the finetune templates need a warm start and a multi-epoch schedule, so
-    # fast_dev_run (which pins max_epochs to 1) cannot drive them. They are
-    # trained through properly by test_finetune_templates.py instead.
-    "finetune/finetune_gn3large": "multi-stage schedule needs max_epochs>=5 "
-    "and a checkpoint — trained by test_finetune_templates.py",
-    "finetune/finetune_gn3large_new_head": "adds a head on jets.large_r_flavour_label, "
-    "absent from write_dummy_file — trained by test_finetune_templates.py",
 }
+
+# config_relpath -> matrix test_name, for every shipped config the matrix
+# (pipeline.py MATRIX) feeds. Tier B skips these (§4.4): the matrix fit
+# (max_epochs=1, limit_batches=2, a real checkpoint) strictly dominates a
+# fast_dev_run, so running both here too is duplicated seconds and two owners
+# for one config's depth — exactly what the consolidation removes.
+MATRIX_ROW_FOR: dict[str, str] = {row.config: row.test_name for row in MATRIX}
 
 # Overlays (fragments with neither a model nor a reader — a pure
 # data-behaviour patch stacked on top of a reader fragment + model at fit
@@ -236,6 +241,10 @@ def test_tables_name_only_files_that_exist():
     # NO_FIXTURE is a Tier-B statement, and Tier B never runs on a fragment
     overlap = sorted(set(NO_FIXTURE) & set(FRAGMENTS))
     assert not overlap, f"NO_FIXTURE names fragments, which Tier B never runs: {overlap}"
+    # a config fed by the matrix gets a "covered by row X" skip (§4.4), not an
+    # xfail-with-an-excuse — the two tables must stay disjoint
+    both = sorted(set(NO_FIXTURE) & set(MATRIX_ROW_FOR))
+    assert not both, f"named in both NO_FIXTURE and fed by a matrix row: {both}"
 
 
 def _expanded(config: str) -> dict:
@@ -290,8 +299,9 @@ def test_reader_fragment_instantiates(fragment):
 def test_every_model_fragment_is_gated_elsewhere():
     """A model fragment names no reader, so a pairing has to drive it.
 
-    `test_production_configs.py` runs ``ttbar_vs_hh4b_event_tagger`` through the
-    full lifecycle on each of its reader pairings, and
+    Matrix row 6 (``event_tagger_easyjet``, ``test_pipeline.py``) runs
+    ``ttbar_vs_hh4b_event_tagger`` through the full lifecycle paired with its
+    ``readers/easyjet_events`` fragment (``pipeline.py`` ``FEEDS``), and
     `test_event_tagger_readers.py` holds the cross-format contract. This asserts
     the set has not silently grown past what those cover.
     """
@@ -299,8 +309,8 @@ def test_every_model_fragment_is_gated_elsewhere():
     uncovered = sorted(set(MODEL_FRAGMENTS) - covered)
     assert not uncovered, (
         f"model fragments with no gate: {uncovered}. A config carrying no reader "
-        "cannot be passed alone to graph validate — declare its reader pairings in "
-        "test_production_configs.py PAIRED."
+        "cannot be passed alone to graph validate — declare its reader pairing as a "
+        "matrix row in pipeline.py's MATRIX/FEEDS."
     )
     stale = sorted(covered - set(MODEL_FRAGMENTS))
     assert not stale, f"named as model fragments but are whole configs: {stale}"
@@ -370,8 +380,16 @@ def test_config_plan_compiles(config, fixtures, tmp_path):
 
 @pytest.mark.parametrize("config", ALL_CONFIGS)
 def test_config_fast_dev_run(config, fixtures, tmp_path, request):
-    """Tier B — the config builds, forward-passes and steps on synthetic data."""
+    """Tier B — the config builds, forward-passes and steps on synthetic data.
+
+    Skips any config with a matrix row (§4.4): the matrix fit strictly
+    dominates a fast_dev_run (a real checkpoint vs two forward/backward
+    steps), so running both here too would be duplicated seconds and two
+    owners for one config's depth.
+    """
     _require_extra(config)
+    if config in MATRIX_ROW_FOR:
+        pytest.skip(f"covered by matrix row {MATRIX_ROW_FOR[config]!r} (test_pipeline.py)")
     if config in NO_FIXTURE:
         request.node.add_marker(
             pytest.mark.xfail(strict=True, reason=f"no fixture: {NO_FIXTURE[config]}")

@@ -545,18 +545,36 @@ def _trainer_args(root: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _expand_train_args(row: Row, ctx: dict[str, Path], tmp_path_factory) -> list[str]:
+def _expand_train_args(
+    row: Row, ctx: dict[str, Path], tmp_path_factory
+) -> tuple[list[str], list[str]]:
     """``row.train_args`` with every ``{token}``/``{token:NAME}`` substituted.
+
+    Split into ``(config_argv, override_argv)``: elements that stack an extra
+    ``--config`` file (``"--config {fragment}"``, ``"--config {config:NAME}"``)
+    go in ``config_argv``; everything else (``--init_from=``, per-row trainer
+    overrides, ...) goes in ``override_argv``. ``_do_fit`` stacks
+    ``config_argv`` BEFORE this row's own template — a ``{config:NAME}``
+    dependency is a producer row's *saved* ``config.yaml``, and salt's fit
+    semantics deep-merge later ``--config`` files on top (salt/parser.py), so
+    stacking it after the template (or after the shared harness args) would
+    let the producer's incidental settings — its own
+    ``trainer.default_root_dir``, ``data.train_file``, a null
+    ``training_schedule`` — clobber this row's. ``override_argv`` stays last,
+    so row-specific overrides still win over both configs and the shared
+    harness args.
 
     Each element may expand to more than one argv token (``"--config {fragment}"``
     -> two), so the whole thing is re-split with :func:`shlex.split` after
     substitution.
     """
-    argv: list[str] = []
+    config_argv: list[str] = []
+    override_argv: list[str] = []
     for template in row.train_args:
         expanded = _expand_one(row.test_name, template, ctx, tmp_path_factory)
-        argv.extend(shlex.split(expanded))
-    return argv
+        tokens = shlex.split(expanded)
+        (config_argv if template.startswith("--config ") else override_argv).extend(tokens)
+    return config_argv, override_argv
 
 
 def _expand_one(name: str, template: str, ctx: dict[str, Path], tmp_path_factory) -> str:
@@ -611,8 +629,8 @@ def run_row(name: str, tmp_path_factory) -> Artifacts:
     row = row_by_name(name)
     try:
         ctx = _feed_context(row, tmp_path_factory)
-        train_argv = _expand_train_args(row, ctx, tmp_path_factory)
-        artifacts = _do_fit(row, ctx, train_argv, tmp_path_factory)
+        config_argv, override_argv = _expand_train_args(row, ctx, tmp_path_factory)
+        artifacts = _do_fit(row, ctx, config_argv, override_argv, tmp_path_factory)
     except LegFailedError as exc:
         _ROW_CACHE[name] = exc
         raise
@@ -620,14 +638,28 @@ def run_row(name: str, tmp_path_factory) -> Artifacts:
     return artifacts
 
 
-def _do_fit(row: Row, ctx: dict[str, Path], train_argv: list[str], tmp_path_factory) -> Artifacts:
+def _do_fit(
+    row: Row,
+    ctx: dict[str, Path],
+    config_argv: list[str],
+    override_argv: list[str],
+    tmp_path_factory,
+) -> Artifacts:
     root = tmp_path_factory.mktemp(row.test_name)
-    argv = ["fit", "--config", str(CONFIG_DIR / f"{row.config}.yaml")]
+    argv = ["fit"]
+    # a {config:NAME} dependency is a producer row's *saved* config.yaml —
+    # stack it BEFORE this row's own template (docs/tutorials/finetuning.md's
+    # worked order: saved base config first, template second), so the
+    # template's own settings (training_schedule, the new head, ...) win over
+    # the producer's incidental ones on any key both happen to set.
+    argv += config_argv
+    argv += ["--config", str(CONFIG_DIR / f"{row.config}.yaml")]
     argv += _base_data_args(row, ctx)
     argv += _trainer_args(root)
-    # train_args last: row-specific overrides (finetune epochs/limits, the
-    # input_samples fix, ...) must win over the shared defaults above.
-    argv += train_argv
+    # override_argv last: row-specific overrides (finetune epochs/limits, the
+    # input_samples fix, ...) must win over both configs and the shared
+    # defaults above.
+    argv += override_argv
     rc = salt_main(argv)
     if rc != 0:
         raise LegFailedError(row.test_name, "fit", f"salt fit rc={rc}")
@@ -705,9 +737,15 @@ def run_export(name: str, tmp_path_factory) -> Path:
 def _assert_eval_h5_matches_golden(eval_h5: Path, row: Row) -> None:
     """The written eval H5's per-group field names/order == the committed golden.
 
-    Strictly stronger than the run-free static check
-    (``test_shipped_configs.py``): this compares what was actually written,
-    not what was planned.
+    This compares what was actually written, not what was planned — strictly
+    stronger than the run-free static table check
+    (``H5OutputSink._resolve_columns`` vs the golden) that the folded
+    ``test_config_h5_schema_parity.py`` used to run for this row's config.
+    That static form has not (yet) been re-added to the Tier-A loop of
+    ``test_shipped_configs.py`` (§4.2 scoped it to ``MIGRATED = {regression,
+    regression_gaussian}``, both of which are ``do_eval=True`` matrix rows) —
+    no coverage loss today, but a config that only ever gets a matrix row and
+    never a Tier-A/eval-golden pairing would have neither check.
     """
     import h5py
 

@@ -137,7 +137,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     ),
     "salt/utils/array_utils.py": ("salt/tests/integration/pipeline.py",),
     "salt/utils/file_utils.py": ("salt/tests/unit/data/readers/test_vds.py",),
-    "salt/utils/loss_history.py": ("salt/tests/unit/test_ckpt_compat.py",),
     "salt/utils/mask_utils.py": ("salt/tests/unit/outputs/test_maskformer_eval_h5.py",),
     "salt/utils/scalers.py": ("salt/tests/unit/model/modules/tasks/test_regression.py",),
     "salt/utils/union_find.py": ("salt/tests/unit/model/test_get_output.py",),

@@ -7,7 +7,7 @@ compares the graph breaks it finds against a checked-in ALLOWLIST. A break at a
 site nobody signed off on fails the gate.
 
 CPU-only and inductor-free (eager backend, tiny fixture models), so it is
-`cpu_always` and runs in the modular-integration-cpu-gates CI job.
+`cpu_always` and runs in the integration-cpu CI job.
 """
 
 from __future__ import annotations

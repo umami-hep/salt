@@ -52,6 +52,17 @@ def pytest_configure(config: pytest.Config) -> None:
         "a stated reason on other cards, so coverage accumulates across CI (A100), "
         "lxplus (V100/T4) and dev boxes (Blackwell).",
     )
+    config.addinivalue_line(
+        "markers",
+        "pipeline: a config-lifecycle matrix row (test_pipeline.py) — its own CI job "
+        "(pipeline-matrix), parallel with the rest of tests/integration/ "
+        "(integration-cpu selects `-m \"not pipeline\"`). See pipeline.py MATRIX.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "gpu: a matrix row in pipeline.py's GPU_ROWS subset — selected by the "
+        "pipeline-matrix-gpu CI job via `-m \"pipeline and gpu\"`.",
+    )
 
 
 def _is_integration(item: pytest.Item) -> bool:
