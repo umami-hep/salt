@@ -30,7 +30,7 @@ import contextlib
 import io
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -42,7 +42,7 @@ import pytest
 from salt.main import CONFIG_DIR
 from salt.main import main as salt_main
 from salt.outputs.sinks.onnx import make_session
-from salt.schema import dump_schema, save_schema
+from salt.schema import dump_schema, load_schema, save_schema
 from salt.testing.datagen import compute_norm_dict, load_pipeline
 from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
 
@@ -161,6 +161,15 @@ MATRIX: list[Row] = [
         False,
         False,
         (
+            # "--config {fragment}" (pipeline #15651154, item 1): the compile+
+            # plot floor leg keeps only "--config "-prefixed train_args
+            # elements (test_pipeline._expand_train_args/run_compile_plot),
+            # so the fit-leg-only "--data.train_file="/"--data.val_file="
+            # overrides below never reached it — its run-free `graph
+            # validate`/`graph plot` calls .prepare() on the reader PROTOTYPE
+            # directly and needs a real filename already resolved in a config
+            # file (see write_standalone_source_fragment).
+            "--config {fragment}",
             "--data.train_file={root}",
             "--data.val_file={root}",
             "--data.batch_size=2",
@@ -196,6 +205,11 @@ MATRIX: list[Row] = [
         False,
         (
             "--config {config:gn3v00_base}",
+            # pipeline #15651154, item 3: re-pin THIS row's own schema (with
+            # large_r_flavour_label) on top of gn3v00_base's stacked one
+            # (without it) — see write_schema_override_fragment. Must come
+            # AFTER "{config:gn3v00_base}" so it wins the config-file merge.
+            "--config {schema_fragment}",
             "--init_from={ckpt:gn3v00_base}",
             "--trainer.max_epochs=6",
             "--trainer.limit_train_batches=1",
@@ -207,7 +221,25 @@ MATRIX: list[Row] = [
     # `fit=False` rows carry forward the old NO_FIXTURE reason (or an EXTRAS
     # gap) as the comment — compile+plot only, no synthetic fixture serves
     # the lifecycle.
-    # NO_FIXTURE: no soft-muon global stream in write_dummy_file
+    # NO_FIXTURE: no soft-muon global stream in write_dummy_file. DEFERRED
+    # (pipeline #15651154, item 2): fit-mode plot fails with BindError
+    # "symbolic dim 'B' resolves to 2 at key 'raw.jets' declared fields but
+    # 14 at key 'raw.global' declared fields". Traced to a PRODUCT-level
+    # issue, not a FEEDS/fixture mismatch: `H5StructuredReader.declare_io`
+    # (salt/data/readers/reader.py) gives every global_object stream the
+    # literal shape ("B",) — not per-stream-qualified — and
+    # `resolve_bind_schema` (salt/model/bind.py) binds a field-carrying key's
+    # symbolic LAST dim to its declared-fields COUNT; for a global_object
+    # stream that last dim IS "B" (there is no other), so with jets (2
+    # declared Features variables) and global (14) both global_object:true,
+    # the SAME "B" symbol gets bound to two different counts. This is 100%
+    # config-driven (Features.declare_io reads `variables:` from the SHIPPED
+    # config directly — no schema/data file involved either way, confirmed
+    # by reading both declare_io implementations), so no FEEDS/dummy-fixture
+    # change can avoid it — the shipped GN2emu.yaml is the only MATRIX config
+    # with two DIFFERENT-width global_object streams, and this looks like a
+    # latent bug never exercised before this restructure ran fit-mode plot
+    # for the first time. Left for product-code judgement, not a test fix.
     Row("gn2emu", "GN2/GN2emu", False, False, fit=False),
     Row("gn2_mup", "GN2/GN2_muP", False, False),
     # NO_FIXTURE: config truncates tracks to 100; the fixture writes 40
@@ -231,7 +263,19 @@ MATRIX: list[Row] = [
     # NO_FIXTURE: no super_tracks stream in write_dummy_file
     Row("dipz", "legacy/Dipz", False, False, fit=False),
     Row("dl1", "legacy/DL1", False, False),
-    # EXTRAS(awkward)-gated; no synthetic FTAG1LITE POOL fixture
+    # EXTRAS(awkward)-gated; no synthetic FTAG1LITE POOL fixture. DEFERRED
+    # (pipeline #15651154, item 1): compile+plot floor leg fails with
+    # ConfigError "reader 'reader' has no source file" — the "default"
+    # H5-shaped dummy feed is irrelevant to this config's OWN UprootReader
+    # (via ftag1lite.yaml, unroll: jets + double-jagged ft1l_trk_* track
+    # decorations under AntiKt4EMPFlowJetsAuxDyn.), and `graph validate`
+    # calls .prepare() on the reader PROTOTYPE (needs a REAL, openable ROOT
+    # file — same fix class as easyjet_flavour above, see
+    # write_standalone_source_fragment). Unlike easyjet_flavour's single-
+    # jagged jets-only minitree, a correct FTAG1LITE fixture needs an
+    # accurate event->jet->track double-jagged structure with 18 branches
+    # across 2 groups — a nontrivial new fixture writer left for a follow-up
+    # rather than risk shipping one unverified (no pytest in this harness).
     Row("ftag1lite_empflow", "readers/ftag1lite_empflow", False, False, fit=False),
 ]
 
@@ -356,6 +400,28 @@ KNOWN_FAILURES: dict[tuple[str, str], str] = {
         "check_onnx: NaN in torch output for MFv2_leading_objects_pt at "
         "lengths={'tracks': 0} and {'tracks': 1} — a real torch/ONNX zero-token "
         "divergence, not a harness bug. Fit and eval are green."
+    ),
+    ("gn2emu", "compile_plot"): (
+        "graph plot --mode fit: BindError, symbolic dim 'B' resolves to 2 at key "
+        "'raw.jets' declared fields but 14 at key 'raw.global' declared fields — "
+        "conflicting widths. Product bug, not a feed/fixture gap (see the MATRIX "
+        "Row comment above): H5StructuredReader.declare_io assigns the literal, "
+        "non-stream-qualified symbolic dim 'B' to EVERY global_object stream's "
+        "shape, so two global_object streams with different declared-Features "
+        "widths (jets: 2, global: 14) collide in resolve_bind_schema's "
+        "field-count binding — both counts come straight from the shipped "
+        "config, so no feed/schema change can avoid it. Needs a product-side fix "
+        "(a stream-qualified dim symbol for global_object shapes)."
+    ),
+    ("ftag1lite_empflow", "compile_plot"): (
+        "graph validate: ConfigError, reader 'reader' has no source file. See "
+        "the MATRIX Row comment above: this config's own UprootReader (via "
+        "ftag1lite.yaml, unroll: jets) needs a REAL, openable ROOT file for "
+        "graph validate's run-free .prepare() call (same mechanism the "
+        "easyjet_flavour fix addresses), but a correct fixture needs an "
+        "accurate double-jagged event->jet->track structure (18 branches "
+        "across 2 groups under AntiKt4EMPFlowJetsAuxDyn.) that does not exist "
+        "yet — tracked as a fixture-writing follow-up, not a harness bug."
     ),
 }
 
@@ -824,6 +890,49 @@ def _reader_node(config: str) -> dict | None:
 _RECIPE_CACHE: dict[str, dict[str, Path]] = {}
 
 
+# config_relpath -> the ``class_names`` this row's own flavour_label task
+# ACTUALLY declares, when it differs from the SHARED recipe's default
+# schema attr (pipeline #15651154, item 5: gn2v2-opendata declares
+# [bjets, cjets, ujets, taujets] (open-data label order, taujets INCLUDED),
+# but the "flavour_tagger" recipe's default flags: {} (no inc_taus) produces
+# a 3-class flavour_label attr with no taujets — check_class_names
+# (salt/model/saltmodule.py) then raises ConfigError at fit/eval time
+# (schema-bound legs only; compile+plot passes no schema, so it never saw
+# this). A per-config table, not a blanket recipe/flag change: GN3X ALSO
+# feeds off "flavour_tagger" (see FEEDS) and ALSO declares a class set the
+# recipe's default doesn't produce (9 classes) — GN3X's fit is an EXISTING
+# KNOWN_FAILURES strict xfail, so fixing this generically for every
+# recipe-fed row risks silently fixing GN3X's root cause too and flipping
+# it to an unexpected PASS (a strict-xfail failure). Metadata-only: the
+# underlying H5 flavour_label INT column is untouched by the override below
+# — the appended class(es) are simply undrawn (count 0), exactly like
+# taujets already is in the write_dummy_file convention this recipe mirrors
+# (jet_features.yaml's own class_names vs. sample_classes split).
+RECIPE_CLASS_NAMES_OVERRIDE: dict[str, list[str]] = {
+    "gn2v2-opendata": ["bjets", "cjets", "ujets", "taujets"],
+}
+
+
+def _apply_class_names_override(
+    row: Row, ctx: dict[str, Path], class_names: list[str], tmp_path_factory
+) -> dict[str, Path]:
+    """A row-scoped derived schema with the ``jets`` group's ``flavour_label``
+    attr replaced by ``class_names`` (see ``RECIPE_CLASS_NAMES_OVERRIDE``).
+
+    Never mutates the shared, cached recipe context (``_recipe_context``,
+    keyed by recipe name only, so other rows sharing the SAME recipe get the
+    UNCHANGED schema) — this returns a NEW ctx dict pointing ``"schema"`` at
+    a freshly written, row-scoped file instead.
+    """
+    schema = load_schema(ctx["schema"])
+    jets = schema.groups["jets"]
+    derived_jets = replace(jets, attrs={**jets.attrs, "flavour_label": list(class_names)})
+    derived_schema = replace(schema, groups={**schema.groups, "jets": derived_jets})
+    out = tmp_path_factory.mktemp(f"{row.test_name}_schema") / "schema.yaml"
+    save_schema(derived_schema, out)
+    return {**ctx, "schema": out}
+
+
 def _recipe_context(recipe: str, tmp_path_factory) -> dict[str, Path]:
     """Run a ``salt.testing.datagen`` recipe once; every row using it shares the result."""
     cached = _RECIPE_CACHE.get(recipe)
@@ -919,6 +1028,34 @@ def _build_gn3_dummy(tmp_path_factory) -> dict[str, Path]:
     return {"h5": h5, "schema": schema, "norm": nd, "class_dict": cd}
 
 
+def _write_schema_override_fragment(out: Path, schema: Path) -> Path:
+    """A ``--config``-stackable overlay pinning the reader's ``schema:`` to
+    ``schema``.
+
+    Needed by rows that chain onto ANOTHER row's saved config
+    (``{config:NAME}`` in ``train_args``, e.g. finetune_new_head onto
+    gn3v00_base): that producer config is schema-bound too (from ITS OWN
+    fixture), and jsonargparse's config-file deep-merge is key-by-key — a
+    later ``--config``/``-c`` that never mentions ``schema:`` does not clear
+    an earlier one, so the producer's schema silently survives unless this
+    row explicitly re-pins its OWN schema on top (pipeline #15651154, item 3:
+    finetune_new_head's compile+plot leg saw gn3v00_base's "gn3" schema —
+    missing ``large_r_flavour_label`` — instead of its own "gn3_large_r"
+    one). The real fit leg never hit this: ``_base_data_args``'s
+    ``--data.modules.reader.init_args.schema=`` is a CLI override applied
+    after every ``-c``/``--config``, so it always won there regardless; the
+    compile+plot floor leg passes no such override at all (discards
+    override_argv, see ``run_compile_plot``), so this row needs the
+    correction to survive as a stacked config file instead.
+    """
+    import yaml
+
+    overlay = {"data": {"modules": {"reader": {"init_args": {"schema": str(schema)}}}}}
+    out = Path(out)
+    out.write_text(yaml.safe_dump(overlay, sort_keys=False))
+    return out
+
+
 def _build_gn3_large_r_dummy(tmp_path_factory) -> dict[str, Path]:
     """The ``gn3`` fixture plus a ``large_r_flavour_label`` jets column — row 15.
 
@@ -954,7 +1091,14 @@ def _build_gn3_large_r_dummy(tmp_path_factory) -> dict[str, Path]:
             dst["jets"].attrs["large_r_flavour_label"] = ["hbb", "hcc", "top", "qcd"]
     schema = out / "schema.yaml"
     save_schema(dump_schema(h5), schema)
-    return {"h5": h5, "schema": schema, "norm": base["norm"], "class_dict": base["class_dict"]}
+    schema_fragment = _write_schema_override_fragment(out / "schema_override.yaml", schema)
+    return {
+        "h5": h5,
+        "schema": schema,
+        "schema_fragment": schema_fragment,
+        "norm": base["norm"],
+        "class_dict": base["class_dict"],
+    }
 
 
 _DUMMY_BUILDERS = {
@@ -1025,11 +1169,18 @@ def _paired_root_context(row: Row, fragment: str, tmp_path_factory) -> dict[str,
 
 
 def _whole_root_context(row: Row, tmp_path_factory) -> dict[str, Path]:
-    """One synthetic minitree, read via ``--data.train_file``/``--data.val_file`` — row 7."""
+    """One synthetic minitree — read via ``--data.train_file``/``--data.val_file``
+    for the fit leg (row 7), and via a stacked ``--config {fragment}`` overlay
+    for the compile+plot floor leg (pipeline #15651154, item 1: that leg
+    discards plain overrides, and its run-free ``graph validate``/``graph
+    plot`` needs the reader's ``filename`` already resolved in a config file —
+    see ``write_standalone_source_fragment``).
+    """
     from salt.tests._fixtures.easyjet_minitree import (
         build_fixture_arrays,
         write_jets_norm_dict,
         write_minitree,
+        write_standalone_source_fragment,
     )
 
     out = tmp_path_factory.mktemp(f"root_{row.test_name}")
@@ -1038,7 +1189,8 @@ def _whole_root_context(row: Row, tmp_path_factory) -> dict[str, Path]:
         "jets"
     ]
     norm = write_jets_norm_dict(out / "norm_dict.yaml", variables)
-    return {"root": root, "norm": norm}
+    fragment = write_standalone_source_fragment(out / "source.yaml", root)
+    return {"root": root, "norm": norm, "fragment": fragment}
 
 
 def _feed_context(row: Row, tmp_path_factory) -> dict[str, Path]:
@@ -1053,7 +1205,11 @@ def _feed_context(row: Row, tmp_path_factory) -> dict[str, Path]:
     kind, arg = FEEDS[row.config]
     if kind == "recipe":
         assert arg is not None
-        return _recipe_context(arg, tmp_path_factory)
+        ctx = _recipe_context(arg, tmp_path_factory)
+        override = RECIPE_CLASS_NAMES_OVERRIDE.get(row.config)
+        if override is not None:
+            ctx = _apply_class_names_override(row, ctx, override, tmp_path_factory)
+        return ctx
     if kind == "dummy":
         assert arg is not None
         return _dummy_context(arg, tmp_path_factory)
@@ -1308,9 +1464,17 @@ _COMPILE_PLOT_PARAMS = [row.test_name for row in MATRIX]
 
 
 @pytest.mark.parametrize("name", _COMPILE_PLOT_PARAMS)
-def test_compile_plot(name, tmp_path_factory, tmp_path):
-    """Floor leg — every row's config plan-compiles and its fit-mode DOT renders."""
+def test_compile_plot(name, tmp_path_factory, tmp_path, request):
+    """Floor leg — every row's config plan-compiles and its fit-mode DOT renders.
+
+    Leg name "compile_plot" for KNOWN_FAILURES purposes (study xfail policy:
+    "pre-existing lifecycle failures get tracked xfails, not debugging
+    expeditions") — this leg has no {fit, eval, export} split of its own, so
+    one entry covers both the ``graph validate`` and ``graph plot`` calls
+    inside ``run_compile_plot``.
+    """
     row = row_by_name(name)
+    _apply_known_xfail(request, name, "compile_plot")
     try:
         run_compile_plot(row, tmp_path_factory, tmp_path)
     except RootDepsMissingError as exc:
@@ -1358,6 +1522,42 @@ def run_row(name: str, tmp_path_factory) -> Artifacts:
     return artifacts
 
 
+def _needs_mup_shapes(config: str) -> bool:
+    """Whether ``config``'s model declares a ``mup:`` block (structural check
+    on the config itself, not a row-name special case — GN2_muP is simply the
+    only shipped config where this is currently true).
+    """
+    model = _load_expanded(config).get("model") or {}
+    return bool((model.get("init_args") or {}).get("mup"))
+
+
+def _generate_mup_shapes(row: Row, ctx: dict[str, Path], tmp_path_factory) -> Path:
+    """Run ``salt mup-shapes`` for ``row``'s config — the real muP pre-fit
+    workflow (pipeline #15651154, item 4): the shipped config's
+    ``model.init_args.mup.shape_path`` is a documented placeholder
+    ("shape_path is a REQUIRED override — generate with `salt mup-shapes`",
+    GN2_muP.yaml), never a real file, so ``salt fit`` on it verbatim always
+    fails looking for ``shape_mup.bsh``. ``generate_shapes`` builds its
+    base/delta probe models data-free/run-free purely from the config, so
+    this needs only the same norm_dict override every bare Normaliser in the
+    row's config needs for a run-free parse (``_norm_set_overrides``) — base/
+    delta widths default from the config's own configured width.
+    """
+    out_dir = tmp_path_factory.mktemp(f"mup_shapes_{row.test_name}")
+    shape_path = out_dir / "shape_mup.bsh"
+    argv = [
+        "mup-shapes",
+        "-c",
+        str(CONFIG_DIR / f"{row.config}.yaml"),
+        "--save-path",
+        str(shape_path),
+    ]
+    for override in _norm_set_overrides(row, ctx):
+        argv += ["--set", override]
+    _salt_main(row.test_name, "mup-shapes", argv)
+    return shape_path
+
+
 def _do_fit(
     row: Row,
     ctx: dict[str, Path],
@@ -1371,6 +1571,10 @@ def _do_fit(
     # `_require_extra`, but the failure surfaced anyway, so this leg gets its
     # OWN direct call rather than relying solely on that transitive path.
     _require_extra(row.config)
+    mup_shape_overrides: list[str] = []
+    if _needs_mup_shapes(row.config):
+        shape_path = _generate_mup_shapes(row, ctx, tmp_path_factory)
+        mup_shape_overrides = [f"--model.init_args.mup.shape_path={shape_path}"]
     root = tmp_path_factory.mktemp(row.test_name)
     argv = ["fit"]
     # a {config:NAME} dependency is a producer row's *saved* config.yaml —
@@ -1382,6 +1586,7 @@ def _do_fit(
     argv += ["--config", str(CONFIG_DIR / f"{row.config}.yaml")]
     argv += _base_data_args(row, ctx)
     argv += _trainer_args(root)
+    argv += mup_shape_overrides
     # override_argv last: row-specific overrides (finetune epochs/limits, the
     # input_samples fix, ...) must win over both configs and the shared
     # defaults above.
@@ -1692,11 +1897,16 @@ def test_every_matrix_config_has_a_feed():
 
 
 def test_known_failures_name_real_rows_and_legs():
-    """Stale KNOWN_FAILURES entries fail loudly instead of silently protecting nothing."""
+    """Stale KNOWN_FAILURES entries fail loudly instead of silently protecting nothing.
+
+    "compile_plot" joins {fit, eval, export} as a valid leg name — the floor
+    leg every row gets (test_compile_plot), added when KNOWN_FAILURES grew
+    its first compile_plot-leg entries (gn2emu, ftag1lite_empflow).
+    """
     names = {r.test_name for r in MATRIX}
     for name, leg in KNOWN_FAILURES:
         assert name in names, f"KNOWN_FAILURES names an unknown row: {name!r}"
-        assert leg in {"fit", "eval", "export"}, (
+        assert leg in {"fit", "eval", "export", "compile_plot"}, (
             f"KNOWN_FAILURES names an unknown leg {leg!r} for {name!r}"
         )
 

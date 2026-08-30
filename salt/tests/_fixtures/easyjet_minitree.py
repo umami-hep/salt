@@ -144,3 +144,38 @@ def write_sourced_fragment(raw: dict, out: Path, files: dict[str, Path]) -> Path
     out = Path(out)
     out.write_text(yaml.safe_dump(raw, sort_keys=False))
     return out
+
+
+def write_standalone_source_fragment(out: Path, path: Path) -> Path:
+    """A ``--config``-stackable overlay pointing a STANDALONE reader-owning
+    config's own ``UprootReader`` at ``path`` directly, alongside the
+    datamodule's ``train_file``/``val_file`` (same value).
+
+    For a config with its OWN complete reader block (unlike
+    ``write_sourced_fragment``'s ``samples:``-list case, where the fragment
+    IS the reader) — e.g. ``readers/easyjet_flavour.yaml``. A plain
+    ``--data.train_file=``/``--data.modules.reader.init_args.filename=``
+    override is an OVERRIDE_ARGV element (``test_pipeline._expand_train_args``
+    classifies anything not starting with ``"--config "`` there), discarded by
+    the compile+plot floor leg's static, run-free ``graph validate``/``graph
+    plot`` (``test_pipeline.run_compile_plot`` retains only ``config_argv``).
+    That leg calls ``.prepare()`` on the reader PROTOTYPE directly — bypassing
+    the ``InputSamples``/``SaltDataModule.setup()`` dynamic binding the fit leg
+    goes through — so it needs the filename already resolved IN THE CONFIG
+    (pipeline #15651154, item 1; same reasoning as ``write_sourced_fragment``'s
+    ``filename`` poke above). Deep-merges harmlessly on top of the model
+    config either stacking order: the model's own ``reader.init_args`` never
+    mentions ``filename``, so a key-by-key config merge never touches it.
+    """
+    import yaml
+
+    overlay = {
+        "data": {
+            "train_file": str(path),
+            "val_file": str(path),
+            "modules": {"reader": {"init_args": {"filename": str(path)}}},
+        }
+    }
+    out = Path(out)
+    out.write_text(yaml.safe_dump(overlay, sort_keys=False))
+    return out
