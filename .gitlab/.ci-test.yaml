@@ -41,16 +41,17 @@ modular-unit-tests:
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
 
 # --------------- CPU INTEGRATION ---------------
-# The whole integration directory in ONE pytest invocation. Without
-# --run-integration only the `cpu_always` tests execute; GPU-only siblings are
-# skipped by the conftest. A new cpu_always file is picked up automatically —
-# there is no per-file list to keep in sync, and no `set -e` truncation (the
-# old modular-integration-cpu-gates job named 8 files and aborted on the first
-# red one, so the remaining 7 never reported), because pytest reports every
-# test and the junit artifact carries them individually. `-m "not pipeline"`
-# excludes the config-lifecycle matrix (below) so the two jobs don't double-run
-# the same tests; this is also what finally pulls test_shipped_configs.py (the
-# discovery floor) into CI.
+# The whole (restructured) integration tree — pipeline/ (the config-lifecycle
+# matrix + inference) and multistage_training/ — in ONE pytest invocation.
+# Without --run-integration only the `cpu_always` tests execute; GPU-only
+# siblings are skipped by the conftest. A new cpu_always file is picked up
+# automatically — there is no per-file list to keep in sync, and no `set -e`
+# truncation (the old modular-integration-cpu-gates job named 8 files and
+# aborted on the first red one, so the remaining 7 never reported), because
+# pytest reports every test and the junit artifact carries them individually.
+# `-m "not gpu"` excludes only the GPU-marked matrix rows (they run in
+# integration-gpu below) — there is no separate `pipeline` marker or job split
+# any more; the matrix and everything else run here as one suite.
 integration-cpu:
   extends: .test-template
   needs:
@@ -60,37 +61,22 @@ integration-cpu:
           - VARIANT: V2H
     - job: modular-unit-tests          # user directive: integration behind units
   script:
-    - JUNIT_FILE=reports/integration-cpu.xml run_test salt/tests/integration -m "not pipeline"
-
-# The config lifecycle matrix (salt/tests/integration/pipeline.py +
-# test_pipeline.py). Split from the job above only for wall-clock: same image,
-# same rules, runs in parallel with it. Every parametrized fit/eval/export leg
-# is its own <testcase> in reports/pipeline-matrix.xml, so a single red row
-# (e.g. test_export[maskformer]) shows up by name in the MR widget instead of
-# "job failed at line 5".
-pipeline-matrix:
-  extends: .test-template
-  needs:
-    - job: build_docker_test
-      parallel:
-        matrix:
-          - VARIANT: V2H
-    - job: modular-unit-tests          # user directive: integration behind units
-  script:
-    - JUNIT_FILE=reports/pipeline-matrix.xml run_test salt/tests/integration -m pipeline
+    - JUNIT_FILE=reports/integration-cpu.xml run_test salt/tests/integration -m "not gpu"
 
 # --------------------- GPU RUNNER (k8s-gpu) ---------------------
 # Replaces gpu-smoke. Proves the GPU path on shipped configs rather than on a
-# derived test config: once tests-gpu runs real pipeline.py rows, a separate
-# smoke job training a throwaway config is redundant. The rows use
+# derived test config: once tests-gpu runs real matrix rows, a separate smoke
+# job training a throwaway config is redundant. The rows use
 # --trainer.accelerator=auto, so they take the GPU with no config change.
-# `-m "pipeline and gpu"` selects the GPU_ROWS subset (pipeline.py) — chosen
-# from rows that are green on CPU, so a device-dependent XPASS on a
-# strict=True xfail can't turn into a second unexplained red job.
+# `-m gpu` selects the GPU_ROWS subset — defined in
+# salt/tests/integration/pipeline/test_pipeline.py now that pipeline.py has
+# been merged into it — chosen from rows that are green on CPU, so a
+# device-dependent XPASS on a strict=True xfail can't turn into a second
+# unexplained red job.
 # `tags: [k8s-gpu]` selects the GPU runner; we keep the .test-template salt
 # image (overrides the runner's default AlmaLinux9). FAIR USE: keep k8s-gpu
 # jobs <= 5 in parallel.
-pipeline-matrix-gpu:
+integration-gpu:
   extends: .test-template
   stage: tests-gpu
   tags:
@@ -110,4 +96,4 @@ pipeline-matrix-gpu:
   # now.
   script:
     - python -c "import torch; assert torch.cuda.is_available(), torch.version.cuda"
-    - JUNIT_FILE=reports/pipeline-gpu.xml run_test salt/tests/integration -m "pipeline and gpu"
+    - JUNIT_FILE=reports/integration-gpu.xml run_test salt/tests/integration -m gpu
