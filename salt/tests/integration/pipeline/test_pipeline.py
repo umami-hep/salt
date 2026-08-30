@@ -26,6 +26,8 @@ just not the fit/eval/export legs.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import re
 import shlex
 from dataclasses import dataclass
@@ -1194,22 +1196,64 @@ def _expand_one(name: str, template: str, ctx: dict[str, Path], tmp_path_factory
 # ---------------------------------------------------------------------------
 
 
-def _salt_main(name: str, leg: str, argv: list[str]) -> int:
-    """``salt_main(argv)``, converting an argv-parse ``SystemExit`` into ``LegFailedError``.
+_STDERR_TAIL_LINES = 20
 
-    ``salt.main.main`` re-raises ``SystemExit`` from a failed CLI parse
-    (``except SystemExit: ... raise``) instead of returning a nonzero rc.
-    Left uncaught here, that crashes past every ``rc != 0`` check below and
-    propagates as a bare pytest error — worse, it skips the ``_ROW_CACHE``/
-    ``_INFERENCE_CACHE`` memoisation entirely, so every row chained onto a
-    dead producer (``{ckpt:NAME}``/``{config:NAME}``) re-runs the full fit
-    from scratch instead of skipping with a named reason (pipeline #15650554,
-    item B4 — gn2v2_opendata's 7 legs each re-ran the whole fit).
+
+def _salt_main(name: str, leg: str, argv: list[str]) -> None:
+    """Run ``salt_main(argv)`` for ``name``'s ``leg``; raises ``LegFailedError``
+    on ANY failure — a nonzero rc, or ``salt.main.main``'s ``SystemExit``
+    re-raise on a failed CLI parse. Returns ``None`` on success (rc == 0):
+    every call site below is now "call it, then keep going" — a failure
+    always surfaces as ``LegFailedError``, never a bare rc for the caller to
+    re-check.
+
+    Harness fix (pipeline #15651025 cluster 4 — "unblocks all future
+    diagnosis"): CI runs pytest with ``--show-capture=stdout``, and every
+    ``salt`` error path prints to STDERR (``console(..., file=sys.stderr)``,
+    argparse's own usage errors, ``GraphError``'s one-block form) — so a
+    failing leg showed NOTHING in the CI log, just a bare rc/exit code. This
+    redirects stderr into a buffer for the duration of the call; on ANY
+    failure the last ``_STDERR_TAIL_LINES`` lines print to STDOUT (so CI
+    actually shows them) and are folded into the raised ``LegFailedError``'s
+    message (so a producer-row skip elsewhere names the real cause, not just
+    "rc=1"). On rc == 0 the buffer is discarded silently.
+
+    ``salt.main.main`` re-raising ``SystemExit`` from a failed CLI parse
+    (instead of returning a nonzero rc) matters beyond messaging too: left
+    uncaught, it skips the ``_ROW_CACHE``/``_INFERENCE_CACHE`` memoisation
+    entirely, so every row chained onto a dead producer
+    (``{ckpt:NAME}``/``{config:NAME}``) re-runs the full fit from scratch
+    instead of skipping with a named reason (pipeline #15650554, item B4 —
+    gn2v2_opendata's 7 legs each re-ran the whole fit).
     """
+    buf = io.StringIO()
     try:
-        return salt_main(argv)
+        with contextlib.redirect_stderr(buf):
+            rc = salt_main(argv)
     except SystemExit as exc:
-        raise LegFailedError(name, leg, f"salt {leg} exited {exc.code} (argv parse)") from exc
+        _fail_with_stderr(name, leg, buf, f"salt {leg} exited {exc.code} (argv parse)", exc)
+        return
+    if rc != 0:
+        _fail_with_stderr(name, leg, buf, f"salt {leg} rc={rc}")
+
+
+def _fail_with_stderr(
+    name: str, leg: str, buf: io.StringIO, reason: str, cause: BaseException | None = None
+) -> None:
+    """Print ``buf``'s captured-stderr tail to stdout, then raise ``LegFailedError``
+    naming ``reason`` with the SAME tail folded into its message. Always raises.
+    """
+    lines = buf.getvalue().splitlines()
+    tail = "\n".join(lines[-_STDERR_TAIL_LINES:])
+    if tail:
+        n_shown = min(len(lines), _STDERR_TAIL_LINES)
+        print(f"--- {name} {leg}: captured stderr (last {n_shown} lines) ---")
+        print(tail)
+        print(f"--- {name} {leg}: end captured stderr ---")
+        reason = f"{reason}\nstderr tail:\n{tail}"
+    if cause is not None:
+        raise LegFailedError(name, leg, reason) from cause
+    raise LegFailedError(name, leg, reason)
 
 
 def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
@@ -1242,8 +1286,7 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     argv = ["graph", "validate", *config_argv, "-c", cfg_path]
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
-    rc = _salt_main(row.test_name, "validate", [*argv, *sets])
-    assert rc == 0, f"{row.test_name} ({row.config}) failed graph validate"
+    _salt_main(row.test_name, "validate", [*argv, *sets])
 
     plot_path = tmp_path / f"{row.test_name}.dot"
     plot_argv = [
@@ -1257,8 +1300,7 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
         "-o",
         str(plot_path),
     ]
-    plot_rc = _salt_main(row.test_name, "plot", [*plot_argv, *sets])
-    assert plot_rc == 0, f"{row.test_name}: graph plot failed"
+    _salt_main(row.test_name, "plot", [*plot_argv, *sets])
     assert plot_path.is_file(), f"{row.test_name}: graph plot wrote nothing to {plot_path}"
 
 
@@ -1323,6 +1365,12 @@ def _do_fit(
     override_argv: list[str],
     tmp_path_factory,
 ) -> Artifacts:
+    # explicit, direct gate — pipeline #15651025 cluster 3: gn2_mup's fit leg
+    # rc=1'd on a missing `mup` despite EXTRAS mapping GN2/GN2_muP to it;
+    # `_feed_context` (called by `run_row` just before this) already calls
+    # `_require_extra`, but the failure surfaced anyway, so this leg gets its
+    # OWN direct call rather than relying solely on that transitive path.
+    _require_extra(row.config)
     root = tmp_path_factory.mktemp(row.test_name)
     argv = ["fit"]
     # a {config:NAME} dependency is a producer row's *saved* config.yaml —
@@ -1338,9 +1386,7 @@ def _do_fit(
     # input_samples fix, ...) must win over both configs and the shared
     # defaults above.
     argv += override_argv
-    rc = _salt_main(row.test_name, "fit", argv)
-    if rc != 0:
-        raise LegFailedError(row.test_name, "fit", f"salt fit rc={rc}")
+    _salt_main(row.test_name, "fit", argv)
     ckpts = sorted(root.rglob("*.ckpt"))
     if not ckpts:
         raise LegFailedError(row.test_name, "fit", f"training wrote no checkpoint under {root}")
@@ -1372,9 +1418,7 @@ def run_eval(name: str, tmp_path_factory) -> Path:
     ]
     if "h5" in ctx:
         argv.append(f"--data.test_file={ctx['h5']}")
-    rc = _salt_main(name, "eval", argv)
-    if rc != 0:
-        raise LegFailedError(name, "eval", f"salt test rc={rc}")
+    _salt_main(name, "eval", argv)
     evals = sorted(artifacts.ckpt.parent.glob("*__test_*.h5"))
     if not evals:
         raise LegFailedError(name, "eval", f"eval wrote no H5 next to {artifacts.ckpt}")
@@ -1400,7 +1444,7 @@ def run_export(name: str, tmp_path_factory) -> Path:
     onnx_dir = artifacts.root_dir / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = onnx_dir / f"{name}.onnx"
-    rc = _salt_main(
+    _salt_main(
         name,
         "export",
         [
@@ -1411,8 +1455,6 @@ def run_export(name: str, tmp_path_factory) -> Path:
             f"--output={onnx_path}",
         ],
     )
-    if rc != 0:
-        raise LegFailedError(name, "export", f"salt export failed rc={rc}")
     if not sorted(onnx_dir.glob("*.onnx")):
         raise LegFailedError(name, "export", f"no ONNX written under {onnx_dir}")
     expected_onnx = EXPECTED_OUTPUTS.get(name, {}).get("onnx")

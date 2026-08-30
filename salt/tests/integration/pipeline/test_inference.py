@@ -16,7 +16,9 @@ reason, rather than running silently-wrong or erroring uninformatively, when:
 it is ROOT-fed (no H5 file to build a labelled/label-stripped pair from), its
 ``outputs:`` section assembles no ONNX export selection (``salt inference``
 is inexpressible for it — same contract ``salt inference`` itself enforces),
-or its own fit (or a chained producer's) failed.
+its ONNX-mode plan does not even connect (``GraphError`` — e.g. gn3_flow/
+gn3_lepid_smt's ``ConnectivityError`` on a missing ``inputs.flow``), or its
+own fit (or a chained producer's) failed.
 
 Gates, generalised per row wherever ``EXPECTED_OUTPUTS`` (the curated
 output-schema table in ``test_pipeline``, seeded from the now-deleted
@@ -68,7 +70,7 @@ import pytest
 import yaml
 from numpy.lib.recfunctions import repack_fields
 
-from salt.graph.errors import ConfigError
+from salt.graph.errors import GraphError
 from salt.inference import run_inference
 from salt.outputs.sinks.onnx import make_session
 from salt.schema import dump_schema, save_schema
@@ -159,9 +161,12 @@ def run_inference_pair(name: str, tmp_path_factory) -> InferenceArtifacts:
     Memoised per row, mirroring ``test_pipeline.run_row``. Re-raises the SAME
     exception on every subsequent call for a row that failed once:
     ``RootDepsMissingError`` (ROOT-fed row, no H5), ``LegFailedError`` (this
-    row's or a producer's fit failed), or ``ConfigError`` (the row's
+    row's or a producer's fit failed), or ``GraphError`` (the row's
     ``outputs:`` section assembles no ONNX export selection — inference is
-    inexpressible for it).
+    inexpressible for it — or its ONNX-mode plan does not even connect, e.g.
+    gn3_flow/gn3_lepid_smt's ``ConnectivityError: 'norm' requires 'inputs.flow'``,
+    pipeline #15651025 cluster 2: `ConnectivityError` is a `GraphError` sibling
+    of `ConfigError`, not a subclass, so catching only `ConfigError` missed it).
     """
     cached = _INFERENCE_CACHE.get(name)
     if isinstance(cached, Exception):
@@ -171,7 +176,7 @@ def run_inference_pair(name: str, tmp_path_factory) -> InferenceArtifacts:
     row = row_by_name(name)
     try:
         artifacts = _build_inference_pair(row, tmp_path_factory)
-    except (LegFailedError, RootDepsMissingError, ConfigError) as exc:
+    except (LegFailedError, RootDepsMissingError, GraphError) as exc:
         _INFERENCE_CACHE[name] = exc
         raise
     _INFERENCE_CACHE[name] = artifacts
@@ -265,7 +270,7 @@ def _artifacts_or_skip(name: str, tmp_path_factory) -> InferenceArtifacts:
         pytest.skip(str(exc))
     except LegFailedError as exc:
         pytest.skip(f"producer row {exc.producer} failed its fit leg: {exc}")
-    except ConfigError as exc:
+    except GraphError as exc:
         pytest.skip(f"{name}: salt inference cannot run — {exc}")
 
 
@@ -467,21 +472,38 @@ class TestLabelStripped:
                 assert not set(f[group].dtype.names or ()) & LABEL_FIELDS, group
 
     def test_prediction_columns_identical(self, name, tmp_path_factory):
-        """Every column present in the labelled output (and any pad mask) is
-        bit-identical in the stripped output — labels contribute nothing.
-        Compares whatever columns the row actually produced, not a curated
-        name list — the two files are the SAME row's own two runs.
+        """The MODEL-MINTED columns — the run-name-prefixed export-selection
+        columns, ``{RUN_NAME}_*`` — are bit-identical between the labelled and
+        stripped runs: labels contribute nothing to the model's own outputs.
+
+        Deliberately NOT a whole-file column diff (pipeline #15651025 cluster
+        1, ~12 failures): the sink's copy-all behaviour copies whatever label
+        columns the LABELLED source carries and (correctly) none from the
+        label-stripped one, so the full column sets differ BY CONSTRUCTION —
+        and the copied VALUES can differ too (e.g. regression: tracks/deta),
+        since copy-all pulls in every source field, not just labels. None of
+        that is a prediction, so it is excluded here: input copies, the pad
+        mask, and target_* columns are all un-prefixed (or differently
+        prefixed) and never enter the comparison.
         """
         artifacts = _artifacts_or_skip(name, tmp_path_factory)
+        fit = run_row(name, tmp_path_factory)
+        run_name = yaml.safe_load(fit.saved_config.read_text())["name"]
+        prefix = f"{run_name}_"
         with h5py.File(artifacts.labelled_output) as fa, h5py.File(artifacts.stripped_output) as fb:
             assert set(fa) == set(fb), f"{name}: group sets differ between labelled and stripped"
+            checked_any = False
             for group in fa:
-                a_names = set(fa[group].dtype.names or ())
-                b_names = set(fb[group].dtype.names or ())
-                assert a_names == b_names, f"{name}/{group}: column sets differ when stripped"
+                a_names = {c for c in (fa[group].dtype.names or ()) if c.startswith(prefix)}
+                b_names = {c for c in (fb[group].dtype.names or ()) if c.startswith(prefix)}
+                assert a_names == b_names, (
+                    f"{name}/{group}: model-minted ({prefix}*) column sets differ when stripped"
+                )
                 for col in a_names:
+                    checked_any = True
                     a, b = fa[group][col][:], fb[group][col][:]
                     assert np.array_equal(a, b), f"{name}: {group}/{col} differs when stripped"
+            assert checked_any, f"{name}: no model-minted ({prefix}*) column found to compare"
 
     def test_stripped_output_carries_no_label_columns(self, name, tmp_path_factory):
         """The stripped-run H5 carries no label copy and no target_* column."""
