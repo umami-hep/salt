@@ -32,9 +32,25 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--pipeline-row",
         action="store",
         default=None,
-        help="run ONLY the named pipeline matrix row's lifecycle legs (test_fit/"
-        "test_eval/test_export). Exact row id (a fixtures/<id>.yaml stem), never "
-        "substring matching; unknown ids error. Used by the integration-gpu CI matrix.",
+        help="run ONLY the named pipeline matrix row (a fixtures/<id>.yaml stem, exact "
+        "match, never substring). Scope of what runs for that row is controlled by "
+        "--pipeline-row-scope. Serves both the per-config CPU matrix (scope=all) and "
+        "the manual integration-gpu matrix (scope=legs); unknown ids error.",
+    )
+    parser.addoption(
+        "--pipeline-row-scope",
+        action="store",
+        default="all",
+        choices=("all", "legs", "misc"),
+        help="how --pipeline-row (or its absence) selects pipeline/ tests. "
+        "'all' (default): with --pipeline-row, run EVERY test parametrized with that "
+        "row id (the lifecycle legs test_fit/test_eval/test_export, the "
+        "compile_plot floor, and the inference/name-check tests) — the per-config "
+        "CPU CI jobs. 'legs': with --pipeline-row, run ONLY the lifecycle legs "
+        "(test_fit/test_eval/test_export) for that row — the manual integration-gpu "
+        "jobs. 'misc': --pipeline-row must NOT be set; runs only the tests that are "
+        "NOT parametrized with any row id (completeness/consistency checks, "
+        "fragment tests, multistage_training/, ...) — the integration-misc CPU job.",
     )
 
 

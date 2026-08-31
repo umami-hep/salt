@@ -1,14 +1,14 @@
 .test-template:
-  stage: tests-cpu
-  # build_docker_test is a parallel:matrix job, so the dependency must name the
-  # cell. Test jobs pull the unsuffixed `-test` tag, which only V2H publishes —
-  # so V2H is the one to wait for. Depending on the bare job name here would
-  # fail pipeline creation.
-  needs:
-    - job: build_docker_test
-      parallel:
-        matrix:
-          - VARIANT: V2H
+  stage: unit-tests
+  # Plan 06: stage barriers, not a needs-DAG (user directive: "single 'cpu unit
+  # tests' stage THEN once that has fully run and passed ... EACH of these CPU
+  # jobs as its own job"). With no `needs:` anywhere in this file, GitLab runs
+  # lint -> builds -> unit-tests -> per-config -> (tests-gpu manual) -> coverage
+  # -> docs purely by stage order. Accepted cost: unit-tests now waits for the
+  # WHOLE builds stage (both V2H and T2B cells), not just V2H as the old
+  # per-job `needs:` on build_docker_test[VARIANT: V2H] arranged — a few extra
+  # minutes of wall time per pipeline, traded for a graph the user can reason
+  # about without reading job-level `needs:` edges.
   image: "$CI_REGISTRY_IMAGE/temporary_images:${CI_COMMIT_REF_SLUG}-test"
   artifacts:
     when: always
@@ -40,29 +40,69 @@ modular-unit-tests:
   script:
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
 
-# --------------- CPU INTEGRATION ---------------
-# The whole (restructured) integration tree — pipeline/ (the config-lifecycle
-# matrix + inference) and multistage_training/ — in ONE pytest invocation.
-# Without --run-integration only the `cpu_always` tests execute; GPU-only
-# siblings are skipped by the conftest. A new cpu_always file is picked up
-# automatically — there is no per-file list to keep in sync, and no `set -e`
-# truncation (the old modular-integration-cpu-gates job named 8 files and
-# aborted on the first red one, so the remaining 7 never reported), because
-# pytest reports every test and the junit artifact carries them individually.
-# ALL 33 rows run here now, including the 4 `gpu: true` rows (plan 04) — this
-# restores the CPU coverage that `-m "not gpu"` had been silently dropping
-# (resolves the pending coverage ruling); those same 4 rows run AGAIN below in
-# integration-gpu, on the actual device, via the exact --pipeline-row selector.
+# --------------- PER-CONFIG CPU FAN-OUT ---------------
+# Plan 06: one CPU job per runnable fixture (stage: per-config, after the
+# single unit-tests barrier has fully passed — user directive verbatim:
+# "single 'cpu unit tests' stage THEN once that has fully run and passed ...
+# EACH of these CPU jobs as its own job"). Each job runs ALL of that row's
+# parametrized tests via the exact --pipeline-row selector at
+# --pipeline-row-scope=all: the lifecycle legs (test_fit/test_eval/test_export),
+# the compile_plot floor, AND the inference/name-check tests that used to live
+# in test_inference.py before its plan-04 fold-in. Selection is via the EXACT
+# --pipeline-row match implemented in
+# salt/tests/integration/pipeline/conftest.py — NOT `-m gpu`/`-m "not gpu"`,
+# NOT `pytest -k` (a `-k` substring match can silently select the wrong
+# subset while staying green, e.g. `gn3_v00` also matching `gn3v00_base`).
+#
+# Chained rows (finetune_new_head, finetune_same_heads) re-fit their producer
+# row inside their own job before their own fit — a genuinely chained config,
+# not a slow row for no reason — so their wall time is expected ~2x a plain
+# row's, same accepted cost as the GPU split's chained row.
+#
+# PIPELINE_ROW here must equal exactly the 33 runnable fixture stems (fixture
+# YAMLs under pipeline/fixtures/ with no top-level `fragment` key) — the
+# both-ways consistency test `test_cpu_ci_matrix_matches_runnable_fixtures` in
+# test_pipeline.py enforces this both ways (CI-only names AND fixture-only
+# names both fail loudly), the same pattern as the pre-existing GPU consistency
+# test below. A new config with no CI row, or a stale CI row with no fixture,
+# fails CI immediately instead of silently under- or over-covering.
+#
+# -k/substring selection is banned here for the same reason as integration-gpu:
+# an exact --pipeline-row match cannot silently pick up a sibling row.
 integration-cpu:
   extends: .test-template
-  needs:
-    - job: build_docker_test
-      parallel:
-        matrix:
-          - VARIANT: V2H
-    - job: modular-unit-tests          # user directive: integration behind units
+  stage: per-config
+  parallel:
+    matrix:
+      - PIPELINE_ROW: [dips, dipz, dl1, easyjet_flavour, event_tagger_easyjet, finetune_new_head, finetune_same_heads, ftag1lite_empflow, gn2_mup, gn2emu, gn2v2_opendata, gn2x_qcdsplit, gn2xe, gn3_baseline, gn3_baseline_loose, gn3_charge, gn3_dr, gn3_flow, gn3_hybrid, gn3_lepid_smt, gn3_softe, gn3_tracklabel, gn3_v00, gn3epclv01, gn3v00_base, gn3x, hitz, maskformer, nan_regression, regression, regression_gaussian, regression_multi_target, regression_weighted]
   script:
-    - JUNIT_FILE=reports/integration-cpu.xml run_test salt/tests/integration
+    - JUNIT_FILE="reports/integration-cpu-${PIPELINE_ROW}.xml" run_test salt/tests/integration/pipeline --pipeline-row="${PIPELINE_ROW}" --pipeline-row-scope=all
+
+# --------------------- INTEGRATION-MISC (row-independent) ---------------------
+# Everything in salt/tests/integration/ that is NOT parametrized with a row id.
+# --pipeline-row-scope=misc gives an EXPLICIT accounting rather than "the
+# rest": every test item parametrized with a "name" value is inspected —
+# if that value IS a known row id, the item is DESELECTED here (it runs in
+# exactly its per-config job above and nowhere else); if the value is NOT a
+# known row id, the harness raises immediately instead of silently orphaning
+# it. What remains after that deselection = completeness + fragment checks,
+# the fixtures<->CI consistency tests (this job's own
+# test_cpu_ci_matrix_matches_runnable_fixtures AND
+# test_gpu_ci_matrix_matches_gpu_fixtures below), the non-parametrized
+# row-artifact tests (regression/regression_gaussian sink mechanics, the
+# finetune residual assertions in test_pipeline.py §3 that check chained
+# artifacts rather than a single row's rc==0), and all of
+# multistage_training/. Coverage note: this job's .coverage* artifact,
+# combined with unit-tests' and all 33 per-config jobs', is what the coverage
+# job (stage: coverage, no needs:/dependencies:, stage-collects from every
+# prior job) merges via `coverage combine` — 35 artifact sets total (33 rows +
+# unit-tests + this job; the 4 manual tests-gpu jobs contribute only when
+# someone actually triggers them).
+integration-misc:
+  extends: .test-template
+  stage: per-config
+  script:
+    - JUNIT_FILE=reports/integration-misc.xml run_test salt/tests/integration --pipeline-row-scope=misc
 
 # --------------------- GPU RUNNER (k8s-gpu) ---------------------
 # Replaces gpu-smoke. Proves the GPU path on shipped configs rather than on a
@@ -76,24 +116,21 @@ integration-cpu:
 # --pipeline-row selector implemented in
 # salt/tests/integration/pipeline/conftest.py — NOT `-m gpu`, NOT `pytest -k`
 # (a `-k` substring match can silently select the wrong subset while staying
-# green, e.g. `gn3_v00` also matching `gn3v00_base`). Splitting into one job
-# per row also fixes the wall-clock story: total wall = the SLOWEST row, not
-# the sum of all four serially in one job (the old `-m gpu` job took 46 min
-# end to end on a contended k8s-gpu fleet).
+# green, e.g. `gn3_v00` also matching `gn3v00_base`).
 #
 # PIPELINE_ROW here must equal exactly the fixtures with `gpu: true` — a unit
 # test (test_gpu_ci_matrix_matches_gpu_fixtures in test_pipeline.py) enforces
 # this both ways, so an added/removed GPU row without updating this list fails
 # CI loudly instead of silently under- or over-covering.
 #
-# `finetune_same_heads` re-fits its chained producer row (gn3v00_base) before
-# its own fit — this is a genuinely chained config, not a slow row for no
-# reason — so its wall time is expected ~2x a plain row's and is reported as
-# its own job in the pipeline UI rather than folded into one aggregate number.
-#
 # `tags: [k8s-gpu]` selects the GPU runner; we keep the .test-template salt
 # image (overrides the runner's default AlmaLinux9). FAIR USE: keep k8s-gpu
 # jobs <= 5 in parallel — this matrix's 4 cells satisfy that on their own.
+#
+# The old job took 46 min end to end on a contended k8s-gpu fleet; splitting
+# into one job per row means total wall = the SLOWEST row, not the sum of all
+# four serially — see the TODO(release) block below for why that split alone
+# was not enough and the rows are now manual.
 #
 # The diagnostic preamble (nproc / cgroup cpu.max / nvidia-smi / a timed
 # first-touch matmul) is the contention evidence if a row blows the <10 min
@@ -101,6 +138,20 @@ integration-cpu:
 # micro-fits were the root cause of the old job's 46-minute wall, and every
 # future run now self-reports where its time went (also see --durations=15
 # on every pytest invocation, set in .test-template).
+#
+# TODO(release): the 4 GPU rows are `when: manual` with `allow_failure: true` —
+# manual + allow_failure: false would hold the whole pipeline in the "blocked"
+# state until someone clicks them, making a green pipeline unreachable. GitLab
+# consequence: a manually-triggered GPU row that goes RED shows as a warning,
+# not a pipeline failure — whoever triggers a row must read its result.
+# Open question: whether these rows belong in a required pipeline at all.
+# Evidence (2026-08-31): the k8s-gpu fleet hands out SHARED slices — measured
+# A100 MIG 1g.5gb (14 SMs) with a 3-CPU cgroup quota; the previous day an
+# autoscaled time-sliced T4 — and only ~2 concurrent slots were observed
+# against these 4 jobs, while the matrix fits are latency-bound micro-
+# workloads, so the GPU rows ran SLOWER than the same rows on the CPU job.
+# The diagnostic preamble below (nproc / cpu.max / nvidia-smi / first-touch
+# matmul) stays as per-run contention evidence for whoever picks this up.
 integration-gpu:
   extends: .test-template
   stage: tests-gpu
@@ -111,6 +162,16 @@ integration-gpu:
   # pointing at V2H — the k8s-gpu fleet publishes only that tag, and a CUDA-13
   # (T2B) image cannot be assumed to run on this fleet. Consequence: T2B is
   # built by CI and never GPU-tested, exactly as before this change.
+  #
+  # allow_failure lives INSIDE the rule (not as a job-level key): a bare
+  # job-level `when: manual` would be overridden by the inherited
+  # .test-template rules block, and manual + allow_failure: false would hold
+  # the pipeline "blocked" until someone clicks the jobs.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: manual
+      allow_failure: true
   parallel:
     matrix:
       - PIPELINE_ROW: [gn2v2_opendata, maskformer, gn3v00_base, finetune_same_heads]
@@ -119,4 +180,4 @@ integration-gpu:
     - cat /sys/fs/cgroup/cpu.max || true
     - nvidia-smi || true
     - python -c "import time, torch; assert torch.cuda.is_available(), torch.version.cuda; t0 = time.time(); (torch.ones(4096, 4096, device='cuda') @ torch.ones(4096, 4096, device='cuda')).sum().item(); print(f'first-touch matmul {time.time() - t0:.2f}s')"
-    - JUNIT_FILE="reports/integration-gpu-${PIPELINE_ROW}.xml" run_test salt/tests/integration/pipeline --pipeline-row="${PIPELINE_ROW}"
+    - JUNIT_FILE="reports/integration-gpu-${PIPELINE_ROW}.xml" run_test salt/tests/integration/pipeline --pipeline-row="${PIPELINE_ROW}" --pipeline-row-scope=legs

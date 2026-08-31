@@ -14,7 +14,8 @@ default:
 stages:
   - lint
   - builds
-  - tests-cpu
+  - unit-tests
+  - per-config
   - tests-gpu
   - coverage
   - docs

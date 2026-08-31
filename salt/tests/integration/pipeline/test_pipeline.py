@@ -1480,6 +1480,26 @@ def test_gpu_ci_matrix_matches_gpu_fixtures():
     )
 
 
+def test_cpu_ci_matrix_matches_runnable_fixtures():
+    """The per-config CPU CI matrix (``.gitlab/.ci-test.yaml``) and the full set of
+    runnable fixture rows may never drift — this is the both-ways twin of
+    ``test_gpu_ci_matrix_matches_gpu_fixtures``: a new runnable fixture with no CI
+    job, or a CI row with no fixture, must fail loudly either way.
+    """
+    ci_path = Path(__file__).resolve().parents[4] / ".gitlab" / ".ci-test.yaml"
+    if not ci_path.is_file():
+        pytest.skip(f"{ci_path} not found")
+    ci = yaml.safe_load(ci_path.read_text())
+    matrix_rows = ci["integration-cpu"]["parallel"]["matrix"][0]["PIPELINE_ROW"]
+    fixture_rows = [r.test_name for r in ROWS]
+    lhs, rhs = set(matrix_rows), set(fixture_rows)
+    assert sorted(matrix_rows) == sorted(fixture_rows), (
+        f"CI per-config matrix {sorted(matrix_rows)} != runnable fixtures "
+        f"{sorted(fixture_rows)} — symmetric difference: "
+        f"CI-only={sorted(lhs - rhs)}, fixture-only={sorted(rhs - lhs)}"
+    )
+
+
 # test_known_failures_name_real_rows_and_legs and
 # test_every_eval_or_onnx_row_has_expected_outputs are DELETED: both
 # guarantees now live in the loader validation (_load_fixtures) — xfail legs
