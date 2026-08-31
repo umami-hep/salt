@@ -36,17 +36,13 @@
 # keeps the heavy salt/tests/integration suite OUT of this job (they need
 # --run-integration).
 #
-# JIT-scripted functions aren't traced by coverage.py, so disable JIT here for
-# accurate coverage. The real ONNX-export tests below are re-run with JIT back
-# on (traced JIT-off would bake their dynamic loop bounds as fixed constants).
+# Extra JIT-off rerun of just the union-find tests, so coverage.py can see
+# their bodies (torch.jit.script isn't traced otherwise). Main run is untouched.
 modular-unit-tests:
   extends: .test-template
-  variables:
-    PYTORCH_JIT: "0"
   script:
-    - echo "PYTORCH_JIT=${PYTORCH_JIT:-unset}"
-    - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit --ignore=salt/tests/unit/outputs/sinks/onnx
-    - PYTORCH_JIT=1 JUNIT_FILE=reports/modular-unit-onnx.xml run_test salt/tests/unit/outputs/sinks/onnx
+    - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
+    - PYTORCH_JIT=0 JUNIT_FILE=reports/modular-unit-jit-coverage.xml run_test salt/tests/unit/nn/test_get_output.py -k union_find
 
 # --------------- PER-CONFIG CPU FAN-OUT ---------------
 # Plan 06: one CPU job per runnable fixture (stage: per-config, after the
