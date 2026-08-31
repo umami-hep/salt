@@ -1,4 +1,4 @@
-"""Tests for `salt.callbacks.ConfusionMatrix` (split from test_callbacks.py)."""
+"""Tests for `salt.callbacks.ConfusionMatrix`."""
 
 from __future__ import annotations
 
@@ -57,10 +57,6 @@ def run_v2(task_name: str, bundles: list[Bundle], **kwargs) -> ConfusionMatrix:
 
 class TestConfusionMatrixValues:
     """Accumulation + reduction values on deterministic eval batches."""
-
-    # DEL-1: run_v1 + test_matches_v1_callback (v1-vs-v2 value parity) retired
-    # with the v1 tree (parity-closure doctrine: git checkout 29c67a1). The
-    # accumulation-across-batches surface is pinned below.
 
     @pytest.mark.parametrize(
         ("task_name", "label_key", "n_classes"),

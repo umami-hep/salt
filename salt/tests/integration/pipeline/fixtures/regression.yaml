@@ -1,0 +1,31 @@
+config: regression/regression.yaml
+eval:
+  expected_outputs:
+    jets:
+      - regression_HadronConeExclTruthLabelPt
+      - target_reg_normed_HadronConeExclTruthLabelPt
+      - regression_R10TruthLabel_R22v1_TruthJetMass
+      - regression_R10TruthLabel_R22v1_TruthJetPt
+      - target_reg_multinorm_R10TruthLabel_R22v1_TruthJetMass
+      - target_reg_multinorm_R10TruthLabel_R22v1_TruthJetPt
+      - regression_pt
+      - target_reg_ratio_HadronConeExclTruthLabelPt
+      - regression_truthMass
+      - regression_truthPt
+      - target_reg_multiratio_R10TruthLabel_R22v1_TruthJetMass
+      - target_reg_multiratio_R10TruthLabel_R22v1_TruthJetPt
+    tracks:
+      - regression_dummyOutput_dPhi
+      - regression_dummyOutput_dEta
+      - target_reg_seq_tracks_dphi
+      - target_reg_seq_tracks_deta
+onnx:
+  expected_outputs:
+    - regression_HadronConeExclTruthLabelPt
+    - regression_R10TruthLabel_R22v1_TruthJetMass
+    - regression_R10TruthLabel_R22v1_TruthJetPt
+    - regression_pt
+    - regression_truthMass
+    - regression_truthPt
+    - regression_dummyOutput_dPhi
+    - regression_dummyOutput_dEta

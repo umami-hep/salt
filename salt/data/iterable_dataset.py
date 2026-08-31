@@ -28,7 +28,7 @@ DEFAULT_BLOCK_ROWS = 16_384
 Throughput is flat down to here and falls off below it, while one read's
 decompressed footprint stays near 77 MB mean / 179 MB max against the
 302 / 690 MB a whole-file read costs, which is what makes many concurrent
-shards affordable. Curve and numbers: study experiment 06, job 3966.
+shards affordable.
 """
 
 
@@ -76,8 +76,9 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
         per-group counts stay within this many rows of their ideal share.
     manifest : CorpusManifest | str | Path | None, optional
         A prebuilt `CorpusManifest` (or its path) to plan shards from, so a rank
-        can size its epoch without touching the corpus. ``None`` (default) asks
-        the reader for its blocks, which resolves `prepare`.
+        can size its epoch without touching the corpus. `SaltDataModule` always
+        supplies one on the streaming path; ``None`` (the default, for direct
+        construction) asks the reader for its blocks, which resolves `prepare`.
     max_live_streams : int | None, optional
         Maximum groups holding a resident block at once, by default 2. Bounds
         peak resident rows at ``max_live_streams * block_rows``; ``None``

@@ -229,8 +229,8 @@ class TestInferenceCoreLoop:
     """The command core driven without Lightning: real adapter + dataset + sink.
 
     The trainer-facing wrapping (checkpoint load, CLI parse) is CI-gated in
-    ``test_inference_e2e.py``; this covers the eager per-jet loop, the
-    column/leaf 1:1 plan, and the duck-driven sink lifecycle locally.
+    ``salt/tests/integration/pipeline/test_inference.py``; this covers the eager
+    per-jet loop, the column/leaf 1:1 plan, and the duck-driven sink lifecycle locally.
     """
 
     N = 120

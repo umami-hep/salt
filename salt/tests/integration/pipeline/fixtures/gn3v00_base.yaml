@@ -1,0 +1,56 @@
+config: GN3/GN3V00.yaml
+gpu: true
+fit:
+  args:
+    - "--trainer.max_epochs=1"
+# do_eval=do_onnx=False in MATRIX (fit-only, warms the finetune templates) —
+# no eval/onnx keys for this row. The `inference:` block below is the
+# ONNX-name contract the folded inference gate checks for fit=True rows
+# without a do_onnx leg.
+inference:
+  expected_outputs:
+    - GN3V00_pb
+    - GN3V00_pc
+    - GN3V00_ps
+    - GN3V00_pud
+    - GN3V00_pg
+    - GN3V00_ptau
+    - GN3V00_ptFromTruthDressedWZJet
+    - GN3V00_TrackOrigin
+    - GN3V00_VertexIndex
+    - GN3V00_TrackType
+# EXPECTED_OUTPUTS["gn3v00_base"]["h5"] (same tracks_ghost alias as
+# GN3EPCLV01: GN3V00.yaml `groups.tracks.dataset: tracks_ghost`) is
+# currently checked by NOTHING (do_eval=False) — kept below as an
+# uncurated future eval contract, not live data.
+# eval:
+#   expected_outputs:
+#     jets:
+#       - GN3V00_pb
+#       - GN3V00_pc
+#       - GN3V00_ps
+#       - GN3V00_pud
+#       - GN3V00_pg
+#       - GN3V00_ptau
+#       - target_jets_classification
+#       - GN3V00_ptFromTruthDressedWZJet
+#       - target_jet_pt_regression_ptFromTruthDressedWZJet
+#     tracks_ghost:
+#       - GN3V00_pPileup
+#       - GN3V00_pFake
+#       - GN3V00_pPrimary
+#       - GN3V00_pFromB
+#       - GN3V00_pFromBC
+#       - GN3V00_pFromC
+#       - GN3V00_pFromTau
+#       - GN3V00_pOtherSecondary
+#       - target_track_origin
+#       - VertexIndex
+#       - target_track_vertexing
+#       - GN3V00_pNoTruth
+#       - GN3V00_pOther
+#       - GN3V00_pPion
+#       - GN3V00_pKaon
+#       - GN3V00_pElectron
+#       - GN3V00_pMuon
+#       - target_track_type

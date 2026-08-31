@@ -327,31 +327,8 @@ def test_section_declared_auxiliary_sink_with_modes_is_accepted():
     SaltCLI._validate_wired_sinks(cli, model)  # noqa: SLF001
 
 
-def test_callbacks_declared_auxiliary_sink_needs_no_modes():
-    """The rule is about the SECTION surface; the alias window stays permissive."""
-    aux = JSONLOutputSink()
-    aux.name = "jsonl"
-    cli, model = _wiring([_seeded_h5("h5_output"), aux], section_sinks=[])
-    SaltCLI._validate_wired_sinks(cli, model)  # noqa: SLF001
-
-
 # ---------------------------------------------------------------------------
-# (6) the alias window still warns
-# ---------------------------------------------------------------------------
-
-
-def test_callbacks_declared_sink_still_warns_and_still_wires():
-    """A ``callbacks:``-declared sink keeps working for one release, loudly."""
-    trainer = SimpleNamespace(salt_sinks=[], callbacks=[])
-    sink = H5OutputSink()
-    with pytest.warns(DeprecationWarning, match="under `callbacks:` is deprecated"):
-        SaltCLI._attach_aliased_sinks(trainer, [("h5_output", sink)])  # noqa: SLF001
-    assert trainer.salt_sinks == [sink]
-    assert [type(cb).__name__ for cb in trainer.callbacks] == ["SinkAdapter"]
-
-
-# ---------------------------------------------------------------------------
-# (7) the worked proof — MaskFormer.yaml, section-declared, three modes
+# (6) the worked proof — MaskFormer.yaml, section-declared, three modes
 # ---------------------------------------------------------------------------
 
 

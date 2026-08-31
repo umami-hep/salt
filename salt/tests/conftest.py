@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from salt.config_utils import disable_logger_in_config  # noqa: F401
+from salt.utils.config_utils import disable_logger_in_config  # noqa: F401
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -27,6 +27,30 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run the GPU/integration tests (gates, full-model fits, real-data reads) "
         "even without a CUDA device",
+    )
+    parser.addoption(
+        "--pipeline-row",
+        action="store",
+        default=None,
+        help="run ONLY the named pipeline matrix row (a fixtures/<id>.yaml stem, exact "
+        "match, never substring). Scope of what runs for that row is controlled by "
+        "--pipeline-row-scope. Serves both the per-config CPU matrix (scope=all) and "
+        "the manual integration-gpu matrix (scope=legs); unknown ids error.",
+    )
+    parser.addoption(
+        "--pipeline-row-scope",
+        action="store",
+        default="all",
+        choices=("all", "legs", "misc"),
+        help="how --pipeline-row (or its absence) selects pipeline/ tests. "
+        "'all' (default): with --pipeline-row, run EVERY test parametrized with that "
+        "row id (the lifecycle legs test_fit/test_eval/test_export, the "
+        "compile_plot floor, and the inference/name-check tests) — the per-config "
+        "CPU CI jobs. 'legs': with --pipeline-row, run ONLY the lifecycle legs "
+        "(test_fit/test_eval/test_export) for that row — the manual integration-gpu "
+        "jobs. 'misc': --pipeline-row must NOT be set; runs only the tests that are "
+        "NOT parametrized with any row id (completeness/consistency checks, "
+        "fragment tests, multistage_training/, ...) — the integration-misc CPU job.",
     )
 
 
@@ -51,6 +75,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "torch.cuda.is_available(). Adaptive: the generation-specific cases skip with "
         "a stated reason on other cards, so coverage accumulates across CI (A100), "
         "lxplus (V100/T4) and dev boxes (Blackwell).",
+    )
+    config.addinivalue_line(
+        "markers",
+        "gpu: a matrix row whose fixture declares gpu: true — the rows the "
+        "integration-gpu CI matrix runs one job each for (via --pipeline-row); the "
+        "mark remains for local `-m gpu` selection.",
     )
 
 

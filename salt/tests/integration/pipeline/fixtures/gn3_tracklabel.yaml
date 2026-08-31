@@ -1,0 +1,3 @@
+# NO_FIXTURE: no tracks.ftagTruthSourceLabel in write_dummy_file
+config: GN3/GN3_tracklabel.yaml
+fit: false

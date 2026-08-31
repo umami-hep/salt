@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from salt.config_utils import disable_logger_in_config
 from salt.graph.planner import compile_plan
 from salt.graph.render import dot_source
 from salt.graph.spec import Mode, TensorSpec, unflatten_spec
@@ -24,6 +23,7 @@ from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
 from salt.testing.inputs import write_dummy_file
 from salt.tests._fixtures.gn2v2_test_config import small_config
+from salt.utils.config_utils import disable_logger_in_config
 
 DUMMY_CFG = small_config()
 

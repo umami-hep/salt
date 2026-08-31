@@ -15,7 +15,7 @@ from salt.data.processors.ftag_labeller import FtagLabeller
 from salt.data.processors.labels import Labels
 from salt.data.processors.maskformer_targets import MaskFormerTargets
 from salt.data.processors.multi_target import MultiTarget
-from salt.data.readers.cuts import ConstituentCuts, Cut, CutSpec, GlobalObjectCuts
+from salt.data.readers.cuts import ConstituentCuts, Cut, GlobalObjectCuts
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.readers.reader import GroupConfig, H5StructuredReader
 from salt.data.readers.stream import OffsetIndex, StreamConfig
@@ -29,7 +29,6 @@ __all__ = [
     "ConstituentCuts",
     "CorpusManifest",
     "Cut",
-    "CutSpec",
     "Features",
     "FtagLabeller",
     "GlobalObjectCuts",

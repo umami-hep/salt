@@ -28,12 +28,11 @@ from lightning.pytorch.trainer import Trainer
 from salt import cli as graph_cli
 from salt.data.datamodule import SaltDataModule
 from salt.graph.errors import ConfigError, GraphError
-from salt.logging import console, get_logger
 from salt.model.saltmodule import SaltModule
 from salt.outputs.run_task_output import OutputSectionWriter
-from salt.outputs.sinks.onnx.config import ExportConfig
 from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
+from salt.utils.logging import console, get_logger
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
 
@@ -70,140 +69,10 @@ def _patch_jsonargparse_sys_modules_race() -> None:
 
 _patch_jsonargparse_sys_modules_race()
 
-
-# --- pre-de-core checkpoint/config compatibility ------------------------------
-# v2 checkpoints and their saved ``config.yaml`` written BEFORE the de-core
-# rename carry ``salt.core.*`` class_paths. This remapper resolves them to their
-# flat ``salt.*`` homes at load time so old artifacts stay loadable with no edit.
-# Ordered longest-prefix-first so the ``salt.core.nn.*`` / ``salt.core.data.*``
-# fan-out (which splits across three destination packages) is resolved before
-# the bare package facades. The ONLY sanctioned ``salt.core.*`` strings in the
-# codebase live here + the compat tests (see docs/architecture.md §Checkpoints).
-_CLASS_PATH_REMAP: dict[str, str] = {
-    # data -> readers
-    "salt.core.data.reader": "salt.data.readers.reader",
-    "salt.core.data.uproot_reader": "salt.data.readers.uproot_reader",
-    "salt.core.data.multisample_reader": "salt.data.readers.multisample_reader",
-    "salt.core.data.stream": "salt.data.readers.stream",
-    "salt.core.data.cuts": "salt.data.readers.cuts",
-    "salt.core.data.vds_module": "salt.data.readers.vds",
-    "salt.core.data.vds": "salt.data.readers.vds",
-    # data -> processors
-    "salt.core.data.features": "salt.data.processors.features",
-    "salt.core.data.labels": "salt.data.processors.labels",
-    "salt.core.data.maskformer_targets": "salt.data.processors.maskformer_targets",
-    "salt.core.data.multi_target": "salt.data.processors.multi_target",
-    "salt.core.data.ftag_labeller": "salt.data.processors.ftag_labeller",
-    # data top-level + facade
-    "salt.core.data.datamodule": "salt.data.datamodule",
-    "salt.core.data.dataset": "salt.data.dataset",
-    "salt.core.data.base": "salt.data.base",
-    "salt.core.data.dtypes": "salt.data.dtypes",
-    "salt.core.data.samplers": "salt.data.samplers",
-    "salt.core.data.input_samples": "salt.data.input_samples",
-    "salt.core.data": "salt.data",
-    # nn -> model / model.modules / model.nn
-    "salt.core.nn.tasks": "salt.model.modules.tasks",
-    "salt.core.nn.base": "salt.model.base",
-    "salt.core.nn.bind": "salt.model.bind",
-    "salt.core.nn.stream_embed": "salt.model.modules.stream_embed",
-    "salt.core.nn.transformer_encoder": "salt.model.modules.transformer_encoder",
-    "salt.core.nn.pooling": "salt.model.modules.pooling",
-    "salt.core.nn.norm": "salt.model.modules.norm",
-    "salt.core.nn.plumbing": "salt.model.modules.plumbing",
-    "salt.core.nn.losses": "salt.model.modules.losses",
-    "salt.core.nn.maskdecoder": "salt.model.modules.maskdecoder",
-    "salt.core.nn.maskformer_matched_loss": "salt.model.modules.maskformer_matched_loss",
-    "salt.core.nn.edge_embed": "salt.model.modules.edge_embed",
-    "salt.core.nn.transformer": "salt.model.nn.transformer",
-    "salt.core.nn.attention": "salt.model.nn.attention",
-    "salt.core.nn.dense": "salt.model.nn.dense",
-    "salt.core.nn.layernorm": "salt.model.nn.layernorm",
-    "salt.core.nn.posenc": "salt.model.nn.posenc",
-    "salt.core.nn.featurewise": "salt.model.nn.featurewise",
-    "salt.core.nn.matcher": "salt.model.nn.matcher",
-    "salt.core.nn.maskformer_loss": "salt.model.nn.maskformer_loss",
-    "salt.core.nn": "salt.model.modules",
-    # top-level singletons
-    "salt.core.saltmodule": "salt.model.saltmodule",
-    "salt.core.SaltModule": "salt.model.SaltModule",
-    "salt.core.mup": "salt.model.mup",
-    "salt.core.render": "salt.graph.render",
-    "salt.core.loss_history": "salt.utils.loss_history",
-    "salt.core.outputs": "salt.outputs",
-    "salt.core.graph": "salt.graph",
-    "salt.core.callbacks": "salt.callbacks",
-    "salt.core.onnx": "salt.outputs.sinks.onnx",
-    "salt.core.utils": "salt.utils",
-    "salt.core.testing": "salt.testing",
-    "salt.core.optim": "salt.optim",
-    "salt.core.inference": "salt.inference",
-    "salt.core.config_utils": "salt.config_utils",
-    "salt.core.schema": "salt.schema",
-    "salt.core.parser": "salt.parser",
-    "salt.core.main": "salt.main",
-    "salt.core.cli": "salt.cli",
-}
-_CLASS_PATH_REMAP_KEYS = sorted(_CLASS_PATH_REMAP, key=len, reverse=True)
-
-
-def _remap_class_path(name: str) -> str:
-    """Remap a pre-de-core ``salt.core.*`` dotted path to its ``salt.*`` home.
-
-    No-op for any non-``salt.core`` path (longest matching prefix wins). Lets
-    checkpoints/configs authored before the rename load unmodified.
-    """
-    if not isinstance(name, str) or not name.startswith("salt.core"):
-        return name
-    for old in _CLASS_PATH_REMAP_KEYS:
-        if name == old or name.startswith(old + "."):
-            return _CLASS_PATH_REMAP[old] + name[len(old) :]
-    return name
-
-
-def _patch_jsonargparse_class_path_remap() -> None:
-    """Wrap jsonargparse's class-path importer so a saved config/ckpt naming
-    ``salt.core.*`` resolves to its ``salt.*`` home — covers the top-level model
-    subclass resolution during config parse (jsonargparse ``_typehints`` binds
-    ``import_object`` by value at import, so the wrapper is installed on every
-    loaded jsonargparse module holding that reference). Idempotent; no-op if
-    jsonargparse renames the helper (falls back to salt-owned resolution +
-    the documented ckpt-config rewrite).
-    """
-    import sys
-
-    from jsonargparse import (
-        _typehints as _th,  # noqa: F401, PLC2701 - force-load the binder
-    )
-    from jsonargparse import _util as _ju  # noqa: PLC2701 - patch site
-
-    orig = getattr(_ju, "import_object", None)
-    if orig is None or getattr(orig, "_salt_decore_remap", False):
-        return
-
-    @functools.wraps(orig)
-    def _remapped_import_object(name: str) -> Any:
-        return orig(_remap_class_path(name))
-
-    _remapped_import_object._salt_decore_remap = True  # type: ignore[attr-defined]  # noqa: SLF001 - salt's own idempotency marker
-    for _mod in list(sys.modules.values()):
-        if (
-            getattr(_mod, "__name__", "").startswith("jsonargparse")
-            and getattr(_mod, "import_object", None) is orig
-        ):
-            _mod.import_object = _remapped_import_object
-
-
-_patch_jsonargparse_class_path_remap()
-
 CONFIG_DIR = Path(__file__).parent / "configs"
 """Directory shipping ``base.yaml`` and the worked GN2v2 configs."""
 
 _GRAPH_COMMANDS = frozenset({"graph", "schema", "mup-shapes", "mup-coord-check"})
-_EXPORT_COMMAND = "export"
-_INFERENCE_COMMAND = "inference"
-_MERGE_CONFIG_COMMAND = "merge-config"
-_PROFILE_COMMAND = "profile"
 
 
 def _needs_logger(callback: Any) -> bool:
@@ -276,9 +145,6 @@ def _best_checkpoint(config_path: Path) -> str:
     return best
 
 
-_CLASS_DICT_ARG = "class_dict"
-"""Top-level convenience flag name (``--class_dict``)."""
-
 _INIT_FROM_ARG = "init_from"
 """Top-level warm-start flag name (``--init_from``)."""
 
@@ -289,9 +155,6 @@ Its canonical home is the config top level (peer of ``trainer:``/``data:``/
 ``model:``), NOT ``model.init_args``; `_relocate_training_schedule` injects the
 resolved value into the `SaltModule` constructor arg before instantiation.
 """
-
-_CLASS_DICT_CLASS = "ClassificationTaskModule"
-"""Class-name suffix of the only ``class_dict``/``weight_source`` consumer."""
 
 
 def _entry_get(entry: Any, key: str) -> Any:
@@ -314,12 +177,8 @@ def _entry_set(entry: Any, key: str, value: Any) -> None:
 
 
 def _resolve_class_path(class_path: str) -> type:
-    """Import a dotted ``module.Class`` path and return the class object.
-
-    Pre-de-core ``salt.core.*`` paths (old checkpoints/configs) are remapped to
-    their ``salt.*`` homes first (see ``_remap_class_path``).
-    """
-    module_path, _, attr = _remap_class_path(class_path).rpartition(".")
+    """Import a dotted ``module.Class`` path and return the class object."""
+    module_path, _, attr = class_path.rpartition(".")
     module = import_module(module_path)
     return getattr(module, attr)
 
@@ -348,18 +207,18 @@ def _instantiate_class_config(cfg: Any) -> Any:
 
 def _is_persistence_sink(class_path: str) -> bool:
     """Whether a callback ``class_path`` names a TEST persistence sink: an
-    `H5OutputWriter` (or subclass, or any callback exposing duck-typed
+    `H5OutputSink` (or subclass, or any callback exposing duck-typed
     ``writer_demand``), EXCLUDING `OnnxExportSink` (ONNX-only, persists
     nothing in TEST). False for an unimportable path or a plain callback.
     """
     import importlib
 
     from salt.outputs import (
-        H5OutputWriter,
+        H5OutputSink,
         OnnxExportSink,
     )
 
-    module_path, _, attr = _remap_class_path(class_path).rpartition(".")
+    module_path, _, attr = class_path.rpartition(".")
     if not module_path:
         return False
     try:
@@ -370,7 +229,7 @@ def _is_persistence_sink(class_path: str) -> bool:
         return False
     if issubclass(cls, OnnxExportSink):  # ONNX-only sink: no TEST persistence
         return False
-    return issubclass(cls, H5OutputWriter) or callable(getattr(cls, "writer_demand", None))
+    return issubclass(cls, H5OutputSink) or callable(getattr(cls, "writer_demand", None))
 
 
 def _has_callback_persistence_sink(callbacks: Any) -> bool:
@@ -400,7 +259,7 @@ def _fan_out_artifacts(cfg: Any) -> Any:
     )
 
     for scope, model in _iter_model_blocks(cfg):
-        class_dict = scope.get(_CLASS_DICT_ARG)
+        class_dict = scope.get("class_dict")
         if not class_dict:
             continue
         init_args = getattr(model, "init_args", None)
@@ -415,7 +274,7 @@ def _fan_out_artifacts(cfg: Any) -> Any:
             if module_args is None:
                 continue
             if (
-                class_path.endswith(_CLASS_DICT_CLASS)
+                class_path.endswith("ClassificationTaskModule")
                 and _entry_get(module_args, "weight_source") is None
             ):
                 _entry_set(
@@ -467,30 +326,14 @@ def _schedule_overrides_to_tree(overrides: Sequence[tuple[str, Any]]) -> dict[st
 
 
 def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] = ()) -> Any:
-    """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` constructor
-    arg (``model.init_args.training_schedule``) before jsonargparse instantiates
-    the model — the schedule describes the run, so it is a config-surface peer of
-    ``trainer:``/``data:``/``model:``, not a model-architecture field.
-
-    Mirrors `_fan_out_artifacts` (parser-time, per model-block scope): reads the
-    schedule from the block's scope (top-level on the run-free surface,
-    subcommand-scoped on a trainer run), deep-merges any extracted
-    ``--training_schedule.<path> <value>`` CLI overrides on top, and writes the
-    plain-dict-normalised value onto BOTH the scope key (so ``--print_config`` /
-    the saved config round-trip carries the resolved schedule) AND
-    ``model.init_args.training_schedule``. A user-authored
-    ``model.init_args.training_schedule`` with NO top-level schedule (the retired
-    home) is a fail-loud `ConfigError`. When a top-level schedule IS present the
-    nested slot is treated as ours to own — overwritten from the authoritative
-    top-level value — so a round-tripped saved config (which carries both the
-    top-level schedule and the previously-injected nested copy) re-injects without
-    error. No-op when neither is set (plain training desugars to one `fit` stage).
-
-    Raises
-    ------
-    ConfigError
-        A config nests ``training_schedule`` under ``model.init_args`` without a
-        top-level ``training_schedule:`` (the schema moved to the top level).
+    """Move the TOP-LEVEL ``training_schedule:`` into the `SaltModule` ctor arg
+    (``model.init_args.training_schedule``) before jsonargparse instantiates the
+    model, deep-merging extracted ``--training_schedule.<path>`` CLI overrides.
+    Writes the normalised value onto BOTH the scope key (so saved configs
+    round-trip) and the ctor arg. A user-authored nested schedule with NO
+    top-level one raises `ConfigError` (the schema home is top-level); with a
+    top-level one present the nested slot is overwritten, so round-tripped
+    saved configs (which carry both) re-inject without error. No-op when unset.
     """
     override_tree = _schedule_overrides_to_tree(overrides)
     from salt.parser import _deep_merge_dicts
@@ -538,7 +381,7 @@ def _section_runs_mode(section: Mapping[str, Any], mode: Any) -> bool:
 def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     """Whether any ``RunTaskOutput`` in the section opts into ``export`` (ONNX).
 
-    Gates the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
+    Drives the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
     leaves (the manifest-only writers — input copies, pad masks — do not), so a
     section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
     tuple.
@@ -579,8 +422,6 @@ class SaltCLI(LightningCLI):
     - ``callbacks:`` — dict-keyed, deep-mergeable; assembled into
       ``trainer.callbacks`` ahead of the stock list entries (``None`` values
       are filtered = deleted).
-    - ``writers:`` — ``output`` template + ``half_precision`` + the
-      deep-mergeable ``modules`` dict, assembled into ONE `WriterCallback`.
 
     ``auto_configure_optimizers`` is off (`SaltModule.configure_optimizers`
     owns the OneCycleLR schedule) and Lightning's
@@ -648,20 +489,11 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             "--callbacks",
-            type=dict[str, Callback | Node | None] | None,
+            type=dict[str, Callback | None] | None,
             default={},
             help="dict-keyed callbacks, deep-mergeable; assembled into trainer.callbacks "
-            "(an entry set to null is removed). An output SINK declared here "
-            "is accepted for one deprecation window and wired through the sink registry "
-            "instead — declare sinks in the `outputs:` section.",
-        )
-        parser.add_argument(
-            "--writers.modules",
-            type=dict[str, Any] | None,
-            default=None,
-            help="REMOVED — migrate to an ``outputs:``/``callbacks:`` sink; "
-            "a non-null entry here raises ConfigError at instantiate_classes "
-            "(see gn2v2-opendata.yaml)",
+            "(an entry set to null is removed). Output sinks belong in the "
+            "`outputs:` section, not here.",
         )
         parser.add_argument(
             "--outputs",
@@ -677,19 +509,6 @@ class SaltCLI(LightningCLI):
             "instantiate_classes (SaltModule.compose_output_section).",
         )
         parser.add_argument(
-            "--export",
-            type=ExportConfig | None,
-            default=None,
-            help="DEPRECATED alias for the ONNX sink's own export keys — model_name, "
-            "inputs (port/name/sequence/dyn_axis/alias), track_selection and the "
-            "rename/combine manifest post-processing now live at "
-            "outputs.<sink>.init_args on the OnnxExportSink. Accepted "
-            "for one deprecation window: `salt export` folds each key it sets onto a "
-            "field the sink LEFT UNSET, and a key carried by both homes is a hard error. "
-            "Declaring export.outputs stays a hard error. Inert during fit/test; "
-            "round-trips through saved run configs.",
-        )
-        parser.add_argument(
             "--compile",
             action="store_true",
             help="torch.compile the model to speed up training (fit only). v2 has no single "
@@ -699,7 +518,7 @@ class SaltCLI(LightningCLI):
             "unpad/repad handling — see docs/training.md.",
         )
         parser.add_argument(
-            f"--{_CLASS_DICT_ARG}",
+            "--class_dict",
             type=str | None,
             default=None,
             help="convenience flag: fanned out to weight_source="
@@ -721,15 +540,10 @@ class SaltCLI(LightningCLI):
         )
         parser.add_argument(
             f"--{_TRAINING_SCHEDULE_ARG}",
-            # BARE `dict` (not dict[str, Any]): jsonargparse recurses into a
-            # subscripted mapping's values and, under the `Any` value type, EAGERLY
-            # instantiates any nested {class_path, init_args} spec (its subclass
-            # shorthand) — which would turn a stage's raw `callbacks:`/`lr_scheduler:`
-            # specs into live objects before salt's own validator sees them, and
-            # is impossible for an LR scheduler (needs the stage optimizer,
-            # not built yet). A bare `dict` has no `__args__`, so jsonargparse treats
-            # the whole schedule as an opaque mapping and leaves the nested specs raw
-            # for `TrainingSchedule.from_config` to parse.
+            # BARE `dict` (not dict[str, Any]): a subscripted type makes jsonargparse
+            # eagerly instantiate nested {class_path, init_args} specs — impossible
+            # for a stage LR scheduler (no optimizer yet). Bare `dict` keeps the
+            # schedule opaque for `TrainingSchedule.from_config` to parse.
             type=dict | None,
             default=None,
             help="TOP-LEVEL staged-training schedule: "
@@ -775,56 +589,16 @@ class SaltCLI(LightningCLI):
         ahead of the stock ``trainer.callbacks`` list. Drops the default
         ``lr_monitor`` LearningRateMonitor when no experiment logger is
         attached (it hard-raises on a logger-less trainer).
-
-        Output SINKS declared under ``callbacks:`` are PARTITIONED out — a
-        sink is not a Lightning callback any more. They are wired onto the
-        built trainer through the sink registry (and, for a runtime sink, a
-        generated adapter), which is the deprecation window for the old
-        placement; the ``outputs:`` section is where sinks belong.
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         has_logger = bool(self._get(self.config_init, "trainer.logger"))
         live = [(key, cb) for key, cb in callbacks_dict.items() if cb is not None]
-        aliased_sinks = [(key, cb) for key, cb in live if isinstance(cb, Node)]
-        assembled = [
-            cb
-            for key, cb in live
-            if not isinstance(cb, Node) and (has_logger or not _needs_logger(cb))
-        ]
+        assembled = [cb for _key, cb in live if has_logger or not _needs_logger(cb)]
         stock = self._get(self.config_init, "trainer.callbacks") or []
         assembled = self._maybe_add_schedule_callback(assembled, stock)
         if assembled:
             kwargs = {**kwargs, "callbacks": [*assembled, *stock]}
-        trainer = super().instantiate_trainer(**kwargs)
-        self._attach_aliased_sinks(trainer, aliased_sinks)
-        return trainer
-
-    @staticmethod
-    def _attach_aliased_sinks(trainer: Trainer, aliased: Sequence[tuple[str, Any]]) -> None:
-        """Wire ``callbacks:``-declared sinks onto `trainer` (the alias window).
-
-        Each sink is registered and, if it has a lifecycle, given its adapter.
-        Node names are left exactly as the class defaults them, which is what
-        the callbacks placement always did, so a config left alone keeps its
-        plan hash. Warns once per config: sinks belong in ``outputs:``.
-        """
-        if not aliased:
-            return
-        from salt.callbacks.sink_adapter import (
-            attach_runtime_sink,
-        )
-
-        warnings.warn(
-            "declaring output sink(s) "
-            + ", ".join(repr(key) for key, _ in aliased)
-            + " under `callbacks:` is deprecated — a sink is no longer a lightning "
-            "Callback. Move them to the top-level `outputs:` section; the callbacks: "
-            "placement is accepted for one release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        for _key, sink in aliased:
-            attach_runtime_sink(trainer, sink)
+        return super().instantiate_trainer(**kwargs)
 
     def _maybe_add_schedule_callback(self, assembled: list, stock: list) -> list:
         """Auto-inject the schedule driver callbacks on ``fit``; the user never
@@ -863,35 +637,14 @@ class SaltCLI(LightningCLI):
         """Instantiate, then compose the top-level ``outputs:`` section onto the
         model (folding section writers into the planning module dict) — done
         here rather than via ``link_arguments`` since a subclass-mode model
-        link target grabs the whole namespace. Raises `ConfigError` if a live
-        ``writers:`` block remains (removed; migrate to
-        ``outputs:``/``callbacks:``).
+        link target grabs the whole namespace.
         """
-        # writers: block with live modules is no longer supported. Null-delete
-        # overrides (writers.modules.X: null) are exempt — they produce an empty
-        # dict here.
-        live_writer_modules = {
-            name: writer
-            for name, writer in (self._get(self.config, "writers.modules") or {}).items()
-            if writer is not None
-        }
-        if live_writer_modules:
-            raise ConfigError(
-                "the `writers:` section was removed; migrate to an `outputs:`/`callbacks:` "
-                "sink — see gn2v2-opendata.yaml"
-            )
-        # Defer the fit-stage experiment logger past the racy validation pass.
-        # jsonargparse's instantiate_classes pass validates the model: block
-        # against a runtime_checkable Protocol, which makes jsonargparse walk
-        # sys.modules.values() to resolve string forward refs. The default-ON
-        # CometLogger is instantiated in that SAME pass, and its __init__ eagerly
-        # starts comet's background upload threads, which import modules and
-        # mutate sys.modules — the two race into "RuntimeError: dictionary
-        # changed size during iteration", surfaced as "model does not validate
-        # against any Union subtype". So on `fit` we stash the logger config,
-        # null it for the parser pass (trainer built logger-less, no comet
-        # threads), then re-instantiate and attach it AFTER validation
-        # completes. Test/graph/export never carry a live logger here.
+        # Defer the fit-stage logger past the racy validation pass: jsonargparse
+        # walks sys.modules to resolve forward refs in the same pass that
+        # CometLogger.__init__ starts background threads mutating sys.modules —
+        # racing into "dictionary changed size during iteration". Stash the
+        # logger config, build the trainer logger-less, re-attach after
+        # validation. Test/graph/export never carry a live logger here.
         deferred_logger_cfg = self._detach_fit_logger()
         super().instantiate_classes()
         self._reattach_fit_logger(deferred_logger_cfg)
@@ -906,19 +659,12 @@ class SaltCLI(LightningCLI):
         writers: Any = None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
-            # compose FIRST: this partitions the section into writers (folded
-            # into the graph) and sinks (held on model._section_sinks).
+            # compose first (partitions writers vs sinks), then register the
+            # declared sinks BEFORE the implicit injection — _inject_command_sinks
+            # skips kinds already present, preventing double-wiring.
             composer(live_section)
             writers = getattr(model, "_output_section", live_section)
-            # register the section-declared sinks BEFORE the implicit injection:
-            # _inject_command_sinks reads iter_sinks and skips a kind that is
-            # already present, so registering first is what stops a declared
-            # sink being double-wired alongside an injected one.
             self._register_section_sinks(model)
-            # plan 50 Phase B: the command wires the implicit per-command sinks
-            # (test -> H5, export/graph -> ONNX) over the composed section — so a
-            # config declaring only WHAT (writers + modes) gets the right sink
-            # without ever naming H5OutputSink/OnnxExportSink.
             self._inject_command_sinks(writers)
             self._validate_wired_sinks(model)
         # bind both manifest sources to the registered sinks NOW: datamodule setup
@@ -1010,9 +756,8 @@ class SaltCLI(LightningCLI):
           and the exporter see the same implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
 
-        A sink already registered — declared in the ``outputs:`` section (the
-        documented form), left in ``callbacks:`` through the deprecation
-        alias, or built programmatically — is left alone; never double-wired.
+        A sink already registered — declared in the ``outputs:`` section or
+        built programmatically — is left alone; never double-wired.
         """
         from salt.callbacks.sink_adapter import attach_runtime_sink
         from salt.graph.spec import Mode
@@ -1089,7 +834,7 @@ class SaltCLI(LightningCLI):
             if fit_cfg.get(_INIT_FROM_ARG) and fit_cfg.get("ckpt_path"):
                 raise ConfigError(
                     "--init_from and --ckpt_path are mutually exclusive: --ckpt_path RESUMES "
-                    "(restores trainer state, strict weight load, plan-hash gate enforced) "
+                    "(restores trainer state, strict weight load, plan-hash check enforced) "
                     "while --init_from WARM-STARTS a fresh run from a possibly surgically-"
                     "changed architecture (weights-only, per-module accounting). Pick one."
                 )
@@ -1100,11 +845,9 @@ class SaltCLI(LightningCLI):
         cfg = self.config["test"]
         self.save_config_callback = None  # no config.yaml dump on test
         cfg.trainer.logger = False
-        # the H5 persistence sink is now IMPLICIT — the command
-        # wires it in instantiate_classes over the top-level outputs: section. So
-        # the writer-less guard checks for the section (the WHAT), not a
-        # declared callbacks-level sink; a config still MAY declare its own sink
-        # (programmatic / MaskFormer), which _inject_command_sinks leaves alone.
+        # the H5 persistence sink is implicit (wired in instantiate_classes), so
+        # the guard checks for the outputs: section, not a declared sink; a
+        # config MAY still declare its own sink, which is left alone.
         has_callback_sink = _has_callback_persistence_sink(cfg.get("callbacks"))
         has_outputs_section = bool(cfg.get("outputs"))
         if not has_callback_sink and not has_outputs_section:
@@ -1203,42 +946,36 @@ def main(args: Sequence[str] | None = None) -> int:
     to the ONNX exporter, ``salt inference`` to the eager export-set
     runner, ``salt merge-config`` to the config-merge + per-stage
     freeze-graph tooling (`salt.merge_config.main`), and ``salt profile
-    dataset``/``model`` to the profiling harnesses (`salt.profiling.main`);
+    dataset``/``model`` to the profiling harnesses (`salt.utils.profiling.main`);
     everything else goes to `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
-    instead of a Python traceback.
-
-    Raises
-    ------
-    SystemExit
-        Re-raised from the parser (usage errors, ``--help`` — after the
-        see-also note when help was requested).
+    instead of a Python traceback. `SystemExit` is re-raised from the parser.
     """
     argv = list(sys.argv[1:] if args is None else args)
     if argv and argv[0] in _GRAPH_COMMANDS:
         return graph_cli.main(argv)
-    if argv and argv[0] == _EXPORT_COMMAND:
+    if argv and argv[0] == "export":
         # local import: the exporter pulls onnx/onnxruntime — not needed at
         # fit/test/graph startup
         from salt.outputs.sinks.onnx import export as onnx_export
 
         return onnx_export.main(argv[1:])
-    if argv and argv[0] == _INFERENCE_COMMAND:
+    if argv and argv[0] == "inference":
         # trainer-free like export: inference executes the export-mode plan
         # eagerly per jet, so it dispatches to its own main
         # rather than a Lightning Trainer subcommand.
         from salt import inference as inference_cli
 
         return inference_cli.main(argv[1:])
-    if argv and argv[0] == _PROFILE_COMMAND:
+    if argv and argv[0] == "profile":
         # its own dispatch: `dataset` iterates the datamodule in-process under
         # line_profiler, `model` drives a short capped fit through SaltCLI
-        from salt import profiling as profiling_cli
+        from salt.utils import profiling as profiling_cli
 
         return profiling_cli.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}
     try:
-        if argv and argv[0] == _MERGE_CONFIG_COMMAND:
+        if argv and argv[0] == "merge-config":
             # trainer-free like export: merge the fit config stack + render the
             # per-stage freeze graphs, no data/checkpoints touched. Kept
             # inside this try so a GraphError reuses the one-block handler below.

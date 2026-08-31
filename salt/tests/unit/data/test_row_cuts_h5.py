@@ -11,7 +11,7 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.data import Cut, CutSpec, H5StructuredReader
+from salt.data import Cut, GlobalObjectCuts, H5StructuredReader
 from salt.data.base import WorkerCtx
 from salt.graph.spec import Mode
 from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
@@ -29,7 +29,9 @@ def dummy(tmp_path_factory) -> Path:
     return path
 
 
-def _reader(path: Path, cuts: CutSpec | None = None, stage: str | None = None, num: int = -1):
+def _reader(
+    path: Path, cuts: GlobalObjectCuts | None = None, stage: str | None = None, num: int = -1
+):
     r = H5StructuredReader(
         groups={"jets": {"global_object": True}, "tracks": {"global_object": False}},
         filename=path,
@@ -61,7 +63,7 @@ def test_engine_no_cuts_keeps_all() -> None:
 def test_engine_applies_global_cut() -> None:
     r = H5StructuredReader(
         groups={"jets": {"global_object": True}},
-        cuts=CutSpec(global_cuts=(Cut("pt", ">", 0.5),)),
+        cuts=GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),)),
     )
     rec = r._row_record({"pt": np.array([0.1, 0.6, 0.9])}, 3)
     np.testing.assert_array_equal(r._apply_row_cuts(rec, None), [False, True, True])
@@ -70,7 +72,7 @@ def test_engine_applies_global_cut() -> None:
 def test_engine_per_split_adds_to_global() -> None:
     r = H5StructuredReader(
         groups={"jets": {"global_object": True}},
-        cuts=CutSpec(
+        cuts=GlobalObjectCuts(
             global_cuts=(Cut("pt", ">", 0.5),),
             per_split={"train": (Cut("label", "==", 5),)},
         ),
@@ -117,7 +119,7 @@ def _oracle_kept(path: Path, thr: float, stage: str | None) -> np.ndarray:
 
 
 def test_cut_len_is_filtered(dummy) -> None:
-    spec = CutSpec(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
     r = _reader(dummy, cuts=spec)
     kept = _oracle_kept(dummy, 0.5, None)
     assert len(r) == len(kept)
@@ -125,7 +127,7 @@ def test_cut_len_is_filtered(dummy) -> None:
 
 
 def test_cut_full_read_matches_oracle(dummy) -> None:
-    spec = CutSpec(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
     r = _reader(dummy, cuts=spec)
     kept = _oracle_kept(dummy, 0.5, None)
     pt, _ = _jets(dummy)
@@ -136,7 +138,7 @@ def test_cut_full_read_matches_oracle(dummy) -> None:
 
 @pytest.mark.parametrize("frac", [(0, 1), (0.5, 0.5), (-1, -1)])  # first / middle / last
 def test_cut_endpoint_reads_map_through_kept(dummy, frac) -> None:
-    spec = CutSpec(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
     r = _reader(dummy, cuts=spec)
     kept = _oracle_kept(dummy, 0.5, None)
     pt, _ = _jets(dummy)
@@ -150,7 +152,7 @@ def test_cut_endpoint_reads_map_through_kept(dummy, frac) -> None:
 
 
 def test_cut_non_contiguous_and_batch_boundary(dummy) -> None:
-    spec = CutSpec(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
     r = _reader(dummy, cuts=spec)
     kept = _oracle_kept(dummy, 0.5, None)
     # non-contiguous: kept file rows are scattered (not a contiguous run)
@@ -170,7 +172,7 @@ def test_cut_non_contiguous_and_batch_boundary(dummy) -> None:
 
 
 def test_cut_stage_binding_train_val_test(dummy) -> None:
-    spec = CutSpec(
+    spec = GlobalObjectCuts(
         global_cuts=(Cut("pt", ">", 0.5),),
         per_split={"train": (Cut("flavour_label", "==", 2),)},
     )
@@ -194,14 +196,14 @@ def test_cut_missing_field_raises(dummy) -> None:
     r = H5StructuredReader(
         groups={"jets": {"global_object": True}, "tracks": {"global_object": False}},
         filename=dummy,
-        cuts=CutSpec(global_cuts=(Cut("not_a_field", ">", 0),)),
+        cuts=GlobalObjectCuts(global_cuts=(Cut("not_a_field", ">", 0),)),
     )
     with pytest.raises(SchemaError, match="not_a_field"):
         r.prepare()
 
 
 def test_cut_num_caps_served_rows(dummy) -> None:
-    spec = CutSpec(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
     kept = _oracle_kept(dummy, 0.5, None)
     r = _reader(dummy, cuts=spec, num=10)
     assert len(r) == 10

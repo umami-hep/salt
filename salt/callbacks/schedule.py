@@ -1,15 +1,11 @@
 """Callback driving multi-stage `training_schedule` transitions inside one fit.
 
-At each stage boundary (`on_train_epoch_start` when the epoch crosses into a new
-stage) it applies the new stage's freeze mask and rebuilds the optimizer + LR
-scheduler via ``trainer.strategy.setup_optimizers``; stage 0 is built by
-Lightning's initial `configure_optimizers`, so the callback only rebuilds for
-stages >= 1. Boundaries are epoch-arithmetic by
-default; when any stage declares `early_stop` they become
-data-dependent — `on_validation_end` folds the monitored metric into the active
-stage's tracker (rank-synced) and either flags a pending advance (non-final) or
-stops the fit (final). Auto-injected by `SaltCLI` when the model's schedule is
-multi-stage or freezes anything — the user never registers it.
+At each stage boundary it applies the new stage's freeze mask and rebuilds the
+optimizer + LR scheduler via ``trainer.strategy.setup_optimizers`` (stage 0 is
+built by Lightning's initial `configure_optimizers`). Boundaries are
+epoch-arithmetic unless a stage declares `early_stop`, which makes them
+data-dependent via the rank-synced monitored metric. Auto-injected by
+`SaltCLI`; the user never registers it.
 """
 
 from __future__ import annotations
@@ -19,8 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 from lightning.pytorch.callbacks import Callback
 
-from salt.logging import get_logger
 from salt.schedule import reducer_safe_freeze_required
+from salt.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from lightning.pytorch import LightningModule, Trainer

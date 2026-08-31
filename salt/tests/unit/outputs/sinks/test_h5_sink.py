@@ -1,0 +1,588 @@
+"""H5OutputSink mechanism: section writer units, column order, dtype policy,
+the int32-min VertexIndex sentinel, softmax-once, ckpt-glob fallback, and the
+section ONNX contract.
+
+Split out of the retired ``tests/integration/test_eval_h5.py`` (re-anchored
+from ``test_outputs_explicit.py`` + ``test_outputs_section.py``): the
+schema-containment and cli-writes-h5 checks that file also carried are now
+the matrix eval leg's job (``pipeline/test_pipeline.py::
+_assert_eval_h5_has_expected_outputs``, column presence against the curated
+``EXPECTED_OUTPUTS`` table); everything here is either a value-level check
+that containment check does not make (dtype, softmax sum, sentinel value,
+target-label content) or pure section/writer-unit introspection with no
+config-lifecycle equivalent.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+import yaml
+
+from salt.graph.spec import Mode
+from salt.main import main
+from salt.outputs.input_copy_writer import InputCopyWriter
+from salt.outputs.pad_mask_writer import PadMaskWriter
+from salt.outputs.run_task_output import RunTaskOutput
+from salt.schema import dump_schema, save_schema
+from salt.testing.inputs import write_dummy_file
+from salt.tests._fixtures.gn2v2_fixture import (
+    ORIGIN_CLASSES,
+    build_gn2v2_modules,
+    write_parity_norm_dict,
+)
+from salt.tests._fixtures.gn2v2_test_config import full_family_config, small_config
+
+DUMMY_CFG = small_config()
+CUTOVER34_CFG = full_family_config()
+RUN_NAME = "GN2v2_dummy"
+N_TEST = 300
+
+JET_SUFFIXES = ["pb", "pc", "pu"]
+ORIGIN_SUFFIXES = [f"p{c}" for c in ORIGIN_CLASSES]
+# VertexIndex is NOT deferred — the vertexing get_output fold mints it (H5
+# integer column + ONNX int8 leaf). Nothing is deferred in this config.
+
+
+@pytest.fixture(scope="module")
+def data(tmp_path_factory) -> dict[str, Path]:
+    """Synthetic norm dict + dummy H5 + schema artifact — shared by both halves."""
+    base = tmp_path_factory.mktemp("h5_sink_data")
+    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
+    write_parity_norm_dict(nd_path, cd_path)
+    h5_path = base / "pp_output_test_ttbar.h5"
+    write_dummy_file(h5_path, nd_path)
+    schema_path = base / "schema.yaml"
+    save_schema(dump_schema(h5_path), schema_path)
+    return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
+
+
+def _overrides(data) -> list[str]:
+    return [
+        f"--data.modules.reader.init_args.schema={data['schema']}",
+        f"--model.modules.norm.init_args.norm_dict={data['nd']}",
+        "--trainer.accelerator=cpu",
+        "--trainer.logger=false",
+        "--callbacks.progress=null",
+    ]
+
+
+@pytest.fixture(scope="module")
+def ckpt(data, tmp_path_factory) -> Path:
+    """A live 1-epoch fit of the shipped gn2v2-dummy config — shared by both halves."""
+    fit_dir = tmp_path_factory.mktemp("h5_sink_fit")
+    rc = main([
+        "fit",
+        "--config",
+        str(DUMMY_CFG),
+        f"--data.train_file={data['h5']}",
+        f"--data.val_file={data['h5']}",
+        *_overrides(data),
+        f"--trainer.default_root_dir={fit_dir}",
+        "--trainer.max_epochs=1",
+        "--trainer.limit_train_batches=2",
+        "--trainer.limit_val_batches=2",
+        "--trainer.num_sanity_val_steps=0",
+        "--trainer.log_every_n_steps=1",
+    ])
+    assert rc == 0, "salt fit on the shipped gn2v2-dummy config must run end-to-end"
+    ckpts = sorted(fit_dir.rglob("*.ckpt"))
+    assert ckpts, f"no checkpoint under {fit_dir}"
+    return ckpts[0]
+
+
+def _explicit_h5_sink_override(out: Path) -> str:
+    """A ``--outputs.h5_output=<JSON>`` value pinning the H5 sink to ``out``.
+
+    Same pattern as ``TestNoCkptFallback`` below: a private, per-fixture
+    output path instead of the default-templated
+    ``{ckpt_dir}/{ckpt_stem}__test_{sample}.h5``. The ONLY true regression in
+    the integration-test restructure (pipeline #15650554 diagnosis item 5):
+    ``cli_h5`` and ``section_h5`` both share the same ``ckpt`` fixture, so
+    both previously wrote to the SAME implicit default path — under
+    pytest-randomly, whichever fixture ran last silently won and the other's
+    glob (``ckpt.parent.glob("*__test_*.h5")[-1]``) picked up the wrong file.
+    In the old layout this never fired: the CPU runner skipped these files
+    entirely (no integration marker), so the collision never executed.
+    """
+    return f'{{"class_path": "salt.outputs.H5OutputSink", "init_args": {{"output": "{out}"}}}}'
+
+
+@pytest.fixture(scope="module")
+def cli_h5(data, ckpt, tmp_path_factory) -> Path:
+    """Eval H5 from ``salt test`` — an explicit, private H5OutputSink output
+    (own path — see ``_explicit_h5_sink_override``, not the implicit
+    default-templated one ``section_h5`` below also targets).
+    """
+    out = tmp_path_factory.mktemp("cli_h5") / "eval.h5"
+    rc = main([
+        "test",
+        "--config",
+        str(DUMMY_CFG),
+        f"--data.test_file={data['h5']}",
+        f"--ckpt_path={ckpt}",
+        f"--data.num_test={N_TEST}",
+        f"--trainer.default_root_dir={data['dir']}",
+        f"--outputs.h5_output={_explicit_h5_sink_override(out)}",
+        *_overrides(data),
+    ])
+    assert rc == 0, "salt test on the shipped gn2v2-dummy config must run end-to-end"
+    assert out.is_file(), f"the explicit H5 sink wrote no eval H5 at {out}"
+    return out
+
+
+@pytest.fixture(scope="module")
+def section_h5(data, ckpt, tmp_path_factory) -> Path:
+    """Eval H5 from the outputs:-section (DUMMY_CFG + CUTOVER34_CFG) — an
+    explicit, private H5OutputSink output (own path — see
+    ``_explicit_h5_sink_override``, not the implicit default-templated one
+    ``cli_h5`` above also targets).
+    """
+    out = tmp_path_factory.mktemp("section_h5") / "eval.h5"
+    rc = main([
+        "test",
+        "--config",
+        str(DUMMY_CFG),
+        "--config",
+        str(CUTOVER34_CFG),
+        f"--data.test_file={data['h5']}",
+        f"--ckpt_path={ckpt}",
+        f"--data.num_test={N_TEST}",
+        f"--trainer.default_root_dir={data['dir']}",
+        f"--outputs.h5_output={_explicit_h5_sink_override(out)}",
+        *_overrides(data),
+    ])
+    assert rc == 0, "salt test on the outputs:-section config must run end-to-end"
+    assert out.is_file(), f"the explicit H5 sink wrote no eval H5 at {out}"
+    return out
+
+
+# --------------------------------------------------- implicit-sink half (single config)
+
+
+def test_cli_probs_are_softmaxed_not_double_converted(cli_h5):
+    """The implicit single-config sink's prob columns are probabilities (sum
+    ~1) — converted EXACTLY ONCE."""
+    with h5py.File(cli_h5) as f:
+        jets = f["jets"][:]
+        tracks = f["tracks"][:]
+        valid = ~tracks["mask"]
+    jet_cols = [f"{RUN_NAME}_{s}" for s in JET_SUFFIXES]
+    prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
+    assert np.allclose(prob_sum, 1.0, atol=1e-3)
+    # padded track positions read 0.0 (masked softmax), valid sum to ~1
+    origin_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
+    origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
+    assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
+    assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
+
+
+def test_cli_target_label_columns_match_source_labels(data, cli_h5):
+    """Phase-C gate: the target_{task} columns EQUAL the source-file labels.
+
+    gn2v2-opendata has no label_map, so the consumed global label is the raw
+    flavour_label; the per-token origin target reads the raw label on
+    valid positions and -1 on padded ones.
+    """
+    with h5py.File(data["h5"]) as src:
+        src_flav = src["jets"]["flavour_label"][:N_TEST].astype("i4")
+        src_origin = src["tracks"]["ftagTruthOriginLabel"][:N_TEST].astype("i4")
+        src_valid = src["tracks"]["valid"][:N_TEST].astype(bool)
+    with h5py.File(cli_h5) as f:
+        got_flav = f["jets"]["target_jets_classification"][:]
+        got_origin = f["tracks"]["target_track_origin"][:]
+    assert (got_flav == src_flav).all()
+    # valid positions read the raw label, except label==-2 which the loss
+    # (and hence the target column) masks to -1 (MR!60199 workaround)
+    v_got, v_src = got_origin[src_valid], src_origin[src_valid]
+    assert ((v_got == v_src) | ((v_src == -2) & (v_got == -1))).all()
+    assert (got_origin[~src_valid] == -1).all()
+
+
+# --------------------------------------------------- outputs:-section half (DUMMY+CUTOVER34)
+
+
+def test_section_task_column_dtypes(section_h5):
+    """Prob columns are float; the bare VertexIndex + target-label columns are integer.
+
+    A value-level dtype check the matrix's golden-vs-schema comparison does
+    NOT make (that check is column NAMES/order only). Nothing is deferred in
+    this config: the vertexing get_output fold mints the per-token
+    VertexIndex integer column alongside the classification probs.
+    """
+    with h5py.File(section_h5) as f:
+        jets, tracks = f["jets"].dtype, f["tracks"].dtype
+    for s in JET_SUFFIXES:
+        assert np.issubdtype(jets[f"{RUN_NAME}_{s}"], np.floating)
+    for s in ORIGIN_SUFFIXES:
+        assert np.issubdtype(tracks[f"{RUN_NAME}_{s}"], np.floating)
+    assert np.issubdtype(tracks["VertexIndex"], np.integer)
+    # target-label columns: unprefixed (model-independent), integer
+    assert np.issubdtype(jets["target_jets_classification"], np.integer)
+    assert np.issubdtype(tracks["target_track_origin"], np.integer)
+    assert np.issubdtype(tracks["target_track_vertexing"], np.integer)
+
+
+def test_section_probs_are_softmaxed_not_double_converted(section_h5):
+    """The section prob columns are probabilities (sum ~1) — converted EXACTLY ONCE."""
+    with h5py.File(section_h5) as f:
+        jets = f["jets"][:]
+        tracks = f["tracks"][:]
+        valid = ~tracks["mask"]
+    jet_cols = [f"{RUN_NAME}_{s}" for s in JET_SUFFIXES]
+    prob_sum = sum(jets[c].astype("f8") for c in jet_cols)
+    assert np.allclose(prob_sum, 1.0, atol=1e-3)
+    origin_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
+    origin_sum = sum(tracks[c].astype("f8") for c in origin_cols)
+    assert np.allclose(origin_sum[valid], 1.0, atol=1e-3)
+    assert np.allclose(origin_sum[~valid], 0.0, atol=1e-6)
+
+
+def test_padded_vertex_index_is_int32_min_sentinel(section_h5):
+    """Padded positions carry the VertexIndex sentinel VALUE.
+
+    The union-find -inf padding int-casts to int32 min (-2147483648) —
+    asserted at value level (re-anchored from the retired
+    ``test_eval_file_v1_layout`` e2e), not just integer-dtype.
+    """
+    with h5py.File(section_h5) as f:
+        tracks = f["tracks"][:]
+    padded = tracks["mask"]
+    assert padded.any(), "fixture must contain padded track positions"
+    assert (tracks["VertexIndex"][padded] == np.int64(-2147483648)).all()
+    # valid positions never carry the sentinel
+    assert (tracks["VertexIndex"][~padded] != np.int64(-2147483648)).all()
+
+
+class TestNoCkptFallback:
+    """``salt test`` without ``--ckpt_path`` (the v1 best-epoch glob).
+
+    Re-anchored from the retired ``test_no_ckpt_fallback_globs_v2_checkpoints``
+    / ``test_no_ckpt_needs_single_config_with_losses`` e2e pair; the glob
+    itself is unit-covered in ``test_main.py::TestBestCheckpointFallback``.
+    """
+
+    def test_globs_best_checkpoint_next_to_saved_config(self, data, ckpt, tmp_path):
+        """The saved run config alone drives eval: the fallback globs the
+        loss=-named checkpoint from the sibling ckpts/ dir and runs green.
+        """
+        assert "loss=" in ckpt.name  # the v1 Checkpoint filename contract
+        config = ckpt.parent.parent / "config.yaml"
+        assert config.is_file(), f"no saved run config next to {ckpt.parent}"
+        # declare an explicit H5 sink with a private output path so this eval
+        # cannot collide with the cli_h5/section_h5 fixtures' files
+        out = tmp_path / "fallback.h5"
+        rc = main([
+            "test",
+            "--config",
+            str(config),
+            f"--data.test_file={data['h5']}",
+            f"--data.num_test={N_TEST}",
+            f"--outputs.h5_output={_explicit_h5_sink_override(out)}",
+            "--callbacks.progress=null",
+        ])
+        assert rc == 0
+        assert out.exists(), "the no-ckpt fallback eval wrote no H5"
+
+    def test_without_loss_named_checkpoints_fails_loudly(self, data, capsys):
+        """No loss=-named checkpoints next to the single --config -> rc 1
+        naming ckpt (the shipped config dir carries no ckpts/checkpoints).
+        """
+        rc = main([
+            "test",
+            "--config",
+            str(DUMMY_CFG),
+            f"--data.test_file={data['h5']}",
+            *_overrides(data),
+        ])
+        assert rc == 1
+        assert "ckpt" in capsys.readouterr().err
+
+
+class TestColumnOrderDrivenBySection:
+    """The H5 column ORDER is enforced by _merge_columns; the SECTION drives task-column order."""
+
+    def test_pad_mask_is_last_column_in_tracks(self, section_h5):
+        """The pad-mask 'mask' column is LAST in the tracks group (section order)."""
+        with h5py.File(section_h5) as f:
+            names = list(f["tracks"].dtype.names)
+        assert names[-1] == "mask", f"pad mask must be the LAST tracks column, got order {names}"
+
+    def test_input_copies_precede_task_columns(self, section_h5):
+        """The input-copy source columns precede the run-name-prefixed task columns."""
+        with h5py.File(section_h5) as f:
+            names = list(f["tracks"].dtype.names)
+        task_cols = [f"{RUN_NAME}_{s}" for s in ORIGIN_SUFFIXES]
+        first_task = min(names.index(c) for c in task_cols)
+        # every column before the first task column must be a copied source field
+        # (NOT a run-name-prefixed task column and NOT the trailing mask)
+        before = names[:first_task]
+        assert before, "expected input-copy columns before the task columns"
+        assert all(not c.startswith(f"{RUN_NAME}_") and c != "mask" for c in before), (
+            f"columns before the task columns must be input copies, got {before}"
+        )
+
+
+class TestSectionOverlayConfigContent:
+    """The gn2v2-opendata.yaml config wires the full-family outputs: section.
+
+    The overlay replaces the base's mode-split jets_out/origin_out
+    writers with ONE all-modes RunTaskOutput, and declares NO callbacks: sinks —
+    the command wires the implicit H5 + ONNX sinks.
+    """
+
+    def test_config_content(self):
+        cfg = yaml.safe_load(CUTOVER34_CFG.read_text())
+        # track_vertexing is un-deferred (base defers via expose: [fit, val]) so
+        # its get_output fold mints the VertexIndex eval/ONNX leaves.
+        mods = cfg["model"]["init_args"]["modules"]
+        assert mods["track_vertexing"]["init_args"]["expose"] is None
+        # no legacy writers: block
+        assert "writers" not in cfg
+        # the outputs: section: null the base's mode-split writers, add run_tasks
+        section = cfg["outputs"]
+        assert section["jets_out"] is None
+        assert section["origin_out"] is None
+        assert section["run_tasks"]["class_path"] == "salt.outputs.RunTaskOutput"
+        # track_vertexing JOINS the orchestrated tasks
+        assert section["run_tasks"]["init_args"]["tasks"] == [
+            "jets_classification",
+            "track_origin",
+            "track_vertexing",
+        ]
+        # the sinks are IMPLICIT — the overlay declares no h5_output/onnx_export
+        assert "callbacks" not in cfg
+
+
+class TestSectionWriterUnits:
+    """Unit-level checks of the section writers' declare_io + manifest + ordering."""
+
+    def _bound_run_task(self):
+        # build the gn2v2 model modules (no file I/O for declare_io / manifest)
+        import tempfile
+
+        nd = Path(tempfile.mkdtemp()) / "nd.yaml"
+        cd = nd.parent / "cd.yaml"
+        write_parity_norm_dict(nd, cd)
+        modules = build_gn2v2_modules(nd)
+        # orchestrate the FULL gn2v2 family (incl track_vertexing)
+        rt = RunTaskOutput(tasks=["jets_classification", "track_origin", "track_vertexing"])
+        rt.name = "run_tasks"
+        rt.bind_model_modules(modules)
+        return rt
+
+    def test_run_task_requires_preds_and_pad_mask(self):
+        """RunTaskOutput.declare_io requires each task's preds + the seq head's pad mask."""
+        from salt.graph.spec import flatten_spec
+
+        rt = self._bound_run_task()
+        req = flatten_spec(rt.declare_io(Mode.TEST).requires)
+        assert "preds.jets.jets_classification" in req
+        assert "preds.tracks.track_origin" in req
+        # the vertexing head's raw edge-score leaf
+        assert "preds.tracks.track_vertexing" in req
+        # the seq head (track_origin) AND the vertexing head declare masks.tracks
+        # via output_time_requires
+        assert "masks.tracks" in req
+        # each task demands EXACTLY its target-label key in TEST
+        assert "labels.jets.flavour_label" in req
+        assert "labels.tracks.ftagTruthOriginLabel" in req
+        assert "labels.tracks.ftagTruthVertexIndex" in req
+
+    def test_run_task_produces_per_field_leaves_test(self):
+        """In TEST, RunTaskOutput produces one outputs.*.<col> leaf PER class column."""
+        from salt.graph.spec import flatten_spec
+
+        rt = self._bound_run_task()
+        prod = set(flatten_spec(rt.declare_io(Mode.TEST).produces))
+        # global head: one leaf per jet class suffix
+        for s in JET_SUFFIXES:
+            assert f"outputs.jets.jets_classification.{s}" in prod
+        # seq head: one leaf per origin class suffix (H5 probs)
+        for s in ORIGIN_SUFFIXES:
+            assert f"outputs.tracks.track_origin.{s}" in prod
+        # vertexing head -> one i8 VertexIndex per-token leaf (H5)
+        assert "outputs.tracks.track_vertexing.VertexIndex" in prod
+        # one target-label leaf per task
+        assert "outputs.jets.jets_classification.target_jets_classification" in prod
+        assert "outputs.tracks.track_origin.target_track_origin" in prod
+        assert "outputs.tracks.track_vertexing.target_track_vertexing" in prod
+
+    def test_run_task_produces_argmax_leaf_onnx(self):
+        """In ONNX, the seq head produces a single argmax-index leaf (TrackOrigin)."""
+        from salt.graph.spec import flatten_spec
+
+        rt = self._bound_run_task()
+        prod = set(flatten_spec(rt.declare_io(Mode.ONNX).produces))
+        # global head: per-class scalar leaves
+        for s in JET_SUFFIXES:
+            assert f"outputs.jets.jets_classification.{s}" in prod
+        # seq head ONNX: a single argmax index leaf under the pascal-case task name
+        assert "outputs.tracks.track_origin.TrackOrigin" in prod
+        # NOT the per-class probs leaves in ONNX (mode-keyed write-once)
+        assert "outputs.tracks.track_origin.pPrimary" not in prod
+        # vertexing head ONNX -> a single VertexIndex union-find leaf
+        assert "outputs.tracks.track_vertexing.VertexIndex" in prod
+        # ONNX/export mode is LABEL-FREE — no target leaf, no label demand
+        assert all("target_" not in k for k in prod)
+        req = flatten_spec(self._bound_run_task().declare_io(Mode.ONNX).requires)
+        assert all(not k.startswith("labels.") for k in req)
+
+    def test_manifest_fields_order_is_task_then_field(self):
+        """manifest_fields orders fields task-then-field (the column-order authority).
+
+        Each task's field list ends with its
+        ``target_{task}`` label column (preds first, then the target).
+        """
+        rt = self._bound_run_task()
+        fields = rt.manifest_fields(Mode.TEST)
+        cols = [f.h5_name for _, f in fields]
+        assert cols == [
+            *JET_SUFFIXES,
+            "target_jets_classification",
+            *ORIGIN_SUFFIXES,
+            "target_track_origin",
+            "VertexIndex",
+            "target_track_vertexing",
+        ]
+
+    def test_input_copy_is_manifest_only(self):
+        """InputCopyWriter is manifest-only (no graph leaf — the sink re-reads copies)."""
+        icw = InputCopyWriter(streams=["jets", "tracks"])
+        assert icw.is_manifest_only() is True
+        assert icw.copy_spec()["streams"] == ["jets", "tracks"]
+
+    def test_pad_mask_produces_mask_leaf(self):
+        """PadMaskWriter produces outputs.<stream>.mask from masks.<stream>."""
+        from salt.graph.spec import flatten_spec
+
+        pmw = PadMaskWriter(streams=["tracks"])
+        io = pmw.declare_io(Mode.TEST)
+        assert "outputs.tracks.mask" in flatten_spec(io.produces)
+        assert "masks.tracks" in flatten_spec(io.requires)
+
+    def test_run_task_rejects_empty_and_duplicate(self):
+        """RunTaskOutput rejects an empty tasks list and duplicate task names."""
+        from salt.graph.errors import ConfigError
+
+        with pytest.raises(ConfigError):
+            RunTaskOutput(tasks=[])
+        with pytest.raises(ConfigError):
+            RunTaskOutput(tasks=["a", "a"])
+
+
+# ONNX contract: the dumb OnnxExportSink names the section's get_output
+# leaves — get_output squeezes the global per-class scalars, the sink ONLY
+# names them (no double split). Expectations are hand-pinned literals.
+
+# the FULL gn2v2 contract — pb/pc/pu globals + the TrackOrigin per-token
+# argmax + the VertexIndex per-token union-find (both int8).
+SECTION_ONNX_NAMES = ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_TrackOrigin", "GN2v2_VertexIndex"]
+SECTION_ONNX_DTYPES = ["float32", "float32", "float32", "int8", "int8"]
+
+
+class TestSectionOnnxContract:
+    """The dumb OnnxExportSink names the section's get_output leaves (pinned contract)."""
+
+    def _section_export(self, tmp_path):
+        import torch
+
+        from salt.model.modules import bind_all, resolve_bind_schema
+        from salt.outputs.sinks.onnx import (
+            ExportConfig,
+            ExportInput,
+            compile_onnx_plan,
+            export_graph,
+            resolve_export_config,
+        )
+        from salt.outputs import OnnxExportSink
+        from salt.tests._fixtures.gn2v2_fixture import (
+            JET_VARIABLES,
+            TRACK_VARIABLES,
+        )
+
+        variables = {"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
+        export_cfg = ExportConfig(
+            model_name="GN2v2",
+            inputs=[
+                ExportInput(port="inputs.jets", name="jet_features"),
+                ExportInput(
+                    port="inputs.tracks", name="track_features", sequence=True, dyn_axis="n_tracks"
+                ),
+            ],
+        )
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
+        # deterministic non-trivial weights; the tests assert contract, not values
+        torch.manual_seed(42)
+        modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+        # the section: RunTaskOutput over the FULL gn2v2 family (classification
+        # + vertexing) + the DUMB OnnxExportSink, both folded into the export
+        # module dict.
+        run_tasks = RunTaskOutput(
+            tasks=["jets_classification", "track_origin", "track_vertexing"]
+        )
+        run_tasks.name = "run_tasks"
+        run_tasks.bind_model_modules(modules)
+        sink = OnnxExportSink()
+        sink.name = "onnx_export"
+        section = {"run_tasks": run_tasks}
+        sink.bind_output_section(section)
+        modules["run_tasks"] = run_tasks
+        modules["onnx_export"] = sink
+        resolved = resolve_export_config(export_cfg, "GN2_v2")
+        plan = compile_onnx_plan(modules, resolved, variables)
+        bind_all(modules, resolve_bind_schema([plan]))
+        modules["norm"].materialise()
+        return export_graph(
+            modules, export_cfg, variables, tmp_path / "section.onnx", outputs=[], run_name="GN2_v2"
+        )
+
+    def test_onnx_contract_names_dtypes_axes_order(self, tmp_path):
+        """The dumb-section ONNX names/dtypes/axes/ORDER == the pinned contract."""
+        adapter = self._section_export(tmp_path).adapter
+        assert adapter.output_names == SECTION_ONNX_NAMES, (
+            f"section ONNX names {adapter.output_names} != pinned {SECTION_ONNX_NAMES}"
+        )
+        assert adapter.output_dtypes == SECTION_ONNX_DTYPES
+        # the per-token int8 leaves (TrackOrigin argmax + VertexIndex union-find)
+        # carry the n_tracks dynamic axis
+        for per_token in ("GN2v2_TrackOrigin", "GN2v2_VertexIndex"):
+            assert adapter.dynamic_axes.get(per_token) == {0: "n_tracks"}, (
+                f"{per_token} dynamic axis {adapter.dynamic_axes.get(per_token)}"
+            )
+        # the global scalars carry NO dynamic axis (the no-double-split scalars)
+        for g in ("GN2v2_pb", "GN2v2_pc", "GN2v2_pu"):
+            assert g not in adapter.dynamic_axes
+
+    def test_onnx_session_runs_no_double_split(self, tmp_path):
+        """The exported ONNX adapter runs — 5 outputs, no re-split."""
+        import torch
+
+        result = self._section_export(tmp_path)
+        adapter = result.adapter
+        for length in (0, 5):
+            example = adapter.example_inputs(sequence_length=length)
+            with torch.no_grad():
+                out = adapter(*example)
+            assert len(out) == 5  # pb, pc, pu, TrackOrigin, VertexIndex
+
+    def test_onnx_output_ranks_match_global_vs_per_token(self, tmp_path):
+        """The exported ONNX graph's output RANKS: globals rank-0 [], per-token rank-1."""
+        import onnx
+
+        onnx_path = tmp_path / "section.onnx"
+        self._section_export(tmp_path)
+        model = onnx.load(str(onnx_path))
+        ranks = {
+            o.name: len(o.type.tensor_type.shape.dim) for o in model.graph.output
+        }
+        for g in ("GN2v2_pb", "GN2v2_pc", "GN2v2_pu"):
+            assert ranks[g] == 0, f"{g} should be a rank-0 scalar, got rank {ranks[g]}"
+        for per_token in ("GN2v2_TrackOrigin", "GN2v2_VertexIndex"):
+            assert ranks[per_token] == 1, (
+                f"{per_token} should be a rank-1 per-token vector, got rank {ranks[per_token]}"
+            )

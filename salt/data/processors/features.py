@@ -14,21 +14,13 @@ from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 
 
 def _all_finite(a: np.ndarray) -> bool:
-    """Whether every element of a float array is finite — ``np.isfinite(a).all()``, cheaper.
+    """Whether every element of a float array is finite — ``np.isfinite(a).all()``
+    without its full-size boolean temporary.
 
-    Identical verdict, no temporary. ``np.isfinite(a).all()`` materialises a full
-    boolean array the size of `a` (megabytes per stream per batch) only to reduce
-    it away; `min`/`max` reduce in place.
-
-    The equivalence holds because both extremes are checked and NaN propagates
-    through both reductions: any NaN makes `min` and `max` NaN; any ``+inf`` with
-    no NaN makes `max` ``+inf``; any ``-inf`` with no NaN makes `min` ``-inf``.
-    So the pair is finite exactly when every element is. Summing instead would
-    NOT be equivalent — a float32 sum over millions of finite values can itself
-    overflow to ``inf`` and report a clean batch as corrupt.
-
-    Empty input is vacuously finite, matching ``.all()`` on an empty array (and
-    unlike `min`, which raises).
+    Equivalent because NaN propagates through both reductions and inf hits an
+    extreme, so min/max are finite exactly when every element is. (A float32
+    SUM would not be equivalent — it can overflow to inf on finite input.)
+    Empty input is vacuously finite, matching ``.all()``.
     """
     if a.size == 0:
         return True

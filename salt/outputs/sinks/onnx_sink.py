@@ -32,55 +32,17 @@ from salt.outputs.sinks.sink import Node, collect_manifest_fields
 class OnnxExportLeaf:
     """One ONNX output: the conversion ``outputs.*`` leaf + its Athena naming.
 
-    The sink's internal representation of one resolved output, built from the
-    producers' declared fields — not a config surface.
-
-    The conversion already ran in the trace, so the sink does no per-batch
-    compute — it just NAMES the demanded conversion leaves into the flat
-    Athena output tuple.
-
-    Three leaf shapes:
-
-    - **split_scalars** (``names`` plural, float32 global): one converted
-      prob leaf (``ClassProbs`` already softmaxed) -> N named scalars. The
-      split is a naming concern owned here (``torch.split(probs, 1, -1)`` +
-      squeeze), not a new conversion node.
-    - **single per-token leaf** (``name`` singular, int8, ``per_token=True``):
-      the conversion node (e.g. ``SeqClassIndex``'s ONNX branch) already
-      produced the int8 ``[L]`` leaf — the sink passes it through under its
-      Athena name and registers its dynamic axis.
-    - **single global leaf** (``name`` singular, float32, ``per_token=False``):
-      a ``Combination`` node's scalar leaf — passed through under its Athena
-      name, no dynamic axis.
-
-    Parameters
-    ----------
-    key : str
-        The ``outputs.<stream>.<name>`` conversion leaf this output names.
-        Concrete, under the ``outputs`` namespace.
-    name : str | None, optional
-        Single-output Athena suffix (full name ``{model_name}_{name}``).
-        Exclusive with `names`. When both `name` and `names` are omitted the
-        suffix defaults to the leaf key's terminal segment (single-source
-        naming — the producing node names the leaf once).
-    names : Sequence[str] | None, optional
-        Per-class scalar suffixes for the split (one converted leaf -> N
-        named scalars). Exclusive with `name`.
-    dtype : str, optional
-        The ONNX output dtype (``"float32"``/``"int8"``), by default
-        ``"float32"``.
-    per_token : bool, optional
-        Whether the output carries a dynamic per-token sequence axis, by
-        default False (a global scalar).
-    dyn_axis : str | None, optional
-        The dynamic-axis name for a per-token output (default ``n_<stream>``
-        from the leaf's stream), ignored for global outputs.
-
-    Raises
-    ------
-    ConfigError
-        For a non-``outputs`` / wildcard key, a name/names arity violation,
-        an unsupported dtype, or names combined with per_token.
+    Internal representation of one resolved output (not a config surface); the
+    sink only NAMES demanded conversion leaves into the flat Athena tuple.
+    Three shapes: **split_scalars** (``names`` plural, float32 global — one
+    converted prob leaf split into N named scalars; the split is a naming
+    concern owned here, not a conversion node); **single per-token leaf**
+    (``name`` singular, int8, ``per_token=True`` — passed through with its
+    dynamic axis, default ``n_<stream>``); **single global leaf** (``name``
+    singular, float32). With both `name` and `names` omitted the Athena suffix
+    defaults to the leaf key's terminal segment. `ConfigError` on a
+    non-``outputs``/wildcard key, name/names arity violation, unsupported
+    dtype, or names combined with per_token.
     """
 
     key: str
@@ -147,48 +109,28 @@ class OnnxExportLeaf:
 class OnnxExportSink(Node):
     """The ONNX sink: a declare-only terminal node naming the conversion leaves.
 
-    A pure terminal `SinkModule` for ``Mode.ONNX``: its ONNX-mode
-    ``declare_io`` requires the export-output conversion leaves
-    (``kind=data``) the folded nodes mint — ``SeqClassIndex``'s int8 leaf,
-    ``Combination``'s scalar leaf, the ``ClassProbs`` probs leaf the
-    ``split_scalars`` split names — and produces nothing. Because every
-    conversion ran inside the traced ``executor.run``, the sink does no
-    per-batch compute: it just flattens/names the populated ``outputs.*``
+    A pure terminal `SinkModule` for ``Mode.ONNX``: requires the export-output
+    conversion leaves the folded nodes mint and produces nothing. Every
+    conversion ran inside the traced ``executor.run``, so the sink does no
+    per-batch compute — it just flattens/names the populated ``outputs.*``
     into the flat Athena output tuple.
 
-    The tuple is AUTO-COLLECTED: every bound manifest source declaring
-    ``manifest_fields(Mode.ONNX)`` contributes its own names and dtypes
-    (`collect_manifest_fields`), so a module minting ``outputs.*`` leaves is
-    the single place those leaves are named. The flat tuple ORDER is GLOBAL
-    float scalars before PER-TOKEN aux outputs, applied within each manifest
-    group — the ``outputs:`` section's writers, then the model's graph modules
-    — with declaration order inside each block. It is pinned by the committed
-    per-config goldens (``salt/tests/_fixtures/output_goldens/``), so a
-    reordering is a visible schema change rather than a silent one.
+    The tuple is AUTO-COLLECTED from every bound manifest source declaring
+    ``manifest_fields(Mode.ONNX)``. Flat tuple ORDER: global float scalars
+    before per-token aux outputs, applied within each manifest group (section
+    writers, then model graph modules), declaration order inside each block —
+    pinned by the curated ``EXPECTED_OUTPUTS`` table in
+    ``salt/tests/integration/pipeline/test_pipeline.py`` so a reordering is a
+    visible, actionable test failure. union_find / MaskFormer outputs are NOT
+    folded and keep the legacy `reduces` path; a config may MIX both and the
+    adapter dispatches per output without drift.
 
-    It is the folded-path counterpart to the legacy `salt.outputs.sinks.onnx.reduces`
-    path: `compile_onnx_plan` sources its ONNX sinks from
-    ``declare_io(Mode.ONNX).requires`` when an export node is present, and
-    the `OnnxAdapter` reads the named leaves from the executed bundle instead
-    of running a post-executor ``reduce.fn`` loop for these outputs.
-    union_find / MaskFormer outputs are NOT folded here and keep the legacy
-    reduce path — a config may MIX folded leaves (declared here) with legacy
-    reduce outputs, and the adapter dispatches per output without drift.
-
-    Outside ``Mode.ONNX`` the node declares empty requires AND empty
-    produces, so the planner prunes it from FIT/VAL/TEST — the FIT
-    ``plan_hash`` is unchanged. It is a `Node`, not a `RuntimeSink`: export
-    never runs a test loop, so there is no lifecycle to have. Its only job is
-    naming the leaves at adapter construction, which happens at compile time.
-
-    It is also the CONFIG HOME of the whole ONNX artifact contract: the Athena
-    model name and input signature (`inputs`, `track_selection`) and the
-    manifest post-processing (`rename`, `combine`) live here alongside the
-    output tuple, and `export_config` assembles them into the resolved
-    `salt.outputs.sinks.onnx.ExportConfig` that ``salt export`` / ``salt inference`` trace
-    against. The top-level ``export:`` block is a deprecated alias for these
-    same keys (`salt.outputs.sinks.onnx.export` folds it in, and a key set in both homes is
-    a `ConfigError`).
+    Outside ``Mode.ONNX`` the node declares empty IO, so FIT/VAL/TEST prune
+    it (FIT ``plan_hash`` unchanged). It is a `Node`, not a `RuntimeSink` —
+    export never runs a test loop. It is also the CONFIG HOME of the ONNX
+    artifact contract (`model_name`, `inputs`, `track_selection`, `rename`,
+    `combine`); `export_config` assembles the resolved `ExportConfig` that
+    ``salt export`` / ``salt inference`` trace against.
 
     Parameters
     ----------

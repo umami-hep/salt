@@ -17,9 +17,6 @@ from salt.model.base import SaltModelModule
 from salt.model.nn.dense import Dense, _reject_width_keys
 from salt.outputs.output_schema import OutputField
 
-_WIDTH_KEYS = ("input_size", "output_size", "context_size")
-
-
 # Streams that are a fixed-count query bank (e.g. MaskFormer's `objects`, M
 # learnable queries with no padding) rather than a variable-length pad-masked
 # sequence. A sequence-mode task on such a stream must NOT require/consume a
@@ -49,7 +46,8 @@ class _TaskModuleBase(SaltModelModule):
         write_targets: bool = True,
     ) -> None:
         super().__init__()
-        _reject_width_keys(type(self).__name__, dense, _WIDTH_KEYS)
+        width_keys = ("input_size", "output_size", "context_size")
+        _reject_width_keys(type(self).__name__, dense, width_keys)
         self.stream = stream
         self.write_targets = bool(write_targets)
         # `input_name` is the head-math name for the task's stream tag (the

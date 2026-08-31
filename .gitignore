@@ -24,8 +24,8 @@ user/
 !gradient_logger
 !weight_logger
 # salt's own logging facility and its test are source, not log output
-!salt/logging.py
-!salt/tests/unit/test_logging.py
+!salt/utils/logging.py
+!salt/tests/unit/utils/test_logging.py
 
 *.pyc
 *.xml

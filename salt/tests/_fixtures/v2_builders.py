@@ -1,8 +1,7 @@
-"""Pure-v2 graph-fixture builders (extracted from ``regression_fixture.py`` at DEL-1).
+"""Pure-v2 graph-fixture builders.
 
-``regression_fixture.py`` mixes these v1-free builders with v1-comparison
-machinery (``build_independent_v1_*``) and dies with the v1 tree. Every builder
-here has live v2 consumers and imports NOTHING from the retired v1 namespace.
+Every builder here has live v2 consumers and imports nothing from the retired
+v1 namespace.
 """
 
 from __future__ import annotations
@@ -318,7 +317,7 @@ def build_maskformer_decoder_modules(
         ),
         "mask_decoder": MaskDecoder(
             embed_dim=MASKFORMER_ENC_DIM,
-            num_objects=MASKFORMER_NUM_OBJECTS,
+            num_queries=MASKFORMER_NUM_OBJECTS,
             num_layers=num_layers,
             class_net={"output_size": MASKFORMER_NUM_OBJECT_CLASSES},
             md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
@@ -365,7 +364,7 @@ def build_matched_loss_module(
     """A bound `MaskFormerMatchedLoss` over the object stream, ready to drive."""
     module = MaskFormerMatchedLoss(
         num_classes=num_classes,
-        num_objects=num_objects,
+        num_queries=num_objects,
         loss_weights=dict(loss_weights or MASKFORMER_LOSS_WEIGHTS),
         null_class_weight=MASKFORMER_NULL_CLASS_WEIGHT,
     )

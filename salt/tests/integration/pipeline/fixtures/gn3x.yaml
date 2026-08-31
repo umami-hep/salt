@@ -1,0 +1,42 @@
+config: GN3X.yaml
+eval:
+  expected_outputs:
+    jets:
+      - GN3XPV01_phtautauhad
+      - GN3XPV01_phbb
+      - GN3XPV01_phcc
+      - GN3XPV01_ptop
+      - GN3XPV01_pqcdbb
+      - GN3XPV01_pqcdbx
+      - GN3XPV01_pqcdcx
+      - GN3XPV01_pqcdll
+      - GN3XPV01_pWqq
+      - target_jets_classification
+    # GN3X.yaml's tracks group carries no `dataset:` alias — group == stream.
+    tracks:
+      - GN3XPV01_pPileup
+      - GN3XPV01_pFake
+      - GN3XPV01_pPrimary
+      - GN3XPV01_pFromB
+      - GN3XPV01_pFromBC
+      - GN3XPV01_pFromC
+      - GN3XPV01_pFromTau
+      - GN3XPV01_pOtherSecondary
+      - target_track_origin
+      - VertexIndex
+      - target_track_vertexing
+onnx:
+  expected_outputs:
+    - GN3XPV01_phtautauhad
+    - GN3XPV01_phbb
+    - GN3XPV01_phcc
+    - GN3XPV01_ptop
+    - GN3XPV01_pqcdbb
+    - GN3XPV01_pqcdbx
+    - GN3XPV01_pqcdcx
+    - GN3XPV01_pqcdll
+    - GN3XPV01_pWqq
+    - GN3XPV01_TrackOrigin
+    - GN3XPV01_VertexIndex
+xfail:
+  fit: "salt fit rc=1, unchanged since the first lifecycle run (exp 55 run 1) — looks like a genuine config/model bug, not a harness artefact."

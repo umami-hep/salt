@@ -1,0 +1,13 @@
+config: hitz.yaml
+eval:
+  expected_outputs:
+    jets:
+      - Hitz_TruthJetPVz
+      - Hitz_TruthJetPVz_stddev
+      - target_gaussian_regression_TruthJetPVz
+onnx:
+  expected_outputs:
+    - Hitz_TruthJetPVz
+    - Hitz_TruthJetPVz_stddev
+xfail:
+  fit: "salt fit rc=1, survives the recipe-schema fixes from exp 55 run 2."

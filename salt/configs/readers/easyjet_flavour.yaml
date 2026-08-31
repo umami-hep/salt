@@ -4,7 +4,7 @@
 # per-jet on HadronConeExclTruthLabelID. No tracks — easyjet output has none.
 #
 # unroll: null serves one row per tree entry (event); jets is a per-event jagged
-# sequence padded to `truncate`. Branch names are verbatim (empty prefix): the
+# sequence padded to `pad_max`. Branch names are verbatim (empty prefix): the
 # `recojet_antikt4PFlow_*` collection prefix and `_NOSYS` suffix live in `branches`.
 
 name: easyjet_flavour
@@ -21,7 +21,7 @@ data:
         groups:
           jets:
             jagged: true
-            truncate: 20
+            pad_max: 20
             branches:
               pt: recojet_antikt4PFlow_pt_NOSYS
               eta: recojet_antikt4PFlow_eta

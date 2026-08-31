@@ -187,16 +187,7 @@ Setting an entry to `null` deletes it, which is how a stacked config drops a
 writer or a sink it inherited.
 
 Every model config declares its own section; `base.yaml` ships none. A
-`salt test` config with no `outputs:` section is refused, and a config still
-carrying the retired top-level `writers:` block fails with a migration error
-pointing here.
-
-!!! note "Sinks used to live under `callbacks:`"
-
-    A sink declared under `callbacks:` still works, with a deprecation
-    warning, for one release. Move it into `outputs:` — a sink is not a
-    Lightning callback, and splitting one concept across two top-level blocks
-    is what the section unifies.
+`salt test` config with no `outputs:` section is refused.
 
 ### Modes: eval, export, or both
 
@@ -735,8 +726,8 @@ summary — the whole thing is short:
 ```python
 # row_count_sink.py
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.logging import console
 from salt.outputs import RuntimeSink
+from salt.utils.logging import console
 
 
 class RowCountSink(RuntimeSink):
@@ -780,7 +771,6 @@ Notes for sink authors:
 | `salt.outputs.RuntimeSink` | base class for a sink with a lifecycle — the extension point |
 | `salt.outputs.Node` | its declare-only parent, for a node with no run-time work |
 | `salt.outputs.SinkContext` | the run facts `open_schema` receives |
-| `salt.outputs.OutputSink` | deprecated alias of `RuntimeSink`; subclassing it warns |
 | `salt.outputs.H5OutputSink` | the eval-H5 sink (implicit on `salt test`) |
 | `salt.outputs.OnnxExportSink` | the ONNX tuple sink (implicit on `salt export`) |
 | `salt.outputs.JSONLOutputSink` | the worked example: newline-delimited JSON |

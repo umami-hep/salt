@@ -6,10 +6,6 @@ import torch
 from torch import BoolTensor, Tensor
 from torch.nn.functional import pad, softmax
 
-# ---------------------------------------------------------------------------
-# inlined v1 math helpers (byte-faithful copies; v1 originals untouched)
-# ---------------------------------------------------------------------------
-
 
 def add_dims(x: Tensor, ndim: int) -> Tensor:
     """Add singleton dimensions (after the batch dim) to reach a target rank.

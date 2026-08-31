@@ -1,4 +1,4 @@
-"""H5OutputSink open_schema reader-shape gate — a structured-reader-less
+"""H5OutputSink open_schema reader-shape guard — a structured-reader-less
 (global-only, no ``.groups``/``.source_path``) reader is accepted when nothing
 demands the source file, and rejected (naming the capability) when pad-mask
 columns or input-copying are requested.
@@ -99,5 +99,6 @@ def test_groupless_reader_rejected_when_source_needed(tmp_path, kwargs, match):
 # Case 3 (H5StructuredReader-shaped reader path UNCHANGED) is already exercised
 # end-to-end by test_h5_sink_precision.py (`_Reader` exposes .groups/.source_path
 # and drives open_schema -> consume -> flush through the groups-present branch)
-# and by test_sink_node.py; the goldens gate (generate_goldens.py) additionally
-# proves the groups-present schema is byte-identical. Not duplicated here.
+# and by test_sink_node.py; the pipeline matrix's eval leg (test_pipeline.py,
+# EXPECTED_OUTPUTS containment check) additionally proves the groups-present
+# schema is produced for real shipped configs. Not duplicated here.

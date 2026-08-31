@@ -18,8 +18,8 @@ from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
 from salt.graph.planner import compile_plan
 from salt.graph.spec import Mode
-from salt.logging import console
 from salt.model.bind import bind_all, materialise_all, resolve_bind_schema
+from salt.utils.logging import console
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas as pd
@@ -45,8 +45,8 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
     """
     import warnings
 
-    from salt.config_utils import disable_logger_in_config
     from salt.main import SaltCLI
+    from salt.utils.config_utils import disable_logger_in_config
 
     args: list[str] = []
     for cfg in configs:

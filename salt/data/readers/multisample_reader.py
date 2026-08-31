@@ -18,23 +18,18 @@ from salt.data.readers.stream import pad_fill
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import PlanStep
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.logging import get_logger
 from salt.schema import GroupSchema, Schema
+from salt.utils.logging import get_logger
 
 __all__ = ["MultiSampleReader", "SampleConfig"]
 
 _LOG = get_logger(__name__)
 
-_LABEL_DTYPE = "int64"
-"""Injected label dtype: int64 so downstream ``Labels``/`ClassificationTaskModule`
-consume it directly without a cast."""
-
 _STAGE_KEYS = ("train", "val", "test")
 
 _EXHAUSTION_LOG_EVERY = 50
-"""Exhaustion logging EMISSION cadence only — the served-rows counter itself updates on
-EVERY `read()` call (i.e. every batch); this constant just throttles how often that state
-gets logged (1st call, then every 50th), since a per-batch record would drown the log."""
+"""Exhaustion logging emission cadence (1st call, then every 50th); the
+served-rows counter itself updates on every `read()`."""
 
 
 @dataclass
@@ -312,7 +307,7 @@ class MultiSampleReader(Reader):
                             f"MultiSampleReader: injected label_field {self.label_field!r} "
                             f"collides with an existing field on {self.label_stream!r}"
                         )
-                    fields[self.label_field] = _LABEL_DTYPE
+                    fields[self.label_field] = "int64"
                 groups[stream] = GroupSchema(fields=fields)
             self.schema = Schema(groups=groups)
 
@@ -550,18 +545,13 @@ class MultiSampleReader(Reader):
     def _segments(self, rows: slice) -> list[tuple[int, slice, np.ndarray]]:
         """Decompose a global window into the FEWEST contiguous per-sample sub-reads.
 
-        `_runs` splits at every change of sample. That satisfies the sub-read
-        contract but is ruinous on disk: a row-granular interleave of two samples
-        turns a 1,000-row window into ~750 one-row sub-reads, and a sub-read is
-        both an uproot range read per branch AND a full truncate/pad pass — the
-        two costs a line profile of this path finds, in that order.
-
-        The local rows one sample contributes to a window are consecutive across
-        those splits, because `_build_index` hands them out from a per-sample
-        cursor. So the same rows can be fetched in ONE sub-read per contiguous
-        local stretch and scattered back to their interleaved output positions.
-        Contiguity is DERIVED here, never assumed: a non-consecutive stretch
-        simply splits, which in the worst case reproduces `_runs` exactly.
+        Unlike `_runs` (which splits at every sample change — ~750 one-row
+        sub-reads for a 1,000-row two-sample window), this exploits that the
+        local rows one sample contributes to a window are consecutive
+        (`_build_index` hands them out from a per-sample cursor): one sub-read
+        per contiguous local stretch, scattered back to the interleaved output
+        positions. Contiguity is DERIVED, never assumed — a non-consecutive
+        stretch simply splits.
 
         Each segment is ``(sample_id, local_slice, out_positions)``, where
         ``out_positions`` index into ``[0, stop - start)``. Segments are ordered
@@ -622,12 +612,10 @@ class MultiSampleReader(Reader):
     def row_blocks(self) -> list[RowBlock]:
         """Every sub-reader's blocks, tagged with its sample id.
 
-        Deliberately does NOT build the global interleaved index: that index is
-        one int64 pair per row of the whole corpus, which is the object the
-        streaming path exists to avoid holding once per reader process. The
-        per-shard proportional interleave is rebuilt from these blocks' row
-        counts instead, which is the same arithmetic over 236 numbers rather
-        than 20 million.
+        Deliberately does NOT build the global interleaved index (one int64 pair
+        per corpus row — the object the streaming path exists to avoid holding
+        per process); the per-shard proportional interleave is rebuilt from
+        these blocks' row counts instead.
         """
         self.prepare()
         return [
@@ -665,17 +653,11 @@ class MultiSampleReader(Reader):
     def _log_exhaustion(self, segments: list[tuple[int, slice, np.ndarray]]) -> None:
         """Accumulate + (at cadence) log the per-worker, per-sample rows-served counter.
 
-        Called only from behind ``_LOG.isEnabledFor(logging.DEBUG)`` in `read`, so it
-        costs nothing at higher log levels. Counts rows actually returned by this call
-        (``positions.size`` per segment), never a window position — under
-        ``shuffle=True`` a position is a random walk, but a served-rows counter is
-        monotonic within an epoch. Per-worker because each DataLoader worker owns its
-        own reader instance (fork/spawn), so ``self._served`` is already private to it;
-        the worker id is included in the record for cross-worker comparison. Reset by
-        `bind` for a new epoch/stage — this method only ever runs behind the DEBUG
-        guard, so the counts accumulate only while DEBUG is enabled; only the emission
-        (not the accumulation) is additionally cadence-gated. Overlapping windows
-        legitimately count twice — this is a count of rows served, not of distinct rows.
+        Runs only behind the DEBUG guard in `read` (free at higher levels).
+        Counts rows actually returned, never window positions (monotonic within
+        an epoch even under ``shuffle=True``); per-worker (each worker owns its
+        reader instance); reset by `bind`. Overlapping windows legitimately
+        count twice — rows served, not distinct rows.
         """
         from torch.utils.data import get_worker_info
 
@@ -714,7 +696,7 @@ class MultiSampleReader(Reader):
         names = list(ref.dtype.names or ())
         dtype_fields = [(nm, ref.dtype[nm]) for nm in names]
         if inject:
-            dtype_fields.append((self.label_field, np.dtype(_LABEL_DTYPE)))
+            dtype_fields.append((self.label_field, np.dtype("int64")))
         combined = np.empty((b,), dtype=np.dtype(dtype_fields))
         for positions, sid, block in blocks:
             for nm in names:

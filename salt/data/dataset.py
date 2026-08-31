@@ -34,7 +34,7 @@ class SaltDataset(_PlanRunner, Dataset):
         if not isinstance(rows, slice) or rows.start is None or rows.stop is None:
             raise TypeError(
                 f"SaltDataset is indexed by contiguous slices with start/stop, got {rows!r} "
-                "(samplers.py:41-55 contract)"
+                "(the RandomBatchSampler contract)"
             )
         self._maybe_bind()
         return self._run_plan(rows)

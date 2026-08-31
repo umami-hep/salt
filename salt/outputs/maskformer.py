@@ -1,5 +1,5 @@
-"""MaskFormer output nodes: `MaskFormerObjects` reconstruction node (+ deprecated
-alias) and `MFLeadVertexDecorator` lead-vertex jet-level decorator.
+"""MaskFormer output nodes: `MaskFormerObjects` reconstruction node and
+`MFLeadVertexDecorator` lead-vertex jet-level decorator.
 """
 
 from __future__ import annotations
@@ -335,13 +335,6 @@ class MaskFormerObjects(SaltModelModule):
         idx = indices_from_mask(masks.sigmoid() > 0.5)  # [B, T] int64, -2 = no object
         idx = torch.where(pad, torch.full_like(idx, -1), idx)  # padded constituents -> -1
         return {self.index_key: idx}
-
-
-# One-window alias: `MaskFormerObject` was renamed `MaskFormerObjects`. The
-# promoted node is a strict superset, so an existing `MaskFormerObject`
-# config keeps working via this alias. Remove after the migration window.
-MaskFormerObject = MaskFormerObjects
-"""Deprecated alias for `MaskFormerObjects`."""
 
 
 class MFLeadVertexDecorator(SaltModelModule):

@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 
-from salt.graph.errors import _SUGGESTION_CUTOFF, GraphError
+from salt.graph.errors import SUGGESTION_CUTOFF, GraphError
 from salt.graph.planner import Plan
 from salt.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
 from salt.model.base import SaltModelModule
@@ -46,7 +46,7 @@ class ResolvedSchema:
         try:
             return self.widths[key]
         except KeyError:
-            near = get_close_matches(key, sorted(self.widths), n=3, cutoff=_SUGGESTION_CUTOFF)
+            near = get_close_matches(key, sorted(self.widths), n=3, cutoff=SUGGESTION_CUTOFF)
             hint = f"; nearest: {', '.join(near)}" if near else ""
             raise BindError(
                 f"no statically resolved width for bundle key {key!r} — the key is either "
@@ -260,7 +260,7 @@ def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: Resol
     `salt.model.saltmodule`) is model-only by construction — but some test
     fixtures call this directly on a per-mode LOCAL module dict with a
     terminal sink folded in (mirroring `SaltModule.compile_mode`'s own fold,
-    e.g. an `OnnxExportSink` under `salt.tests.unit.onnx.test_adapter`), so
+    e.g. an `OnnxExportSink` under `salt.tests.unit.outputs.sinks.onnx.test_adapter`), so
     this stays an explicit `SaltModelModule`-partitioned direct call, not an
     unconditional one — a sink has no `bind`. `SaltModelModule.bind` is a
     documented no-op default, so no further discovery is needed for the

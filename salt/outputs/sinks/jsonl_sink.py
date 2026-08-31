@@ -13,9 +13,9 @@ import numpy as np
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.logging import console
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
+from salt.utils.logging import console
 
 __all__ = ["JSONLOutputSink"]
 
@@ -57,7 +57,7 @@ class JSONLOutputSink(RuntimeSink):
 
     It is an AUXILIARY sink: `is_test_sink` returns False so `H5OutputSink`
     stays the single TEST persistence sink that anchors the graph's boundary
-    demand. Wire this alongside the implicit H5 sink in ``callbacks:`` and
+    demand. Wire this alongside the implicit H5 sink in ``outputs:`` and
     you get both files from one ``salt test``. Because its columns are
     derived from the same section, every leaf it reads is one the H5 sink
     already demanded — it never widens the plan.

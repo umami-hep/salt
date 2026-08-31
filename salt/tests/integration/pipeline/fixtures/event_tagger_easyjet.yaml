@@ -1,0 +1,13 @@
+config: ttbar_vs_hh4b_event_tagger.yaml
+fit:
+  args:
+    - "--config {fragment}"
+    - "--data.batch_size=2"
+eval:
+  # do_onnx=False — no onnx entry. ROOT-fed (ttbar_vs_hh4b_event_tagger),
+  # its event-level stream carries no reader `dataset:` alias.
+  expected_outputs:
+    event:
+      - ttbar_vs_hh4b_event_tagger_pbackground
+      - ttbar_vs_hh4b_event_tagger_psignal
+      - target_events_classification

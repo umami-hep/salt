@@ -1,8 +1,7 @@
-"""The ONNX export contract folded onto `OnnxExportSink`, and its top-level alias."""
+"""The ONNX export contract, assembled on `OnnxExportSink` — its sole config home."""
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 
 import pytest
@@ -15,10 +14,9 @@ from salt.outputs.sinks.onnx.config import (
     ExportCombine,
     ExportConfig,
     ExportInput,
-    ExportOutput,
     resolve_export_config,
 )
-from salt.outputs.sinks.onnx.export import _merge_export_alias, _resolve_export_contract
+from salt.outputs.sinks.onnx.export import _resolve_export_contract
 from salt.outputs import OnnxExportSink
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
@@ -28,6 +26,7 @@ pytestmark = pytest.mark.cpu_always
 _CONFIGS = Path(__file__).parents[3] / "configs"
 _DUMMY = small_config()
 _MASKFORMER = _CONFIGS / "MaskFormer.yaml"
+_GN2V2_OPENDATA = _CONFIGS / "gn2v2-opendata.yaml"
 
 _INPUTS = [
     {"port": "inputs.jets", "name": "jet_features"},
@@ -36,10 +35,10 @@ _INPUTS = [
 
 
 class _StubCLI:
-    """The two config reads `_resolve_export_contract` makes off a parsed run config."""
+    """The config read `_resolve_export_contract` makes off a parsed run config: its ``name``."""
 
-    def __init__(self, export=None, name="salt"):
-        self.config_init = {"export": export, "name": name}
+    def __init__(self, name="salt"):
+        self.config_init = {"name": name}
 
     def _get(self, config, key):
         """Mirror `SaltCLI._get` over a plain dict namespace."""
@@ -101,90 +100,28 @@ def test_no_input_signature_names_the_sink_home():
     assert "init_args.inputs" in message
 
 
-# ---------------------------------------------------------------------------
-# the deprecated top-level export: block
-# ---------------------------------------------------------------------------
-
-
-def test_top_level_block_still_fills_the_sink_and_warns():
-    """The alias fills every key the sink left unset — and says it is deprecated."""
-    sink = OnnxExportSink()
-    block = ExportConfig(
-        model_name="GN2v2",
-        inputs=[ExportInput(port="inputs.jets", name="jet_features")],
-        track_selection="r22loose",
-        rename={"pu": "plight"},
-        combine=[ExportCombine(name="pbc", inputs={"pb": 1.0})],
-    )
-    with pytest.warns(DeprecationWarning, match="top-level `export:` block is deprecated"):
-        resolved = _resolve_export_contract(_StubCLI(block, name="run"), sink)
-    assert resolved.model_name == "GN2v2"
-    assert [entry.port for entry in resolved.inputs] == ["inputs.jets"]
-    assert resolved.track_selection == "r22loose"
-    assert resolved.rename == {"pu": "plight"}
-    assert [entry.name for entry in resolved.combine] == ["pbc"]
-
-
-def test_no_block_resolves_the_sink_alone_without_warning():
-    """A config without the block resolves the sink's own contract, warning-free."""
+def test_resolve_export_contract_reads_the_sink_and_the_run_name():
+    """`_resolve_export_contract` resolves off the sink's own fields plus the run name."""
     sink = OnnxExportSink(model_name="GN2v2", inputs=_INPUTS)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        resolved = _resolve_export_contract(_StubCLI(None, name="run"), sink)
+    resolved = _resolve_export_contract(_StubCLI(name="run"), sink)
     assert resolved.model_name == "GN2v2"
-    assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
+    assert [entry.port for entry in resolved.inputs] == ["inputs.jets", "inputs.tracks"]
 
 
-def test_cli_name_override_wins_over_both_homes():
-    """``salt export -n NAME`` overrides the sink and the alias block alike."""
+def test_cli_name_override_wins_over_the_sink():
+    """``salt export -n NAME`` overrides the sink's own `model_name`."""
     sink = OnnxExportSink(inputs=_INPUTS, model_name="FromSink")
-    resolved = _resolve_export_contract(_StubCLI(None, name="run"), sink, "OverrideName")
+    resolved = _resolve_export_contract(_StubCLI(name="run"), sink, "OverrideName")
     assert resolved.model_name == "OverrideName"
 
 
-@pytest.mark.parametrize(
-    ("key", "block_kwargs", "sink_kwargs"),
-    [
-        ("model_name", {"model_name": "FromBlock"}, {"model_name": "FromSink"}),
-        (
-            "inputs",
-            {"inputs": [ExportInput(port="inputs.jets", name="a")]},
-            {"inputs": _INPUTS},
-        ),
-        ("track_selection", {"track_selection": "r22loose"}, {"track_selection": "ip3d"}),
-        ("rename", {"rename": {"pu": "a"}}, {"rename": {"pu": "b"}}),
-        (
-            "combine",
-            {"combine": [ExportCombine(name="x", inputs={"pb": 1.0})]},
-            {"combine": [{"name": "y", "inputs": {"pb": 1.0}}]},
-        ),
-    ],
-)
-def test_key_in_both_homes_is_refused(key, block_kwargs, sink_kwargs):
-    """A key carried by BOTH homes errors, naming the key and both homes."""
-    sink = OnnxExportSink(**sink_kwargs)
-    with pytest.warns(DeprecationWarning), pytest.raises(ConfigError) as excinfo:
-        _merge_export_alias(_StubCLI(ExportConfig(**block_kwargs), name="run"), sink)
-    message = str(excinfo.value)
-    assert f"export.{key}" in message
-    assert "OnnxExportSink" in message
-    assert "top-level" in message
-
-
-def test_declared_export_outputs_stays_a_hard_error():
-    """The retired ``export.outputs`` carrier is refused through the alias too."""
-    block = ExportConfig(outputs=[ExportOutput(port="preds.jets.a", names=["pb"])])
-    with pytest.raises(ConfigError, match="export.outputs was REMOVED"):
-        _merge_export_alias(_StubCLI(block, name="run"), OnnxExportSink())
-
-
 # ---------------------------------------------------------------------------
-# the shipped configs: MaskFormer migrated, gn2v2-opendata on the alias
+# the shipped configs: the sink is the only home
 # ---------------------------------------------------------------------------
 
 
 def test_maskformer_carries_the_contract_on_the_sink():
-    """`MaskFormer.yaml` is the worked proof of the new home: no top-level block."""
+    """`MaskFormer.yaml` names the export contract on the sink — no top-level block."""
     raw = yaml.safe_load(_MASKFORMER.read_text())
     assert "export" not in raw
     init_args = raw["outputs"]["onnx_export"]["init_args"]
@@ -192,23 +129,28 @@ def test_maskformer_carries_the_contract_on_the_sink():
     assert [entry["port"] for entry in init_args["inputs"]] == ["inputs.jets", "inputs.tracks"]
 
 
-def test_gn2v2_dummy_keeps_the_deprecated_block():
-    """`gn2v2-opendata.yaml` stays on the alias — the live proof the window is open."""
+def test_gn2v2_opendata_carries_the_contract_on_the_sink():
+    """`gn2v2-opendata.yaml` also declares the sink directly — no top-level block."""
+    raw = yaml.safe_load(_GN2V2_OPENDATA.read_text())
+    assert "export" not in raw
+    init_args = raw["outputs"]["onnx_export"]["init_args"]
+    assert init_args["model_name"] == "GN2v2opendata"
+    assert [entry["port"] for entry in init_args["inputs"]] == ["inputs.jets", "inputs.tracks"]
+
+
+def test_gn2v2_dummy_carries_the_contract_on_the_sink():
+    """The derived GN2v2-dummy test fixture inherits the sink form from the shipped config."""
     raw = yaml.safe_load(_DUMMY.read_text())
-    assert raw["export"]["model_name"] == "GN2v2dummy"
-    assert "onnx_export" not in raw["outputs"]  # the sink is INJECTED, not declared
+    assert "export" not in raw
+    init_args = raw["outputs"]["onnx_export"]["init_args"]
+    assert init_args["model_name"] == "GN2v2dummy"
+    assert [entry["port"] for entry in init_args["inputs"]] == ["inputs.jets", "inputs.tracks"]
 
 
-def test_gn2v2_dummy_resolves_its_contract_through_the_alias():
-    """The alias reaches the INJECTED sink: block -> sink -> resolved contract.
-
-    The regression test for the deprecation window — the sink `salt export`
-    finds is the same object `_inject_command_sinks` registered, so the
-    top-level block still lands on it.
-    """
-    from salt.cli import _static_onnx_export_sink
-    from salt.config_utils import disable_logger_in_config
+def test_gn2v2_dummy_resolves_its_contract_from_the_declared_sink():
+    """The section-declared sink resolves directly: config -> sink -> resolved contract."""
     from salt.main import SaltCLI
+    from salt.utils.config_utils import disable_logger_in_config
 
     cli = SaltCLI(
         args=[
@@ -218,17 +160,13 @@ def test_gn2v2_dummy_resolves_its_contract_through_the_alias():
         ],
         run=False,
     )
-    sink = _static_onnx_export_sink(cli)
-    assert isinstance(sink, OnnxExportSink)  # injected by _inject_command_sinks
-    assert sink.inputs == []  # the contract is NOT on the sink
-    assert sink.model_name is None
-    with pytest.warns(DeprecationWarning, match="top-level `export:` block is deprecated"):
-        resolved = _resolve_export_contract(cli, sink)
+    sink = cli._get(cli.config_init, "outputs")["onnx_export"]  # noqa: SLF001 - main.py precedent
+    assert isinstance(sink, OnnxExportSink)
+    assert sink.model_name == "GN2v2dummy"
+    resolved = _resolve_export_contract(cli, sink)
     assert resolved.model_name == "GN2v2dummy"
     assert [entry.port for entry in resolved.inputs] == ["inputs.jets", "inputs.tracks"]
     assert [entry.dyn_axis for entry in resolved.inputs] == [None, "n_tracks"]
-    # the merge landed on the sink itself, not on a copy
-    assert sink.model_name == "GN2v2dummy"
 
 
 @pytest.fixture(scope="module")

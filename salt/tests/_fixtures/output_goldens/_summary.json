@@ -1,2 +1,0 @@
-{"generator_command":"apptainer exec --bind /home/npond/Documents/CCRA --bind /tmp $CCRA_CONTAINERS_DIR/salt-py314.sif python salt/tests/_fixtures/output_goldens/generate_goldens.py","head_sha":"d848b61+phaseC","n_configs":1,"results":{"MaskFormer":{"captured":true,"error":null,"h5_columns":13,"onnx_outputs":10}}}
-

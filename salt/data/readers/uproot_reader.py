@@ -27,40 +27,22 @@ from salt.schema import GroupSchema, Schema
 __all__ = ["UprootGroupConfig", "UprootReader"]
 
 INDEX_CACHE_VERSION = 1
-"""Format version of the `index_cache` artifact.
-
-Bump whenever what `prepare` stores changes shape or meaning. It is part of the
-cache key, so a bump makes every existing artifact a miss rather than something
-to be migrated or — worse — read under the wrong interpretation.
-"""
+"""Part of the cache key — bump whenever what `prepare` stores changes shape or
+meaning, so old artifacts become misses instead of being misread."""
 
 MAX_BRANCHES_PER_READ = 64
-"""How many branches one batch read may ask `uproot` for at a time.
-
-A batch needs every configured branch over the same entry range, and `uproot`
-merges the resulting basket byte-ranges into as few source requests as it can
-(``uproot.source.coalesce``: adjacent ranges within ``max_range_gap``, capped by
-``max_request_bytes``). That merge runs **once per ``arrays()`` call**, so asking
-for the branches together is what lets ranges from *different* branches coalesce
-— which is the whole point on storage where seeking dominates.
-
-Grouping is bounded rather than unbounded because one call holds every requested
-branch's decompressed baskets at once: transient memory grows with the group, and
-uproot's own request packing stops paying off past a few MB anyway. 64 keeps a
-155-branch GN3-style read at three calls instead of 155, with a bounded working
-set. Sizing is empirical — see experiment 05's T2 group-size sweep — so this is a
-plain module constant a benchmark can monkeypatch, not a config surface.
-"""
+"""Branches per grouped ``arrays()`` call. uproot coalesces basket byte-ranges
+only within one call, so grouping is what merges seeks across branches; the bound
+caps transient memory (one call holds every requested branch's decompressed
+baskets at once). 64 is empirical: a 155-branch GN3-style read in three calls."""
 
 _GROUP_KEYS = {
     "branches",
     "prefix",
     "jagged",
     "pad_max",
-    "truncate",
     "link_branch",
     "target_prefix",
-    "target_collection",
     "join_branch",
     "join_prefix",
     "join_branches",
@@ -85,9 +67,9 @@ class UprootGroupConfig:
         a fixed ``T`` with a ``valid`` field + pad mask); ``False`` is a scalar
         per-row stream. The row axis is set by the reader's ``unroll``.
     pad_max : int | None, optional
-        Keeps the leading N constituents of a jagged stream; ``None`` (default)
-        auto-resolves the file's max multiplicity in `prepare`. (``truncate`` is
-        accepted as an alias.)
+        Keeps the leading N constituents of a jagged stream, padding sequences
+        shorter than N and truncating sequences longer than N; ``None``
+        (default) auto-resolves the file's max multiplicity in `prepare`.
     link_branch : str | None, optional
         Turns a jagged stream into an ElementLink-dereferenced constituent stream
         (PHYSLITE ``GhostTrack``): the per-row link vector
@@ -96,8 +78,7 @@ class UprootGroupConfig:
     target_prefix : str | None, optional
         The aux-store prefix of the ElementLink target container
         (``InDetTrackParticlesAuxDyn.``); this group's ``branches`` map onto it.
-        Set together with ``link_branch``. (``target_collection`` is a deprecated
-        alias meaning ``f"{target_collection}AuxDyn."``.)
+        Set together with ``link_branch``.
     join_branch : str | None, optional
         A **1:1** ElementLink carried by this group's own elements
         (``btaggingLink``, resolved with this group's ``prefix``), used to JOIN
@@ -256,17 +237,11 @@ class UprootReader(Reader):
     stage : str | None, optional
         The bound stage (``"train"``/``"val"``/``"test"``); selects per-split cuts.
     index_cache : str | Path | None, optional
-        Directory to persist the built index in. ``None`` (default) rebuilds it
-        every run. `prepare` has to open every file and read the unroll carrier's
-        counts to know which row lives where, which is a fixed startup cost paid
-        again on every run over an unchanged dataset — 200.7 s for a 236-file
-        corpus, of which ~75% is the counts read waiting on disk. With a
-        directory set, that result is written once and restored on later runs.
-        The cache key covers the reader config, the resolved file list with each
-        file's size and mtime, and the salt/uproot/awkward versions, so a changed
-        config or a re-derived file is a miss rather than a stale hit; a corrupt
-        or unreadable artifact is also a miss. Writes are atomic
-        (temp file + replace), so concurrent runs cannot read a partial artifact.
+        Directory to persist the built index in; ``None`` (default) rebuilds it
+        every run (~200 s startup for a 236-file corpus). The cache key covers
+        the reader config, each file's size/mtime, and the salt/uproot/awkward
+        versions, so any change is a miss; corrupt artifacts are misses; writes
+        are atomic (temp file + replace).
 
     Raises
     ------
@@ -420,9 +395,7 @@ class UprootReader(Reader):
     def _parse_group(
         stream: str, cfg: UprootGroupConfig | Mapping[str, Any] | Any
     ) -> UprootGroupConfig:
-        """Normalise a group config entry (``truncate``->``pad_max``,
-        ``target_collection``->``target_prefix``).
-        """
+        """Normalise a group config entry."""
         if isinstance(cfg, UprootGroupConfig):
             return cfg
         cfg = dict(cfg or {})
@@ -430,33 +403,20 @@ class UprootReader(Reader):
         if unknown:
             raise ConfigError(
                 f"group {stream!r}: unknown config keys {sorted(unknown)} — expected "
-                "branches/prefix/jagged/pad_max/link_branch/target_prefix (truncate, "
-                "target_collection accepted as aliases)"
+                "branches/prefix/jagged/pad_max/link_branch/target_prefix"
             )
         if "branches" not in cfg:
             raise ConfigError(
                 f"group {stream!r}: 'branches' mapping is required (field -> branch name)"
             )
-        if "pad_max" in cfg and "truncate" in cfg:
-            raise ConfigError(
-                f"group {stream!r}: give either 'pad_max' or 'truncate' (its alias), not both"
-            )
-        if "target_prefix" in cfg and "target_collection" in cfg:
-            raise ConfigError(
-                f"group {stream!r}: give either 'target_prefix' or 'target_collection' (its "
-                "alias), not both"
-            )
-        target_prefix = cfg.get("target_prefix")
-        if target_prefix is None and cfg.get("target_collection") is not None:
-            target_prefix = f"{cfg['target_collection']}AuxDyn."
         join_branches = dict(cfg.get("join_branches") or {})
         return UprootGroupConfig(
             branches={str(k): str(v) for k, v in dict(cfg["branches"]).items()},
             prefix=str(cfg.get("prefix", "")),
             jagged=bool(cfg.get("jagged", True)),
-            pad_max=cfg.get("pad_max", cfg.get("truncate")),
+            pad_max=cfg.get("pad_max"),
             link_branch=cfg.get("link_branch"),
-            target_prefix=target_prefix,
+            target_prefix=cfg.get("target_prefix"),
             join_branch=cfg.get("join_branch"),
             join_prefix=cfg.get("join_prefix"),
             join_branches={str(k): str(v) for k, v in join_branches.items()},
@@ -664,14 +624,10 @@ class UprootReader(Reader):
         }
 
     def _index_cache_key(self, files: list[Path]) -> str:
-        """A digest of everything the built index depends on.
-
-        Anything that could change the index must be in here, or a stale artifact
-        gets served as if it were current: the resolved file list with each file's
-        size and mtime (a re-derived file at the same path is a different file),
-        the reader's `config_fingerprint`, the cache format version, and the
-        versions of the libraries whose output is being cached. Cheap to compute —
-        it is `stat` plus a hash, never a file read.
+        """A digest of everything the built index depends on: the file list with
+        sizes/mtimes, the `config_fingerprint`, the cache format version, and the
+        library versions. Anything missing here would let a stale artifact serve
+        as current. `stat` plus a hash — never a file read.
         """
         import hashlib
         import json
@@ -703,13 +659,9 @@ class UprootReader(Reader):
     def _load_index_cache(self, files: list[Path], key: str) -> bool:
         """Restore the index from the artifact for `key`; False when there is nothing usable.
 
-        The key already covers config, library versions and each file's
-        size/mtime, so a hit means the inputs are the same ones the artifact was
-        built from. What is re-checked here is only what a corrupt or truncated
-        artifact could get wrong — the file list and the row total it claims —
-        because those are what the rest of the reader indexes against. Any
-        failure returns False and lets `prepare` rebuild: a cache is never
-        allowed to be the reason a run fails.
+        Only what a corrupt/truncated artifact could get wrong is re-checked
+        (file list, claimed row total); any failure returns False and `prepare`
+        rebuilds — a cache is never the reason a run fails.
         """
         import json
 
@@ -783,10 +735,9 @@ class UprootReader(Reader):
             "num_available": sum(int(e.kept.size) for e in self._table),
         }
         arrays: dict[str, Any] = {}
-        # With no row cuts, `kept` is just arange(n) and `per_row_kept` equals
-        # `orig_counts` — for the 236-file corpus that alone is a 160 MB int64
-        # copy of the row numbers 0..19,977,488. Record those two identities as
-        # flags and rebuild them on load; a cut index still stores its arrays.
+        # With no row cuts, `kept` is arange(n) and `per_row_kept` equals
+        # `orig_counts` (~160 MB of redundant int64 for a 236-file corpus) —
+        # store those identities as flags and rebuild on load.
         identity_kept: list[bool] = []
         identity_prk: list[bool] = []
         for i, e in enumerate(self._table):
@@ -805,11 +756,8 @@ class UprootReader(Reader):
         arrays["meta"] = np.array(json.dumps(meta, default=str))
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            # Write through an OPEN FILE, not a path: `np.savez` appends ".npz"
-            # to any path that does not already end in it, so a ".tmp" path would
-            # be written as "<name>.tmp.npz" and the rename below would then fail
-            # on a file that was never created — leaving a cache that is written
-            # but never found. A file object is written verbatim.
+            # write through an OPEN FILE: np.savez appends ".npz" to any path
+            # not ending in it, so a ".tmp" path would break the rename below
             tmp = path.with_suffix(".tmp")
             with tmp.open("wb") as fh:
                 np.savez(fh, **arrays)
@@ -824,15 +772,11 @@ class UprootReader(Reader):
         (idempotent); evaluates the (per-stage) `GlobalObjectCuts` over row-axis scalars to keep
         only passing rows, then resolves each jagged stream's served ``pad_max``.
 
-        The served schema is probed ONCE, on the first file, from branch METADATA
-        (`uproot`'s ``interpretation``/``typename``) plus — only where the
-        interpretation is not one this reader maps directly — a single-entry
-        bounded read. Later files are checked for branch presence and for an
-        identical ``typename`` per configured branch, which is a pure metadata
-        comparison. Nothing here reads a whole branch: the only bulk reads
-        `prepare` performs are the ones it genuinely needs — the unroll carrier's
-        counts, the cut scalars, and (for a jagged stream with no ``pad_max``)
-        one multiplicity-carrying branch.
+        The schema is probed once, on the first file, from branch metadata (with
+        a single-entry read only where the interpretation is not mapped
+        directly); later files get a metadata-only presence/typename check. The
+        only bulk reads are the unroll carrier's counts, the cut scalars, and —
+        for a jagged stream with no ``pad_max`` — one multiplicity branch.
         """
         if self._table is not None:
             return
@@ -1207,12 +1151,8 @@ class UprootReader(Reader):
 
         Direct stream: per-row constituent count of the stream's first branch;
         linked stream: per-row NON-NULL link count. ``unroll`` flattens the outer
-        collection level away first (``[entry][obj][const] -> [row][const]``);
-        ``unroll=None`` reads per-entry constituents directly. This is the one
-        part of `prepare` that legitimately reads bulk data, and only for a
-        jagged stream whose ``pad_max`` the config left unset — it takes the
-        tree handle `prepare` already has open rather than re-opening the file
-        (re-parsing streamers + re-reading a branch step 1 had in hand).
+        collection level away first. The one bulk read in `prepare`, and only for
+        a jagged stream whose ``pad_max`` the config left unset.
         """
         import awkward as ak
 
@@ -1315,18 +1255,10 @@ class UprootReader(Reader):
     def _tree(self, path: str | Path) -> Any:
         """The open TTree for `path`, cached per process — the HOT read path only.
 
-        ``uproot.open`` re-reads the file header and re-parses the TTree's
-        streamers and branch metadata on every call, which is fine once per file
-        in `prepare` and ruinous per batch: a `MultiSampleReader` decomposes an
-        interleaved window into one contiguous run per few rows, so an uncached
-        open ran once per run PER GROUP — order 1,000 opens for a 1,000-row
-        batch. Measured on a 170-branch easyjet ntuple that is ~40 s per batch,
-        i.e. training through a ROOT reader is not possible without this cache.
-
-        Handles are per (reader instance, path) and live until the process ends
-        (or the reader is pickled — `__getstate__` drops them, since an open
-        uproot file is not picklable). The file count per reader is the stage's
-        source list, so this is a handful of descriptors, not a leak.
+        ``uproot.open`` re-parses streamers and branch metadata on every call;
+        uncached that meant order 1,000 opens per interleaved 1,000-row batch
+        (~40 s/batch on a 170-branch ntuple). Handles live until process end;
+        `__getstate__` drops them (an open uproot file is not picklable).
         """
         self._require_deps()
         import uproot
@@ -1351,25 +1283,12 @@ class UprootReader(Reader):
 
         Per file: resolve the covering entry range, read, flatten (when
         unrolling), apply the kept-row mask and slice to the file's
-        contribution; blocks concat in row order. Linked streams dereference the
-        target container by ``m_persIndex`` per row.
-
-        Every stream is read in ONE pass over the files, and within a file every
-        non-linked stream's direct branches go out as a SINGLE grouped request.
-        That is the point of taking a dict rather than one stream at a time: the
-        covering entry range is a property of the FILE and the row range, not of
-        the stream (it is computed from ``entry.per_row_kept``), so all streams
-        want exactly the same entries — and `uproot` coalesces basket byte-ranges
-        within one ``arrays()`` call but not across calls. Reading stream by
-        stream therefore made a 155-branch block into 7 independent covering
-        passes over the same entries, one per stream, each seeking its own
-        baskets.
-
-        Linked streams keep their own reads: `_read_linked_block` dereferences an
-        ElementLink into a different container, so its branches do not live on
-        this group's axis and cannot share the request. Joined fields likewise
-        stay on `_read_joined_cols`, which already groups the link with its
-        targets.
+        contribution; blocks concat in row order. The covering entry range is a
+        property of the file and row range — not the stream — so all non-linked
+        streams' direct branches share ONE grouped request per file (uproot
+        coalesces basket ranges within one ``arrays()`` call, not across calls).
+        Linked/joined streams keep their own reads (`_read_linked_block` /
+        `_read_joined_cols`): their branches live on a different container axis.
         """
         self._require_deps()
         import awkward as ak
@@ -1443,19 +1362,10 @@ class UprootReader(Reader):
     def _read_branches(self, t: Any, branches: list[str], e0: int, e1: int) -> dict[str, Any]:
         """Read several branches over entry block ``[e0, e1)`` in as few reads as possible.
 
-        One ``arrays()`` call per bounded group of branches instead of one
-        ``array()`` call per branch. The served values are the same either way —
-        both go through the same per-branch interpretation — but the number of
-        *source requests* is not: `uproot` coalesces basket byte-ranges inside a
-        single call, so grouping lets ranges from different branches merge, and a
-        155-branch batch stops being 155 independent seek-read round trips into
-        the file.
-
-        `array_cache` is deliberately left at uproot's ``"inherit"`` default, the
-        same as the per-branch call this replaces: whether reads are cached stays
-        a property of how the file was opened, so a caller that opened with
-        ``array_cache=None`` still gets no cache and nothing about the existing
-        cache-off path changes.
+        One ``arrays()`` call per bounded group of branches, so uproot can
+        coalesce basket byte-ranges across branches (it never coalesces across
+        calls). `array_cache` stays at uproot's ``"inherit"`` default: caching
+        remains a property of how the file was opened.
 
         Returns
         -------
@@ -1516,9 +1426,6 @@ class UprootReader(Reader):
     def _read_col(self, t: Any, cfg: UprootGroupConfig, f: str, e0: int, e1: int) -> Any:
         """Read one normal branch over entry block ``[e0, e1)`` as ``[row]`` / ``[row][const]``
         (flattening the outer collection level away when unrolling).
-
-        The single-branch form of `_read_group_cols`' grouped read; kept because a
-        one-branch read is still occasionally the whole request.
         """
         branch = self._on_disk(cfg, cfg.branches[f])
         return self._unrolled(self._read_branches(t, [branch], e0, e1)[branch])
@@ -1538,9 +1445,7 @@ class UprootReader(Reader):
         import awkward as ak
 
         link_branch = self._on_disk(cfg, cfg.join_branch or "")
-        # link + every join target in ONE grouped request (see `_read_branches`):
-        # they cover the same entry range, so reading them together lets uproot
-        # coalesce their basket ranges instead of seeking once per branch.
+        # link + every join target in ONE grouped request (see `_read_branches`)
         tgt_names = {f: self._join_branch(cfg, cfg.join_branches[f]) for f in fields}
         raw = self._read_branches(t, [link_branch, *tgt_names.values()], e0, e1)
         links = raw[link_branch]  # [entry][elem]
@@ -1597,8 +1502,6 @@ class UprootReader(Reader):
         import awkward as ak
 
         # link vector + every demanded target column in ONE grouped request
-        # (see `_read_branches`) — same entry range, so their basket ranges
-        # coalesce instead of costing a seek each.
         link_branch = self._link_branch(cfg)
         tgt_names = {f: self._target_branch(cfg, cfg.branches[f]) for f in fields}
         raw = self._read_branches(t, [link_branch, *tgt_names.values()], e0, e1)

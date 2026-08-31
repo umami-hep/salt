@@ -1,4 +1,4 @@
-"""Spike: jsonargparse support for the salt v2 dict-of-modules config mechanism."""
+"""jsonargparse capabilities the salt dict-of-modules config mechanism relies on."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ class ProgressBar(Callback):
     """Stand-in for a stock Lightning callback listed under trainer.callbacks."""
 
 
-# Spike-validated remediation shim (referenced from SPIKE_jsonargparse.md)
+# Remediation shim: deep-merge for dict-typed values
 
 
 class DeepMergeParser(ArgumentParser):
@@ -207,7 +207,7 @@ def test_print_config_round_trip(tmp_path, capsys):
     reason="jsonargparse 4.46.0: None fails dict[str, Base] value validation, and a "
     "second config file replaces the dict wholesale (merge_config -> Namespace.update "
     "treats dict leaves atomically). Null-deletion needs the DeepMergeParser "
-    "shim plus `| None` value types — see the workaround tests and SPIKE_jsonargparse.md.",
+    "shim plus `| None` value types — see the workaround tests below.",
 )
 def test_null_deletion_via_second_config_file(tmp_path):
     """A second config file setting modules.decoder=null removes it."""
@@ -304,7 +304,7 @@ def test_env_var_override(tmp_path, monkeypatch):
     strict=True,
     reason="jsonargparse 4.46.0: merge_config -> Namespace.update replaces dict leaves "
     "wholesale, so a second config file drops earlier dict keys. The 'module "
-    "dicts merge' semantics need the DeepMergeParser shim — see SPIKE_jsonargparse.md.",
+    "dicts merge' semantics need the DeepMergeParser shim — see the workaround tests below.",
 )
 def test_deep_merge_across_config_files(tmp_path):
     """A later file adds a key, earlier keys survive."""

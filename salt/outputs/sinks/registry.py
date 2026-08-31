@@ -16,9 +16,9 @@ def sink_registry(owner: Any) -> list[Any]:
     """The sink list attached to `owner` (a trainer), created on first use.
 
     Sinks stopped being Lightning callbacks, so ``trainer.callbacks`` is no
-    longer where they are found. Every wiring path — the ``callbacks:`` alias,
-    the ``outputs:`` section, a command's implicit injection — appends here,
-    and every discovery site reads `iter_sinks`.
+    longer where they are found. Every wiring path — the ``outputs:`` section,
+    a command's implicit injection — appends here, and every discovery site
+    reads `iter_sinks`.
 
     Parameters
     ----------
@@ -86,9 +86,8 @@ def iter_sinks(owner: Any) -> list[Any]:
     """Every sink attached to `owner`, registry first.
 
     The single discovery surface. It also scans ``owner.callbacks`` for
-    sink-shaped entries: that is the ``callbacks:`` alias path — a sink handed
-    straight to a programmatically built trainer, which is how a config
-    declared one before sinks moved into the ``outputs:`` section.
+    sink-shaped entries — a defensive fallback for a sink handed straight to
+    a programmatically built trainer, outside the ``outputs:`` section path.
 
     Parameters
     ----------

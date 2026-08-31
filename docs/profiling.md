@@ -9,7 +9,7 @@ Training has two halves and they need different tools.
   that enqueues a kernel costs nothing, and whichever line next synchronises
   inherits the blame. Use `torch.profiler`, which timestamps the kernels
   themselves: `salt profile model`, or its callback
-  `salt.profiling.TorchProfilerCallback` attached to a run you were doing anyway.
+  `salt.utils.profiling.TorchProfilerCallback` attached to a run you were doing anyway.
 
 Both subcommands take the same `--config` stack, the same `--set K=V` overrides
 and the same `--steps` (default **100**).
@@ -83,8 +83,6 @@ The harness:
    `@profile` decorators in the source), iterates `--steps` batches, and
    restores the originals.
 
-(`--batches` still works as a deprecated alias for `--steps`.)
-
 Outputs land in `--out`: `dataset_profile.txt` (the classic annotated listing),
 `dataset_profile.lprof` (for `python -m line_profiler`), and
 `dataset_summary.json` (per-function totals and the ranked hot lines).
@@ -95,7 +93,7 @@ alongside each other, so the H5 slab read, the constituent cuts, the
 `structured_to_unstructured` copy and the numpy→torch conversion are separated
 by line rather than by function.
 
-The default function list is `salt.profiling.DEFAULT_DATASET_FUNCTIONS`
+The default function list is `salt.utils.profiling.DEFAULT_DATASET_FUNCTIONS`
 (`SaltDataset.__getitem__` / `_to_torch`, `H5StructuredReader.read` /
 `_read_kept`, `ConstituentCuts.apply`, `Features.process`, `Labels.process`,
 `Bundle.merge`). Extend or replace it:
@@ -148,7 +146,7 @@ anyway, rather than a throwaway one:
 
 ```bash
 salt fit --config configs/GN3/GN3V00.yaml \
-    --trainer.callbacks+=salt.profiling.TorchProfilerCallback \
+    --trainer.callbacks+=salt.utils.profiling.TorchProfilerCallback \
     --trainer.callbacks.dirpath profile/ \
     --trainer.callbacks.tag eager_flash \
     --trainer.callbacks.wait 5 \
@@ -161,7 +159,7 @@ or, in a config file:
 ```yaml
 callbacks:
   profiler:
-    class_path: salt.profiling.TorchProfilerCallback
+    class_path: salt.utils.profiling.TorchProfilerCallback
     init_args:
       dirpath: profile/
       tag: eager_flash
@@ -218,7 +216,7 @@ engine). The summary reports it separately as `backward_scope_device` (the
 `optimizer_device` (torch's own `Optimizer.step#<Class>.step` scope).
 
 If you want the step scopes under Lightning's `PyTorchProfiler` instead, add
-`salt.profiling.PlanStepScopes` as a callback — it turns them on for the run
+`salt.utils.profiling.PlanStepScopes` as a callback — it turns them on for the run
 and does nothing else.
 
 ### Measuring the profiler's own cost

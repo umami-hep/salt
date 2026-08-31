@@ -115,12 +115,13 @@ def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
 # Row font colour for the signature-card rows: the port-card layout has no
 # per-key wires to colour, so the orange/red/blue kind accents are applied to
 # the consumed/produced row text instead.
-_KIND_COLOURS = {"label": "#b5651d", "loss": "#c0392b", "preds": "#1f6fb2"}
-_ROW_DEFAULT_COLOUR = "#333333"
-_SHAPE_COLOUR = "#888888"
-_PRUNED_FILL = "#dddddd"
-# frozen-module card fill (mid-grey, distinct from the lighter pruned fill).
-_FROZEN_FILL = "#bdbdbd"
+_KIND_COLOURS = {
+    "label": "#b5651d",
+    "loss": "#c0392b",
+    "preds": "#1f6fb2",
+    "default": "#333333",  # neutral row text
+    "shape": "#888888",  # grey shape annotation
+}
 
 
 def _graph_label(text: str) -> str:
@@ -137,7 +138,7 @@ def _row_colour(key: str, spec: TensorSpec | None) -> str:
         return _KIND_COLOURS[spec.kind]
     if key.partition(KEY_SEP)[0] == "preds":
         return _KIND_COLOURS["preds"]
-    return _ROW_DEFAULT_COLOUR
+    return _KIND_COLOURS["default"]
 
 
 def _html_esc(text: str) -> str:
@@ -171,7 +172,7 @@ def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | No
 def _card_row(key: str, shape: str, colour: str, *, bold: bool) -> str:
     """One ``<TR>`` row of a signature card: kind-coloured key plus grey shape."""
     name = f"<B>{_html_esc(key)}</B>" if bold else _html_esc(key)
-    tail = f'  <FONT COLOR="{_SHAPE_COLOUR}">{_html_esc(shape)}</FONT>' if shape else ""
+    tail = f'  <FONT COLOR="{_KIND_COLOURS["shape"]}">{_html_esc(shape)}</FONT>' if shape else ""
     return f'    <TR><TD ALIGN="LEFT"><FONT COLOR="{colour}">{name}{tail}</FONT></TD></TR>'
 
 
@@ -305,9 +306,8 @@ def dot_source(
         outs = _rows(step.produces.items())
         cls = type(step.module).__name__
         if frozen is not None and step.name in frozen:
-            lines.append(
-                _card_node(step.name, step.name, cls, _FROZEN_FILL, ins, outs, badge="frozen")
-            )
+            fill = _NS_COLOURS["frozen"]
+            lines.append(_card_node(step.name, step.name, cls, fill, ins, outs, badge="frozen"))
         else:
             lines.append(_card_node(step.name, step.name, cls, _module_colour(step), ins, outs))
     if any(edge.consumer == SINKS for edge in plan.edges):
@@ -317,7 +317,7 @@ def dot_source(
     for name in pruned:
         cls = type(modules[name]).__name__ if name in modules else "?"
         ins = _rows(consumed.get(name, {}).items())
-        line = _card_node(name, f"{name} (pruned)", cls, _PRUNED_FILL, ins, [])
+        line = _card_node(name, f"{name} (pruned)", cls, _NS_COLOURS["pruned"], ins, [])
         # grey dashed border distinguishes a demand-pruned card from a live one
         lines.append(line.replace("];", ", style=dashed, color=grey];"))
 
@@ -351,8 +351,11 @@ _NS_COLOURS = {
     "preds": "#fdae6b",
     "losses": "#fb6a4a",
     "loss": "#de2d26",
+    # card fills that are not namespace-derived
+    "pruned": "#dddddd",
+    "frozen": "#bdbdbd",  # mid-grey, distinct from the lighter pruned fill
+    "fallback": "#cccccc",
 }
-_FALLBACK_COLOUR = "#cccccc"
 
 
 def _module_colour(step: PlanStep) -> str:
@@ -360,4 +363,4 @@ def _module_colour(step: PlanStep) -> str:
     for namespace in sorted({key.split(KEY_SEP)[0] for key in step.produces}):
         if namespace in _NS_COLOURS:
             return _NS_COLOURS[namespace]
-    return _FALLBACK_COLOUR
+    return _NS_COLOURS["fallback"]

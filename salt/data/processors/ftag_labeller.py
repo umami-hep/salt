@@ -84,17 +84,12 @@ class FtagLabeller(Processor):
         self.label = str(label)
         self.dtype_policy = dtype_policy
         self.require_labels = bool(require_labels)
-        # mirror v1 LabellerConfig: the empty-class guard MUST fire when
-        # class_names is empty.
         if not class_names:
             raise ConfigError(
                 f"FtagLabeller module {self.name!r}: class_names is empty — specify the "
-                "target classes for relabelling (v1 LabellerConfig empty-class guard, "
-                "configs.py:189)"
+                "target classes for relabelling"
             )
         self.class_names = tuple(class_names)
-        # the ftag Labeller IS the parity reference (ftag/labeller.py); v1
-        # builds it identically (Labeller(class_names, require_labels))
         self.labeller = Labeller(list(self.class_names), self.require_labels)
 
     def _labeller_variables(self) -> tuple[str, ...]:
@@ -139,11 +134,10 @@ class FtagLabeller(Processor):
         if missing:
             raise ValueError(
                 f"FtagLabeller module {self.name!r}: not enough fields to apply labelling cuts on "
-                f"stream {self.stream!r} — missing labeller variables {missing} (v1 field-subset "
-                "check, datasets.py:622-624)"
+                f"stream {self.stream!r} — missing labeller variables {missing}"
             )
-        # get_labels raises under require_labels on an unlabelled object and
-        # otherwise drops it — v1 parity.
+        # get_labels raises under require_labels on an unlabelled object,
+        # otherwise drops it
         derived = self.labeller.get_labels(raw)
         if self.dtype_policy == "int64-for-int" and np.issubdtype(derived.dtype, np.integer):
             out = derived.astype(np.int64)

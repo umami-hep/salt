@@ -32,7 +32,6 @@ from salt.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
-from salt.logging import get_logger
 from salt.model.base import SaltModelModule
 from salt.model.bind import (
     ResolvedSchema,
@@ -54,6 +53,7 @@ from salt.schedule import (
     reducer_safe_freeze_required,
     trainable_named_params,
 )
+from salt.utils.logging import get_logger
 
 try:
     from lion_pytorch import Lion as ReferenceLion
@@ -86,39 +86,17 @@ _LOG = get_logger(__name__)
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "lion-pytorch", "HybridMuonAdamW")
 _MUP_KEYS = frozenset({"apply_to", "shape_path"})
-# dataset-boundary demand is declared for the three runtime modes; ONNX
-# export feeds the model directly and has no dataset plan.
-_DEMAND_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
 
 
 def safe_pct_start(pct_start: float, total_steps: int) -> float:
     """`pct_start` clamped so neither OneCycleLR phase is empty on a short run.
 
-    torch puts the warm-up/anneal boundary at ``pct_start * total_steps - 1``
-    and, in ``get_lr``, divides by each phase's length. On a full training run
-    that is unremarkable, but on a SHORT one — a smoke, a
-    ``--trainer.limit_train_batches`` cap, ``salt profile model`` — a small
-    ``pct_start`` collapses the warm-up phase to zero length and the scheduler
-    dies with ``ZeroDivisionError`` raised from inside its own constructor. The
-    shipped GN3 configs use ``pct_start: 0.01``, which does exactly that at
-    exactly 100 steps.
-
-    The clamp keeps the boundary strictly inside ``(0, total_steps - 1)``. It is
-    a no-op for any run long enough for the configured warm-up to span two
-    steps, so real training is untouched; a run short enough to be clamped has
-    no meaningful LR schedule anyway.
-
-    Parameters
-    ----------
-    pct_start : float
-        The configured warm-up fraction.
-    total_steps : int
-        ``trainer.estimated_stepping_batches`` for this run.
-
-    Returns
-    -------
-    float
-        A ``pct_start`` OneCycleLR can build a non-degenerate schedule from.
+    OneCycleLR divides by each phase's length, so a small ``pct_start`` on a
+    short run (smoke test, ``limit_train_batches``, ``salt profile model``)
+    raises ``ZeroDivisionError`` in its constructor (e.g. ``pct_start: 0.01``
+    at 100 steps). The clamp keeps the phase boundary strictly inside
+    ``(0, total_steps - 1)`` and is a no-op for any run long enough for the
+    configured warm-up to span two steps.
     """
     low = 2.0 / total_steps if total_steps > 0 else 1.0
     high = 1.0 - 1.0 / total_steps if total_steps > 0 else 0.0
@@ -133,7 +111,7 @@ _is_test_persistence_sink = is_test_persistence_sink
 
 def _resolve_lr_scheduler_class(class_path: str) -> type:
     """Import a stage `lr_scheduler.class_path` to its class. Reuses the
-    CLI's `salt.core.*`-aware resolver (local import avoids a load-time cycle).
+    CLI's class-path resolver (local import avoids a load-time cycle).
 
     Raises
     ------
@@ -156,15 +134,10 @@ def _resolve_lr_scheduler_class(class_path: str) -> type:
 
 
 def _reachable_sinks(model: Any) -> list[Any]:
-    """Every sink `model` can reach: the trainer registry, then its own section sinks.
+    """Every sink `model` can reach: trainer registry plus its own section sinks.
 
-    `iter_sinks` stays the single discovery path and is authoritative; section
-    sinks are appended (deduplicated by identity) so the PROGRAMMATIC path
-    still resolves — ``SaltModule(outputs=...)`` composes in ``__init__``,
-    where there is no trainer for them to have been registered on.
-
-    Attribute reads are defensive because the white-box tests call the
-    consumers of this helper unbound, against a stand-in model.
+    Section sinks are appended (deduplicated by identity) so the programmatic
+    path (``SaltModule(outputs=...)``, no trainer to register on) still resolves.
     """
     from salt.outputs.sinks.registry import iter_sinks
 
@@ -178,12 +151,9 @@ def _reachable_sinks(model: Any) -> list[Any]:
 def _is_section_sink(entry: Any) -> bool:
     """Whether an ``outputs:`` section entry is a SINK rather than a writer.
 
-    Note this cannot select on the `SinkModule` Protocol: it is
-    runtime-checkable and structural, and `SaltModelModule` carries an
-    ``is_sink`` method (defaulting to False) precisely so a model module never
-    accidentally matches it — which means every section WRITER matches the
-    Protocol too. The discriminator is the `Node` base, plus the answer a
-    duck-typed sink gives to ``is_sink()``.
+    Cannot select on the structural `SinkModule` Protocol — every section
+    writer matches it too (`SaltModelModule` defines ``is_sink``). The
+    discriminator is the `Node` base plus a duck-typed ``is_sink()``.
     """
     from salt.outputs.sinks.sink import Node
 
@@ -214,39 +184,25 @@ class SaltModule(lightning.LightningModule):
         ``end``, ``pct_start``; optional ``weight_decay`` (default 1e-5) and
         ``last_epoch`` (default -1).
     optimizer : str, optional
-        One of ``"AdamW"`` (default), ``"lion"``, ``"lion-pytorch"``,
-        ``"HybridMuonAdamW"``. ``"lion"`` is `salt.optim.Lion` — the
-        ``_foreach_``-batched form, which produces bit-identical parameters and
-        state to ``"lion-pytorch"`` (the per-parameter reference from the
-        ``lion-pytorch`` package) at a fraction of the kernel launches. Prefer
-        ``"lion"``; ``"lion-pytorch"`` exists to gate that equivalence and to
-        A/B the launch overhead. When `mup` is configured the optimizer is
-        swapped to ``mup.optim.MuAdamW`` regardless of this name.
+        One of ``"AdamW"`` (default), ``"lion"`` (`salt.optim.Lion`,
+        ``_foreach_``-batched, bit-identical to the reference), ``"lion-pytorch"``
+        (per-parameter reference, kept for equivalence checks), or
+        ``"HybridMuonAdamW"``. With `mup` configured the optimizer is swapped
+        to ``mup.optim.MuAdamW`` regardless of this name.
     mup : Mapping[str, Any], optional
-        The muP routing config. ``None`` (default) = no muP. Keys:
-
-        - ``apply_to`` (required): explicit list of module instance names
-          that carry ``mup: true``. Each must exist in `modules` and accept
-          a ``mup`` init_arg, else `ConfigError`.
-        - ``shape_path`` (optional): base-shapes file produced by
-          ``salt mup-shapes`` / ``setup_mup``, applied at bind time so
-          `MuReadout.width_mult()` resolves against real base widths.
+        muP routing config; ``None`` = no muP. ``apply_to`` (required) lists
+        module instance names carrying ``mup: true`` (each must exist and
+        accept a ``mup`` init_arg). ``shape_path`` (optional) is a base-shapes
+        file from ``salt mup-shapes``, applied at bind time.
     training_schedule : dict, optional
-        Optional staged-training schedule ``{"stages": {name: {...}}}``.
-        Its config home is the TOP-LEVEL ``training_schedule:`` key (peer of
-        ``trainer:``/``data:``/``model:``); the CLI
-        (`salt.main._relocate_training_schedule`) injects the resolved value
-        into this constructor arg before instantiation, and rejects a nested
-        ``model.init_args.training_schedule`` fail-loud. Passed directly when
-        constructing `SaltModule` programmatically (tests).
-        Each stage may declare an epoch budget, a `frozen`/`trainable` module
-        list (by `model.modules` name), and per-stage `optimizer`/`lrs`
-        overrides. Parsed + validated fail-loud here; ``None`` (default) desugars
-        to one `fit` stage falling back to the top-level ``lrs:``/``optimizer:``
-        (bitwise-identical to legacy training). Multi-stage schedules run inside a
-        single `trainer.fit()`: the auto-injected `TrainingScheduleCallback`
-        applies each stage's freeze mask and rebuilds the optimizer + per-stage
-        OneCycle scheduler at the epoch boundaries.
+        Staged-training schedule ``{"stages": {name: {...}}}``. Config home is
+        the TOP-LEVEL ``training_schedule:`` key; the CLI injects it into this
+        arg and rejects a nested ``model.init_args.training_schedule``. Each
+        stage may declare an epoch budget, a `frozen`/`trainable` module list,
+        and per-stage `optimizer`/`lrs` overrides. ``None`` desugars to one
+        `fit` stage using the top-level ``lrs:``/``optimizer:`` (bitwise-
+        identical to unscheduled training). Multi-stage schedules run inside a
+        single `trainer.fit()` via the auto-injected `TrainingScheduleCallback`.
     name : str, optional
         Model name (run naming/metadata), by default ``"salt"``.
     debug : bool, optional
@@ -266,12 +222,9 @@ class SaltModule(lightning.LightningModule):
         lrs: Mapping[str, float],
         optimizer: str = "AdamW",
         mup: Mapping[str, Any] | None = None,
-        # BARE `dict` (not Mapping[str, Any]): a subscripted mapping value type makes
-        # jsonargparse recurse and EAGERLY instantiate nested {class_path, init_args}
-        # specs (stage `callbacks:`/`lr_scheduler:`), which corrupts them before
-        # `TrainingSchedule.from_config` validates the raw specs and is
-        # impossible for an LR scheduler (no optimizer yet). A bare `dict` has no
-        # `__args__`, so jsonargparse keeps the schedule opaque and the specs raw.
+        # BARE `dict` (not Mapping[str, Any]): a subscripted type makes jsonargparse
+        # eagerly instantiate nested {class_path, init_args} specs — impossible for
+        # an LR scheduler (no optimizer yet). Bare `dict` keeps the specs raw.
         training_schedule: dict | None = None,
         name: str = "salt",
         debug: bool = False,
@@ -306,50 +259,29 @@ class SaltModule(lightning.LightningModule):
             raise ConfigError(
                 f"optimizer {optimizer!r} is not supported — choose from {list(_OPTIMIZERS)}"
             )
-        # validates apply_to against the module dict and warns on a mup-on module
-        # left out of apply_to — see _validate_mup.
         self.mup_cfg: dict[str, Any] | None = _validate_mup(mup, modules)
-        # staged-training schedule: parsed + validated against the
-        # model-module names NOW (before the outputs: writers are folded into the
-        # graph dict). It is the single canonical home for optimizer/LR config —
-        # a plain config (no training_schedule) desugars to one `fit` stage that
-        # falls back to the top-level lrs:/optimizer:, so `configure_optimizers`
-        # has ONE code path and legacy training stays bitwise-identical.
+        # validated against model-module names NOW, before outputs: writers fold in.
+        # The schedule is the single home for optimizer/LR config: no-schedule
+        # configs desugar to one `fit` stage so configure_optimizers has ONE path.
         self._schedule: TrainingSchedule = (
             TrainingSchedule.from_config(training_schedule, tuple(modules))
             if training_schedule is not None
             else TrainingSchedule.desugar_legacy(tuple(modules))
         )
-        # index of the stage currently active (0 at fit start; advanced by the
-        # `TrainingScheduleCallback` at each stage boundary). `configure_optimizers`
-        # reads it to pick the stage's optimizer/LR + per-stage OneCycle steps.
+        # advanced by TrainingScheduleCallback at each stage boundary
         self._current_stage_index = 0
-        # module names whose params are held fixed for the active stage — set by
-        # `_apply_stage_freeze` at fit setup / each boundary, re-asserted every
-        # epoch via `train`.
+        # set by _apply_stage_freeze; re-asserted every epoch via `train`
         self._frozen_module_names: set[str] = set()
-        # per-stage early-stop runtime state. All inert unless the
-        # schedule declares `early_stop` on some stage (`has_early_stop` master
-        # switch) — the legacy path never touches them, so no new checkpoint state
-        # is written and behaviour is bitwise-identical. `_stage_start_epoch` is the
-        # global epoch the active stage began (for the per-stage epoch-cap count);
-        # `_early_stop_tracker` holds the active stage's live counters;
-        # `_boundary_records` logs completed transitions for resume;
-        # `_pending_early_advance` is set at a validation-end early-stop trigger and
-        # consumed at the next train-epoch-start transition.
+        # per-stage early-stop runtime state — inert unless some stage declares
+        # `early_stop`, so unscheduled runs write no new checkpoint state.
         self._stage_start_epoch = 0
         self._early_stop_tracker: EarlyStopTracker | None = None
         self._boundary_records: list[dict[str, Any]] = []
         self._pending_early_advance = False
-        # reducer-safe freeze mode: decided at fit `setup` from the
-        # attached strategy + schedule. When True, schedule-managed params keep
-        # `requires_grad=True` at DDP wrap (so a later unfreeze stays rank-synced);
-        # "frozen" is enforced by optimizer-exclusion + eval + per-step grad
-        # clearing. False (default) keeps the requires_grad-based freeze (optimal
-        # + bitwise-parity for single-device / static-freeze runs).
+        # when True, schedule-managed params keep requires_grad=True at DDP wrap
+        # (unfreeze stays rank-synced); "frozen" is enforced by optimizer-exclusion
+        # + eval + per-step grad clearing. False = requires_grad-based freeze.
         self._reducer_safe_freeze: bool = False
-        # edge-stream-first + EdgeAttention-backend forcing bind-time validators.
-        # No-op without an edge encoder.
         _validate_edge_port(modules)
         # resolved config only — the module dict is NOT pickled into hparams
         # (load_from_checkpoint takes modules= explicitly)
@@ -359,24 +291,16 @@ class SaltModule(lightning.LightningModule):
         self.optimizer = optimizer
         self.debug = debug
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
-        # model-only, by construction (see bind_all/materialise_all docstrings):
-        # modules: entries above + the non-manifest-only outputs: writers folded
-        # in by compose_output_section below — never a terminal sink.
+        # model-only by construction: modules + non-manifest-only outputs: writers,
+        # never a terminal sink.
         self._graph_modules: dict[str, SaltModelModule] = dict(modules)
-        # a producer that names its own outputs.* leaves (ClassProbs / SeqClassIndex /
-        # MaskFormerObjects / MFLeadVertexDecorator) resolves the source task from the
-        # model graph. Bind the LIVE dict, so the section writers compose_output_section
-        # folds in below are visible to it too.
+        # bind the LIVE dict so section writers folded in below stay visible
         for module in modules.values():
             if callable(getattr(module, "bind_model_modules", None)):
                 module.bind_model_modules(self._graph_modules)
-        # the top-level outputs: section, composed AFTER the model (empty until
-        # compose_output_section runs — either here or from the CLI path).
         self._output_section: dict[str, SaltModelModule | SinkModule] = {}
-        # sinks declared in that same section, partitioned out of it: they are
-        # neither graph modules nor manifest entries. The CLI registers these on
-        # the trainer; on the programmatic path (SaltModule(outputs=...), no
-        # trainer) this list IS the registry — see `_sinks`.
+        # section sinks, partitioned out: neither graph modules nor manifest
+        # entries. On the programmatic path (no trainer) this list IS the registry.
         self._section_sinks: list[Any] = []
         self.plans: dict[Mode, Plan] = {}
         self._executors: dict[Mode, Executor] = {}
@@ -385,72 +309,37 @@ class SaltModule(lightning.LightningModule):
         self._materialised = False
         self._loaded_from_checkpoint = False
         self._ckpt_plan_hashes: dict[str, str] = {}
-        # --init_from warm start (fresh trainer state, prefix-filtered weight
-        # load with per-module accounting — distinct from a resume ckpt_path).
-        # The CLI sets `_init_from` on the instantiated model; `setup("fit")`
-        # runs the load after bind. `_init_loaded_modules` records which config
-        # modules received checkpoint weights so `on_fit_start` materialises
-        # ONLY the ones that did not (design D4, selective materialise).
+        # --init_from warm start (fresh trainer state; distinct from resume
+        # ckpt_path). setup("fit") runs the load after bind; on_fit_start
+        # materialises only modules that received no checkpoint weights.
         self._init_from: str | None = None
         self._init_warm_started = False
         self._init_loaded_modules: set[str] = set()
-        # `--compile` request (None = off); applied at the end of setup, see
-        # enable_compile/_apply_compile.
         self._compile_kwargs: dict[str, Any] | None = None
         self._compiled = False
-        # programmatic-construction path: compose the outputs: section now (the CLI
-        # path passes outputs=None here and composes via instantiate_classes).
+        # CLI path passes outputs=None and composes via instantiate_classes
         if outputs:
             self.compose_output_section({key: w for key, w in outputs.items() if w is not None})
 
     def compose_output_section(self, section: Mapping[str, SaltModelModule | SinkModule]) -> None:
         """Compose the top-level ``outputs:`` section onto the model.
 
-        The section holds two kinds of entry, partitioned here by type.
+        WRITERS are folded into the planning module dict (and `net`, params-free);
+        their declaration order is the eval-H5 per-group column order. SINKS go
+        to `_section_sinks` instead: excluded from the graph dict (folded into
+        the per-mode plan at ``compile_mode``) and from the bound section
+        manifest (a sink reads that manifest, so it must not contain itself).
+        MANIFEST-ONLY writers (`InputCopyWriter`) have no ``produces`` so the
+        demand closure would prune them — they stay in the section dict only,
+        for the sink to read their copy spec at ``bind_output_section``.
 
-        Section WRITERS (`RunTaskOutput` / `InputCopyWriter` / `PadMaskWriter`) are
-        folded into the planning module dict (and `net`, params-free so the
-        state_dict is unchanged). Their ``outputs.*`` leaves reach a sink only in
-        TEST/ONNX, so FIT/VAL demand-prune them. Their declaration ORDER is the
-        eval-H5 per-group column order.
-
-        Section SINKS (`salt.outputs.Node` subclasses — the H5 persistence sink,
-        the ONNX manifest, an auxiliary sink) are held aside in `_section_sinks`
-        instead. They are excluded from the graph module dict (a sink is folded
-        into the per-mode plan separately, at ``compile_mode``) and from the bound
-        section manifest (a sink reads that manifest, so it must not contain
-        itself). That exclusion is also what keeps a sink out of the column
-        ordering: the writers' order is untouched by where a sink sits.
-
-        MANIFEST-ONLY writers (`InputCopyWriter` — input copies are re-read from the
-        source H5 by the SINK, never flowing through the graph) are NOT folded into
-        the graph: they have no ``produces``, so the demand closure would prune
-        them. They stay in the section dict for the sink to read their copy spec at
-        ``bind_output_section``.
-
-        Parameters
-        ----------
-        section : Mapping[str, SaltModelModule | SinkModule]
-            The section entries by instance name, in declaration order (the eval-H5
-            column-order authority for the writers among them).
-
-        Raises
-        ------
-        ConfigError
-            For a section entry that is neither a `SaltModelModule` nor a
-            `SinkModule`, or whose name collides with a model module.
+        Raises `ConfigError` on an entry that is neither a `SaltModelModule`
+        nor a `SinkModule`, or whose name collides with a model module.
         """
         section = {key: w for key, w in section.items() if w is not None}
         if not section:
             return
         for key, w in section.items():
-            # accepted shapes: a graph-folded section writer
-            # (SaltModelModule — RunTaskOutput/PadMaskWriter/InputCopyWriter
-            # today) or a terminal callback-style sink
-            # (SinkModule) — see salt.model.base.SaltModelModule for the
-            # audited rationale (real shipped configs only ever wire the
-            # former here; terminal sinks are wired via trainer.callbacks:
-            # and folded into the per-mode plan separately, at compile_mode).
             if not isinstance(w, (SaltModelModule, SinkModule)):
                 raise ConfigError(
                     f"outputs: section writer {key!r} ({type(w).__name__}) is neither a "
@@ -463,14 +352,12 @@ class SaltModule(lightning.LightningModule):
                     "names are unique across the pipeline graph"
                 )
             w.name = key
-        # PARTITION: sinks out of the writer section entirely. Both exclusions
-        # matter — out of `graph_writers` (else the sink is folded into `net` /
-        # `_graph_modules` and collides with the compile-time sink fold) and out
-        # of `_output_section` (else the sink binds a manifest containing
-        # itself, and the column resolver iterates over it).
+        # partition sinks out of BOTH graph_writers (else they collide with the
+        # compile-time sink fold) and _output_section (else a sink binds a
+        # manifest containing itself).
         sinks = {key: w for key, w in section.items() if _is_section_sink(w)}
         writers = {key: w for key, w in section.items() if key not in sinks}
-        # the model-side modules before the section folds in — RunTaskOutput
+        # model-side modules before the section folds in — RunTaskOutput
         # resolves its tasks against these.
         model_modules = dict(self._graph_modules)
         graph_writers = {
@@ -487,7 +374,7 @@ class SaltModule(lightning.LightningModule):
             if callable(getattr(w, "bind_model_modules", None)):
                 w.bind_model_modules(model_modules)
 
-    # -- lifecycle state (read-only — gates and tests assert on these) ---------
+    # -- lifecycle state (read-only — tests assert on these) --------------------
 
     @property
     def bound(self) -> bool:
@@ -544,7 +431,8 @@ class SaltModule(lightning.LightningModule):
         demand keys or a demand key outside the dataset-served namespaces.
         """
         out: dict[Mode, tuple[list[str], dict[str, str]]] = {}
-        for mode in _DEMAND_MODES:
+        # ONNX export feeds the model directly and has no dataset plan
+        for mode in (Mode.FIT, Mode.VAL, Mode.TEST):
             required: dict[str, list[str]] = {}
             produced: set[str] = set()
             for name, module in self._graph_modules.items():
@@ -795,7 +683,7 @@ class SaltModule(lightning.LightningModule):
                 if not consumed:
                     raise ConfigError(
                         "[mode=TEST] the configured writers consume nothing the model "
-                        "produces — check writers.modules"
+                        "produces — check the outputs: section"
                     )
                 return consumed
         # the ONNX output manifest is not writer-derived — the folded OnnxExportSink
@@ -918,7 +806,7 @@ class SaltModule(lightning.LightningModule):
         # warm start (freeze composes on top of the loaded weights) and BEFORE
         # optimizer construction, so the initial `configure_optimizers` (built by
         # Lightning's strategy.setup, after this) sees stage 0's requires_grad
-        # mask — Gotcha #2. Later stage boundaries are driven by the
+        # mask. Later stage boundaries are driven by the
         # `TrainingScheduleCallback`. Fit-only.
         if stage == "fit":
             self._apply_training_schedule()
@@ -930,7 +818,7 @@ class SaltModule(lightning.LightningModule):
 
     def _apply_training_schedule(self) -> None:
         """Validate the schedule against the attached trainer and apply stage 0's
-        freeze mask at fit setup (Gotcha #2 — before the initial optimizer build).
+        freeze mask at fit setup (before the initial optimizer build).
         When any stage declares `early_stop`, also runs the early-stop preflight
         and seeds stage 0's live counters.
 
@@ -982,14 +870,7 @@ class SaltModule(lightning.LightningModule):
         """Fail fast at fit setup for every stage's `lr_scheduler`:
         import its `class_path` (unimportable → ConfigError) and enforce the
         metric-driven-⇒-`monitor` rule (a `ReduceLROnPlateau`-family scheduler needs
-        a monitored metric). Inert unless the schedule declares an `lr_scheduler`
-        (the `has_lr_scheduler` master switch).
-
-        Raises
-        ------
-        ConfigError
-            An `lr_scheduler.class_path` is unimportable, or a metric-driven
-            scheduler omits `monitor`.
+        a monitored metric). Inert unless the schedule declares an `lr_scheduler`.
         """
         if not self._schedule.has_lr_scheduler:
             return
@@ -1083,18 +964,8 @@ class SaltModule(lightning.LightningModule):
         ``None`` when the metric is absent — a fail-fast misconfiguration). The
         caller rank-syncs the returned boolean before acting on it; this method only
         advances the stage-local counters. Returns ``False`` (no stop) when the
-        active stage declares no `early_stop`.
-
-        Returns
-        -------
-        bool
-            This rank's decision that the active stage should now early-stop.
-
-        Raises
-        ------
-        ConfigError
-            The active stage declares `early_stop` but its `monitor` metric is
-            absent from ``trainer.callback_metrics``.
+        active stage declares no `early_stop`; raises `ConfigError` when the
+        monitored metric is absent from ``trainer.callback_metrics``.
         """
         stage = self._schedule.stages[self._current_stage_index]
         if stage.early_stop is None:
@@ -1122,35 +993,24 @@ class SaltModule(lightning.LightningModule):
     # -- torch.compile -------------------------------------------------------------
 
     def enable_compile(self, **compile_kwargs: Any) -> None:
-        """Request `torch.compile` of the graph modules; applied at the end of `setup`.
+        """Request `torch.compile` of each graph module; applied at the end of `setup`.
 
-        v1 compiled one inner ``model.model`` nn.Module. v2 has no such object —
-        the forward is a `Plan` executed module-by-module by `Executor` — so the
-        equivalent unit is each graph module. Compiling is deferred to the end of
-        `setup` so it happens after bind/materialise have resolved widths and
-        written buffers: dynamo then traces the module in its final shape.
-
-        Parameters
-        ----------
-        **compile_kwargs : Any
-            Forwarded to `torch.compile` (e.g. ``mode``, ``dynamic``, ``fullgraph``).
+        The compile unit is each graph module (the forward is a `Plan` run by
+        `Executor` — there is no single inner nn.Module). Deferred to the end of
+        `setup` so dynamo traces each module after bind/materialise have
+        resolved widths. `compile_kwargs` are forwarded to `torch.compile`.
         """
         self._compile_kwargs = dict(compile_kwargs)
 
     def _apply_compile(self) -> None:
         """Compile each graph module's forward, in place.
 
-        ``nn.Module.compile()`` routes ``__call__`` through a compiled
-        ``_call_impl`` instead of replacing the module with dynamo's
-        ``OptimizedModule``. That matters here: the frozen `Plan` steps and the
-        `Executor` hold the module INSTANCES, and an ``OptimizedModule`` wrapper
-        fails the executor's `GraphModule` protocol check. In-place compilation
-        keeps every instance (and therefore every plan step, executor binding
-        and ``state_dict`` key) untouched — a checkpoint written under
-        ``--compile`` is byte-compatible with an uncompiled load, no
-        ``_orig_mod.`` rewriting needed. The `on_load_checkpoint` shim stays for
-        v1-era checkpoints, which were written with the whole-model
-        ``torch.compile(model.model)`` form.
+        Uses ``nn.Module.compile()`` (not the ``OptimizedModule``-returning
+        ``torch.compile``) because `Plan` steps and `Executor` hold the module
+        INSTANCES — a wrapper would fail the executor's `GraphModule` protocol
+        check. In-place compilation leaves ``state_dict`` keys untouched, so a
+        checkpoint written under ``--compile`` loads uncompiled with no
+        ``_orig_mod.`` rewriting.
         """
         if self._compile_kwargs is None or self._compiled:
             return
@@ -1429,7 +1289,7 @@ class SaltModule(lightning.LightningModule):
         """The `OneCycleLR.total_steps` for the active stage. A single-stage
         schedule uses the whole-run `estimated_stepping_batches` exactly (parity);
         a multi-stage schedule uses this stage's proportional per-stage allocation
-        of that estimate (Gotcha #1 — never the whole-run figure for a sub-stage).
+        of that estimate (never the whole-run figure for a sub-stage).
         Under the `early_stop` switch the envelope is sized from the stage's epoch
         cap measured from its ACTUAL start epoch (see `_early_stop_stage_total_steps`)
         so a stage that starts early — because an earlier stage early-stopped — never
@@ -1460,7 +1320,7 @@ class SaltModule(lightning.LightningModule):
         if is_final:
             budget_epochs = max_epochs - self._stage_start_epoch
         else:
-            assert stage.epochs is not None  # non-final stages require epochs (D-ES)
+            assert stage.epochs is not None  # non-final stages require epochs
             budget_epochs = stage.epochs
         return max(1, steps_per_epoch * budget_epochs)
 
@@ -1538,20 +1398,12 @@ class SaltModule(lightning.LightningModule):
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Serialise the resolved schema + per-mode plan hashes + the active
-        training-schedule stage under `CKPT_KEY` (Plans themselves aren't
-        picklable; the hash is the integrity check).
-
-        The recorded ``schedule.stage_index`` is *the stage whose optimizer and
-        scheduler state this checkpoint carries* (the currently-active stage). On
-        resume, `on_load_checkpoint` sets `_current_stage_index` back to it BEFORE
-        the optimizer is rebuilt, so `configure_optimizers` constructs an optimizer
-        whose `state_dict` shape matches the saved optimizer state. This is
-        epoch-boundary granular: stage transitions are keyed off the epoch (see
-        `TrainingScheduleCallback`), so a checkpoint saved at an epoch boundary
-        (Lightning's default val-loss `ModelCheckpoint`) resumes exactly; a
-        mid-epoch (`every_n_train_steps`) checkpoint restores the same stage's
-        optimizer but any pending stage transition is only re-evaluated at the
-        next epoch start.
+        training-schedule stage under `CKPT_KEY` (Plans aren't picklable; the
+        hash is the integrity check). ``schedule.stage_index`` is the stage
+        whose optimizer state this checkpoint carries; on resume it is restored
+        BEFORE the optimizer rebuild so the state_dict shapes match. Epoch-
+        boundary granular: a mid-epoch checkpoint restores the same stage's
+        optimizer, with any pending transition re-evaluated at next epoch start.
         """
         if self.schema is None:
             warnings.warn(
@@ -1622,37 +1474,20 @@ class SaltModule(lightning.LightningModule):
                     fields={key: tuple(val) for key, val in stored.get("fields", {}).items()},
                 )
             )
-        # On resume: re-establish the saved schedule stage + freeze mask now, while
-        # the model is bound but the optimizer has NOT yet been built (Lightning
-        # restore order: setup("fit") -> on_load_checkpoint -> configure_optimizers
-        # -> restore_optimizers_and_schedulers, empirically confirmed by a
-        # restore-order probe). setup("fit") already applied stage 0; this promotes
-        # it to the checkpoint's stage k so `configure_optimizers` builds a stage-k
-        # optimizer whose state_dict shape matches the saved (stage-k) optimizer
-        # state. A resume at a stage boundary is then handled by the callback's one
-        # post-restore rebuild at the resume epoch (it sees a later epoch-implied
-        # stage); a mid-stage resume sees no change and keeps the restored moments.
+        # Re-establish the saved stage + freeze mask while the model is bound but
+        # the optimizer is NOT yet built (Lightning restore order: setup("fit") ->
+        # on_load_checkpoint -> configure_optimizers -> restore_optimizers), so
+        # configure_optimizers builds a stage-k optimizer whose state_dict shape
+        # matches the saved stage-k state.
         self._restore_schedule_stage(payload.get("schedule"))
 
     def _restore_schedule_stage(self, schedule_state: Mapping[str, Any] | None) -> None:
-        """On a fit resume, set `_current_stage_index` + apply the saved stage's
-        freeze mask (multi-stage only), then restore the early-stop counters
-        (any-stage, when declared).
-
-        No-op unless the trainer is fitting: `salt test --ckpt_path` never mutates
-        the freeze/early-stop state. For a multi-stage schedule the saved stage
-        index + freeze mask are restored (the desugared/legacy single-stage path is
-        left bitwise-untouched — parity guard); the early-stop tracker is restored
-        for single- and multi-stage alike (mid-stage patience resume). A checkpoint
-        whose saved stage is out of range for, or names a different stage than, the
-        current schedule is a hard `ConfigError` (schedule config changed — resume
-        is not defined).
-
-        Raises
-        ------
-        ConfigError
-            The saved stage index is out of range, or its recorded name no longer
-            matches the schedule stage at that index.
+        """On a fit resume, restore the saved stage index + freeze mask
+        (multi-stage only; the single-stage path stays bitwise-untouched), then
+        the early-stop counters (any-stage, when declared). No-op unless the
+        trainer is fitting — `salt test --ckpt_path` never mutates this state.
+        A saved stage out of range for, or named differently than, the current
+        schedule raises `ConfigError` (schedule changed; resume is undefined).
         """
         if schedule_state is None:
             return
@@ -1685,19 +1520,11 @@ class SaltModule(lightning.LightningModule):
             self._restore_early_stop_state(index, schedule_state)
 
     def _restore_early_stop_state(self, index: int, schedule_state: Mapping[str, Any]) -> None:
-        """Restore the early-stop resume state: the active stage's start epoch,
-        the completed-boundary records, and the live counters (so a mid-stage resume
-        continues patience exactly). A checkpoint carrying no
-        `early_stop_state`) resets the counters fresh for the restored stage. When
-        the persisted criterion fingerprint no longer matches the current stage's
-        `early_stop`, resume is undefined and raises (same policy as the stage-name
-        guard).
-
-        Raises
-        ------
-        ConfigError
-            The checkpoint's early-stop criterion fingerprint differs from the
-            current stage's `early_stop` config.
+        """Restore early-stop resume state (stage start epoch, boundary records,
+        live counters) so a mid-stage resume continues patience exactly. No
+        `early_stop_state` in the checkpoint resets the counters fresh; a
+        criterion-fingerprint mismatch with the current config raises
+        `ConfigError` (resume undefined).
         """
         self._stage_start_epoch = schedule_state.get("stage_start_epoch", 0)
         self._boundary_records = list(schedule_state.get("boundaries", []))
@@ -1761,10 +1588,10 @@ class SaltModule(lightning.LightningModule):
 
     def _warm_start_from_checkpoint(self, path: str) -> None:
         """Warm-start weights from `path` into the (already-bound) model with
-        strict per-module accounting — the ``--init_from`` load path (design D4).
+        strict per-module accounting — the ``--init_from`` load path.
 
         Distinct from a resume `ckpt_path`: trainer state stays fresh, the FIT
-        plan-hash gate is NOT enforced (the checkpoint's hashes are logged for
+        plan-hash check is NOT enforced (the checkpoint's hashes are logged for
         information only, since the architecture may have been surgically
         changed), and the state-dict load is prefix-filtered by module name
         rather than strict.
@@ -1775,25 +1602,19 @@ class SaltModule(lightning.LightningModule):
           config, fully covered (identical key set, shapes, dtypes). Its
           tensors are loaded.
         - **new** — a config module absent from the checkpoint. Left at fresh
-          init; `on_fit_start` materialises it (Wall #3 fix).
+          init; `on_fit_start` materialises it.
         - **dropped** — a checkpoint module absent from the current config.
           Skipped and logged.
 
-        A *retained* module (present in both) that is only PARTIALLY covered
-        (missing/unexpected subkeys or a shape/dtype mismatch) is a hard
-        `ConfigError`: the module's internal architecture changed, which is a
-        swap — declare it as one (rename the module so it drops+adds cleanly).
-
-        Raises
-        ------
-        ConfigError
-            If the model is not yet bound, the checkpoint has no ``state_dict``,
-            it is a v1 layout, or any retained module is only partially covered.
+        A retained module that is only PARTIALLY covered (missing/unexpected
+        subkeys, shape/dtype mismatch) is a hard `ConfigError`: that is an
+        architecture swap — rename the module so it drops+adds cleanly. Also
+        raises when unbound, on a missing ``state_dict``, or a v1 layout.
         """
         if not self._bound:
             raise ConfigError(
                 f"--init_from {path!r}: warm start before bind — the model must compile its "
-                "plans and bind first (design D4). This is an internal ordering error."
+                "plans and bind first. This is an internal ordering error."
             )
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         raw_state = checkpoint.get("state_dict") if isinstance(checkpoint, Mapping) else None
@@ -1869,7 +1690,7 @@ class SaltModule(lightning.LightningModule):
                 f"--init_from {path!r}: {len(partial)} retained module(s) are only PARTIALLY "
                 "covered by the checkpoint — their internal architecture changed. That is a "
                 "swap, not a warm start: rename the module so it drops the old weights and "
-                "fresh-inits the new ones (design D4, rename-with-weights is out of scope). "
+                "fresh-inits the new ones (rename-with-weights is out of scope). "
                 "Offenders:\n" + "\n".join(partial)
             )
         dropped = sorted(
@@ -1945,7 +1766,7 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
         if len(parts := key.split(KEY_SEP)) > 2  # preds.<stream>.<task>
     }
     hints = [
-        f"writers.modules.{wname}.init_args.tasks: {list(tasks)} currently excludes {excluded}"
+        f"outputs.{wname}.init_args.tasks: {list(tasks)} currently excludes {excluded}"
         for wname, writer in (getattr(writers, "writers", None) or {}).items()
         if (tasks := getattr(writer, "tasks", None)) is not None
         and (excluded := sorted(dead_tasks - set(tasks)))
@@ -1973,33 +1794,16 @@ def _dead_preds_message(dead: list[str], produced: Mapping[str, str], writers: A
 
 
 def module_supports_mup(module: Any) -> bool:
-    """Whether `module` accepts a ``mup`` init_arg (the routing apply_to target test).
+    """Whether `module` accepts a ``mup`` init_arg (the ``apply_to`` target test).
 
-    `StreamEmbed`/`TransformerEncoder` carry a ``mup`` init_arg stored as a
-    ``mup`` attribute; a module is an eligible ``apply_to`` target iff it
-    carries that attribute. Duck-typed so user modules participate too.
-
-    Parameters
-    ----------
-    module : Any
-        The model-side graph module.
-
-    Returns
-    -------
-    bool
-        True if the module has a ``mup`` attribute (the init_arg landed).
+    Eligible iff the module carries a ``mup`` attribute (init_arg landed) —
+    duck-typed so user modules participate too.
     """
     return hasattr(module, "mup")
 
 
 def module_mup_enabled(module: Any) -> bool:
-    """Whether `module`'s ``mup`` flag is truthy (the validator's mup-on test).
-
-    Returns
-    -------
-    bool
-        True if the module both supports muP and has it switched on.
-    """
+    """Whether `module`'s ``mup`` flag is truthy (the validator's mup-on test)."""
     return bool(getattr(module, "mup", False))
 
 
@@ -2009,39 +1813,12 @@ def validate_mup_routing(
     """Validate the muP routing config against the module dict.
 
     The single validator behind both `SaltModule.__init__` and
-    ``salt graph validate`` so the same rules fire data-free in CI and at
-    run construction. ``apply_to`` is an explicit instance-name list, not a
-    regex.
-
-    Rules:
-
-    - ``apply_to`` naming a module that does NOT exist → `ConfigError`.
-    - ``apply_to`` naming a module that lacks a ``mup`` init_arg
-      (`module_supports_mup` False) → `ConfigError`.
-    - a module with ``mup`` truthy that is NOT in ``apply_to`` → warning
-      (its base shapes / MuAdamW grouping would be silently inconsistent).
-    - unknown top-level keys / a non-list ``apply_to`` / a missing
-      ``apply_to`` → `ConfigError`.
-
-    Parameters
-    ----------
-    mup : Mapping[str, Any] | None
-        The ``model.init_args.mup`` block (None = no muP).
-    modules : Mapping[str, Any]
-        The model-side module dict (instance name -> module). For the static
-        validator this is the model subdict; for `SaltModule` it is the
-        pre-filtered ctor dict.
-
-    Returns
-    -------
-    dict[str, Any] | None
-        The normalised mup config (``{"apply_to": [...], "shape_path": ...}``)
-        or None when `mup` is None.
-
-    Raises
-    ------
-    ConfigError
-        On any of the hard-error rules above.
+    ``salt graph validate``. ``apply_to`` is an explicit instance-name list.
+    Hard `ConfigError`: naming a missing module, naming one without a ``mup``
+    init_arg, unknown keys, or a non-list/missing ``apply_to``. Warning only:
+    a mup-on module left out of ``apply_to`` (base shapes / MuAdamW grouping
+    would be silently inconsistent). Returns the normalised config, or None
+    when `mup` is None.
     """
     if mup is None:
         return None
@@ -2136,40 +1913,14 @@ def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
 def validate_edge_port(modules: Mapping[str, Any]) -> int:
     """Validate the encoder edge-port bind-time constraints.
 
-    Runs at `SaltModule.__init__` (every fit/test) and in
-    ``salt graph validate`` so the same rules fire data-free in CI and at
-    run construction — the edge analogue of `validate_mup_routing`. No-op
-    when no encoder declares an edge port.
-
-    Rules:
-
-    - **edge-stream-first** (rule a): the edge tensor's stream must be the
-      first stream of the `Concat` (``Concat.streams[0]``) — required
-      because the encoder zero-pads the ``[B, T, T, D_e]`` edge matrix to
-      the register-augmented sequence length assuming the edge stream's
-      ``T`` rows are the leading rows of the concatenated sequence. A
-      mis-ordered concat is a `ConfigError`.
-    - **EdgeAttention-backend forcing** (rule b): an encoder with an edge
-      port may not declare a non-edge attention backend (any backend
-      outside ``{"torch-math"}``), since EdgeAttention only supports raw
-      torch attention.
-
-    Parameters
-    ----------
-    modules : Mapping[str, Any]
-        The model-side module dict (instance name -> module). For the static
-        validator this is the model subdict; for `SaltModule` it is the
-        pre-filtered ctor dict.
-
-    Returns
-    -------
-    int
-        The number of edge-bearing encoders validated (0 = no edge path).
-
-    Raises
-    ------
-    ConfigError
-        On either rule, naming the encoder, the edge stream, and the conflict.
+    Runs at `SaltModule.__init__` and in ``salt graph validate``; no-op when
+    no encoder declares an edge port. Rule (a) edge-stream-first: the edge
+    tensor's stream must be ``Concat.streams[0]``, because the encoder
+    zero-pads the ``[B, T, T, D_e]`` edge matrix assuming the edge stream's
+    rows lead the concatenated sequence. Rule (b): an encoder with an edge
+    port may not declare a backend outside ``{"torch-math"}`` — EdgeAttention
+    only supports raw torch attention. Either violation is a `ConfigError`;
+    returns the number of edge-bearing encoders validated.
     """
     encoders = _edge_encoders(modules)
     if not encoders:
@@ -2221,35 +1972,12 @@ def _validate_edge_port(modules: Mapping[str, Any]) -> int:
 def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
     """Cross-check configured ``class_names`` against schema label attrs.
 
-    Default-on whenever both sides exist: for every module declaring
-    ``class_names`` + ``stream`` + ``label`` (duck-typed so user task
-    modules participate too), the reader's schema artifact is consulted —
-    if the stream's group carries an attr named like the label whose value
-    is a list of strings (e.g. the ``flavour_label`` attr on ``jets``), the
-    configured list must match in set **and order**. A reordered
-    ``class_names`` is a silent physics mislabeling no shape check can
-    catch. Runs at `SaltModule.setup` (every fit/test) and in
-    ``salt graph validate``. No-op without a schema artifact.
-
-    Parameters
-    ----------
-    modules : Mapping[str, GraphModule]
-        The model-side module dict.
-    reader : Any
-        The dataset reader; consulted via ``schema_group(stream)``
-        (duck-typed — readers without schema support are skipped).
-
-    Returns
-    -------
-    int
-        The number of class-name lists actually compared (0 when no schema
-        artifact / no matching attrs exist).
-
-    Raises
-    ------
-    ConfigError
-        Naming the module, its config address, and both orderings, when a
-        configured list mismatches the schema attr.
+    For every module declaring ``class_names`` + ``stream`` + ``label``
+    (duck-typed), the configured list must match the schema artifact's label
+    attr in set AND order — a reordered ``class_names`` is a silent physics
+    mislabeling no shape check can catch. Runs at `SaltModule.setup` and in
+    ``salt graph validate``; no-op without a schema artifact. Returns the
+    number of lists compared; mismatch raises `ConfigError`.
     """
     schema_group = getattr(reader, "schema_group", None)
     if not callable(schema_group):
@@ -2293,30 +2021,12 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
 def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) -> int:
     """Resolve name-based ``origin_weighting`` to ids before bind.
 
-    For every module exposing a callable ``resolve_origin_names`` (duck-typed
-    so user vertexing modules participate too), the names are mapped to
-    integer origin ids against the schema artifact. Runs at `SaltModule.setup`
-    (fit/test) right after `check_class_names`, before the two-phase bind, so
-    the resolved ids are in place when `VertexingTaskModule.bind` builds the
-    composed head. Integer-id weighting and readers without a schema are
-    no-ops here; a name-based config that resolves nothing then fails loudly
-    at bind.
-
-    A `ConfigError` from a module's `resolve_origin_names` (an unknown class
-    name, or a missing origin class-name attr for a name-based config)
-    propagates unchanged.
-
-    Parameters
-    ----------
-    modules : Mapping[str, GraphModule]
-        The model-side module dict.
-    reader : Any
-        The stage dataset reader (``schema_group`` consulted per module).
-
-    Returns
-    -------
-    int
-        The number of modules whose names were actually resolved here.
+    Maps names to integer origin ids against the schema artifact for every
+    module exposing ``resolve_origin_names`` (duck-typed). Runs at
+    `SaltModule.setup` before the two-phase bind, so resolved ids are in
+    place when `VertexingTaskModule.bind` builds the composed head. Integer-id
+    weighting and schema-less readers are no-ops; a name-based config that
+    resolves nothing fails loudly at bind. Returns the count resolved.
     """
     resolved = 0
     for module in modules.values():
@@ -2324,26 +2034,3 @@ def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) ->
         if callable(resolve) and resolve(reader):
             resolved += 1
     return resolved
-
-
-def bundle_as_v1_outputs(bundle: Bundle) -> dict[str, Any]:
-    """Migration shim: expose a bundle as the v1 ``{preds, labels, pad_masks}`` view.
-
-    Deprecated. ``preds`` and ``labels`` keep their nested
-    ``{stream: {name: tensor}}`` shape; ``pad_masks`` maps each masked
-    stream (``masks.*`` minus the encoder's ``registers`` entry) to its
-    True-is-padded mask.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"preds": ..., "labels": ..., "pad_masks": ...}`` with ``{}`` for
-        absent namespaces.
-    """
-    masks: dict[str, Tensor] = dict(bundle.subtree("masks")) if "masks" in bundle.data else {}
-    masks.pop("registers", None)
-    return {
-        "preds": bundle.subtree("preds") if "preds" in bundle.data else {},
-        "labels": bundle.subtree("labels") if "labels" in bundle.data else {},
-        "pad_masks": masks,
-    }

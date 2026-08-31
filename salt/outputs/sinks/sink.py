@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fnmatch
 import functools
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -18,7 +17,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module import-li
 
 __all__ = [
     "Node",
-    "OutputSink",
     "RuntimeSink",
     "SinkContext",
     "collect_manifest_fields",
@@ -59,32 +57,11 @@ def _fmt_modes(modes: frozenset[Mode]) -> str:
 def parse_modes(modes: Sequence[str | Mode], owner: str) -> frozenset[Mode]:
     """Parse a config ``modes:`` list into planner `Mode` members.
 
-    The vocabulary is the planner's own — ``fit``/``val``/``test``/``onnx``,
-    case-insensitive, plus ``export`` for ``onnx`` (the spelling a section
-    WRITER's ``modes:`` list uses, and writers and sinks share one section).
-
-    It deliberately has no entry for `salt inference`: that driver calls a
-    sink's lifecycle directly, with no planner mode and no registration, so it
-    is outside what ``modes:`` selects (see ``docs/outputs.md``).
-
-    Parameters
-    ----------
-    modes : Sequence[str | Mode]
-        The configured mode names. Must name at least one mode — to switch a
-        sink off, delete its section entry (``<key>: null``) rather than
-        declaring it with no modes.
-    owner : str
-        The declaring class name, for the error message.
-
-    Returns
-    -------
-    frozenset[Mode]
-        The parsed modes.
-
-    Raises
-    ------
-    ConfigError
-        On an empty list, or a name that is not a planner mode.
+    Vocabulary: ``fit``/``val``/``test``/``onnx`` (case-insensitive) plus
+    ``export`` for ``onnx``. Deliberately no entry for `salt inference` — that
+    driver calls a sink's lifecycle directly, outside planner modes. Raises
+    `ConfigError` on an empty list (delete the sink with ``<key>: null``
+    instead) or an unknown name. `owner` labels the error.
     """
     if not modes:
         raise ConfigError(
@@ -111,29 +88,11 @@ def parse_modes(modes: Sequence[str | Mode], owner: str) -> frozenset[Mode]:
 def collect_manifest_fields(sources: Iterable[Any], mode: Mode) -> list[tuple[str, OutputField]]:
     """Collect the ``(leaf_key, OutputField)`` manifest a set of producers declares.
 
-    The one place a sink learns WHAT to serialise. Any graph module minting
-    ``outputs.*`` leaves names them by implementing ``manifest_fields(mode)``
-    — the ``outputs:`` section's `RunTaskOutput`, a conversion producer, a
-    reconstruction node. Sources are walked in order and their fields
-    concatenated, so the caller's source order is the column/tuple order.
-
-    A field marked ``final=False`` is an intermediate leaf a downstream node
-    consumes; it is declared (so it is visible) and dropped here (so no sink
-    serialises it).
-
-    Parameters
-    ----------
-    sources : Iterable[Any]
-        The candidate producers. An entry without a callable
-        ``manifest_fields`` is skipped, so a source list may mix producers
-        with plain graph modules.
-    mode : Mode
-        The mode to collect for.
-
-    Returns
-    -------
-    list[tuple[str, OutputField]]
-        The concatenated final fields, each tagged with its ``outputs.*`` leaf key.
+    The one place a sink learns WHAT to serialise: any module minting
+    ``outputs.*`` leaves names them via ``manifest_fields(mode)``. Sources are
+    walked in order (caller's order = column/tuple order); entries without a
+    callable ``manifest_fields`` are skipped. Fields marked ``final=False``
+    are intermediate leaves and dropped here so no sink serialises them.
     """
     out: list[tuple[str, OutputField]] = []
     for source in sources:
@@ -214,16 +173,6 @@ def is_test_persistence_sink(sink: Any) -> bool:
     ONNX-only sink (`OnnxExportSink`, empty TEST requires) and for an
     auxiliary sink that opts out (`JSONLOutputSink`). A duck-typed object
     without ``is_test_sink`` counts as one.
-
-    Parameters
-    ----------
-    sink : Any
-        A sink node, typically one exposing ``writer_demand``.
-
-    Returns
-    -------
-    bool
-        Whether `sink` should anchor the TEST boundary demand.
     """
     is_test_sink = getattr(sink, "is_test_sink", None)
     return True if not callable(is_test_sink) else bool(is_test_sink())
@@ -538,8 +487,8 @@ class RuntimeSink(Node):
     A minimal sink counting the rows it saw::
 
         from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-        from salt.logging import console
         from salt.outputs import RuntimeSink
+        from salt.utils.logging import console
 
 
         class RowCountSink(RuntimeSink):
@@ -579,27 +528,3 @@ class RuntimeSink(Node):
 
     def close_if_open(self) -> None:  # pragma: no cover - overridden
         """Idempotently close any open handle (failure-cleanup)."""
-
-
-class OutputSink(RuntimeSink):
-    """Deprecated alias of `RuntimeSink`, kept for third-party subclasses.
-
-    The sink base used to BE a `lightning.Callback`; it was split into
-    `Node` (declare-only) and `RuntimeSink` (lifecycle) so a sink stops
-    privileging one driver. An existing ``class MySink(OutputSink)`` keeps
-    working unchanged — the lifecycle methods and their contracts are
-    identical — but subclassing warns, and the name is removed after the
-    deprecation window. Subclass `RuntimeSink` instead.
-    """
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Warn once per subclass that `OutputSink` is deprecated."""
-        super().__init_subclass__(**kwargs)
-        warnings.warn(
-            f"{cls.__name__} subclasses OutputSink, which is a deprecated alias of "
-            "RuntimeSink — subclass salt.outputs.RuntimeSink instead (a sink is no "
-            "longer a lightning Callback; the test loop drives it through a generated "
-            "adapter).",
-            DeprecationWarning,
-            stacklevel=2,
-        )

@@ -61,7 +61,7 @@ class MaskDecoder(SaltModelModule):
     def __init__(
         self,
         embed_dim: int,
-        num_objects: int,
+        num_queries: int,
         num_layers: int,
         class_net: Mapping[str, Any],
         md: Mapping[str, Any] | None = None,
@@ -76,7 +76,7 @@ class MaskDecoder(SaltModelModule):
         embed_dim : int
             Query / node embedding width. Sizes the query bank, decoder layers,
             and the ``mask_net`` output.
-        num_objects : int
+        num_queries : int
             Number of learnable object queries ``M``.
         num_layers : int
             Number of decoder layers.
@@ -98,7 +98,7 @@ class MaskDecoder(SaltModelModule):
         Raises
         ------
         ConfigError
-            On a non-positive ``embed_dim`` / ``num_objects`` / ``num_layers``, a
+            On a non-positive ``embed_dim`` / ``num_queries`` / ``num_layers``, a
             ``class_net`` / ``mask_net`` that sets ``input_size``, a ``class_net``
             missing ``output_size`` or with ``output_size < 1``, or an ``md``
             config missing ``n_heads``.
@@ -106,8 +106,8 @@ class MaskDecoder(SaltModelModule):
         super().__init__()
         if embed_dim < 1:
             raise ConfigError(f"MaskDecoder: embed_dim must be >= 1, got {embed_dim}")
-        if num_objects < 1:
-            raise ConfigError(f"MaskDecoder: num_objects must be >= 1, got {num_objects}")
+        if num_queries < 1:
+            raise ConfigError(f"MaskDecoder: num_queries must be >= 1, got {num_queries}")
         if num_layers < 1:
             raise ConfigError(f"MaskDecoder: num_layers must be >= 1, got {num_layers}")
 
@@ -135,12 +135,12 @@ class MaskDecoder(SaltModelModule):
             )
 
         self.embed_dim = embed_dim
-        self.num_objects = num_objects
+        self.num_queries = num_queries
         self.num_classes = n_classes - 1  # last class is the null/no-object category
         self.input_key = input
         self.out_stream = out_stream
 
-        self.inital_q = nn.Parameter(torch.empty((num_objects, embed_dim)))
+        self.inital_q = nn.Parameter(torch.empty((num_queries, embed_dim)))
         nn.init.normal_(self.inital_q)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
@@ -174,16 +174,16 @@ class MaskDecoder(SaltModelModule):
             }),
             produces=unflatten_spec({
                 f"{self.out_stream}.embed": TensorSpec(
-                    shape=("B", self.num_objects, emb), dtype="float32"
+                    shape=("B", self.num_queries, emb), dtype="float32"
                 ),
                 f"{self.out_stream}.class_logits": TensorSpec(
-                    shape=("B", self.num_objects, n_classes), dtype="float32"
+                    shape=("B", self.num_queries, n_classes), dtype="float32"
                 ),
                 f"{self.out_stream}.class_probs": TensorSpec(
-                    shape=("B", self.num_objects, n_classes), dtype="float32"
+                    shape=("B", self.num_queries, n_classes), dtype="float32"
                 ),
                 f"{self.out_stream}.masks": TensorSpec(
-                    shape=("B", self.num_objects, tok), dtype="float32"
+                    shape=("B", self.num_queries, tok), dtype="float32"
                 ),
             }),
         )

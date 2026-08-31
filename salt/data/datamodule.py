@@ -18,23 +18,14 @@ from salt.data.base import Reader, SaltDatasetModule, SetupBundle
 from salt.data.dataset import SaltDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
 from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableSaltDataset
-from salt.data.manifest import (
-    AUTO_MANIFEST,
-    CorpusManifest,
-    apply_schema,
-    built_schema_hash,
-    ensure_manifest,
-    is_auto,
-    read_manifest,
-    resolve_manifest_path,
-)
+from salt.data.manifest import CorpusManifest, apply_schema, ensure_manifest
 from salt.data.readers.vds import VDS
 from salt.data.samplers import RandomBatchSampler
 from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_setup_plan
 from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import PRIMARY_MODES, Mode
-from salt.logging import get_logger
+from salt.utils.logging import get_logger
 
 __all__ = ["AUTO_PREFETCH_CAP", "SaltDataModule", "auto_prefetch_factor"]
 
@@ -218,16 +209,16 @@ class SaltDataModule(lightning.LightningDataModule):
     max_live_streams : int | None, optional
         Samples holding a resident block at once when `iterable`, by default 2.
         Peak resident rows per worker is ``max_live_streams * block_rows``.
-    manifest : str | Path | None, optional
-        `CorpusManifest` for `iterable` runs. With one, shard planning and epoch
-        length need no reader index and open no data file. ``None`` (default):
-        no artifact, every reader process resolves its own index. A path: that
-        artifact, for every streaming stage. ``"auto"``: resolve a conventional
-        path per stage (next to the corpus when writable, else
-        ``$SALT_MANIFEST_CACHE`` / ``~/.cache/salt/manifests``), validate it, and
-        build it in `prepare_data` when missing or stale — convenient rather
-        than optimal, since `python -m salt.data.manifest` pre-builds it offline
-        and a large corpus wants that.
+    manifest : str | Path | Mapping[str, str | Path] | None, optional
+        `CorpusManifest` path(s) — REQUIRED when `iterable`. With a manifest,
+        shard planning and epoch length need no reader index and open no data
+        file. A mapping gives one path per stage
+        (``{train: ..., val: ..., test: ...}``); a single path is shared by
+        every streaming stage, which is only valid when they read the same
+        corpus. An existing file is validated and read; a missing one is built
+        there by `prepare_data` (global rank 0, atomic write). A stale manifest
+        is a hard error naming the file to delete — it is the user's file and
+        is never silently overwritten.
     shuffle_stream : bool, optional
         Shuffle block order and within-batch row order on the fit streaming
         loader, by default True. Val/test always stream in order.
@@ -266,7 +257,7 @@ class SaltDataModule(lightning.LightningDataModule):
         block_rows: int | None = DEFAULT_BLOCK_ROWS,
         interleave_block: int = 1,
         max_live_streams: int | None = 2,
-        manifest: str | Path | None = None,
+        manifest: str | Path | Mapping[str, str | Path] | None = None,
         shuffle_stream: bool = True,
     ) -> None:
         super().__init__()
@@ -342,13 +333,26 @@ class SaltDataModule(lightning.LightningDataModule):
         self.block_rows = block_rows
         self.interleave_block = int(interleave_block)
         self.max_live_streams = max_live_streams
+        if isinstance(manifest, str) and manifest.strip().lower() == "auto":
+            raise ConfigError(
+                "manifest: 'auto' was removed — give an explicit manifest path "
+                "(salt builds the file there when it is missing, and never chooses "
+                "a storage location itself)"
+            )
+        if self.iterable and manifest is None:
+            raise ConfigError(
+                "data.manifest is required when data.iterable=true — give the path each "
+                "streaming stage plans its shards from (a missing file is built there on "
+                "rank 0); use a mapping, manifest: {train: ..., val: ..., test: ...}, when "
+                "stages read different corpora"
+            )
         self.manifest = manifest
         self.shuffle_stream = bool(shuffle_stream)
-        # `manifest: auto` writes ONE artifact to shared storage, so exactly one
-        # process in the job builds it — not one per node, which is Lightning's
-        # default and is right only for a per-node download. Without a shared
-        # filesystem set this back to True; the atomic write makes that race
-        # wasteful, never corrupting.
+        # The manifest is ONE artifact on shared storage, so exactly one process
+        # in the job builds it — not one per node, which is Lightning's default
+        # and is right only for a per-node download. Without a shared filesystem
+        # set this back to True; the atomic write makes that race wasteful,
+        # never corrupting.
         self.prepare_data_per_node = False
         self.train_dset: SaltDataset | IterableSaltDataset | None = None
         self.val_dset: SaltDataset | IterableSaltDataset | None = None
@@ -568,7 +572,7 @@ class SaltDataModule(lightning.LightningDataModule):
         narrowed key set) must not leak across train/val/test plans sharing
         this module dict.
         """
-        reader, num = self._stage_reader(mode)
+        reader, _num = self._stage_reader(mode)
         if reader is None:
             raise ConfigError(f"no file configured for mode {mode.name}")
         if self._sinks is None:
@@ -576,12 +580,12 @@ class SaltDataModule(lightning.LightningDataModule):
                 "SaltDataModule has no sinks — pass sinks= or call set_sinks() with the "
                 "model boundary's demanded keys before setup"
             )
-        # Resolved BEFORE staging: an auto manifest is keyed by the corpus the
-        # user configured, not by the /dev/shm copies a staged run reads, so
-        # staging never invalidates it (the blocks are the same rows either way).
-        manifest = self._manifest_for(mode, reader, num)
+        # Resolved BEFORE staging: the manifest describes the corpus the user
+        # configured, not the /dev/shm copies a staged run reads, so staging
+        # never invalidates it (the blocks are the same rows either way).
+        manifest = self._manifest_for(mode, reader)
         reader = self._stage(reader)
-        if isinstance(manifest, CorpusManifest) and apply_schema(manifest, reader):
+        if manifest is not None and apply_schema(manifest, reader):
             _LOG.info(
                 f"manifest: seeded the {_STAGE_OF_MODE[mode]} reader's schema from the manifest "
                 "— plan compilation opens no data file"
@@ -640,25 +644,42 @@ class SaltDataModule(lightning.LightningDataModule):
             return reader
         return reader.restage(self._stage_root)
 
-    # -- manifest: auto -------------------------------------------------------
+    # -- corpus manifest ------------------------------------------------------
+
+    def _manifest_path(self, mode: Mode) -> Path:
+        """The configured manifest path for this stage.
+
+        A mapping is per-stage; a scalar is one path shared by every streaming
+        stage (valid only when they read the same corpus — `ensure_manifest`
+        errors otherwise).
+        """
+        if isinstance(self.manifest, Mapping):
+            stage = _STAGE_OF_MODE[mode]
+            if stage not in self.manifest:
+                raise ConfigError(
+                    f"data.manifest has no entry for stage {stage!r} — a manifest mapping "
+                    f"needs a path per streaming stage, got {sorted(self.manifest)}"
+                )
+            return Path(self.manifest[stage])
+        assert self.manifest is not None  # enforced in __init__ for iterable runs
+        return Path(self.manifest)
 
     def prepare_data(self) -> None:
-        """Build the corpus manifest for ``manifest: "auto"`` — once, on rank 0.
+        """Build any missing corpus manifest — once, on rank 0.
 
         Lightning calls this hook on global rank 0 alone
         (``prepare_data_per_node = False``) and barriers every rank before
-        ``setup``, which is exactly the coordination an auto-built artifact
-        needs: one writer, no lock, and everyone else finds a finished file.
-        `setup` therefore only ever READS a manifest. Idempotent — a second call
-        finds the artifact the first one wrote.
+        ``setup``, which is exactly the coordination a built artifact needs: one
+        writer, no lock, and everyone else finds a finished file. Idempotent — a
+        second call validates and reuses the artifact the first one wrote; a
+        stale one is a hard error naming the file to delete.
         """
-        if not is_auto(self.manifest):
-            return
         if not self.iterable:
-            _LOG.warning(
-                f"data.manifest={AUTO_MANIFEST!r} is ignored on the map-style path — a corpus "
-                "manifest plans streaming shards, and this run has data.iterable=false"
-            )
+            if self.manifest is not None:
+                _LOG.warning(
+                    "data.manifest is ignored on the map-style path — a corpus manifest "
+                    "plans streaming shards, and this run has data.iterable=false"
+                )
             return
         # the hook takes no stage argument; the trainer's entry point is what
         # says whether a test corpus is about to be read or is merely configured
@@ -667,38 +688,23 @@ class SaltDataModule(lightning.LightningDataModule):
         modes = self._modes_for_stage(stage)
         self._run_setup_pass(_STAGE_OF_MODE[m] for m in modes)
         for mode in modes:
-            reader, num = self._stage_reader(mode)
-            if reader is None or not reader.sources():
+            reader, _num = self._stage_reader(mode)
+            if reader is None:
                 continue
-            path, where = resolve_manifest_path(reader, stage=_STAGE_OF_MODE[mode], num=num)
-            ensure_manifest(reader, path, _STAGE_OF_MODE[mode], where)
+            ensure_manifest(reader, self._manifest_path(mode), _STAGE_OF_MODE[mode])
 
-    def _manifest_for(self, mode: Mode, reader: Reader, num: int) -> Any:
-        """The manifest this stage's streaming dataset plans from.
+    def _manifest_for(self, mode: Mode, reader: Reader) -> CorpusManifest | None:
+        """The manifest this stage's streaming dataset plans from; None on map-style.
 
-        An explicit path passes through untouched — it is the user's assertion,
-        and a bad one must fail loudly downstream. ``"auto"`` re-derives the path
-        `prepare_data` wrote (resolution is pure, so ranks agree without sharing
-        state) and validates it; a miss means `prepare_data` never ran — a
-        datamodule driven outside a `Trainer` — so it degrades to reader-index
-        planning rather than failing a run over a cache artifact.
+        The same `ensure_manifest` call `prepare_data` makes: inside a `Trainer`
+        the file already exists (built behind the rank-0 barrier), so this only
+        validates and reads it. A datamodule driven outside a `Trainer` builds
+        here instead — uncoordinated ranks can then waste the build, never
+        corrupt it, thanks to the atomic write.
         """
-        if not is_auto(self.manifest):
-            return self.manifest
         if not self.iterable:
             return None
-        stage = _STAGE_OF_MODE[mode]
-        path, _where = resolve_manifest_path(reader, stage=stage, num=num)
-        manifest, problems = read_manifest(
-            path, sources=reader.sources(), schema_hash=built_schema_hash(reader)
-        )
-        if manifest is None:
-            _LOG.warning(
-                f"manifest: no usable {stage} manifest at {path} ({'; '.join(problems)}) — "
-                "planning from the reader index instead. prepare_data() builds it inside a "
-                "Trainer run; offline, `python -m salt.data.manifest` writes one for any config."
-            )
-        return manifest
+        return ensure_manifest(reader, self._manifest_path(mode), _STAGE_OF_MODE[mode])
 
     def setup(self, stage: str) -> None:
         """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST.

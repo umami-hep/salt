@@ -15,10 +15,10 @@ import numpy as np
 import torch
 from torch.utils.data import get_worker_info
 
-from salt.data.base import RAW_NAMESPACE, Reader, SaltDatasetModule, WorkerCtx
+from salt.data.base import Reader, SaltDatasetModule, WorkerCtx
 from salt.data.processors.labels import Labels
 from salt.graph.bundle import Bundle
-from salt.graph.errors import _SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
+from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
 from salt.graph.executor import canonical_produced
 from salt.graph.planner import Plan, Sinks, compile_plan
 from salt.graph.spec import KEY_SEP, Mode, TensorSpec
@@ -166,7 +166,7 @@ class _PlanRunner:
         for step in plan.steps:
             for key, spec in step.requires.items():
                 parts = key.split(KEY_SEP)
-                if parts[0] != RAW_NAMESPACE or len(parts) != 2 or spec.fields is None:
+                if parts[0] != "raw" or len(parts) != 2 or spec.fields is None:
                     continue
                 gschema = self._reader.schema_group(parts[1])
                 if gschema is None:  # no schema artifact: bind-time checks remain
@@ -177,7 +177,7 @@ class _PlanRunner:
                     if field in gschema.fields:
                         continue
                     near = get_close_matches(
-                        field, sorted(gschema.fields), n=3, cutoff=_SUGGESTION_CUTOFF
+                        field, sorted(gschema.fields), n=3, cutoff=SUGGESTION_CUTOFF
                     )
                     hint = f"; nearest: {', '.join(near)}" if near else ""
                     raise SchemaError(

@@ -1,5 +1,7 @@
 """`CorpusManifest` — the offline artifact a streaming run plans its shards from,
 so no rank has to open a data file to learn how many rows exist or where they are.
+It lives at the user-configured ``manifest:`` path and nowhere else; `ensure_manifest`
+is the whole lifecycle (validate+read, build-on-missing, hard error when stale).
 """
 
 from __future__ import annotations
@@ -13,26 +15,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from salt import __version__
 from salt.data.base import Reader, RowBlock
 from salt.graph.errors import ConfigError
-from salt.logging import get_logger
 from salt.schema import GroupSchema, Schema
+from salt.utils.logging import get_logger
 
-__all__ = ["AUTO_MANIFEST", "MANIFEST_VERSION", "CorpusManifest", "ManifestEntry", "build_manifest"]
+__all__ = ["CorpusManifest", "ManifestEntry", "build_manifest", "ensure_manifest"]
 
 _LOG = get_logger(__name__)
-
-MANIFEST_VERSION = 2
-"""Artifact format version. A mismatch is a miss, never a best-effort read."""
-
-AUTO_MANIFEST = "auto"
-"""The `manifest:` config value that resolves, validates and builds on demand."""
-
-MANIFEST_CACHE_ENV = "SALT_MANIFEST_CACHE"
-"""Environment variable overriding the fallback manifest cache directory."""
-
-_MIN_ROOT_PARTS = 3
-"""Shallowest directory that may hold a manifest (``/a/b`` == 3 parts)."""
 
 
 @dataclass(frozen=True)
@@ -84,17 +75,20 @@ class CorpusManifest:
         The served schema as ``{stream: {field: dtype}}``. Carried so plan
         compilation can validate demanded fields without asking the reader to
         probe a file for them — see `apply_schema`.
-    version : int, optional
-        Artifact format version, by default `MANIFEST_VERSION`.
+    config_digest : str, optional
+        Digest of the builder's `config_fingerprint` — the one staleness signal
+        no `stat` can supply, since a reconfigured reader (different ``cuts``,
+        different ``groups``) moves every block boundary over byte-identical
+        files.
     meta : dict, optional
-        Free-form provenance (salt/uproot versions, build time, source glob).
+        Free-form provenance (build time, source list, stage).
     """
 
     entries: list[ManifestEntry]
     group_names: list[str] = field(default_factory=lambda: ["default"])
     schema_hash: str = ""
     schema: dict[str, dict[str, str]] = field(default_factory=dict)
-    version: int = MANIFEST_VERSION
+    config_digest: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -121,14 +115,19 @@ class CorpusManifest:
         silently train on part of it. The temp name carries the writer's pid, so
         racing builders each write their own and one `os.replace` wins whole:
         they can waste work, never corrupt it.
+
+        The payload is stamped with `salt.__version__` — the artifact's format
+        identity. `load` refuses a foreign stamp, so a format change never has
+        to be detected field-by-field.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": self.version,
+            "salt_version": __version__,
             "group_names": list(self.group_names),
             "schema_hash": self.schema_hash,
             "schema": {s: dict(f) for s, f in self.schema.items()},
+            "config_digest": self.config_digest,
             "meta": dict(self.meta),
             "entries": [asdict(entry) for entry in self.entries],
         }
@@ -148,24 +147,26 @@ class CorpusManifest:
         Raises
         ------
         ConfigError
-            If the file is unreadable, malformed, or a different format version.
+            If the file is unreadable, malformed, or stamped by a different
+            salt version — delete it to rebuild.
         """
         path = Path(path)
         try:
             payload = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ConfigError(f"unreadable corpus manifest {path}: {exc}") from exc
-        if payload.get("version") != MANIFEST_VERSION:
+        stamp = str(payload.get("salt_version", ""))
+        if stamp != __version__:
             raise ConfigError(
-                f"corpus manifest {path} is format version {payload.get('version')!r}, "
-                f"this salt reads {MANIFEST_VERSION} — rebuild it"
+                f"corpus manifest {path} was written by salt {stamp or 'unknown'}, "
+                f"this is salt {__version__} — delete {path} to rebuild"
             )
         return cls(
             entries=[ManifestEntry(**entry) for entry in payload["entries"]],
             group_names=list(payload.get("group_names", ["default"])),
             schema_hash=str(payload.get("schema_hash", "")),
             schema={s: dict(f) for s, f in payload.get("schema", {}).items()},
-            version=int(payload["version"]),
+            config_digest=str(payload.get("config_digest", "")),
             meta=dict(payload.get("meta", {})),
         )
 
@@ -173,21 +174,27 @@ class CorpusManifest:
         self,
         schema_hash: str | None = None,
         sources: Sequence[str | Path] | None = None,
+        config_digest: str | None = None,
     ) -> list[str]:
         """Structural + filesystem checks; returns the reasons it is stale (empty = usable).
 
         Opens NO data file — only what a `stat` can decide (every recorded file
-        still present at the same size and mtime), plus the schema hash, so a
-        manifest built for a different reader configuration cannot be used by
-        accident. `sources` additionally catches the one change no per-file stat
-        can see: a file added to or removed from the glob leaves every recorded
-        file untouched.
+        still present at the same size and mtime), plus the schema hash and the
+        config digest, so a manifest built for a different reader configuration
+        cannot be used by accident. `sources` additionally catches the one
+        change no per-file stat can see: a file added to or removed from the
+        glob leaves every recorded file untouched.
         """
         problems: list[str] = []
         if schema_hash is not None and self.schema_hash and schema_hash != self.schema_hash:
             problems.append(
                 f"schema hash {schema_hash} != manifest's {self.schema_hash} "
                 "(reader configuration changed)"
+            )
+        if config_digest is not None and config_digest != self.config_digest:
+            problems.append(
+                f"reader config digest {config_digest or '(empty)'} != manifest's "
+                f"{self.config_digest or '(empty)'} (cuts/groups/reader configuration changed)"
             )
         if sources is not None:
             recorded = [str(s) for s in self.meta.get("sources", [])]
@@ -224,12 +231,13 @@ def built_schema_hash(reader: Reader) -> str | None:
 def config_digest(reader: Reader) -> str:
     """A digest of the reader's `config_fingerprint`; empty when it has none.
 
-    The manifest's only OPEN-FREE staleness signal. The stat checks catch a
-    changed corpus and `schema_hash` catches a changed served schema, but both
-    describe the files; neither sees a reader reconfigured over the SAME files —
-    a different `cuts` (which changes row counts, and so every block boundary) or
-    a different `groups`. That has to be caught before anything is read, which
-    means it belongs in the artifact's key, not in its contents.
+    The manifest's only OPEN-FREE staleness signal for a reconfigured reader.
+    The stat checks catch a changed corpus and `schema_hash` catches a changed
+    served schema, but both describe the files; neither sees a reader
+    reconfigured over the SAME files — a different `cuts` (which changes row
+    counts, and so every block boundary) or a different `groups`. That has to be
+    caught before anything is read, which is why the digest is recorded in the
+    artifact and checked by `validate`.
     """
     fingerprint = reader.config_fingerprint()
     if not fingerprint:
@@ -254,8 +262,7 @@ def build_manifest(reader: Reader, meta: dict[str, Any] | None = None) -> Corpus
     """Build a manifest from a reader, resolving its index once.
 
     This is the expensive step, and the reason the artifact exists: it is paid
-    deliberately, offline, once per corpus — instead of by every rank of every
-    run.
+    deliberately, once per corpus — instead of by every rank of every run.
     """
     blocks = reader.row_blocks()
     sources = [str(p) for p in reader.sources()]
@@ -285,6 +292,7 @@ def build_manifest(reader: Reader, meta: dict[str, Any] | None = None) -> Corpus
         group_names=names,
         schema_hash=schema_digest(reader),
         schema=served_schema(reader),
+        config_digest=config_digest(reader),
         meta={"sources": sources, **(meta or {})},
     )
 
@@ -320,119 +328,56 @@ def apply_schema(manifest: CorpusManifest, reader: Reader) -> bool:
     return True
 
 
-# --------------------------------------------------------------------------- #
-# `manifest: auto` — resolve a conventional path, validate it, build on a miss
-# --------------------------------------------------------------------------- #
+def ensure_manifest(reader: Reader, path: str | Path, stage: str) -> CorpusManifest:
+    """The manifest at `path`: validated and read when present, built there when not.
 
+    The ONE code path behind the required ``manifest:`` config value. Building
+    resolves the reader's index, which opens every source file once — which is
+    why the datamodule calls this first from Lightning's `prepare_data` (global
+    rank 0, barriered before `setup`), so one process pays and every other rank
+    finds a finished file. The atomic `save` means an uncoordinated caller can
+    waste that work, never corrupt it.
 
-def is_auto(manifest: Any) -> bool:
-    """Whether a configured `manifest:` value asks for automatic resolution."""
-    return isinstance(manifest, str) and manifest.strip().lower() == AUTO_MANIFEST
-
-
-def corpus_root(sources: Sequence[str | Path]) -> Path | None:
-    """The corpus's own directory, when a manifest can be written next to it.
-
-    The sources' common ancestor, rejected unless it is a writable directory
-    deep enough to BE a corpus: sources on different trees have ``/`` in common,
-    which is an accident, not a corpus root.
-    """
-    if not sources:
-        return None
-    try:
-        resolved = [Path(s).resolve() for s in sources]
-        common = Path(os.path.commonpath([str(p) for p in resolved]))
-    except ValueError:  # nothing in common (different roots)
-        return None
-    if common in set(resolved):  # a single file is its own commonpath
-        common = common.parent
-    if len(common.parts) < _MIN_ROOT_PARTS or not os.access(common, os.W_OK):
-        return None
-    return common if common.is_dir() else None
-
-
-def resolve_manifest_path(
-    reader: Reader,
-    *,
-    stage: str | None = None,
-    num: int = -1,
-    sources: Sequence[str | Path] | None = None,
-) -> tuple[Path, str]:
-    """Where this reader's auto manifest belongs, and whether that is ``"corpus"`` or ``"cache"``.
-
-    Pure: every rank derives the same path without coordinating, from facts
-    known before any file is opened. The filename is keyed by everything that
-    decides which rows the manifest describes, so two stages of one run get two
-    manifests — as they must, being two different corpora.
-    """
-    srcs = [str(s) for s in (reader.sources() if sources is None else sources)]
-    key = json.dumps(
-        [MANIFEST_VERSION, type(reader).__name__, stage, int(num), srcs, config_digest(reader)],
-        sort_keys=True,
-    )
-    name = f"salt_manifest_{hashlib.blake2b(key.encode(), digest_size=6).hexdigest()}.json"
-    root = corpus_root(srcs)
-    if root is not None:
-        return root / name, "corpus"
-    cache = os.environ.get(MANIFEST_CACHE_ENV)
-    base = Path(cache).expanduser() if cache else Path.home() / ".cache" / "salt" / "manifests"
-    return base / name, "cache"
-
-
-def read_manifest(
-    path: str | Path,
-    sources: Sequence[str | Path] | None = None,
-    schema_hash: str | None = None,
-) -> tuple[CorpusManifest | None, list[str]]:
-    """The manifest at `path` if it is present AND usable, else ``(None, why not)``.
-
-    Absent, unreadable, wrong-version and stale are one outcome to a caller that
-    can rebuild — so none of them raise, and none of them return a
-    partially-trusted manifest.
-
-    `schema_hash` is optional because computing it needs a BUILT schema, and
-    building one opens files — which is the cost this artifact exists to avoid.
-    Callers pass it when the reader has already been prepared and it is therefore
-    free; when they cannot, the config digest in the artifact's own filename is
-    what stands between a reconfigured reader and a stale manifest.
+    Raises
+    ------
+    ConfigError
+        If the existing manifest is unreadable, foreign, or stale for this
+        reader — it is the user's file, so it is never silently overwritten;
+        the error names the path to delete to rebuild.
     """
     path = Path(path)
     if not path.exists():
-        return None, ["not built yet"]
-    try:
-        manifest = CorpusManifest.load(path)
-    except ConfigError as exc:
-        return None, [str(exc)]
-    problems = manifest.validate(schema_hash=schema_hash, sources=sources)
-    return (None, problems) if problems else (manifest, [])
-
-
-def ensure_manifest(reader: Reader, path: Path, stage: str, where: str) -> CorpusManifest:
-    """Reuse the manifest at `path`, or build it from `reader` and write it there.
-
-    The expensive half of ``manifest: auto``, and why it belongs in Lightning's
-    `prepare_data`: building resolves the reader's index, which opens every
-    source file once. One rank pays that behind the framework's own barrier.
-    """
-    existing, problems = read_manifest(
-        path, sources=reader.sources(), schema_hash=built_schema_hash(reader)
-    )
-    if existing is not None:
         _LOG.info(
-            f"manifest: reusing {path} ({len(existing.entries):,} blocks, {existing.n_rows:,} rows)"
+            f"manifest: building the {stage} manifest -> {path}. This opens every source "
+            "file once; later runs reuse the artifact."
         )
-        return existing
-    _LOG.info(
-        f"manifest: building the {stage} manifest -> {path} [{where}] ({'; '.join(problems)}). "
-        "This opens every source file once; for a large corpus pre-build it offline with "
-        "`python -m salt.data.manifest` and point `manifest:` at the artifact."
+        start = time.perf_counter()
+        manifest = build_manifest(reader, meta={"stage": stage})
+        manifest.save(path)
+        _LOG.info(
+            f"manifest: built {len(manifest.entries):,} block(s), {manifest.n_rows:,} rows in "
+            f"{time.perf_counter() - start:.1f} s"
+        )
+        return manifest
+    manifest = CorpusManifest.load(path)
+    problems = manifest.validate(
+        schema_hash=built_schema_hash(reader),
+        sources=reader.sources(),
+        config_digest=config_digest(reader),
     )
-    start = time.perf_counter()
-    manifest = build_manifest(reader, meta={"stage": stage})
-    manifest.save(path)
+    if problems:
+        hint = (
+            " (one manifest cannot serve two corpora — configure per-stage paths, "
+            "manifest: {train: ..., val: ...}, when stages read different file sets)"
+            if any("file list changed" in p for p in problems)
+            else ""
+        )
+        raise ConfigError(
+            f"stale corpus manifest {path} for the {stage} corpus: {'; '.join(problems)} — "
+            f"delete {path} to rebuild{hint}"
+        )
     _LOG.info(
-        f"manifest: built {len(manifest.entries):,} block(s), {manifest.n_rows:,} rows in "
-        f"{time.perf_counter() - start:.1f} s"
+        f"manifest: reusing {path} ({len(manifest.entries):,} blocks, {manifest.n_rows:,} rows)"
     )
     return manifest
 
@@ -470,35 +415,3 @@ def _block_paths(reader: Reader, blocks: list[RowBlock]) -> list[str]:
         }
         return [by_group[b.group].get(b.start, "") for b in blocks]
     return ["" for _ in blocks]
-
-
-def main() -> int:
-    """CLI: build a corpus manifest from a salt config and write it to disk."""
-    import argparse
-
-    ap = argparse.ArgumentParser(description="Build a salt corpus manifest.")
-    ap.add_argument("--config", action="append", required=True)
-    ap.add_argument("--set", action="append", default=[], dest="overrides")
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args()
-
-    from salt.profiling import _build_datamodule
-
-    datamodule, _model = _build_datamodule([Path(c) for c in args.config], args.overrides)
-    datamodule.setup("fit")
-    dataset = datamodule.train_dset
-    assert dataset is not None
-    manifest = build_manifest(dataset.reader)
-    path = manifest.save(args.out)
-    _LOG.info(
-        "manifest: %d block(s), %d group(s), %s rows -> %s",
-        len(manifest.entries),
-        len(manifest.group_names),
-        f"{manifest.n_rows:,}",
-        path,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

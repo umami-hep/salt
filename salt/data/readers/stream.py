@@ -23,8 +23,6 @@ INT_PAD_SENTINEL = -1
 ``ignore_index=-1`` downstream. Floats pad to 0.0; unsigned/counts pad to 0; bool
 pads to False; the ``valid`` field is set explicitly, never via these fills."""
 
-_SORT_MODES = ("ascending", "descending")
-
 
 @dataclass(frozen=True)
 class StreamConfig:
@@ -38,8 +36,8 @@ class StreamConfig:
     ----------
     pad_max : int
         The served constituent multiplicity ``T`` (the leading N kept after sort +
-        truncate). Resolved by the reader at index-build (config ``truncate`` /
-        ``pad_max`` or the file-wide max). Must be ``>= 1``.
+        truncate). Resolved by the reader at index-build (config ``pad_max`` or
+        the file-wide max). Must be ``>= 1``.
     sort : Mapping[str, str] | None, optional
         Constituent sort spec ``{"var": <field>, "mode": "ascending"|"descending"}``.
         ``None`` (default) keeps the file order — the parity-preserving path. The
@@ -81,9 +79,10 @@ class StreamConfig:
             mode = self.sort.get("mode", "descending")
             if not var:
                 raise ConfigError("StreamConfig.sort: 'var' must be a non-empty field name")
-            if mode not in _SORT_MODES:
+            if mode not in {"ascending", "descending"}:
                 raise ConfigError(
-                    f"StreamConfig.sort: unknown mode {mode!r} — expected one of {_SORT_MODES}"
+                    f"StreamConfig.sort: unknown mode {mode!r} — "
+                    "expected one of ('ascending', 'descending')"
                 )
             # normalise (frozen dataclass — set via object.__setattr__)
             object.__setattr__(self, "sort", {"var": str(var), "mode": str(mode)})
@@ -242,12 +241,10 @@ class OffsetIndex:
     """Cumulative row offsets across a file list + covering-range mapping.
 
     The simple flavour (``offsets`` only) maps a contiguous global row slice to
-    the ``(file_index, local_start, local_stop)`` runs that cover it — the
-    per-file ``entry_start``/``entry_stop`` reads the easyjet reader stitches.
-    The covering flavour (a per-entry cumulative array) maps a contiguous
-    slice over a filtered / derived index back to a covering range over an
-    underlying coarser index (the ftag1lite kept-jet -> covering-event
-    search).
+    the ``(file_index, local_start, local_stop)`` runs that cover it. The
+    covering flavour (a per-entry cumulative array) maps a contiguous slice
+    over a filtered / derived index back to a covering range over an
+    underlying coarser index (kept-row -> covering-entry).
 
     Parameters
     ----------
@@ -313,8 +310,7 @@ class OffsetIndex:
         ``cum[k]`` is the number of derived rows in the first ``k`` coarse units
         — e.g. the per-event cumulative kept-jet counts), return the smallest
         coarse range ``[c0, c1)`` whose derived rows include ``[lo, hi)``, plus
-        the offset of ``lo`` within ``c0``'s first derived row. This is the
-        ftag1lite kept-jet -> covering-event search, generalised.
+        the offset of ``lo`` within ``c0``'s first derived row.
 
         Parameters
         ----------

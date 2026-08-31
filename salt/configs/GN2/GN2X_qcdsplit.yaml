@@ -13,8 +13,8 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false, truncate: 100}
-          flow: {global_object: false, truncate: 100}
+          tracks: {global_object: false, pad_max: 100}
+          flow: {global_object: false, pad_max: 100}
           truth_hadrons: {global_object: false}
     features:
       class_path: salt.data.Features
@@ -157,14 +157,15 @@ outputs:
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
-
-export:
-  model_name: GN2Xqcdsplit # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
-    - {port: inputs.flow, name: flow_features, sequence: true, dyn_axis: n_flow}
-    - {port: inputs.truth_hadrons, name: truth_hadron_features, sequence: true, dyn_axis: n_truth_hadrons}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN2Xqcdsplit # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flow, name: flow_features, sequence: true, dyn_axis: n_flow}
+        - {port: inputs.truth_hadrons, name: truth_hadron_features, sequence: true, dyn_axis: n_truth_hadrons}
 
 trainer:
   max_epochs: 20

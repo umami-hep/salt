@@ -1,0 +1,5 @@
+config: readers/ftag1lite_streaming.yaml
+fragment: >-
+  overlay: needs a manifest and real DAOD_FTAG1LITE files to build an
+  IterableSaltDataset - no synthetic fixture emits that corpus shape, so
+  it stays floor-only (this table entry) rather than a matrix row.

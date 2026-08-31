@@ -141,13 +141,14 @@ outputs:
     class_path: salt.outputs.RunTaskOutput
     init_args:
       tasks: [reg_weighted, reg_weighted_multi, reg_weighted_ratio, reg_weighted_multi_ratio, reg_weighted_no_global_object]
-
-export:
-  model_name: regressionWeighted # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
-  # sample_weight is a FIT|VAL-only label, absent from the export graph.
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: regressionWeighted # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+      # sample_weight is a FIT|VAL-only label, absent from the export graph.
 
 trainer:
   max_epochs: 2

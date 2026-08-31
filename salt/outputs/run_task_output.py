@@ -76,13 +76,6 @@ class OutputSectionWriter(SaltModelModule):
         return bool(mode & self._section_modes)
 
 
-# the bundle modes that run get_output (everything but pure FIT/VAL training):
-# get_output mints serialisation leaves only for TEST + ONNX. (FIT/VAL prune the
-# whole section by demand, so this is a belt-and-braces selector for the
-# manifest helpers that resolve fields without a live bundle.)
-_OUTPUT_MODES = Mode.TEST | Mode.ONNX
-
-
 class RunTaskOutput(OutputSectionWriter):
     """The ``outputs:`` section's per-task serialisation orchestrator.
 

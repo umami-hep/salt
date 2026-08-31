@@ -99,11 +99,11 @@ class SinkAdapter(Callback):
 def attach_runtime_sink(trainer: Any, sink: Any) -> SinkAdapter | None:
     """Register `sink` on `trainer` and, for a runtime sink, generate its adapter.
 
-    The one wiring entry point: every path that adds a sink to a run (the
-    ``callbacks:`` alias, a command's implicit injection, and the
-    ``outputs:`` section) goes through here, so discovery and the Lightning
-    bridge can never disagree. A declare-only `Node` (the ONNX manifest) is
-    registered but gets no adapter — it has no lifecycle to drive.
+    The one wiring entry point: every path that adds a sink to a run (a
+    command's implicit injection and the ``outputs:`` section) goes through
+    here, so discovery and the Lightning bridge can never disagree. A
+    declare-only `Node` (the ONNX manifest) is registered but gets no
+    adapter — it has no lifecycle to drive.
 
     Parameters
     ----------

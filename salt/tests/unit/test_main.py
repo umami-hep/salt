@@ -14,7 +14,6 @@ from lightning.pytorch import Callback
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
 from salt.callbacks import Checkpoint, ProgressBar
-from salt.config_utils import disable_logger_in_config
 from salt.data import SaltDataModule
 from salt.graph.errors import ConfigError
 from salt.main import (
@@ -29,6 +28,7 @@ from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
 from salt.testing.inputs import write_dummy_file
+from salt.utils.config_utils import disable_logger_in_config
 
 DUMMY_CFG = small_config()
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
@@ -44,10 +44,8 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # gn2v2-opendata.yaml declares its eval outputs as an outputs:
-    # section (composed onto model.net). The graph-folded section writers appear
-    # in model.net (inputs_copy is manifest-only, not folded); the standalone
-    # conversion producers (jet_probs/track_origin_probs/...) are retired.
+    # the outputs: section writers are graph-folded into model.net
+    # (inputs_copy is manifest-only, not folded).
     "jets_out",
     "origin_out",
     "pad_mask",
@@ -123,20 +121,18 @@ class TestParseAndInstantiate:
         assert isinstance(cli.model, SaltModule)
         assert isinstance(cli.datamodule, SaltDataModule)
         assert set(cli.model.net.keys()) == GN2V2_MODULES
-        # instance names were assigned from the config dict keys
         assert cli.model.net["encoder"].name == "encoder"
         # data modules in YAML order: reader -> features -> labels
         assert str(cli.datamodule.train_file) == str(data["h5"])
 
     def test_name_linked_into_model(self, data):
-        # the single surviving link of the v1 CLI glue
         cli = make_cli(data)
         assert cli.config.name == "GN2v2_dummy"
         assert cli.model.name == "GN2v2_dummy"
 
     def test_opendata_config_parses(self, data):
         # same model at open-data scale; file paths are required overrides
-        # (real-data runs are the gates experiment's job — no /data here)
+        # (real-data runs are out of scope here — no /data paths)
         cli = make_cli(data, config=OPENDATA_CFG)
         assert isinstance(cli.model, SaltModule)
         # the open-data config is on the outputs: section path — model.net carries
@@ -155,7 +151,7 @@ class TestParseAndInstantiate:
         assert section["run_tasks"].is_run_task_output()
 
 
-# --print_config round-trip (spike capability 2 at the real surface)
+# --print_config round-trip
 
 
 class TestPrintConfig:
@@ -240,7 +236,7 @@ class TestNullDeletion:
         assert set(dm_modules) == {"reader", "features", "input_samples", "vds"}
 
 
-# dotted CLI overrides into init_args (spike capability 4 at the real surface)
+# dotted CLI overrides into init_args
 
 
 class TestDottedOverrides:
@@ -359,7 +355,7 @@ class TestStaticFitValCallbackSinks:
         assert "ConfusionMatrix" in origins["preds.jets.jets_classification"]
 
 
-# 2-step fit smoke through the REAL CLI (run=True path; gate G2 surface)
+# 2-step fit smoke through the REAL CLI (run=True path)
 
 
 class TestFitSmoke:
@@ -688,68 +684,6 @@ class TestGraphFitConfigAdapter:
         assert rc == 1
         assert "trainer configs only" in capsys.readouterr().err
 
-    def test_validate_onnx_legacy_outputs_fail_with_the_migration_error(self, tmp_path, capsys):
-        # export.outputs was removed — a config carrying the section must fail
-        # `validate --mode onnx` with the migration error pointing at the
-        # writers (NOT silently validate green against a stale hand-typed
-        # manifest)
-        import yaml
-
-        config = yaml.safe_load(DUMMY_CFG.read_text())
-        config["export"]["outputs"] = [
-            {"port": "preds.jets.jets_classification", "names": ["pb", "pc", "pu"]}
-        ]
-        bad = tmp_path / "legacy_outputs.yaml"
-        bad.write_text(yaml.dump(config, sort_keys=False))
-        rc = main([
-            "graph",
-            "validate",
-            "-c",
-            str(bad),
-            "--mode",
-            "onnx",
-            "--set",
-            "model.modules.norm.init_args.norm_dict=unused.yaml",
-        ])
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "export.outputs was REMOVED" in err
-        assert "OnnxExportSink" in err  # the migration error names the live mechanism
-
-    def test_validate_writers_block_raises_clean_migration_error(self, tmp_path, capsys):
-        # a config carrying a live top-level writers: block (a real
-        # writers.modules entry, NOT a null override) must fail with the CLEAN
-        # migration ConfigError — NOT a cryptic jsonargparse class_path resolution
-        # failure ("module has no attribute 'modules'").
-        config = yaml.safe_load(DUMMY_CFG.read_text())
-        config["writers"] = {
-            "modules": {
-                "tasks": {
-                    "class_path": "salt.core.writers.modules.TaskWriter",
-                    "init_args": {"tasks": ["jets_classification"]},
-                }
-            }
-        }
-        bad = tmp_path / "legacy_writers.yaml"
-        bad.write_text(yaml.dump(config, sort_keys=False))
-        rc = main([
-            "graph",
-            "validate",
-            "-c",
-            str(bad),
-            "--mode",
-            "test",
-            "--set",
-            "model.modules.norm.init_args.norm_dict=unused.yaml",
-        ])
-        assert rc == 1
-        err = capsys.readouterr().err
-        # message must mention writers: and removal/migration — NOT a parse-time
-        # AttributeError about a missing 'modules' attribute
-        assert "writers" in err
-        assert ("removed" in err.lower() or "migrate" in err.lower())
-        assert "AttributeError" not in err
-
     def test_validate_onnx_sinks_derive_from_writers(self, capsys):
         # the unified-manifest happy path: ONNX validates green with sinks
         # from the writers (the shipped config carries NO export.outputs)
@@ -768,11 +702,11 @@ class TestGraphFitConfigAdapter:
         assert "OK [mode=ONNX]" in out
 
     def test_validate_onnx_underscore_model_name_fails(self, tmp_path, capsys):
-        # the 'export.model_name contains no _/-' validate check
+        # the sink's 'model_name contains no _/-' validate check
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
-        config["export"]["model_name"] = "GN2_v2_dummy"
+        config["outputs"]["onnx_export"]["init_args"]["model_name"] = "GN2_v2_dummy"
         bad = tmp_path / "bad_name.yaml"
         bad.write_text(yaml.dump(config, sort_keys=False))
         rc = main([
@@ -792,12 +726,11 @@ class TestGraphFitConfigAdapter:
 
     def test_validate_onnx_export_less_config_warns(self, tmp_path, capsys):
         # a trainer config declaring no export contract keeps the all-preds
-        # fallback but says so — and --strict promotes it (the converted-config
-        # CI gate expects the contract to exist)
+        # fallback but says so — and --strict promotes it to an error
         import yaml
 
         config = yaml.safe_load(DUMMY_CFG.read_text())
-        config.pop("export")
+        del config["outputs"]["onnx_export"]
         no_export = tmp_path / "no_export.yaml"
         no_export.write_text(yaml.dump(config, sort_keys=False))
         flags = ["--set", "model.modules.norm.init_args.norm_dict=unused.yaml"]
@@ -840,16 +773,9 @@ class TestGraphFitConfigAdapter:
         assert "metric callback" in out
 
 
-# ===========================================================================
-# class_dict fan-out
-#
-# These exercise the --class_dict convenience flag on salt.main
-# (SaltCLI._fan_out_artifacts). Helpers/fixtures are wave1_*-prefixed to avoid
-# colliding with the CLI-surface ones above. norm_dict is NOT a fan-out flag —
-# it is the Normaliser module's own config (set on
-# model.modules.norm.init_args.norm_dict); the TestNormDictOnModule section at
-# the end pins that.
-# ===========================================================================
+# --class_dict fan-out (SaltCLI._fan_out_artifacts). Helpers are
+# fanout_*-prefixed. norm_dict is NOT a fan-out flag — it is the Normaliser
+# module's own config (pinned in TestNormDictOnModule).
 
 
 # the two classification tasks in gn2v2-opendata.yaml, both with weight_source unset
@@ -858,8 +784,8 @@ NORM_MODULE = "norm"
 
 
 @pytest.fixture(scope="module")
-def wave1_data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("wave1_fanout")
+def fanout_data(tmp_path_factory) -> dict[str, Path]:
+    base = tmp_path_factory.mktemp("fanout")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
     # a SECOND class dict, used to prove an explicit per-task weight_source is
@@ -880,24 +806,24 @@ def wave1_data(tmp_path_factory) -> dict[str, Path]:
     }
 
 
-def wave1_base_overrides(wave1_data) -> list[str]:
+def fanout_base_overrides(fanout_data) -> list[str]:
     """The gn2v2-opendata.yaml required path overrides MINUS the per-task weight_source."""
     return [
         "--config",
         str(DUMMY_CFG),
-        f"--data.train_file={wave1_data['h5']}",
-        f"--data.val_file={wave1_data['h5']}",
-        f"--data.modules.reader.init_args.schema={wave1_data['schema']}",
+        f"--data.train_file={fanout_data['h5']}",
+        f"--data.val_file={fanout_data['h5']}",
+        f"--data.modules.reader.init_args.schema={fanout_data['schema']}",
         # norm_dict is the Normaliser module's own config (its sole consumer):
         # always set it the module way, NOT via a top-level fan-out flag
-        f"--model.modules.{NORM_MODULE}.init_args.norm_dict={wave1_data['nd']}",
+        f"--model.modules.{NORM_MODULE}.init_args.norm_dict={fanout_data['nd']}",
         "--trainer.logger=false",  # opt out of the default-ON CometLogger
     ]
 
 
-def wave1_verbose_block(wave1_data) -> list[str]:
+def fanout_verbose_block(fanout_data) -> list[str]:
     """Today's verbose per-task weight_source override block (the form being retired)."""
-    cd = wave1_data["cd"]
+    cd = fanout_data["cd"]
 
     def ws_override(task: str) -> str:
         return f'--model.modules.{task}.init_args.weight_source={{"from_class_dict": "{cd}"}}'
@@ -908,124 +834,127 @@ def wave1_verbose_block(wave1_data) -> list[str]:
     ]
 
 
-def wave1_class_dict_flag(wave1_data) -> list[str]:
+def fanout_class_dict_flag(fanout_data) -> list[str]:
     """The one-flag form (``--class_dict``)."""
-    return [f"--class_dict={wave1_data['cd']}"]
+    return [f"--class_dict={fanout_data['cd']}"]
 
 
-def wave1_make_cli(wave1_data, extra: list[str]) -> SaltCLI:
-    return SaltCLI(args=[*wave1_base_overrides(wave1_data), *extra], run=False)
+def fanout_make_cli(fanout_data, extra: list[str]) -> SaltCLI:
+    return SaltCLI(args=[*fanout_base_overrides(fanout_data), *extra], run=False)
 
 
-def wave1_print_config(wave1_data, extra: list[str]) -> str:
+def fanout_print_config(fanout_data, extra: list[str]) -> str:
     """Capture the ``--print_config`` dump for the given override block."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), pytest.raises(SystemExit) as excinfo:
-        wave1_make_cli(wave1_data, [*extra, "--print_config"])
+        fanout_make_cli(fanout_data, [*extra, "--print_config"])
     assert excinfo.value.code == 0
     return buf.getvalue()
 
 
-# Gate (a) — --print_config byte-equality (--class_dict == verbose two-line)
+# --print_config byte-equality (--class_dict == verbose two-line)
 
 
 class TestPrintConfigByteEquality:
-    def test_model_block_byte_equal(self, wave1_data):
-        verbose = yaml.safe_load(wave1_print_config(wave1_data, wave1_verbose_block(wave1_data)))
-        one_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_class_dict_flag(wave1_data)))
+    def test_model_block_byte_equal(self, fanout_data):
+        verbose = yaml.safe_load(
+            fanout_print_config(fanout_data, fanout_verbose_block(fanout_data))
+        )
+        one_flag = yaml.safe_load(
+            fanout_print_config(fanout_data, fanout_class_dict_flag(fanout_data))
+        )
         # the whole assembled model block is byte-identical between the two forms
         # (norm_dict comes from the shared base overrides in both — module config)
         assert one_flag["model"] == verbose["model"]
 
-    def test_norm_dict_field_from_module_config(self, wave1_data):
+    def test_norm_dict_field_from_module_config(self, fanout_data):
         # norm_dict is NOT a fan-out flag: it rides on the module config supplied
-        # by wave1_base_overrides, identically for both the --class_dict and the
+        # by fanout_base_overrides, identically for both the --class_dict and the
         # verbose weight_source form
-        verbose = yaml.safe_load(wave1_print_config(wave1_data, wave1_verbose_block(wave1_data)))
-        one_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_class_dict_flag(wave1_data)))
+        verbose = yaml.safe_load(
+            fanout_print_config(fanout_data, fanout_verbose_block(fanout_data))
+        )
+        one_flag = yaml.safe_load(
+            fanout_print_config(fanout_data, fanout_class_dict_flag(fanout_data))
+        )
 
         def norm_path(cfg):
             return cfg["model"]["init_args"]["modules"][NORM_MODULE]["init_args"]["norm_dict"]
 
-        assert norm_path(one_flag) == norm_path(verbose) == str(wave1_data["nd"])
+        assert norm_path(one_flag) == norm_path(verbose) == str(fanout_data["nd"])
 
-    def test_weight_source_fields_equal(self, wave1_data):
-        verbose = yaml.safe_load(wave1_print_config(wave1_data, wave1_verbose_block(wave1_data)))
-        one_flag = yaml.safe_load(wave1_print_config(wave1_data, wave1_class_dict_flag(wave1_data)))
+    def test_weight_source_fields_equal(self, fanout_data):
+        verbose = yaml.safe_load(
+            fanout_print_config(fanout_data, fanout_verbose_block(fanout_data))
+        )
+        one_flag = yaml.safe_load(
+            fanout_print_config(fanout_data, fanout_class_dict_flag(fanout_data))
+        )
 
         def ws(cfg, task):
             return cfg["model"]["init_args"]["modules"][task]["init_args"]["weight_source"]
 
         for task in CLS_TASKS:
             assert ws(one_flag, task) == ws(verbose, task)
-            assert ws(one_flag, task) == {"from_class_dict": str(wave1_data["cd"])}
+            assert ws(one_flag, task) == {"from_class_dict": str(fanout_data["cd"])}
 
 
-# Gate (c) — the class_dict fan-out lands on the right tasks / leaves explicit
+# The class_dict fan-out lands on the right tasks / leaves explicit
 # ones alone (norm_dict, the module config, is covered in TestNormDictOnModule)
 
 
 class TestFanOutInstantiated:
-    def test_class_dict_lands_on_every_unset_task(self, wave1_data):
-        cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
+    def test_class_dict_lands_on_every_unset_task(self, fanout_data):
+        cli = fanout_make_cli(fanout_data, fanout_class_dict_flag(fanout_data))
         for task in CLS_TASKS:
             mod = cli.model.net[task]
             assert isinstance(mod, ClassificationTaskModule)
-            assert mod.weight_source == {"from_class_dict": str(wave1_data["cd"])}
+            assert mod.weight_source == {"from_class_dict": str(fanout_data["cd"])}
 
-    def test_class_dict_skips_non_classification_tasks(self, wave1_data):
+    def test_class_dict_skips_non_classification_tasks(self, fanout_data):
         # track_vertexing is a VertexingTaskModule, NOT a ClassificationTaskModule,
         # so --class_dict must NOT fan a weight_source onto it (the .endswith
         # ClassificationTaskModule suffix-match in _fan_out_artifacts). Pins the
         # negative case so a future broadening of the match (e.g. to "TaskModule")
         # would be caught here.
-        cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
+        cli = fanout_make_cli(fanout_data, fanout_class_dict_flag(fanout_data))
         vtx = cli.model.net["track_vertexing"]
         assert not isinstance(vtx, ClassificationTaskModule)
         assert getattr(vtx, "weight_source", None) is None
 
-    def test_explicit_weight_source_left_alone(self, wave1_data):
+    def test_explicit_weight_source_left_alone(self, fanout_data):
         # a task that ALREADY sets weight_source (here jets_classification, the
         # resume / saved-run-dir-config case) must NOT be overwritten by the
         # --class_dict fan-out; the other (unset) task still gets it.
-        cd_explicit = wave1_data["cd_explicit"]
+        cd_explicit = fanout_data["cd_explicit"]
         explicit_ws = (
             "--model.modules.jets_classification.init_args.weight_source="
             f'{{"from_class_dict": "{cd_explicit}"}}'
         )
-        cli = wave1_make_cli(wave1_data, [*wave1_class_dict_flag(wave1_data), explicit_ws])
+        cli = fanout_make_cli(fanout_data, [*fanout_class_dict_flag(fanout_data), explicit_ws])
         jets = cli.model.net["jets_classification"]
         track = cli.model.net["track_origin"]
         assert jets.weight_source == {"from_class_dict": str(cd_explicit)}  # untouched
-        assert track.weight_source == {"from_class_dict": str(wave1_data["cd"])}  # fanned out
+        assert track.weight_source == {"from_class_dict": str(fanout_data["cd"])}  # fanned out
 
-    def test_no_class_dict_is_a_noop(self, wave1_data):
+    def test_no_class_dict_is_a_noop(self, fanout_data):
         # with no --class_dict, an unset task stays unset (no accidental fan-out);
         # norm_dict supplied the module way still works (control that the fan-out
         # is purely additive on the --class_dict flag)
-        cli = wave1_make_cli(wave1_data, [])
+        cli = fanout_make_cli(fanout_data, [])
         for task in CLS_TASKS:
             assert cli.model.net[task].weight_source is None
         # norm_dict (module config from the base overrides) still landed
-        assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(wave1_data["nd"])
+        assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(fanout_data["nd"])
 
 
-# ===========================================================================
-# TOP-LEVEL `training_schedule:` config home
-#
-# The staged-training schedule is a config-surface peer of trainer:/data:/model:,
-# NOT nested under model.init_args. salt.main._relocate_training_schedule
-# injects the resolved top-level value into the SaltModule constructor arg before
-# instantiation (mirroring the --class_dict fan-out / --init_from hand-off), and
-# rejects the retired nested home fail-loud. DeepMergeParser deep-merges the
-# schedule per-stage-by-name across stacked configs. SaltModule internals,
-# checkpoint payloads, desugaring and the callback are unchanged.
-# ===========================================================================
+# top-level `training_schedule:` — a config-surface peer of trainer:/data:/
+# model:, injected into the SaltModule constructor arg before instantiation;
+# the nested model.init_args home is rejected fail-loud.
 
 
-# A structural twin of the study example config
-# (examples/finetune_gn3large.yaml): two stages — head warm-up (only the
-# classification head trainable, per-stage lrs override) then a full-network
+# structural twin of examples/finetune_gn3large.yaml: head warm-up (only the
+# classification head trainable, per-stage lrs override) then full-network
 # fine-tune (frozen: [] = everything trainable, epochs omitted = remainder).
 TOP_LEVEL_SCHEDULE_YAML = """
 training_schedule:
@@ -1077,9 +1006,8 @@ class StageCallbackProbe(Callback):
         self.stage_name = stage_name
 
 
-# a single-`fit`-stage schedule whose stage declares a scoped callback — the exact
-# nested {class_path, init_args} spec that crashed the real CLI. ``{out}`` is
-# formatted with a tmp path per test.
+# a single-`fit`-stage schedule whose stage declares a scoped callback.
+# ``{out}`` is formatted with a tmp path per test.
 STAGE_CALLBACK_YAML = """
 training_schedule:
   stages:
@@ -1181,7 +1109,7 @@ class TestTopLevelTrainingSchedule:
         assert getattr(cli.config.model.init_args, "training_schedule", None) is None
 
 
-# main.py callback auto-injection gate. The TrainingScheduleCallback is
+# main.py callback auto-injection. The TrainingScheduleCallback is
 # auto-added on `fit` iff the schedule is multi-stage or freezes anything;
 # never otherwise.
 class TestScheduleCallbackAutoInjection:
@@ -1213,26 +1141,22 @@ class TestScheduleCallbackAutoInjection:
         assembled = cli._maybe_add_schedule_callback([], [])  # noqa: SLF001
         assert not any(isinstance(cb, TrainingScheduleCallback) for cb in assembled)
 
-    def test_class_dict_only_requires_norm_dict_elsewhere(self, wave1_data):
+    def test_class_dict_only_requires_norm_dict_elsewhere(self, fanout_data):
         # --class_dict fans out to the tasks; norm_dict must still be supplied
         # (it is REQUIRED on the Normaliser) — here via the module config in the
         # base overrides, proving the two knobs are independent
-        cli = wave1_make_cli(wave1_data, wave1_class_dict_flag(wave1_data))
+        cli = fanout_make_cli(fanout_data, fanout_class_dict_flag(fanout_data))
         for task in CLS_TASKS:
-            assert cli.model.net[task].weight_source == {"from_class_dict": str(wave1_data["cd"])}
+            assert cli.model.net[task].weight_source == {"from_class_dict": str(fanout_data["cd"])}
 
 
-# stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI.
-# The feature was only ever gated by direct `SaltModule(...)` construction
-# (test_stage_callbacks.py); the YAML/CLI path crashed because jsonargparse
-# eager-instantiated the nested {class_path, init_args} spec before salt's own
-# validator saw the raw dict. These lock the CLI path: parse, fit-start
-# instantiation from the raw spec, and merge-config round-trip.
+# stage-scoped `training_schedule.stages.*.callbacks` through the REAL CLI:
+# jsonargparse must NOT eager-instantiate the nested {class_path, init_args}
+# spec (regression: it once did, crashing the CLI path).
 class TestStageCallbacksCLI:
     def test_stage_callback_reaches_model_as_raw_spec(self, data, tmp_path):
-        # the exact crash repro: a stage `callbacks:` entry on the real CLI.
-        # It must now parse and arrive at the model as a RAW spec dict, NOT an
-        # eager-instantiated object.
+        # a stage `callbacks:` entry must parse and arrive at the model as a
+        # RAW spec dict, NOT an eager-instantiated object.
         text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
         override = write_yaml(tmp_path, "sched_cb.yaml", text)
         cli = make_cli(data, extra=["--config", override])
@@ -1302,9 +1226,7 @@ class TestStageCallbacksCLI:
         assert (tmp_path / "merged_stage00_fit.dot").exists()
 
 
-# a two-stage schedule whose stages choose DIFFERENT scheduler classes — the same
-# nested {class_path, init_args} spec shape the fix protects (a scheduler can
-# never be eager-instantiated: it needs the stage optimizer, built at the boundary).
+# a two-stage schedule whose stages choose DIFFERENT scheduler classes.
 LR_SCHEDULER_YAML = """
 training_schedule:
   stages:
@@ -1321,9 +1243,9 @@ training_schedule:
 """
 
 
-# per-stage `lr_scheduler:` through the REAL CLI. The scheduler spec has the
-# same nested-class-spec shape that escaped CLI coverage; CLI gating is
-# mandatory.
+# per-stage `lr_scheduler:` through the REAL CLI (same nested-class-spec
+# shape; a scheduler can never be eager-instantiated — it needs the stage
+# optimizer, built at the boundary).
 class TestLRSchedulerCLI:
     def test_lr_scheduler_specs_reach_model_unparsed(self, data, tmp_path):
         from salt.schedule import LRSchedulerConfig
@@ -1373,33 +1295,32 @@ class TestLRSchedulerCLI:
 
 
 # norm_dict is the Normaliser module's OWN config (its sole consumer): set on
-# model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag. These
-# replace the retired --norm_dict fan-out tests.
+# model.modules.norm.init_args.norm_dict, NOT a top-level fan-out flag.
 
 
 class TestNormDictOnModule:
-    def test_norm_dict_from_module_config_lands_on_normaliser(self, wave1_data):
+    def test_norm_dict_from_module_config_lands_on_normaliser(self, fanout_data):
         # the module-config form (model.modules.norm.init_args.norm_dict, supplied
-        # by wave1_base_overrides) materialises on the instantiated Normaliser
-        cli = wave1_make_cli(wave1_data, [])
+        # by fanout_base_overrides) materialises on the instantiated Normaliser
+        cli = fanout_make_cli(fanout_data, [])
         assert isinstance(cli.model, SaltModule)
-        assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(wave1_data["nd"])
+        assert str(cli.model.net[NORM_MODULE].norm_dict_path) == str(fanout_data["nd"])
 
-    def test_norm_dict_does_not_touch_tasks(self, wave1_data):
+    def test_norm_dict_does_not_touch_tasks(self, fanout_data):
         # setting norm_dict on the module leaves the classification tasks'
         # weight_source untouched (norm_dict is module-local, not multi-task)
-        cli = wave1_make_cli(wave1_data, [])
+        cli = fanout_make_cli(fanout_data, [])
         for task in CLS_TASKS:
             assert cli.model.net[task].weight_source is None
 
-    def test_norm_dict_unknown_flag_is_rejected(self, wave1_data):
+    def test_norm_dict_unknown_flag_is_rejected(self, fanout_data):
         # the retired --norm_dict flag is now an unknown arg: the parser must
         # reject it (proves the top-level fan-out flag is gone, not silently
         # ignored). The norm_dict in base_overrides is dropped here so the only
         # norm_dict surface under test is the (now-invalid) flag.
-        bad_args = [a for a in wave1_base_overrides(wave1_data) if "norm_dict" not in a]
+        bad_args = [a for a in fanout_base_overrides(fanout_data) if "norm_dict" not in a]
         with pytest.raises(SystemExit):
-            SaltCLI(args=[*bad_args, f"--norm_dict={wave1_data['nd']}"], run=False)
+            SaltCLI(args=[*bad_args, f"--norm_dict={fanout_data['nd']}"], run=False)
 
 
 class TestInitFromCLI:
@@ -1425,7 +1346,7 @@ class TestInitFromCLI:
     def test_init_from_flag_is_registered(self, data, tmp_path):
         # the flag is accepted + parsed by the real CLI surface (registered like
         # --class_dict); the full model plumbing is covered by the integration
-        # gates (test_init_from.py).
+        # tests (test_init_from.py).
         fake = tmp_path / "fake.ckpt"
         cli = make_cli(data, extra=[f"--init_from={fake}"])
         assert str(cli.config.get("init_from")) == str(fake)

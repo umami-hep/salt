@@ -15,9 +15,8 @@ from salt.data.processors.multi_target import _OPERATORS
 from salt.data.readers.expressions import Aggregation, parse_expression
 from salt.graph.errors import ConfigError
 
-__all__ = ["ConstituentCuts", "Cut", "CutSpec", "GlobalObjectCuts"]
+__all__ = ["ConstituentCuts", "Cut", "GlobalObjectCuts"]
 
-_ON_FAIL = ("mask", "drop")
 VALID_FIELD = "valid"
 """The per-constituent validity field every jagged stream carries."""
 
@@ -334,10 +333,6 @@ class GlobalObjectCuts:
         return tuple(seen.values())
 
 
-CutSpec = GlobalObjectCuts
-"""Deprecated alias kept so pre-rename ``cuts:`` config/class paths keep resolving."""
-
-
 @dataclass(frozen=True)
 class ConstituentCuts:
     """Per-stream constituent cuts with explicit failure semantics.
@@ -372,9 +367,9 @@ class ConstituentCuts:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cuts", _parse_cuts(tuple(self.cuts), "ConstituentCuts.cuts"))
-        if self.on_fail not in _ON_FAIL:
+        if self.on_fail not in {"mask", "drop"}:
             raise ConfigError(
-                f"ConstituentCuts: on_fail must be set explicitly to one of {list(_ON_FAIL)}, "
+                f"ConstituentCuts: on_fail must be set explicitly to one of ['mask', 'drop'], "
                 f"got {self.on_fail!r} — 'mask' blanks a failing constituent in place, 'drop' "
                 "removes it and re-pads"
             )

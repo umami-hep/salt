@@ -6,7 +6,7 @@ import torch
 from torch import Tensor, nn
 
 from salt.graph.errors import ConfigError
-from salt.graph.spec import _UNNAMED
+from salt.graph.spec import UNNAMED
 from salt.model.nn.dense import Dense, _reject_width_keys
 
 _FEATUREWISE_LAYERS: frozenset[str] = frozenset({"input", "encoder", "global"})
@@ -33,7 +33,7 @@ class FeaturewiseTransformation(nn.Module):
         apply_norm: bool = False,
     ) -> None:
         super().__init__()
-        self.name = _UNNAMED
+        self.name = UNNAMED
         if layer not in _FEATUREWISE_LAYERS:
             raise ConfigError(
                 f"FeaturewiseTransformation: layer must be one of {sorted(_FEATUREWISE_LAYERS)}, "

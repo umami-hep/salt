@@ -1,0 +1,3 @@
+# NO_FIXTURE: no super_tracks stream in write_dummy_file
+config: legacy/Dipz.yaml
+fit: false

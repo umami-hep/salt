@@ -1,0 +1,2 @@
+config: readers/easyjet_events.yaml
+fragment: paired

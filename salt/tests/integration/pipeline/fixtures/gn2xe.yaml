@@ -1,0 +1,3 @@
+# NO_FIXTURE: config truncates tracks to 100; the fixture writes 40
+config: GN2/GN2XE.yaml
+fit: false

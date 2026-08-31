@@ -1,12 +1,9 @@
-"""Exception hierarchy for the salt v2 graph kernel.
-
-Planner-stage errors (connectivity, config, cycles, ...) are appended to this
-module by the planner stage — see the anchor comment at the bottom.
-"""
+"""Exception hierarchy for the salt v2 graph kernel."""
 
 from __future__ import annotations
 
 __all__ = [
+    "SUGGESTION_CUTOFF",
     "AllModesDeadError",
     "ConfigError",
     "ConnectivityError",
@@ -21,7 +18,7 @@ __all__ = [
     "UndeclaredAccessError",
 ]
 
-_SUGGESTION_CUTOFF = 0.5
+SUGGESTION_CUTOFF = 0.5
 """`difflib.get_close_matches` cutoff for did-you-mean suggestions in error messages."""
 
 
@@ -45,7 +42,7 @@ class DeclarationError(GraphError):
     """
 
 
-# planner-stage errors appended below
+# planner errors
 
 
 class ConfigError(GraphError):
@@ -109,7 +106,7 @@ class SchemaError(GraphError):
     """
 
 
-# executor-stage errors
+# executor errors
 
 
 class UndeclaredAccessError(GraphError):

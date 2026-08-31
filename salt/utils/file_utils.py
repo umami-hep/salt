@@ -20,7 +20,7 @@ try:
 except ImportError:
     _boto3 = None
 
-from salt.logging import get_logger
+from salt.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
 
@@ -200,7 +200,6 @@ def setup_S3_CLI(sc_data: dict) -> dict:
     Similar to :func:`import_data_S3`, but operates directly on an in-memory
     ``data`` configuration dictionary containing a ``config_s3`` section.
     """
-    """Setting up salt to use S3."""
     config_s3 = sc_data["config_s3"]
     os.environ["AWS_ACCESS_KEY_ID"] = config_s3["pubKey"]
     os.environ["AWS_SECRET_ACCESS_KEY"] = config_s3["secKey"]
@@ -247,7 +246,6 @@ def require_S3(path: Path | str) -> bool:
 
 def require_S3_CLI(config_s3: dict | None) -> bool:
     """Return whether S3 is required: ``config_s3`` sets ``use_S3`` or ``download_S3``."""
-    """Checking whether salt requires s3."""
     if config_s3 is None:
         return False
     if config_s3.get("use_S3"):

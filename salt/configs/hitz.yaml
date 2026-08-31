@@ -77,12 +77,13 @@ outputs:
   run_tasks:
     class_path: salt.outputs.RunTaskOutput
     init_args: {tasks: [gaussian_regression]}
-
-export:
-  model_name: Hitz # Athena name: no '_'/'-'
-  inputs:
-    - {port: inputs.jets, name: jet_features}
-    - {port: inputs.hits, name: hit_features, sequence: true, dyn_axis: n_hits}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: Hitz # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.hits, name: hit_features, sequence: true, dyn_axis: n_hits}
 
 trainer:
   max_epochs: 100

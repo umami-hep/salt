@@ -1,0 +1,19 @@
+# do_onnx=True (§7 resolution): "no gaussian handling" was a stale
+# docstring claim, not a property of check_onnx — see check.py.
+config: regression/regression_gaussian.yaml
+eval:
+  expected_outputs:
+    jets:
+      - regression_gaussian_HadronConeExclTruthLabelPt
+      - regression_gaussian_HadronConeExclTruthLabelPt_stddev
+      - target_gaussian_regression_HadronConeExclTruthLabelPt
+    tracks:
+      - regression_gaussian_dummyOutput_dPhi
+      - regression_gaussian_dummyOutput_dPhi_stddev
+      - target_gaussian_regression_no_global_object_dphi
+onnx:
+  expected_outputs:
+    - regressionGaussian_HadronConeExclTruthLabelPt
+    - regressionGaussian_HadronConeExclTruthLabelPt_stddev
+    - regressionGaussian_dummyOutput_dPhi
+    - regressionGaussian_dummyOutput_dPhi_stddev

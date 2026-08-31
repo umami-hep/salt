@@ -95,7 +95,7 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false, truncate: 40}
+          tracks: {global_object: false, pad_max: 40}
     features:
       class_path: salt.data.Features
       init_args:
@@ -161,10 +161,9 @@ trainer:
   precision: 32-true
 ```
 
-(the full 19-variable track list and the `export:` ONNX-input block — this
-shipped config still uses the deprecated top-level alias, see
-[Export to ONNX](../deployment/export.md) — are elided here for length; see
-the shipped file for the complete config.)
+(the full 19-variable track list and the `onnx_export` sink's ONNX-input block
+— see [Export to ONNX](../deployment/export.md) — are elided here for length;
+see the shipped file for the complete config.)
 
 ### What each piece is doing
 
@@ -174,8 +173,9 @@ the shipped file for the complete config.)
   keys.
 - **`reader`** (`H5StructuredReader`) — reads the pre-processed UPP-format H5:
   `jets` is `global_object: true` (one row per jet, like part 3's `event`
-  stream), `tracks` is a padded sequence (`truncate: 40`), matching v1's track
-  cap.
+  stream), `tracks` is a padded sequence (`pad_max: 40` — sequences shorter
+  than 40 are padded up to 40, longer ones truncated down to 40), matching
+  v1's track cap.
 - **`norm`** (`Normaliser`, not `MaskedInputNormaliser`) — this dataset ships
   a precomputed `norm_dict.yaml` (means/stds from the *training* set only), so
   the config uses the fixed-dict normaliser, not the self-normalising one from
@@ -548,8 +548,7 @@ truth selection from either file is valid for both.
 
 To run your tagger in Athena it has to be exported to
 [ONNX](https://onnxruntime.ai/). The export set is not a separate
-configuration — it comes from the export sink's `inputs:` (still the
-deprecated top-level `export:` block in this shipped config, see
+configuration — it comes from the `onnx_export` sink's `inputs:` (see
 [Export to ONNX](../deployment/export.md)) plus the `outputs:` section you
 already have, so the eval columns and the Athena outputs cannot drift apart.
 
@@ -580,9 +579,7 @@ file), alongside `plan_onnx.txt` — the rendered ONNX plan and output manifest.
 
 `--name` sets the prefix on every ONNX output (Athena forbids `_` and `-` in
 it), so `--name GN2vXX` gives `GN2vXX_pb`, `GN2vXX_pc`, `GN2vXX_pu`. It
-overrides `model_name` in the config, wherever it is declared — the export
-sink's `init_args`, or (as in this shipped config) the deprecated top-level
-`export:` block.
+overrides `model_name` set on the export sink's `init_args`.
 
 !!! info "The torch-vs-ONNX check runs automatically"
 

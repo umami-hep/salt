@@ -22,14 +22,6 @@ _MODULE_DICT_NULL = re.compile(
     r"^--(?P<parent>model\.(?:init_args\.)?modules)\.(?P<key>[\w-]+)=(?:null|None)$"
 )
 
-# the top-level staged-training schedule key (kept in sync with
-# salt.main._TRAINING_SCHEDULE_ARG; duplicated here to avoid a parser<->main
-# import cycle at module load). Its nested {stages: {name: {...}}} content needs a
-# RECURSIVE deep-merge across stacked config files — the shallow dict-leaf union
-# below would replace the whole `stages` dict wholesale (plain dict[str, Any] has
-# no per-entry subclass adapter), losing D1's per-stage-by-name merge.
-_TRAINING_SCHEDULE_KEY = "training_schedule"
-
 
 def _extract_schedule_cli_overrides(
     args: list[Any],
@@ -46,7 +38,7 @@ def _extract_schedule_cli_overrides(
     through untouched. Returns the remaining args plus ``(dotted_path, raw_value)``
     pairs.
     """
-    prefix = f"--{_TRAINING_SCHEDULE_KEY}."
+    prefix = "--training_schedule."
     kept: list[Any] = []
     overrides: list[tuple[str, Any]] = []
     i = 0
@@ -84,9 +76,6 @@ def _deep_merge_dicts(base: dict[str, Any], over: dict[str, Any]) -> dict[str, A
     return merged
 
 
-_CONFIG_FLAGS = ("--config", "-c")
-
-
 def _expand_config_includes(args: list[Any]) -> list[Any]:
     """Rewrite every ``--config``/``-c`` value to its include-expanded form.
 
@@ -94,7 +83,7 @@ def _expand_config_includes(args: list[Any]) -> list[Any]:
     before jsonargparse reads the file. Configs without includes are passed
     through untouched.
     """
-    from salt.config_utils import (
+    from salt.utils.config_utils import (
         expand_includes,
     )  # local import: avoids a parser<->config_utils cycle
 
@@ -107,7 +96,7 @@ def _expand_config_includes(args: list[Any]) -> list[Any]:
             continue
         expect_value = False
         if isinstance(arg, str):
-            if arg in _CONFIG_FLAGS:
+            if arg in {"--config", "-c"}:
                 expect_value = True
             elif arg.startswith("--config="):
                 out.append("--config=" + expand_includes(arg.split("=", 1)[1]))
@@ -144,9 +133,11 @@ class DeepMergeParser(LightningArgumentParser):
                 continue
             val_to = cfg_to.get(key)
             if isinstance(val_to, dict):
+                # training_schedule's nested {stages: {name: {...}}} needs a
+                # RECURSIVE merge — a shallow union would replace `stages` wholesale
                 cfg_from[key] = (
                     _deep_merge_dicts(val_to, val_from)
-                    if key == _TRAINING_SCHEDULE_KEY
+                    if key == "training_schedule"
                     else {**val_to, **val_from}
                 )
         return super().merge_config(cfg_from, cfg_to)

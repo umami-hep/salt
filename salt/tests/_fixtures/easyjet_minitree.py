@@ -144,3 +144,53 @@ def write_sourced_fragment(raw: dict, out: Path, files: dict[str, Path]) -> Path
     out = Path(out)
     out.write_text(yaml.safe_dump(raw, sort_keys=False))
     return out
+
+
+def write_standalone_source_fragment(out: Path, path: Path, reader_node: dict) -> Path:
+    """A ``--config``-stackable overlay pointing a STANDALONE reader-owning
+    config's own reader at ``path`` directly, alongside the datamodule's
+    ``train_file``/``val_file`` (same value).
+
+    For a config with its OWN complete reader block (unlike
+    ``write_sourced_fragment``'s ``samples:``-list case, where the fragment
+    IS the reader) — e.g. ``readers/easyjet_flavour.yaml``. A plain
+    ``--data.train_file=``/``--data.modules.reader.init_args.filename=``
+    override is an OVERRIDE_ARGV element (``test_pipeline._expand_train_args``
+    classifies anything not starting with ``"--config "`` there), discarded by
+    the compile+plot floor leg's static, run-free ``graph validate``/``graph
+    plot`` (``test_pipeline.run_compile_plot`` retains only ``config_argv``).
+    That leg calls ``.prepare()`` on the reader PROTOTYPE directly — bypassing
+    the ``InputSamples``/``SaltDataModule.setup()`` dynamic binding the fit leg
+    goes through — so it needs the filename already resolved IN THE CONFIG
+    (pipeline #15651154, item 1; same reasoning as ``write_sourced_fragment``'s
+    ``filename`` poke above).
+
+    ``reader_node`` MUST be the row's own FULL, EXPANDED ``data.modules.reader``
+    node (``class_path`` + ``init_args``), not a bare ``init_args`` dict — a
+    partial ``{"init_args": {"filename": ...}}`` overlay with no ``class_path``
+    is what ``write_sourced_fragment`` never does either (it always mutates a
+    full ``reader`` node, class_path included). jsonargparse's subclass-typed
+    ``reader:`` field validates a LATER config's ``reader:`` value as a whole
+    replacement Namespace, not a key-by-key patch onto the init_args dict —
+    without ``class_path`` it rejects the value outright ("Expected a
+    <class 'dict'> ... Given value: {'init_args': {'filename': ...}}",
+    pipeline #15651451 item 1). Passing the full node (with class_path) and
+    only editing its ``init_args.filename`` matches the WORKING pattern
+    byte-for-byte.
+    """
+    import yaml
+
+    reader_node = dict(reader_node)
+    init_args = dict(reader_node.get("init_args") or {})
+    init_args["filename"] = str(path)
+    reader_node["init_args"] = init_args
+    overlay = {
+        "data": {
+            "train_file": str(path),
+            "val_file": str(path),
+            "modules": {"reader": reader_node},
+        }
+    }
+    out = Path(out)
+    out.write_text(yaml.safe_dump(overlay, sort_keys=False))
+    return out

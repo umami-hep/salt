@@ -85,18 +85,22 @@ FIXTURE_VARIABLES: dict[str, Any] = {
     }
 }
 
-# The head shape the committed output goldens are anchored to: a 3-class
-# flavour head and a track_vertexing deferred out of TEST. The shipped config
-# carries 4 classes (it has taujets) and exposes vertexing everywhere, so
-# without this the H5 column table and ONNX tuple would both move and every
-# golden would have to be recaptured. The goldens are an oracle for the outputs
-# MACHINERY, not for a shipped model, so their subject is pinned here and the
-# shipped config stays free to change.
+# The head shape the curated EXPECTED_OUTPUTS table (salt/tests/integration/
+# pipeline/test_pipeline.py) is anchored to: a 3-class flavour head and a
+# track_vertexing deferred out of TEST. The shipped config carries 4 classes
+# (it has taujets) and exposes vertexing everywhere, so without this the H5
+# column table and ONNX tuple would both move and EXPECTED_OUTPUTS's curated
+# entries would drift from what these fixture configs actually produce.
+# EXPECTED_OUTPUTS is an oracle for the outputs MACHINERY, not for a shipped
+# model, so their subject is pinned here and the shipped config stays free to
+# change.
 GOLDEN_HEADS: dict[str, Any] = {
     # H5 column prefixes and ONNX output names are both derived from the run
     # name, so reproducing the goldens means pinning it too.
     "name": "GN2v2_dummy",
-    "export": {"model_name": "GN2v2dummy"},
+    # the shipped config's onnx_export sink carries model_name: GN2v2opendata;
+    # override to match the dummy run name (sanitised: GN2v2_dummy -> GN2v2dummy).
+    "outputs": {"onnx_export": {"init_args": {"model_name": "GN2v2dummy"}}},
     "model": {
         "init_args": {
             "modules": {
@@ -254,7 +258,11 @@ def h5_only_config() -> Path:
                 "jets_out": {
                     "class_path": "salt.outputs.RunTaskOutput",
                     "init_args": {"modes": ["test"]},
-                }
+                },
+                # every writer is test-only above, so no ONNX leaf is minted;
+                # null the shipped config's inherited sink too, or a
+                # zero-leaf OnnxExportSink would contradict "no ONNX tuple".
+                "onnx_export": None,
             }
         },
     )

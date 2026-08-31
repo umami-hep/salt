@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any, Literal, NoReturn, TypeAlias
 
 from salt.graph.errors import (
-    _SUGGESTION_CUTOFF,
+    SUGGESTION_CUTOFF,
     AllModesDeadError,
     ConfigError,
     ConnectivityError,
@@ -60,17 +60,11 @@ __all__ = [
     "deadcode",
 ]
 
-SOURCES = "<sources>"
-"""Edge producer sentinel: the key is provided a priori by the framework."""
-
-SINKS = "<sinks>"
-"""Edge consumer sentinel: the key is demanded by a sink (writer/export/loss boundary)."""
+SOURCES = "<sources>"  # edge producer sentinel: key provided a priori by the framework
+SINKS = "<sinks>"  # edge consumer sentinel: key demanded by a sink
 
 Sinks: TypeAlias = "Iterable[str] | Mapping[Mode, Iterable[str]] | None"
 """Sink keys: flat iterable (compiled mode only) or per-mode mapping."""
-
-_MAX_SHOWN_KEYS = 12
-
 
 # ---------------------------------------------------------------------------
 # public dataclasses
@@ -149,16 +143,11 @@ class DeadOutput:
 
     `key` is the dead produced key, or ``"*"`` when the whole module was
     demand-pruned; `module` may be the `SOURCES` sentinel for unconsumed
-    source leaves. `severity` classifies the finding: an unconsumed
-    ``preds.*`` port in TEST mode is an ``"error"`` by default (predictions
-    silently vanishing from eval files); an unconsumed ``preds.*`` port in
-    FIT/VAL is ``"info"`` (the normal case of no configured metric callback;
-    never promoted by ``--strict``), as is a module pruned from the ONNX plan
-    (the ONNX sinks are the writer-declared manifest ports, and an export
-    surface narrower than eval is legitimate by design, so
-    ``--strict --mode onnx`` stays usable on narrowed configs); everything
-    else is a ``"warning"``. The CLI exits non-zero on any error-level
-    finding.
+    source leaves. Severity: unconsumed ``preds.*`` in TEST is ``"error"``
+    (a prediction silently vanishing from eval files); ``preds.*`` in
+    FIT/VAL and modules pruned from the ONNX plan are ``"info"`` (expected,
+    never promoted by ``--strict``); everything else is ``"warning"``. The
+    CLI exits non-zero on any error-level finding.
     """
 
     module: str
@@ -289,16 +278,10 @@ def deadcode(
     Unlike `compile_plan`, a module dead in every mode is reported, not
     raised — but connectivity/cycle errors still raise.
 
-    Severity: unconsumed ``preds.*`` in TEST is ``"error"`` (a computed
-    prediction with no writer); in FIT/VAL, or a module pruned in ONNX
-    mode, it's ``"info"`` (expected — no metric callback, or an
-    intentionally narrower export surface); everything else is
-    ``"warning"``. The per-task ``expose:`` opt-out gates ports out of a
-    mode before this runs, so an opted-out ``preds.*`` prunes its module
-    (warning) rather than hitting the TEST error.
-
-    Returns deterministically ordered findings; empty when everything is
-    consumed.
+    Severity is per `DeadOutput`. The per-task ``expose:`` opt-out gates
+    ports out of a mode before this runs, so an opted-out ``preds.*`` prunes
+    its module (warning) rather than hitting the TEST error. Returns
+    deterministically ordered findings; empty when everything is consumed.
     """
     _check_primary_mode(mode)
     if sinks is not None and not isinstance(sinks, Mapping):
@@ -307,23 +290,16 @@ def deadcode(
     consumed: dict[str, set[str]] = {}
     for edge in res.edges:
         consumed.setdefault(edge.producer, set()).add(edge.key)
-    # ONNX-mode pruning is the writer-manifest narrowing story: the export
-    # surface is explicitly declared and may legitimately be narrower than
-    # eval — info-level, never promoted by --strict. All other modes keep
-    # the warning default.
+    # ONNX export surface is writer-declared and may legitimately be
+    # narrower than eval — info-level, never promoted by --strict
     pruned_suffix = (
         " (narrowed out of the writer-declared export surface — legitimate)"
         if mode == Mode.ONNX
         else ""
     )
-    # A CONVERSION PRODUCER (a salt.outputs node producing an
-    # ``outputs.*`` leaf — ClassProbs/SeqClassIndex/etc.)
-    # that prunes in a non-ONNX mode is the by-design export-pruning story:
-    # its OnnxExportSink (or an H5OutputSink) is inactive in that mode, so
-    # the node has no sink and prunes legitimately. Demote it to info
-    # (never --strict-promoted), exactly like the ONNX-narrowing case — a
-    # config carrying ONNX export nodes must still pass
-    # `salt graph validate --strict --mode test`.
+    # a conversion producer (salt.outputs node) pruned in a non-ONNX mode is
+    # by design (its export sink is inactive there) — demote to info so
+    # configs carrying ONNX nodes still pass --strict --mode test
 
     def _is_conversion_producer(name: str) -> bool:
         return isinstance(getattr(modules.get(name), "output_key", None), str)
@@ -552,10 +528,8 @@ def _collect_nodes(
                 "must match their config keys"
             )
         io = face.getter(module)
-        # framework-internal seam for "only framework-shipped producers may
-        # declare patterns": the attribute is not user API. TODO: bind
-        # the capability to shipped code (module-path check or a framework
-        # registry) so user classes cannot grant it to themselves.
+        # framework-internal seam, not user API. TODO: bind the capability to
+        # shipped code so user classes cannot grant it to themselves.
         allow_wildcards = bool(getattr(module, "allow_wildcards", False))
         requires: dict[str, Any] = {}
         produces: dict[str, Any] = {}
@@ -684,7 +658,7 @@ def _narrow_wildcards(
                     consumers = ", ".join(
                         _describe_consumer(c, key, sink_origins) for c in demand[key]
                     )
-                    near = get_close_matches(key, sorted(schema), n=3, cutoff=_SUGGESTION_CUTOFF)
+                    near = get_close_matches(key, sorted(schema), n=3, cutoff=SUGGESTION_CUTOFF)
                     hint = f"\n  nearest schema keys: {', '.join(near)}" if near else ""
                     raise ConnectivityError(
                         f"[mode={mode.name}] key {key!r} (demanded by {consumers}) is not in "
@@ -1078,11 +1052,11 @@ def _raise_missing_producer(
         fix = f"fix: correct the require in module {consumer!r}, or add a module producing {key!r}"
     lines = [head]
     available = sorted(producer_of)
-    near = get_close_matches(key, available, n=3, cutoff=_SUGGESTION_CUTOFF)
+    near = get_close_matches(key, available, n=3, cutoff=SUGGESTION_CUTOFF)
     if near:
         lines.append(f"  did you mean: {', '.join(repr(k) for k in near)}?")
     if available:
-        shown = available[:_MAX_SHOWN_KEYS]
+        shown = available[:12]
         more = f" (+{len(available) - len(shown)} more)" if len(available) > len(shown) else ""
         lines.append(f"  available keys: {', '.join(shown)}{more}")
     lines.extend(f"  {note}" for note in _other_mode_producers(modules, sources, key, mode))

@@ -13,7 +13,9 @@ __all__ = [
     "IO",
     "KEY_SEP",
     "KINDS",
+    "OBJECT_STREAM",
     "PRIMARY_MODES",
+    "UNNAMED",
     "GraphModule",
     "Kind",
     "Mode",
@@ -32,7 +34,6 @@ __all__ = [
 ]
 
 KEY_SEP = "."
-"""Separator for dotted bundle keys."""
 
 
 class Mode(Flag):
@@ -47,13 +48,11 @@ class Mode(Flag):
 
 
 PRIMARY_MODES: tuple[Mode, ...] = (Mode.FIT, Mode.VAL, Mode.TEST, Mode.ONNX)
-"""The four atomic modes, in canonical order (composites excluded)."""
 
 Kind: TypeAlias = Literal["data", "pad_mask", "label", "loss", "meta"]
 """Port kinds: a consumer port can only bind a producer leaf of the same kind."""
 
 KINDS: tuple[Kind, ...] = get_args(Kind)
-"""All valid `Kind` values, for runtime validation."""
 
 
 # ---------------------------------------------------------------------------
@@ -138,13 +137,10 @@ def join_key(parts: tuple[str, ...] | list[str]) -> str:
 # wildcard key patterns (shared by planner, CLI, renderer, SaltModule)
 # ---------------------------------------------------------------------------
 
-_WILDCARD_PARTS = frozenset({"*", "**"})
-"""Wildcard key components: ``"*"`` matches exactly one component, ``"**"`` one or more."""
-
 
 def _has_wildcard(key: str) -> bool:
     """Check whether a dotted key contains a wildcard component (``"*"`` or ``"**"``)."""
-    return any(part in _WILDCARD_PARTS for part in key.split(KEY_SEP))
+    return any(part in {"*", "**"} for part in key.split(KEY_SEP))
 
 
 def _pattern_matches(pattern: str, key: str) -> bool:
@@ -405,11 +401,11 @@ class IO:
         flatten_spec(self.produces)
 
 
-_UNNAMED = "unnamed"
+UNNAMED = "unnamed"
 """Placeholder `GraphModule.name` — the instance name (the config dict key) is
 assigned before compile."""
 
-_OBJECT_STREAM = "objects"
+OBJECT_STREAM = "objects"
 """The maskformer object-stream key component — the ``labels.objects.*`` /
 ``matched.objects.*`` contract shared by the data-side target builder
 (`salt.data.processors.maskformer_targets`) and the nn-side matched loss
@@ -436,22 +432,14 @@ class GraphModule(Protocol):
 class SinkModule(Protocol):
     """A terminal sink node: stays in `plan.steps` for render/demand, but is not a forward.
 
-    A sink is a `GraphModule` (it carries `name` + `declare_io`) whose
-    ``declare_io`` produces nothing — it is a terminal CONSUMER of
-    ``outputs.*`` that finalises a side effect (an H5 file, the ONNX output
-    tuple), not a per-batch tensor producer. The planner keeps it in the
-    plan (so it renders its own card and anchors demand), but `Executor`
-    excludes it from the per-batch forward + write-once merge loop: a sink
-    produces no tensor and is not invoked as a callable. This is the
-    inverse of the setup-only partition
-    (`salt.data.datamodule._is_setup_only`), which removes setup
-    modules from the per-batch plan entirely — a sink stays IN the plan.
-
-    The marker is the ``is_sink()`` method returning ``True`` (duck-typed,
-    runtime-checkable): `Executor.__init__` partitions plan steps into
-    forward steps vs sink steps by it. The lifecycle
-    (``consume``/``flush``) is driven by the generated Lightning bridge,
-    not by the executor.
+    A sink is a `GraphModule` whose ``declare_io`` produces nothing — a
+    terminal CONSUMER of ``outputs.*`` that finalises a side effect (an H5
+    file, the ONNX output tuple). The planner keeps it in the plan (it
+    renders its own card and anchors demand) but `Executor` excludes it from
+    the per-batch forward loop: it produces no tensor and need not be
+    callable. The marker is ``is_sink()`` returning ``True`` (duck-typed);
+    the ``consume``/``flush`` lifecycle is driven by the generated Lightning
+    bridge, not the executor.
     """
 
     name: str

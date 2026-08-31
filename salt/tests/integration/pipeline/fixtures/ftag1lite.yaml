@@ -1,0 +1,2 @@
+config: readers/ftag1lite.yaml
+fragment: included

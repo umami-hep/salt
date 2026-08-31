@@ -30,10 +30,10 @@
 # a 13.x (580+) driver on the *host*. Every lxplus GPU node was measured on
 # 2026-08-02 to run driver 13.0 or 13.3, so lxplus is fine. CERN's k8s-gpu CI
 # fleet has NOT been re-checked — an older note here claimed 570.x/CUDA 12.8,
-# which if still true means a T2B image cannot run the `gpu-smoke` CI job
-# ("driver too old"). That is why `gpu-smoke` in .gitlab/.ci-test.yaml stays
-# pinned to the V2H (cu126) image, which runs on any 12.8-or-newer driver via
-# minor-version compatibility.
+# which if still true means a T2B image cannot run the `integration-gpu`
+# CI job ("driver too old"). That is why `integration-gpu` in
+# .gitlab/.ci-test.yaml stays pinned to the V2H (cu126) image, which runs on
+# any 12.8-or-newer driver via minor-version compatibility.
 ARG CUDA_IMAGE=nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
 FROM ${CUDA_IMAGE}
 

@@ -14,7 +14,9 @@ default:
 stages:
   - lint
   - builds
-  - tests
+  - unit-tests
+  - per-config
+  - tests-gpu
   - coverage
   - docs
   - publish

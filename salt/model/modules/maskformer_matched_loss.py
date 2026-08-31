@@ -15,8 +15,8 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import (
-    _OBJECT_STREAM,
     IO,
+    OBJECT_STREAM,
     Mode,
     TensorSpec,
     sym_dim,
@@ -46,9 +46,9 @@ class MaskFormerMatchedLoss(SaltModelModule):
     num_classes : int
         The number of non-null object classes. The null/no-object class index is
         ``num_classes``. MUST equal the decoder's ``class_net.output_size - 1``.
-    num_objects : int
+    num_queries : int
         The number of object queries ``M``. Must equal the decoder's
-        ``num_objects`` and the truth-object slot count. MUST be >= 1.
+        ``num_queries`` and the truth-object slot count. MUST be >= 1.
     loss_weights : Mapping[str, float]
         Per-component loss weights; keys among ``object_class_ce``, ``mask_dice``,
         ``mask_focal``, ``mask_ce``, ``regression``. A component is produced only
@@ -76,7 +76,7 @@ class MaskFormerMatchedLoss(SaltModelModule):
     def __init__(
         self,
         num_classes: int,
-        num_objects: int,
+        num_queries: int,
         loss_weights: Mapping[str, float],
         matcher_weights: Mapping[str, float] | None = None,
         null_class_weight: float = 0.5,
@@ -89,13 +89,13 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 f"MaskFormerMatchedLoss: num_classes (non-null classes) must be >= 1, got "
                 f"{num_classes}"
             )
-        if num_objects < 1:
+        if num_queries < 1:
             raise ConfigError(
-                f"MaskFormerMatchedLoss: num_objects (query count M) must be >= 1, got "
-                f"{num_objects}"
+                f"MaskFormerMatchedLoss: num_queries (query count M) must be >= 1, got "
+                f"{num_queries}"
             )
         self.num_classes = num_classes
-        self.num_objects = num_objects
+        self.num_queries = num_queries
         self.input_stream = input_stream
 
         self.loss_weights = {k: float(v) for k, v in dict(loss_weights).items()}
@@ -142,7 +142,7 @@ class MaskFormerMatchedLoss(SaltModelModule):
         # composes the HungarianMatcher + empty_weight buffer + loss_labels/loss_masks
         self.v1_loss = MaskFormerLoss(
             num_classes=num_classes,
-            num_objects=num_objects,
+            num_objects=num_queries,
             loss_weights=self.loss_weights,
             matcher_weights=self.matcher_weights,
             null_class_weight=self.null_class_weight,
@@ -167,7 +167,7 @@ class MaskFormerMatchedLoss(SaltModelModule):
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
 
-        m = self.num_objects
+        m = self.num_queries
         tok = sym_dim("T", self.name)
         emb = sym_dim("E", self.name)
         n_classes = self.num_classes + 1
@@ -181,10 +181,10 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 shape=("B", m, n_classes), dtype="float32", modes=f
             ),
             f"{self.input_stream}.masks": TensorSpec(shape=("B", m, tok), dtype="float32", modes=f),
-            f"labels.{_OBJECT_STREAM}.object_class": TensorSpec(
+            f"labels.{OBJECT_STREAM}.object_class": TensorSpec(
                 shape=("B", m), dtype="int64", kind="label", modes=f
             ),
-            f"labels.{_OBJECT_STREAM}.masks": TensorSpec(
+            f"labels.{OBJECT_STREAM}.masks": TensorSpec(
                 shape=("B", m, tok), dtype="bool", kind="label", modes=f
             ),
         }
@@ -194,22 +194,22 @@ class MaskFormerMatchedLoss(SaltModelModule):
             requires[self._reg_tgt_key()] = TensorSpec(shape=("B", m, r), dtype="float32", modes=f)
 
         produces: dict[str, TensorSpec] = {
-            f"matched.{_OBJECT_STREAM}.embed": TensorSpec(
+            f"matched.{OBJECT_STREAM}.embed": TensorSpec(
                 shape=("B", m, emb), dtype="float32", modes=f
             ),
-            f"matched.{_OBJECT_STREAM}.class_logits": TensorSpec(
+            f"matched.{OBJECT_STREAM}.class_logits": TensorSpec(
                 shape=("B", m, n_classes), dtype="float32", modes=f
             ),
-            f"matched.{_OBJECT_STREAM}.class_probs": TensorSpec(
+            f"matched.{OBJECT_STREAM}.class_probs": TensorSpec(
                 shape=("B", m, n_classes), dtype="float32", modes=f
             ),
-            f"matched.{_OBJECT_STREAM}.masks": TensorSpec(
+            f"matched.{OBJECT_STREAM}.masks": TensorSpec(
                 shape=("B", m, tok), dtype="float32", modes=f
             ),
-            f"matched.{_OBJECT_STREAM}.object_class": TensorSpec(
+            f"matched.{OBJECT_STREAM}.object_class": TensorSpec(
                 shape=("B", m), dtype="int64", kind="label", modes=f
             ),
-            f"matched.{_OBJECT_STREAM}.target_masks": TensorSpec(
+            f"matched.{OBJECT_STREAM}.target_masks": TensorSpec(
                 shape=("B", m, tok), dtype="bool", kind="label", modes=f
             ),
         }
@@ -218,10 +218,10 @@ class MaskFormerMatchedLoss(SaltModelModule):
         )
         if "regression" in self.components:
             r = sym_dim("R", self.name)
-            produces[f"matched.{_OBJECT_STREAM}.regression"] = TensorSpec(
+            produces[f"matched.{OBJECT_STREAM}.regression"] = TensorSpec(
                 shape=("B", m, r), dtype="float32", modes=f
             )
-            produces[f"matched.{_OBJECT_STREAM}.target_regression"] = TensorSpec(
+            produces[f"matched.{OBJECT_STREAM}.target_regression"] = TensorSpec(
                 shape=("B", m, r), dtype="float32", modes=f
             )
         for component in self.components:
@@ -265,8 +265,8 @@ class MaskFormerMatchedLoss(SaltModelModule):
         class_probs = b.get(f"{self.input_stream}.class_probs")
         masks = b.get(f"{self.input_stream}.masks")
         embed = b.get(f"{self.input_stream}.embed")
-        object_class = b.get(f"labels.{_OBJECT_STREAM}.object_class")
-        target_masks = b.get(f"labels.{_OBJECT_STREAM}.masks")
+        object_class = b.get(f"labels.{OBJECT_STREAM}.object_class")
+        target_masks = b.get(f"labels.{OBJECT_STREAM}.masks")
 
         # matcher cost stays in scaled space
         pred_for_match: dict[str, Tensor] = {
@@ -295,12 +295,12 @@ class MaskFormerMatchedLoss(SaltModelModule):
         m_embed = embed[idx]
 
         out: dict[str, Tensor] = {
-            f"matched.{_OBJECT_STREAM}.embed": m_embed,
-            f"matched.{_OBJECT_STREAM}.class_logits": m_class_logits,
-            f"matched.{_OBJECT_STREAM}.class_probs": m_class_probs,
-            f"matched.{_OBJECT_STREAM}.masks": m_masks,
-            f"matched.{_OBJECT_STREAM}.object_class": object_class,
-            f"matched.{_OBJECT_STREAM}.target_masks": target_masks,
+            f"matched.{OBJECT_STREAM}.embed": m_embed,
+            f"matched.{OBJECT_STREAM}.class_logits": m_class_logits,
+            f"matched.{OBJECT_STREAM}.class_probs": m_class_probs,
+            f"matched.{OBJECT_STREAM}.masks": m_masks,
+            f"matched.{OBJECT_STREAM}.object_class": object_class,
+            f"matched.{OBJECT_STREAM}.target_masks": target_masks,
         }
 
         permuted_preds = {"objects": {"class_logits": m_class_logits, "masks": m_masks}}
@@ -316,8 +316,8 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 assert reg_tgt is not None
                 m_reg = reg_pred[idx]
                 reg_loss = self._matched_regression_loss(m_reg, reg_tgt, object_class)
-                out[f"matched.{_OBJECT_STREAM}.regression"] = m_reg
-                out[f"matched.{_OBJECT_STREAM}.target_regression"] = reg_tgt
+                out[f"matched.{OBJECT_STREAM}.regression"] = m_reg
+                out[f"matched.{OBJECT_STREAM}.target_regression"] = reg_tgt
                 out["losses.regression"] = self.loss_weights["regression"] * reg_loss
             else:
                 out[f"losses.{component}"] = losses[component]

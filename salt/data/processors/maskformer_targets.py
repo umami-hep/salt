@@ -10,15 +10,14 @@ import numpy as np
 
 from salt.data.base import Processor
 from salt.graph.errors import ConfigError, SchemaError
-from salt.graph.spec import _OBJECT_STREAM, IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.graph.spec import IO, OBJECT_STREAM, Mode, TensorSpec, sym_dim, unflatten_spec
 
 
 @dataclass(frozen=True)
 class _ObjectCut:
-    """A single field-bound cut on MaskFormer truth objects: ``min <= batch[field] <= max``.
+    """A field-bound cut on MaskFormer truth objects: ``min <= batch[field] <= max``.
 
-    NaN handling / PV exemption / drop semantics live in
-    `MaskFormerTargets._select_objects`.
+    NaN / PV-exemption / drop semantics live in `MaskFormerTargets._select_objects`.
     """
 
     field: str
@@ -29,7 +28,7 @@ class _ObjectCut:
         if self.min is None and self.max is None:
             raise ConfigError(
                 f"MaskFormerTargets: ObjectCut on field {self.field!r} must set at least one of "
-                "min/max (v1 ObjectCut.__post_init__, configs.py)"
+                "min/max"
             )
 
 
@@ -91,12 +90,6 @@ class MaskFormerTargets(Processor):
     regression_targets : Sequence[str] | None, optional
         Per-object regression label fields published under
         ``labels.objects.<target>``, by default None (no regression labels).
-    num_objects : int | None, optional
-        The number of object queries ``M``. When set, the produced shapes
-        carry it as a concrete dim (a static check that the file's object
-        count matches the decoder's query bank); None leaves ``M``
-        symbolic. Bridged to ``max_objects`` when only one is set (see
-        below).
     cuts : Sequence[_ObjectCut | Mapping[str, Any]] | None, optional
         Per-jet field cuts for object selection; dicts are coerced to
         :class:`_ObjectCut`. Default None.
@@ -110,8 +103,11 @@ class MaskFormerTargets(Processor):
         (validated to a non-null mapped index); ``None`` disables PV
         pinning. Default 0.
     max_objects : int | None, optional
-        Max object slots retained per jet after selection. ``None``
-        auto-links to ``num_objects`` (the decoder query bank).
+        The single object-cap kwarg: max object slots retained per jet after
+        selection, AND (when set) the concrete ``M`` dim the produced shapes
+        carry — a static check that the file's object count matches the
+        decoder's query bank. ``None`` leaves ``M`` symbolic and disables
+        selection-by-count.
     max_lxy_mm : float | None, optional
         |Lxy| threshold (mm) above which a vertex is re-labelled to null.
         Default None (disabled).
@@ -130,7 +126,7 @@ class MaskFormerTargets(Processor):
         On a missing ``null`` class, a null not mapped last, ``mapped``
         values that are not ``range(len(class_map))``, a raw value shared
         across mapped indices, a non-scalar class weight, a duplicate
-        regression target, a non-positive ``num_objects`` / ``max_objects``,
+        regression target, a non-positive ``max_objects``,
         an out-of-range ``pv_class``, or an ``_ObjectCut`` with neither min
         nor max.
     """
@@ -144,7 +140,6 @@ class MaskFormerTargets(Processor):
         object_stream: str,
         constituent_stream: str,
         regression_targets: Sequence[str] | None = None,
-        num_objects: int | None = None,
         cuts: Sequence[_ObjectCut | Mapping[str, Any]] | None = None,
         sort_by: str | None = None,
         sort_descending: bool = True,
@@ -160,8 +155,7 @@ class MaskFormerTargets(Processor):
         self.object_stream = str(object_stream)
         self.constituent_stream = str(constituent_stream)
         self._raw_to_mapped = self._checked_class_map(class_map)
-        # per-class loss weights, ordered by mapped index (v1 derived property
-        # MaskformerObjectConfig.object_weights). Defaults to 1.0 per class.
+        # per-class loss weights ordered by mapped index (default 1.0 per class)
         self.object_weights: list[float] = self._class_weights(class_map)
         self.regression_targets: tuple[str, ...] = tuple(regression_targets or ())
         if len(set(self.regression_targets)) != len(self.regression_targets):
@@ -170,8 +164,7 @@ class MaskFormerTargets(Processor):
             )
 
         # --- object-selection config surface -------------------------------
-        # Generic per-jet field cuts. jsonargparse may hand dicts -> coerce to
-        # _ObjectCut (v1 MaskformerObjectConfig.__post_init__ dict->ObjectCut).
+        # jsonargparse may hand dicts -> coerce to _ObjectCut
         self.cuts: tuple[_ObjectCut, ...] = tuple(
             c if isinstance(c, _ObjectCut) else _ObjectCut(**dict(c)) for c in (cuts or ())
         )
@@ -180,66 +173,30 @@ class MaskFormerTargets(Processor):
         self.max_lxy_mm = max_lxy_mm
         self.lxy_field = str(lxy_field)
 
-        # Object selection — and crucially the pv_class PV-pin REORDER — runs
-        # ONLY when the user EXPLICITLY configured cuts / sort_by / max_objects.
-        # It MUST key on the PRE-bridge `max_objects` argument: the
-        # num_objects -> max_objects bridge below sets self.max_objects from
-        # the decoder query bank for EVERY MaskFormer config, so gating on
-        # self.max_objects would fire selection unconditionally and break
-        # byte-identity (pv_class defaults to 0, so the PV-pin would silently
-        # reorder slot 0). max_lxy relabel is a SEPARATE gate
-        # (self.max_lxy_mm is not None).
+        # Selection (and the pv_class PV-pin REORDER) runs ONLY when the user
+        # explicitly configured cuts / sort_by / max_objects. max_lxy relabel
+        # is a SEPARATE gate.
         self._should_select: bool = (
             bool(self.cuts) or sort_by is not None or max_objects is not None
         )
 
-        # In v2 num_objects is the decoder query bank (the declared label M
-        # dim, set from mask_decoder.num_objects in convert.py) and
-        # max_objects is the selection truncation count. They MUST agree:
-        # declare_io produces object_class with M == num_objects while
-        # _select_objects truncates to max_objects, so a config that sets BOTH
-        # to different values would emit a [B, max_objects] array against a
-        # declared [B, num_objects] shape. The bridge below only equalises
-        # them when one is None, so guard the both-set case explicitly.
-        if num_objects is not None and max_objects is not None and num_objects != max_objects:
-            raise ConfigError(
-                f"MaskFormerTargets: num_objects ({num_objects}) and max_objects "
-                f"({max_objects}) are both set but differ — num_objects is the decoder "
-                "query bank (declared label M) and max_objects is the selection "
-                "truncation count; they must be equal (set only one, or set both equal)"
-            )
-
-        # legacy num_objects <-> max_objects bridge (v1 MaskformerObjectConfig
-        # __post_init__): num_objects is ALSO the decoder query bank, so this
-        # auto-links the selection truncation count (max_objects) to it when
-        # the config leaves it unset. max_objects wins when both are set.
-        if max_objects is None and num_objects is not None:
-            max_objects = num_objects
-        if num_objects is None and max_objects is not None:
-            num_objects = max_objects
-        if num_objects is not None and num_objects < 1:
-            raise ConfigError(f"MaskFormerTargets: num_objects must be >= 1, got {num_objects}")
         if max_objects is not None and max_objects < 1:
             raise ConfigError(f"MaskFormerTargets: max_objects must be >= 1, got {max_objects}")
-        self.num_objects = num_objects
         self.max_objects = max_objects
 
-        # PV class must be a valid non-null mapped index (v1
-        # MaskformerObjectConfig __post_init__). null_index == n_non_null.
+        # PV class must be a valid non-null mapped index (null_index == n_non_null)
         self.pv_class = pv_class
         if pv_class is not None:
             n_non_null = self.null_index
             if not (0 <= pv_class < n_non_null):
                 raise ConfigError(
                     f"MaskFormerTargets: pv_class={pv_class} must be in [0, {n_non_null - 1}] "
-                    "(non-null mapped indices; v1 configs.py)"
+                    "(non-null mapped indices)"
                 )
 
-        # Derived raw-id sets (mapped-index world -> raw-id world). PV raws:
-        # every raw whose mapped == pv_class — these classes get pinned at
-        # slot 0, exempt from cuts/sorts. null raw: the raw whose mapped ==
-        # null_index — the sentinel written to pad slots' class field so the
-        # np.select class-map maps them cleanly back to null_index.
+        # derived raw-id sets: PV raws (mapped == pv_class) are pinned at slot 0
+        # and exempt from cuts/sorts; the null raw is the sentinel written to pad
+        # slots' class field so np.select maps them back to null_index
         self._pv_raw_values: tuple[int, ...] = (
             tuple(r for r, m in self._raw_to_mapped.items() if m == self.pv_class)
             if self.pv_class is not None
@@ -260,15 +217,14 @@ class MaskFormerTargets(Processor):
         raw values MUST be disjoint across classes.
         """
         if not class_map:
-            raise ConfigError("MaskFormerTargets: class_map must not be empty (FD 1108)")
+            raise ConfigError("MaskFormerTargets: class_map must not be empty")
         # jsonargparse may parse a YAML ``null:`` key as Python None — accept both.
         names = {
             ("null" if name is None else str(name)): dict(spec) for name, spec in class_map.items()
         }
         if "null" not in names:
             raise ConfigError(
-                "MaskFormerTargets: class_map must contain a 'null' (no-object) class "
-                "(v1 MaskformerObjectConfig, configs.py:36)"
+                "MaskFormerTargets: class_map must contain a 'null' (no-object) class"
             )
         n = len(names)
         raw_to_mapped: dict[int, int] = {}
@@ -280,11 +236,11 @@ class MaskFormerTargets(Processor):
             if name != "null" and "raw" not in spec:
                 raise ConfigError(
                     f"MaskFormerTargets: class_map[{name!r}] is missing a 'raw' index "
-                    "(only the 'null' class may omit it; v1 object_classes)"
+                    "(only the 'null' class may omit it)"
                 )
             mapped = int(spec["mapped"])
-            # the null class's raw id defaults to -1 (v1 MaskFormer.yaml:177: null raw -1).
-            # raw may be a scalar (the common case) or a list/tuple → class merge.
+            # null raw id defaults to -1; raw may be a scalar or a
+            # list/tuple -> class merge
             raw_spec = spec.get("raw", -1)
             if isinstance(raw_spec, (list, tuple)):
                 if not raw_spec:
@@ -299,18 +255,18 @@ class MaskFormerTargets(Processor):
                     raise ConfigError(
                         f"MaskFormerTargets: raw class id {r} is mapped to multiple classes "
                         f"({raw_to_mapped[r]} and {mapped}) — merged raws must be disjoint "
-                        "across mapped indices (v1 object_classes)"
+                        "across mapped indices"
                     )
                 raw_to_mapped[r] = mapped
         if names["null"]["mapped"] != n - 1:
             raise ConfigError(
                 f"MaskFormerTargets: the 'null' class must be mapped LAST (to {n - 1}), got "
-                f"{names['null']['mapped']} (v1 configs.py:39 'Null class must be last')"
+                f"{names['null']['mapped']}"
             )
         if set(raw_to_mapped.values()) != set(range(n)):
             raise ConfigError(
                 f"MaskFormerTargets: mapped class indices {sorted(set(raw_to_mapped.values()))} "
-                f"must be exactly range({n}) (v1 configs.py:42)"
+                f"must be exactly range({n})"
             )
         return raw_to_mapped
 
@@ -328,8 +284,7 @@ class MaskFormerTargets(Processor):
             w = spec.get("weight", 1.0)
             if isinstance(w, (list, tuple)):
                 raise ConfigError(
-                    f"MaskFormerTargets: class_map[{name!r}] 'weight' must be a scalar, got {w!r} "
-                    "(v1 object_weights, configs.py)"
+                    f"MaskFormerTargets: class_map[{name!r}] 'weight' must be a scalar, got {w!r}"
                 )
             by_mapped[int(spec["mapped"])] = float(w)
         return [by_mapped[i] for i in range(len(by_mapped))]
@@ -366,18 +321,18 @@ class MaskFormerTargets(Processor):
                 kind="data", fields=(self.constituent_id,)
             ),
         }
-        m: int | str = self.num_objects if self.num_objects is not None else sym_dim("M", self.name)
+        m: int | str = self.max_objects if self.max_objects is not None else sym_dim("M", self.name)
         tok = sym_dim("T", self.constituent_stream)
         produces: dict[str, TensorSpec] = {
-            f"labels.{_OBJECT_STREAM}.object_class": TensorSpec(
+            f"labels.{OBJECT_STREAM}.object_class": TensorSpec(
                 shape=("B", m), dtype="int64", kind="label"
             ),
-            f"labels.{_OBJECT_STREAM}.masks": TensorSpec(
+            f"labels.{OBJECT_STREAM}.masks": TensorSpec(
                 shape=("B", m, tok), dtype="bool", kind="label"
             ),
         }
         for target in self.regression_targets:
-            produces[f"labels.{_OBJECT_STREAM}.{target}"] = TensorSpec(
+            produces[f"labels.{OBJECT_STREAM}.{target}"] = TensorSpec(
                 shape=("B", m), dtype="float32", kind="label"
             )
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
@@ -416,12 +371,9 @@ class MaskFormerTargets(Processor):
                 "stream variables/read set."
             )
 
-        # candidate (non-pad) slots. The production v2 reader appends an
-        # authoritative `valid` bool field to every assembled stream, keyed
-        # exactly as upstream's `valid`; prefer it so a legitimate object
-        # with object_id == -1 is NOT silently dropped. The hand-built unit
-        # fixtures omit `valid`, so fall back to the v2 pad sentinel
-        # object_id == -1 (INT_PAD_SENTINEL) == ~valid.
+        # candidate (non-pad) slots: prefer the authoritative `valid` field
+        # (so a legitimate object with object_id == -1 is NOT silently
+        # dropped); fall back to the pad sentinel object_id == -1
         if "valid" in (obj.dtype.names or ()):
             valid = np.asarray(obj["valid"]).astype(bool)
         else:
@@ -465,7 +417,6 @@ class MaskFormerTargets(Processor):
                 filled[j, : chosen.size] = True
 
         # sentinel-fill pad slots so they don't collide with real ids/classes
-        # (v1 datasets.py:148-164). 'filled' (not a valid field) marks the pads.
         pad = ~filled
         if pad.any():
             out[self.object_id][pad] = -1
@@ -482,49 +433,36 @@ class MaskFormerTargets(Processor):
         con = batch.get(f"raw.{self.constituent_stream}")
         out: dict[str, np.ndarray] = {}
 
-        # Object selection (cuts -> PV-pin -> sort -> truncate). GATED: only
-        # when the user explicitly configured cuts/sort_by/max_objects. When
-        # OFF, `obj` is the raw stream untouched -> the blocks below are
-        # byte-identical to the no-selection case. The selection rebuilds a
-        # NEW [B, n_out] structured array so EVERY field (class, id,
-        # regression, lxy) is permuted/truncated IN LOCKSTEP.
+        # selection is gated on explicit config; it rebuilds a NEW [B, n_out]
+        # structured array so every field is permuted/truncated in lockstep
         if self._should_select:
             obj = self._select_objects(obj)
 
-        # object_class: map raw -> mapped from the ORIGINAL values (atomic, no
-        # sequential x[x==k]=v mutation; v1 datasets.py:641-643). Unmapped raw
-        # values fall through to the null index (v1 reads only configured
-        # classes, and any object whose raw class is not in the map is a
-        # no-object slot).
+        # map raw -> mapped from the ORIGINAL values (atomic, no sequential
+        # x[x==k]=v mutation); unmapped raw values fall through to null
         raw_class = np.asarray(obj[self.object_class])
         conds = [raw_class == raw for raw in self._raw_to_mapped]
         choices = [self._raw_to_mapped[raw] for raw in self._raw_to_mapped]
         object_class = np.select(conds, choices, default=self.null_index).astype(np.int64)
 
-        # Lxy relabel (SEPARATE gate, self.max_lxy_mm is not None; v1
-        # datasets.py:814-820). AFTER the class-map: vertices with
-        # |Lxy| > max_lxy_mm cannot be reconstructed by the tracker -> re-label
-        # to null. NaN-safe: np.abs(nan) > thr is always False, so null/pad
-        # slots (NaN or 0 Lxy) are never accidentally relabelled.
+        # Lxy relabel, AFTER the class-map: vertices with |Lxy| > max_lxy_mm
+        # cannot be reconstructed by the tracker -> null. NaN-safe:
+        # np.abs(nan) > thr is False, so null/pad slots never relabel.
         if self.max_lxy_mm is not None:
             lxy = np.asarray(obj[self.lxy_field])
             object_class[np.abs(lxy) > self.max_lxy_mm] = self.null_index
-        out[f"labels.{_OBJECT_STREAM}.object_class"] = object_class
+        out[f"labels.{OBJECT_STREAM}.object_class"] = object_class
 
-        # masks: constituent_id == object_id, [B, M] x [B, T] -> [B, M, T]. v1
-        # build_target_masks substitutes -1 ids with -999 IN PLACE before the
-        # equality; we do it on a private COPY so the published object_class /
-        # ids are untouched. The substitution makes invalid (-1) objects never
-        # match a constituent (constituent ids are non-negative).
+        # masks: constituent_id == object_id, [B, M] x [B, T] -> [B, M, T].
+        # -1 ids become -999 on a private COPY (published ids untouched) so
+        # invalid objects never match a constituent (constituent ids are >= 0).
         object_ids = np.array(obj[self.object_id], copy=True)
         object_ids[object_ids == -1] = -999
         constituent_ids = np.asarray(con[self.constituent_id])
         # [B, M, 1] == [B, 1, T] -> [B, M, T]
-        out[f"labels.{_OBJECT_STREAM}.masks"] = (
-            object_ids[:, :, None] == constituent_ids[:, None, :]
-        )
+        out[f"labels.{OBJECT_STREAM}.masks"] = object_ids[:, :, None] == constituent_ids[:, None, :]
 
         # raw per-object regression labels (float32; the task stacks + scales them)
         for target in self.regression_targets:
-            out[f"labels.{_OBJECT_STREAM}.{target}"] = np.asarray(obj[target], dtype=np.float32)
+            out[f"labels.{OBJECT_STREAM}.{target}"] = np.asarray(obj[target], dtype=np.float32)
         return out

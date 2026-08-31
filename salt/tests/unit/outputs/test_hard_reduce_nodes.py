@@ -14,7 +14,6 @@ from salt.outputs.sinks.onnx.reduces import (
 )
 from salt.outputs import (
     H5OutputSink,
-    MaskFormerObject,
     MaskFormerObjects,
     MFLeadVertexDecorator,
     OutputColumn,
@@ -23,12 +22,12 @@ from salt.outputs import (
 pytestmark = pytest.mark.cpu_always
 
 
-# MaskFormerObject (folds _bind_leading_object + _bind_object_index — ONE node)
+# MaskFormerObjects (folds _bind_leading_object + _bind_object_index — ONE node)
 
 
 def test_maskformer_object_declares_all_cross_node_requires():
-    """ALL three maskformer reads are declared so the demand-closure keeps the decoder alive (R4)."""
-    node = MaskFormerObject(n_reg=3, stream="objects", constituent_stream="tracks")
+    """ALL three maskformer reads are declared so the demand-closure keeps the decoder alive."""
+    node = MaskFormerObjects(n_reg=3, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     io = node.declare_io(Mode.ONNX)
     assert sorted(flatten_spec(io.requires)) == [
@@ -36,7 +35,7 @@ def test_maskformer_object_declares_all_cross_node_requires():
         "objects.masks",
         "preds.objects.regression",
     ]
-    # the two-node split (USER DESIGN 2026-06-22): the reconstruction node mints the
+    # the two-node split: the reconstruction node mints the
     # leading + per-token index folds AND exposes the reordered per-vertex leaves
     assert sorted(flatten_spec(io.produces)) == [
         "outputs.objects.leading_object",
@@ -53,14 +52,14 @@ def test_maskformer_object_declares_all_cross_node_requires():
 
 def test_maskformer_object_non_default_regression_task_threaded():
     """A non-default ``regression_task`` is threaded into the reg port (never hardcoded)."""
-    node = MaskFormerObject(n_reg=2, regression_task="obj_reg", stream="objects")
+    node = MaskFormerObjects(n_reg=2, regression_task="obj_reg", stream="objects")
     node.name = "mf_obj"
     assert "preds.objects.obj_reg" in flatten_spec(node.declare_io(Mode.ONNX).requires)
 
 
 def test_maskformer_object_derived_widths():
-    """The index leaf collapses to 1 (R6); leading + vertices_regression keep n_reg."""
-    node = MaskFormerObject(n_reg=3, stream="objects", constituent_stream="tracks")
+    """The index leaf collapses to 1; leading + vertices_regression keep n_reg."""
+    node = MaskFormerObjects(n_reg=3, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     assert node.derived_widths({}) == {
         "outputs.tracks.object_index": 1,
@@ -72,9 +71,9 @@ def test_maskformer_object_derived_widths():
 def test_maskformer_object_rejects_bad_n_reg():
     """``n_reg`` must be a positive int (the leading-object target count)."""
     with pytest.raises(ConfigError, match="n_reg"):
-        MaskFormerObject(n_reg=0, stream="objects")
+        MaskFormerObjects(n_reg=0, stream="objects")
     with pytest.raises(ConfigError, match="n_reg"):
-        MaskFormerObject(n_reg=True, stream="objects")  # bool is not a valid count
+        MaskFormerObjects(n_reg=True, stream="objects")  # bool is not a valid count
 
 
 def test_maskformer_object_forward_matches_inlined_reduces():
@@ -88,7 +87,7 @@ def test_maskformer_object_forward_matches_inlined_reduces():
     b.set("objects.class_probs", class_probs)
     b.set("objects.masks", masks)
     b.set("preds.objects.regression", reg)
-    node = MaskFormerObject(n_reg=n_reg, stream="objects", constituent_stream="tracks")
+    node = MaskFormerObjects(n_reg=n_reg, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     out = node.forward(b, Mode.ONNX)
     # the reference: one direct get_maskformer_outputs call on CLONED inputs
@@ -128,7 +127,7 @@ def test_maskformer_object_forward_does_not_mutate_bundle_leaves():
         "objects.masks": masks.clone(),
         "preds.objects.regression": reg.clone(),
     }
-    node = MaskFormerObject(n_reg=n_reg, stream="objects", constituent_stream="tracks")
+    node = MaskFormerObjects(n_reg=n_reg, stream="objects", constituent_stream="tracks")
     node.name = "mf_obj"
     node.forward(b, Mode.ONNX)
     for key, snapshot in before.items():
@@ -161,7 +160,7 @@ def test_maskformer_objects_exposes_reordered_per_vertex_leaves():
     )
 
 
-# MFLeadVertexDecorator (NEW jet-level capability — NO legacy oracle; GO3 unit gate)
+# MFLeadVertexDecorator (jet-level capability with NO legacy oracle)
 
 _CP = "outputs.objects.vertices_class_probs"
 _REG = "outputs.objects.vertices_regression"
@@ -240,7 +239,7 @@ def test_lead_vertex_decorator_pnull_cut_excludes_high_pt_null_vertex():
 
 
 def test_lead_vertex_decorator_argmax_null_below_pnull_thr_excluded():
-    """argmax==null but pnull<threshold (thin-spread) is EXCLUDED (3rd cut, user 2026-06-22)."""
+    """argmax==null but pnull<threshold (thin-spread) is EXCLUDED (the third cut)."""
     class_probs = torch.tensor([[
         [0.1, 0.8, 0.1],   # v0: SV (argmax 1), pnull 0.1 < 0.5 -> qualifies, pt 3
         [0.3, 0.3, 0.4],   # v1: argmax 2 = NULL but pnull 0.4 < 0.5 -> EXCLUDED by the argmax!=null cut

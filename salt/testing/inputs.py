@@ -24,8 +24,6 @@ __all__ = [
     "write_dummy_norm_dict",
 ]
 
-DEFAULT_NTRACK = 40
-
 # Example feature name lists used by the dummy writers below
 JET_VARS = [
     "pt",
