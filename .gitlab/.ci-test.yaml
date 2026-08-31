@@ -35,10 +35,16 @@
 # salt/tests/unit mirrors salt/ 1:1 — fast on CPU. The conftest GPU-guard
 # keeps the heavy salt/tests/integration suite OUT of this job (they need
 # --run-integration).
+#
+# Extra JIT-off rerun of just the union-find tests, so coverage.py can see
+# their bodies (torch.jit.script isn't traced otherwise). Main run is untouched.
+# Same rerun for the maskformer_loss/matcher parity tests in test_maskdecoder.py.
 modular-unit-tests:
   extends: .test-template
   script:
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
+    - PYTORCH_JIT=0 JUNIT_FILE=reports/modular-unit-jit-coverage.xml run_test salt/tests/unit/model/test_get_output.py -k union_find
+    - PYTORCH_JIT=0 JUNIT_FILE=reports/modular-unit-jit-coverage-maskdecoder.xml run_test salt/tests/unit/model/modules/test_maskdecoder.py -k eager_vs_scripted
 
 # --------------- PER-CONFIG CPU FAN-OUT ---------------
 # Plan 06: one CPU job per runnable fixture (stage: per-config, after the

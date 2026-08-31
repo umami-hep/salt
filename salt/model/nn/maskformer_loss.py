@@ -13,8 +13,7 @@ from salt.model.nn.matcher import HungarianMatcher
 __all__ = ["MaskFormerLoss"]
 
 
-@torch.jit.script
-def dice_loss(inputs: Tensor, labels: Tensor):
+def dice_loss_eager(inputs: Tensor, labels: Tensor):
     """DICE loss (similar to generalized IOU for masks); returns a scalar."""
     inputs = inputs.sigmoid()
     numerator = 2 * (inputs * labels).sum(-1)
@@ -24,7 +23,12 @@ def dice_loss(inputs: Tensor, labels: Tensor):
 
 
 @torch.jit.script
-def mask_ce_loss(inputs: Tensor, labels: Tensor):
+def dice_loss(inputs: Tensor, labels: Tensor):
+    """TorchScript wrapper for :func:`dice_loss_eager`."""
+    return dice_loss_eager(inputs, labels)
+
+
+def mask_ce_loss_eager(inputs: Tensor, labels: Tensor):
     """Binary cross-entropy loss for masks, mean-reduced per example; returns a scalar."""
     loss = functional.binary_cross_entropy_with_logits(inputs, labels, reduction="none")
     loss = loss.mean(1)
@@ -32,7 +36,12 @@ def mask_ce_loss(inputs: Tensor, labels: Tensor):
 
 
 @torch.jit.script
-def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
+def mask_ce_loss(inputs: Tensor, labels: Tensor):
+    """TorchScript wrapper for :func:`mask_ce_loss_eager`."""
+    return mask_ce_loss_eager(inputs, labels)
+
+
+def sigmoid_focal_loss_eager(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
     """Sigmoid focal loss (RetinaNet, https://arxiv.org/abs/1708.02002); returns a scalar.
 
     ``alpha<0`` disables the positive/negative balance weighting.
@@ -47,6 +56,12 @@ def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma
         loss = alpha_t * loss
 
     return loss.mean(1).sum() / len(inputs)
+
+
+@torch.jit.script
+def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
+    """TorchScript wrapper for :func:`sigmoid_focal_loss_eager`."""
+    return sigmoid_focal_loss_eager(inputs, targets, alpha, gamma)
 
 
 class MaskFormerLoss(nn.Module):

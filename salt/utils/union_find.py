@@ -169,26 +169,9 @@ def get_node_assignment_jit(output: Tensor, mask: Tensor) -> Tensor:
     return get_node_assignment(output, mask)
 
 
-# convert flattened array to shape of mask (ntracks, ...) -> (njets, maxtracks, ...)
-@torch.jit.script
-def mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
-    """Unflatten a per-node array back to a batch-shaped tensor using a mask.
-
-    The ``@torch.jit.script`` decorator is load-bearing: the union-find export
-    reduce inlines this scripted subgraph into the ONNX trace, and the scripted
-    form's loop semantics matter for export parity.
-
-    Parameters
-    ----------
-    flat_array : Tensor
-        Tensor of shape ``[N, F]`` with concatenated (valid) per-node values.
-    mask : Tensor
-        Boolean mask of shape ``[B, L]`` where valid (non-padded) positions are ``False``.
-
-    Returns
-    -------
-    Tensor
-        Filled tensor of shape ``[B, L, F]`` where padded positions are set to ``-inf``.
+def mask_fill_flattened_eager(flat_array: Tensor, mask: Tensor) -> Tensor:
+    """Unflatten per-node values ``[N, F]`` to ``[B, L, F]`` using ``mask`` ``[B, L]``
+    (valid positions are ``False``); padded positions are filled with ``-inf``.
     """
     filled = torch.full((mask.shape[0], mask.shape[1], flat_array.shape[1]), float("-inf"))
     mask = mask.to(torch.bool)
@@ -196,8 +179,18 @@ def mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
 
     for i in range(mask.shape[0]):
         if mask[i].shape[0] > 0:
-            end_index += (~mask[i]).to(torch.long).sum()
+            end_index += int((~mask[i]).to(torch.long).sum())
             filled[i, : end_index - start_index] = flat_array[start_index:end_index]
             start_index = end_index
 
     return filled
+
+
+@torch.jit.script
+def mask_fill_flattened(flat_array: Tensor, mask: Tensor) -> Tensor:
+    """TorchScript wrapper for :func:`mask_fill_flattened_eager` (same shapes).
+
+    ``@torch.jit.script`` is load-bearing: the export reduce inlines this scripted
+    subgraph into the ONNX trace, and its loop semantics matter for export parity.
+    """
+    return mask_fill_flattened_eager(flat_array, mask)
