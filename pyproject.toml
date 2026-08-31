@@ -326,4 +326,4 @@ filterwarnings = ["ignore::DeprecationWarning"]
 testpaths = ["salt/tests"]
 
 [tool.coverage.report]
-omit = ["**/mup_utils/*"]
+omit = ["**/mup_utils/*", "salt/tests/*"]
