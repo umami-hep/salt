@@ -74,6 +74,9 @@ class ModelWrapper(lightning.LightningModule):
         Loss reduction mode. Default is ``"wsum"``. Other option: ``"GLS"``.
     optimizer : str, optional
         Optimizer to use. Default is ``"AdamW"``. Other options: ``"lion"``, ``"HybridMuonAdamW"``.
+    optimizer_kwargs : dict | None, optional
+        Extra keyword arguments forwarded to the optimizer constructor, e.g.
+        ``{"fused": true}`` to enable the fused CUDA AdamW kernel. Default is ``None``.
     edge_constructors : list[dict] | None, optional
         Edge constructors configuration. By default None
     """
@@ -88,6 +91,7 @@ class ModelWrapper(lightning.LightningModule):
         mup_config: dict | None = None,
         loss_mode: str = "wsum",
         optimizer: str = "AdamW",
+        optimizer_kwargs: dict | None = None,
         edge_constructors: list[dict] | None = None,
     ):
         super().__init__()
@@ -143,6 +147,7 @@ class ModelWrapper(lightning.LightningModule):
 
         # Set the optimizer
         self.optimizer = optimizer
+        self.optimizer_kwargs = optimizer_kwargs or {}
 
     def _get_optimizer_class(self) -> type[Optimizer]:
         """
@@ -372,6 +377,7 @@ class ModelWrapper(lightning.LightningModule):
         optimizer_kwargs = {
             "lr": self.lrs_config["initial"],
             "weight_decay": self.lrs_config.get("weight_decay", 1e-5),
+            **self.optimizer_kwargs,
         }
 
         # HybridMuonAdamW wants names for good parameter selection
