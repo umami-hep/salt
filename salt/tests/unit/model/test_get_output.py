@@ -27,7 +27,12 @@ from salt.outputs.sinks.onnx.reduces import mask_fill_flattened
 from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
-from salt.utils.union_find import get_node_assignment_jit
+from salt.utils.union_find import (
+    get_node_assignment,
+    get_node_assignment_jit,
+    mask_fill_flattened_eager,
+)
+from salt.utils.union_find import mask_fill_flattened as uf_mask_fill_flattened
 
 _FLOAT_TOL = 1e-6
 _STREAM_J = "jets"
@@ -563,6 +568,93 @@ def test_vtx_get_output_prefix_follows_prefix_vertex_column():
     mask = torch.zeros(1, 4, dtype=torch.bool)
     (field,) = module.get_output(_vtx_bundle(module, edge_scores, mask), Mode.TEST, _RUN)
     assert field.prefix is True
+
+
+# ===========================================================================
+# union_find: eager-vs-scripted parity (test_mirror_convention.py designates
+# this file as union_find.py's mirror)
+# ===========================================================================
+
+
+def test_union_find_get_node_assignment_eager_vs_scripted_parity():
+    """`get_node_assignment` (eager) and `get_node_assignment_jit` (scripted) agree exactly."""
+    # B=3: row 0 all-valid, row 1 ALL-PADDED (deliberately in the middle, to
+    # stress offset accounting), row 2 partially padded (3 valid + 2 padded).
+    mask = torch.zeros(3, 5, dtype=torch.bool)
+    mask[1, :] = True
+    mask[2, 3:] = True
+
+    # one edge score per ordered pair of VALID tracks per graph: 5*4 + 0 + 3*2 = 26
+    gen = torch.Generator().manual_seed(101)
+    scores = torch.rand(26, 1, generator=gen)
+
+    eager = get_node_assignment(scores.clone(), mask.clone())
+    scripted = get_node_assignment_jit(scores.clone(), mask.clone())
+    assert torch.equal(eager, scripted), (
+        f"eager vs scripted diverge at {torch.nonzero((eager != scripted).reshape(-1))}: "
+        f"eager={eager.reshape(-1)} scripted={scripted.reshape(-1)}"
+    )
+
+
+def test_union_find_mask_fill_flattened_eager_vs_scripted_parity():
+    """`mask_fill_flattened_eager` and the scripted `mask_fill_flattened` agree exactly."""
+    # same B=3 mask; a valid row AFTER row 0 is the discriminating case — the historical
+    # eager bug only corrupts rows >= 1, and prior vertexing tests here all used B=1.
+    mask = torch.zeros(3, 5, dtype=torch.bool)
+    mask[1, :] = True
+    mask[2, 3:] = True
+
+    # n_total_valid = 5 + 0 + 3 = 8
+    gen = torch.Generator().manual_seed(102)
+    flat_array = torch.rand(8, 2, generator=gen)
+
+    eager = mask_fill_flattened_eager(flat_array.clone(), mask.clone())
+    scripted = uf_mask_fill_flattened(flat_array.clone(), mask.clone())
+    # -inf == -inf is True and there are no NaNs on this path, so exact equality is safe.
+    assert torch.equal(eager, scripted), (
+        f"eager vs scripted diverge at {torch.nonzero((eager != scripted).reshape(-1))}: "
+        f"eager={eager.reshape(-1)} scripted={scripted.reshape(-1)}"
+    )
+
+
+def test_union_find_full_chain_parity_h5_sink_shape():
+    """Full union-find chain parity on an H5-sink-shaped batch; the scripted (production)
+    output carries the int32-min sentinel.
+    """
+    # shape/pattern of the failing H5-sink fixture: multi-jet batch with padded tails.
+    n_tracks = 8
+    valid_counts = [8, 5, 3, 6]
+    mask = torch.zeros(4, n_tracks, dtype=torch.bool)
+    for j, n_valid in enumerate(valid_counts):
+        mask[j, n_valid:] = True
+
+    # one edge score per ordered pair of VALID tracks per graph
+    n_edges = sum(n * (n - 1) for n in valid_counts)
+    gen = torch.Generator().manual_seed(103)
+    scores = torch.rand(n_edges, 1, generator=gen)
+
+    eager = mask_fill_flattened_eager(
+        get_node_assignment(scores.clone(), mask.clone()), mask.clone()
+    ).int()
+    scripted = uf_mask_fill_flattened(
+        get_node_assignment_jit(scores.clone(), mask.clone()), mask.clone()
+    ).int()
+
+    # (a) parity between the two call paths
+    assert torch.equal(eager, scripted), (
+        f"eager vs scripted diverge at {torch.nonzero((eager != scripted).reshape(-1))}: "
+        f"eager={eager.reshape(-1)} scripted={scripted.reshape(-1)}"
+    )
+
+    # (b) scripted (production) output at value level — a pure parity assert would pass
+    # if both paths were wrong (mirrors test_h5_sink.py::
+    # test_padded_vertex_index_is_int32_min_sentinel).
+    values = scripted.reshape(-1)
+    flat_mask = mask.reshape(-1)
+    sentinel = torch.tensor(-2147483648, dtype=values.dtype)
+    assert (values[flat_mask] == sentinel).all(), values
+    assert (values[~flat_mask] >= 0).all(), values
+    assert (values[~flat_mask] != sentinel).all(), values
 
 
 # ===========================================================================
