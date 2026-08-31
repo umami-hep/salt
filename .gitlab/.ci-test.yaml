@@ -36,18 +36,9 @@
 # keeps the heavy salt/tests/integration suite OUT of this job (they need
 # --run-integration).
 #
-# PYTORCH_JIT=0 scoped to THIS job only (not .test-template): @torch.jit.script
-# bodies (salt/utils/union_find.py) execute in the TorchScript C++ interpreter,
-# invisible to coverage.py's sys.settrace, so unit tests calling them mark no
-# body lines covered. Disabling JIT makes them run eagerly, in CPython, for
-# this job's coverage artifact. NOT applied to integration-cpu/integration-gpu
-# — those perform real torch.onnx.export tracing where the scripted subgraph
-# is load-bearing for export parity, and PYTORCH_JIT=0 would silently swap in
-# a different code path than the one that ships. The export-tracing-sensitive
-# tests also live INSIDE this job's own selector, in
-# salt/tests/unit/outputs/sinks/onnx/ (real torch.onnx.export + onnxruntime
-# round-trips) — that subtree is carved out below and re-run with JIT live so
-# it traces the same scripted union-find path as everything else that exports.
+# JIT-scripted functions aren't traced by coverage.py, so disable JIT here for
+# accurate coverage. The real ONNX-export tests below are re-run with JIT back
+# on (traced JIT-off would bake their dynamic loop bounds as fixed constants).
 modular-unit-tests:
   extends: .test-template
   variables:
