@@ -100,6 +100,10 @@ docs = [
 
 [tool.uv]
 default-groups = []
+# py-lap-solver 0.1.4 has no cp314 wheel, so uv builds its sdist — whose metadata
+# uses cmake.minimum-version, rejected by scikit-build-core>=0.8. Delete once it
+# ships cp314 wheels or fixed metadata.
+build-constraint-dependencies = ["scikit-build-core<0.8"]
 
 [project.urls]
 "Homepage" = "https://gitlab.cern.ch/aft/algorithms/salt"

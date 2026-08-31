@@ -138,14 +138,8 @@ _salt_lxplus_setup() {
         uv venv --python 3.14 "$SALT_LXPLUS_DIR/.venv" || return 1
     fi
 
-    # py-lap-solver 0.1.4 (a salt dependency) ships wheels only up to cp312, but
-    # salt pins Python 3.14, so it is built from sdist — and that build fails with
-    # scikit-build-core >= 0.8 ("Use cmake.version instead of cmake.minimum-version").
-    # Constrain the build backend until py-lap-solver ships cp314 wheels or fixed
-    # metadata (then this file + UV_BUILD_CONSTRAINT can be removed).
-    local bc_file="$SALT_LXPLUS_DIR/.salt-build-constraints.txt"
-    printf 'scikit-build-core<0.8\n' > "$bc_file"
-    export UV_BUILD_CONSTRAINT="${UV_BUILD_CONSTRAINT:-$bc_file}"
+    # py-lap-solver's cp314 sdist-build workaround now lives in pyproject.toml
+    # ([tool.uv] build-constraint-dependencies) — nothing extra needed here.
 
     # --- install salt + deps into that venv (CUDA wheels install fine on the
     #     login node even without a GPU; the GPU only matters at run time) ---

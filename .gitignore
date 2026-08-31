@@ -6,6 +6,8 @@ bin/
 run/
 python_install/
 conda/
+.venv/
+setup/.uv-bin/
 condor/
 logs/
 slurm/
