@@ -42,7 +42,7 @@ modular-unit-tests:
   extends: .test-template
   script:
     - JUNIT_FILE=reports/modular-unit.xml run_test salt/tests/unit
-    - PYTORCH_JIT=0 JUNIT_FILE=reports/modular-unit-jit-coverage.xml run_test salt/tests/unit/nn/test_get_output.py -k union_find
+    - PYTORCH_JIT=0 JUNIT_FILE=reports/modular-unit-jit-coverage.xml run_test salt/tests/unit/model/test_get_output.py -k union_find
 
 # --------------- PER-CONFIG CPU FAN-OUT ---------------
 # Plan 06: one CPU job per runnable fixture (stage: per-config, after the
