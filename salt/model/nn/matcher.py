@@ -56,8 +56,7 @@ def fill_unmatched_assignments_vectorized(assignments: Tensor, num_predictions: 
 # ---------------------------------------------------------------------------
 
 
-@torch.jit.script
-def batch_dice_cost(inputs: Tensor, targets: Tensor) -> Tensor:
+def batch_dice_cost_eager(inputs: Tensor, targets: Tensor) -> Tensor:
     """Pairwise DICE cost ``[B, N, M]`` for every prediction/target permutation."""
     inputs = inputs.sigmoid()
 
@@ -68,7 +67,12 @@ def batch_dice_cost(inputs: Tensor, targets: Tensor) -> Tensor:
 
 
 @torch.jit.script
-def batch_sigmoid_ce_cost(inputs: Tensor, targets: Tensor) -> Tensor:
+def batch_dice_cost(inputs: Tensor, targets: Tensor) -> Tensor:
+    """TorchScript wrapper for :func:`batch_dice_cost_eager`."""
+    return batch_dice_cost_eager(inputs, targets)
+
+
+def batch_sigmoid_ce_cost_eager(inputs: Tensor, targets: Tensor) -> Tensor:
     """Pairwise sigmoid cross-entropy cost ``[B, N, M]`` for every permutation."""
     pos = functional.binary_cross_entropy_with_logits(
         inputs, torch.ones_like(inputs), reduction="none"
@@ -83,7 +87,12 @@ def batch_sigmoid_ce_cost(inputs: Tensor, targets: Tensor) -> Tensor:
 
 
 @torch.jit.script
-def batch_sigmoid_focal_cost(
+def batch_sigmoid_ce_cost(inputs: Tensor, targets: Tensor) -> Tensor:
+    """TorchScript wrapper for :func:`batch_sigmoid_ce_cost_eager`."""
+    return batch_sigmoid_ce_cost_eager(inputs, targets)
+
+
+def batch_sigmoid_focal_cost_eager(
     inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2
 ) -> Tensor:
     """Pairwise sigmoid focal cost ``[B, N, M]``; ``alpha<0`` disables class balancing."""
@@ -108,9 +117,22 @@ def batch_sigmoid_focal_cost(
 
 
 @torch.jit.script
-def batch_mae_loss(inputs: Tensor, targets: Tensor) -> Tensor:
+def batch_sigmoid_focal_cost(
+    inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2
+) -> Tensor:
+    """TorchScript wrapper for :func:`batch_sigmoid_focal_cost_eager`."""
+    return batch_sigmoid_focal_cost_eager(inputs, targets, alpha, gamma)
+
+
+def batch_mae_loss_eager(inputs: Tensor, targets: Tensor) -> Tensor:
     """Pairwise MAE cost ``[B, N, M]``, averaged over the last dimension."""
     return (inputs[:, :, None] - targets[:, None, :]).abs().mean(-1)
+
+
+@torch.jit.script
+def batch_mae_loss(inputs: Tensor, targets: Tensor) -> Tensor:
+    """TorchScript wrapper for :func:`batch_mae_loss_eager`."""
+    return batch_mae_loss_eager(inputs, targets)
 
 
 class HungarianMatcher(nn.Module):

@@ -18,6 +18,24 @@ from salt.model.modules import (
     materialise_all,
     resolve_bind_schema,
 )
+from salt.model.nn.maskformer_loss import (
+    dice_loss,
+    dice_loss_eager,
+    mask_ce_loss,
+    mask_ce_loss_eager,
+    sigmoid_focal_loss,
+    sigmoid_focal_loss_eager,
+)
+from salt.model.nn.matcher import (
+    batch_dice_cost,
+    batch_dice_cost_eager,
+    batch_mae_loss,
+    batch_mae_loss_eager,
+    batch_sigmoid_ce_cost,
+    batch_sigmoid_ce_cost_eager,
+    batch_sigmoid_focal_cost,
+    batch_sigmoid_focal_cost_eager,
+)
 from salt.tests._fixtures.gn2v2_fixture import (
     make_gn2_batch,
 )
@@ -167,3 +185,110 @@ class TestMaskDecoder:
         probs = out["objects.class_probs"]
         assert probs.shape[-1] == 2  # 1 logit sigmoid-expanded to [1-p, p]
         assert torch.allclose(probs.sum(-1), torch.ones(4, 5), atol=1e-5)
+
+
+# ===========================================================================
+# maskformer_loss / matcher: eager-vs-scripted parity (test_mirror_convention.py
+# designates this file as the mirror for both)
+# ===========================================================================
+
+
+def test_dice_loss_eager_vs_scripted_parity():
+    # K=7 matched (non-null) objects, C=40 constituents — the [K, C] shape
+    # loss_masks passes after boolean-indexing labels["masks"] by valid_idx.
+    gen = torch.Generator().manual_seed(201)
+    inputs = torch.randn(7, 40, generator=gen)
+    targets = (torch.rand(7, 40, generator=gen) > 0.5).float()
+
+    eager = dice_loss_eager(inputs.clone(), targets.clone())
+    scripted = dice_loss(inputs.clone(), targets.clone())
+    assert torch.equal(eager, scripted), f"eager={eager.item()} vs scripted={scripted.item()}"
+
+
+def test_mask_ce_loss_eager_vs_scripted_parity():
+    gen = torch.Generator().manual_seed(202)
+    inputs = torch.randn(7, 40, generator=gen)
+    targets = (torch.rand(7, 40, generator=gen) > 0.5).float()
+
+    eager = mask_ce_loss_eager(inputs.clone(), targets.clone())
+    scripted = mask_ce_loss(inputs.clone(), targets.clone())
+    assert torch.equal(eager, scripted), f"eager={eager.item()} vs scripted={scripted.item()}"
+
+
+def test_sigmoid_focal_loss_eager_vs_scripted_parity():
+    gen = torch.Generator().manual_seed(203)
+    inputs = torch.randn(7, 40, generator=gen)
+    targets = (torch.rand(7, 40, generator=gen) > 0.5).float()
+
+    eager_default = sigmoid_focal_loss_eager(inputs.clone(), targets.clone())
+    scripted_default = sigmoid_focal_loss(inputs.clone(), targets.clone())
+    assert torch.equal(eager_default, scripted_default), (
+        f"alpha<0: eager={eager_default.item()} vs scripted={scripted_default.item()}"
+    )
+
+    eager_weighted = sigmoid_focal_loss_eager(inputs.clone(), targets.clone(), alpha=0.25)
+    scripted_weighted = sigmoid_focal_loss(inputs.clone(), targets.clone(), alpha=0.25)
+    assert torch.equal(eager_weighted, scripted_weighted), (
+        f"alpha>=0: eager={eager_weighted.item()} vs scripted={scripted_weighted.item()}"
+    )
+
+
+def test_batch_dice_cost_eager_vs_scripted_parity():
+    # square [B, N, C] inputs, matching get_batch_cost's call shape (B=2, N=5, C=40).
+    gen = torch.Generator().manual_seed(301)
+    inputs = torch.randn(2, 5, 40, generator=gen)
+    targets = (torch.rand(2, 5, 40, generator=gen) > 0.5).float()
+
+    eager = batch_dice_cost_eager(inputs.clone(), targets.clone())
+    scripted = batch_dice_cost(inputs.clone(), targets.clone())
+    assert torch.equal(eager, scripted), (
+        f"eager vs scripted diverge at {torch.nonzero((eager != scripted).reshape(-1))}: "
+        f"eager={eager.reshape(-1)} scripted={scripted.reshape(-1)}"
+    )
+
+
+def test_batch_sigmoid_ce_cost_eager_vs_scripted_parity():
+    gen = torch.Generator().manual_seed(302)
+    inputs = torch.randn(2, 5, 40, generator=gen)
+    targets = (torch.rand(2, 5, 40, generator=gen) > 0.5).float()
+
+    eager = batch_sigmoid_ce_cost_eager(inputs.clone(), targets.clone())
+    scripted = batch_sigmoid_ce_cost(inputs.clone(), targets.clone())
+    assert torch.equal(eager, scripted), (
+        f"eager vs scripted diverge at {torch.nonzero((eager != scripted).reshape(-1))}: "
+        f"eager={eager.reshape(-1)} scripted={scripted.reshape(-1)}"
+    )
+
+
+def test_batch_sigmoid_focal_cost_eager_vs_scripted_parity():
+    gen = torch.Generator().manual_seed(303)
+    inputs = torch.randn(2, 5, 40, generator=gen)
+    targets = (torch.rand(2, 5, 40, generator=gen) > 0.5).float()
+
+    eager_default = batch_sigmoid_focal_cost_eager(inputs.clone(), targets.clone())
+    scripted_default = batch_sigmoid_focal_cost(inputs.clone(), targets.clone())
+    assert torch.equal(eager_default, scripted_default), (
+        f"alpha<0 diverge at {torch.nonzero((eager_default != scripted_default).reshape(-1))}: "
+        f"eager={eager_default.reshape(-1)} scripted={scripted_default.reshape(-1)}"
+    )
+
+    eager_weighted = batch_sigmoid_focal_cost_eager(inputs.clone(), targets.clone(), alpha=0.25)
+    scripted_weighted = batch_sigmoid_focal_cost(inputs.clone(), targets.clone(), alpha=0.25)
+    assert torch.equal(eager_weighted, scripted_weighted), (
+        f"alpha>=0 diverge at {torch.nonzero((eager_weighted != scripted_weighted).reshape(-1))}: "
+        f"eager={eager_weighted.reshape(-1)} scripted={scripted_weighted.reshape(-1)}"
+    )
+
+
+def test_batch_mae_loss_eager_vs_scripted_parity():
+    # preds [B, N, D] and targets [B, M, D] with B=2, N=M=5, D=2.
+    gen = torch.Generator().manual_seed(304)
+    inputs = torch.randn(2, 5, 2, generator=gen)
+    targets = torch.randn(2, 5, 2, generator=gen)
+
+    eager = batch_mae_loss_eager(inputs.clone(), targets.clone())
+    scripted = batch_mae_loss(inputs.clone(), targets.clone())
+    assert torch.equal(eager, scripted), (
+        f"eager vs scripted diverge at {torch.nonzero((eager != scripted).reshape(-1))}: "
+        f"eager={eager.reshape(-1)} scripted={scripted.reshape(-1)}"
+    )
