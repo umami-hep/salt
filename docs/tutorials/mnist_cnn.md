@@ -289,8 +289,9 @@ head, and training schedule. The only variable is the module you wrote.
 
 ## 7. Finale: render the graph
 
-Salt can draw the compiled plan as an image (the `dot` binary is baked into
-the salt container):
+Salt can draw the compiled plan as an image. This needs the Graphviz `dot`
+binary: the salt containers ship it, but on a native install you'll need to
+install Graphviz first — see [Setup: Install Graphviz](../setup.md#install-graphviz).
 
 ```bash
 salt graph plot -c config_cnn.yaml -o graph_cnn.png

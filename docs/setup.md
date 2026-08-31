@@ -541,6 +541,42 @@ uv run --no-sync python -m pip install "<URL>"
 This will install the correct FlashAttention version and you should not get any errors or warnings related to FlashAttention.
 
 
+### Install Graphviz
+
+`salt graph plot` renders graph images via the Graphviz `dot` binary — this is a **system**
+binary, not a Python package. The `graphviz`/`pydot` packages on PyPI are pure-Python
+wrappers that shell out to `dot`; they do not provide it, and `uv`/`pip` cannot install it
+at all.
+
+Install it for your platform:
+
+```bash
+# macOS
+brew install graphviz
+
+# Debian / Ubuntu
+sudo apt-get install graphviz
+
+# Fedora / RHEL
+dnf install graphviz
+
+# Arch
+pacman -S graphviz
+```
+
+If you set up with conda/mamba (e.g. via `setup/setup_conda.sh`), conda-forge is the only
+Python-ecosystem-adjacent path that ships real Graphviz binaries:
+
+```bash
+conda install -c conda-forge graphviz
+```
+
+The prebuilt salt docker/apptainer containers already include `dot`, so container users
+need not install anything.
+
+Verify with `dot -V` (prints the version, to stderr) or `which dot`.
+
+
 ### Setup Logging
 
 Salt has the potential to support any logging framework that is also supported by Lightning.

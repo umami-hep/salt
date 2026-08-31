@@ -909,10 +909,11 @@ def _render_with_dot(dot_path: Path, out_path: Path) -> None:
         raise GraphError(
             "the Graphviz `dot` binary was not found on PATH — cannot render the "
             f"graph image. The DOT source was written to {dot_path}; render it "
-            "inside the salt container (which bakes in Graphviz), e.g.\n"
-            "  apptainer exec .../salt.sif dot -Tpng "
-            f"{dot_path} -o {out_path}\n"
-            "or rebuild the salt container from repos/salt/container/salt.def."
+            f"later, e.g. `dot -Tpng {dot_path} -o {out_path}`. On a native "
+            "install (uv/conda), install Graphviz separately as a system "
+            "package; the prebuilt salt containers already include it, so "
+            "hitting this there is unexpected. See "
+            "https://ftag-salt.docs.cern.ch/setup/#install-graphviz"
         )
     png_path = out_path
     pdf_path = out_path.with_suffix(".pdf")
