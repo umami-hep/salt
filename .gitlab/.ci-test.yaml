@@ -117,6 +117,6 @@ integration-gpu:
   script:
     - nproc
     - cat /sys/fs/cgroup/cpu.max || true
-    - nvidia-smi
+    - nvidia-smi || true
     - python -c "import time, torch; assert torch.cuda.is_available(), torch.version.cuda; t0 = time.time(); (torch.ones(4096, 4096, device='cuda') @ torch.ones(4096, 4096, device='cuda')).sum().item(); print(f'first-touch matmul {time.time() - t0:.2f}s')"
     - JUNIT_FILE="reports/integration-gpu-${PIPELINE_ROW}.xml" run_test salt/tests/integration/pipeline --pipeline-row="${PIPELINE_ROW}"

@@ -25,8 +25,11 @@ eval:
 onnx:
   expected_outputs: [pb, pc, pu]   # ordered ONNX output-tuple names
 inference:
-  expected_outputs:           # same file-dataset vocabulary as eval
-    jets: [pb, pc, pu]
+  expected_outputs:           # ordered ONNX output-tuple names (exact tuple order),
+                              # NOT the eval/file-dataset vocabulary
+    [GN3V00_pb, GN3V00_pc, GN3V00_ps, GN3V00_pud, GN3V00_pg, GN3V00_ptau,
+     GN3V00_ptFromTruthDressedWZJet, GN3V00_TrackOrigin, GN3V00_VertexIndex,
+     GN3V00_TrackType]
 xfail:                        # leg-scoped, reason mandatory
   fit: "reason..."
   eval: "reason..."
