@@ -1,0 +1,6 @@
+config: readers/physlite_events.yaml
+fragment: >-
+  documented alternate leg for ttbar_vs_hh4b_event_tagger (the PHYSLITE
+  side of the easyjet/physlite reader-parity pair, see the config's own
+  docstring) - no synthetic PHYSLITE/POOL fixture exists to pair it into
+  a matrix row, so it is exercised only via test_reader_fragment_instantiates.

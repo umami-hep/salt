@@ -1,0 +1,31 @@
+config: regression/regression_weighted.yaml
+eval:
+  expected_outputs:
+    jets:
+      - regression_weighted_HadronConeExclTruthLabelPt
+      - target_reg_weighted_HadronConeExclTruthLabelPt
+      - regression_weighted_R10TruthLabel_R22v1_TruthJetMass
+      - regression_weighted_R10TruthLabel_R22v1_TruthJetPt
+      - target_reg_weighted_multi_R10TruthLabel_R22v1_TruthJetMass
+      - target_reg_weighted_multi_R10TruthLabel_R22v1_TruthJetPt
+      - regression_weighted_pt
+      - target_reg_weighted_ratio_HadronConeExclTruthLabelPt
+      - regression_weighted_truthMass
+      - regression_weighted_truthPt
+      - target_reg_weighted_multi_ratio_R10TruthLabel_R22v1_TruthJetMass
+      - target_reg_weighted_multi_ratio_R10TruthLabel_R22v1_TruthJetPt
+    tracks:
+      - regression_weighted_dummyOutput_dPhi
+      - regression_weighted_dummyOutput_dEta
+      - target_reg_weighted_no_global_object_dphi
+      - target_reg_weighted_no_global_object_deta
+onnx:
+  expected_outputs:
+    - regressionWeighted_HadronConeExclTruthLabelPt
+    - regressionWeighted_R10TruthLabel_R22v1_TruthJetMass
+    - regressionWeighted_R10TruthLabel_R22v1_TruthJetPt
+    - regressionWeighted_pt
+    - regressionWeighted_truthMass
+    - regressionWeighted_truthPt
+    - regressionWeighted_dummyOutput_dPhi
+    - regressionWeighted_dummyOutput_dEta

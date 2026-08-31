@@ -1,0 +1,16 @@
+config: regression/nan_regression.yaml
+eval:
+  expected_outputs:
+    jets:
+      - nan_regression_output_std_norm
+      - target_reg_nan_norm_HadronConeExclTruthLabelLxy
+      - nan_regression_output_ratio
+      - target_reg_nan_ratio_HadronConeExclTruthLabelLxy
+    tracks:
+      - nan_regression_dummyOutput_dPhi
+      - target_reg_nan_seq_dphi
+onnx:
+  expected_outputs:
+    - nanRegression_output_std_norm
+    - nanRegression_output_ratio
+    - nanRegression_dummyOutput_dPhi

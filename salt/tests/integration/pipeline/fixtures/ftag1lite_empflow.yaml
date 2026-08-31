@@ -1,0 +1,13 @@
+# EXTRAS(awkward)-gated; no synthetic FTAG1LITE POOL fixture.
+config: readers/ftag1lite_empflow.yaml
+fit: false
+xfail:
+  compile_plot: >-
+    graph validate: ConfigError, reader 'reader' has no source file. See
+    the MATRIX Row comment above: this config's own UprootReader (via
+    ftag1lite.yaml, unroll: jets) needs a REAL, openable ROOT file for
+    graph validate's run-free .prepare() call (same mechanism the
+    easyjet_flavour fix addresses), but a correct fixture needs an
+    accurate double-jagged event->jet->track structure (18 branches
+    across 2 groups under AntiKt4EMPFlowJetsAuxDyn.) that does not exist
+    yet - tracked as a fixture-writing follow-up, not a harness bug.

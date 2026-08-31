@@ -1,0 +1,15 @@
+# NO_FIXTURE: no soft-muon global stream in write_dummy_file.
+config: GN2/GN2emu.yaml
+fit: false
+xfail:
+  compile_plot: >-
+    graph plot --mode fit: BindError, symbolic dim 'B' resolves to 2 at key
+    'raw.jets' declared fields but 14 at key 'raw.global' declared fields -
+    conflicting widths. Product bug, not a feed/fixture gap (see the MATRIX
+    Row comment above): H5StructuredReader.declare_io assigns the literal,
+    non-stream-qualified symbolic dim 'B' to EVERY global_object stream's
+    shape, so two global_object streams with different declared-Features
+    widths (jets: 2, global: 14) collide in resolve_bind_schema's
+    field-count binding - both counts come straight from the shipped
+    config, so no feed/schema change can avoid it. Needs a product-side fix
+    (a stream-qualified dim symbol for global_object shapes).

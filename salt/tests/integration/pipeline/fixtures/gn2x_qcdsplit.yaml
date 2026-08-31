@@ -1,0 +1,3 @@
+# NO_FIXTURE: fixture flow stream lacks the flow_* field prefix
+config: GN2/GN2X_qcdsplit.yaml
+fit: false

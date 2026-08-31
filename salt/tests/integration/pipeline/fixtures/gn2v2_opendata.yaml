@@ -1,0 +1,46 @@
+config: gn2v2-opendata.yaml
+gpu: true
+fit:
+  args:
+    # pipeline #15649957: SystemExit 2 on every leg — the old form used
+    # three deep-dotted per-stage overrides
+    # (`--...files.train=`/`.val=`/`.test=`); jsonargparse hands a dict-typed
+    # field a Namespace for a dotted key instead of merging into it, so each
+    # override wiped the other two ("Namespace given where dict expected").
+    # Fix: ONE whole-dict override. Single braces, not double — this
+    # template is expanded by this module's own `_TOKEN_RE`/`_expand_one`
+    # (a plain regex substitution over `{h5}`), not `str.format`, so a
+    # doubled brace would survive substitution unconsumed and land in the
+    # argv as a literal `{{`/`}}`, breaking the JSON. The value is
+    # single-quoted so `shlex.split` (the next step in
+    # `_expand_train_args`) does not treat the embedded double quotes as
+    # shell quoting and mangle the JSON on its internal spaces.
+    - "--data.modules.input_samples.init_args.files='{\"train\": \"{h5}\", \"val\": \"{h5}\", \"test\": \"{h5}\"}'"
+eval:
+  expected_outputs:
+    jets:
+      - GN2v2_opendata_pb
+      - GN2v2_opendata_pc
+      - GN2v2_opendata_pu
+      - GN2v2_opendata_ptau
+      - target_jets_classification
+    tracks:
+      - GN2v2_opendata_pPileup
+      - GN2v2_opendata_pFake
+      - GN2v2_opendata_pPrimary
+      - GN2v2_opendata_pFromB
+      - GN2v2_opendata_pFromBC
+      - GN2v2_opendata_pFromC
+      - GN2v2_opendata_pFromTau
+      - GN2v2_opendata_pOtherSecondary
+      - target_track_origin
+      - VertexIndex
+      - target_track_vertexing
+onnx:
+  expected_outputs:
+    - GN2v2opendata_pb
+    - GN2v2opendata_pc
+    - GN2v2opendata_pu
+    - GN2v2opendata_ptau
+    - GN2v2opendata_TrackOrigin
+    - GN2v2opendata_VertexIndex

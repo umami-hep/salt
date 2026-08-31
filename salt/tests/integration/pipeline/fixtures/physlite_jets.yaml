@@ -1,0 +1,5 @@
+config: readers/physlite_jets.yaml
+fragment: >-
+  documented JET-axis PHYSLITE reader (ElementLink-dereferenced tracks) -
+  no synthetic PHYSLITE/POOL fixture exists to pair it into a matrix row,
+  so it is exercised only via test_reader_fragment_instantiates.

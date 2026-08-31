@@ -28,6 +28,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="run the GPU/integration tests (gates, full-model fits, real-data reads) "
         "even without a CUDA device",
     )
+    parser.addoption(
+        "--pipeline-row",
+        action="store",
+        default=None,
+        help="run ONLY the named pipeline matrix row's lifecycle legs (test_fit/"
+        "test_eval/test_export). Exact row id (a fixtures/<id>.yaml stem), never "
+        "substring matching; unknown ids error. Used by the integration-gpu CI matrix.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -54,8 +62,9 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "gpu: a matrix row in test_pipeline.py's GPU_ROWS subset — selected by the "
-        "integration-gpu CI job via `-m gpu`.",
+        "gpu: a matrix row whose fixture declares gpu: true — the rows the "
+        "integration-gpu CI matrix runs one job each for (via --pipeline-row); the "
+        "mark remains for local `-m gpu` selection.",
     )
 
 

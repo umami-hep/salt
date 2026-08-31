@@ -1,0 +1,15 @@
+config: readers/easyjet_flavour.yaml
+fit:
+  args:
+    # "--config {fragment}" (pipeline #15651154, item 1): the compile+
+    # plot floor leg keeps only "--config "-prefixed train_args
+    # elements (test_pipeline._expand_train_args/run_compile_plot),
+    # so the fit-leg-only "--data.train_file="/"--data.val_file="
+    # overrides below never reached it — its run-free `graph
+    # validate`/`graph plot` calls .prepare() on the reader PROTOTYPE
+    # directly and needs a real filename already resolved in a config
+    # file (see write_standalone_source_fragment).
+    - "--config {fragment}"
+    - "--data.train_file={root}"
+    - "--data.val_file={root}"
+    - "--data.batch_size=2"

@@ -1,0 +1,3 @@
+# NO_FIXTURE: labels on raw HadronConeExclTruthLabelID; fixture writes PDG-like values
+config: legacy/dips.yaml
+fit: false
