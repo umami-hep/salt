@@ -40,9 +40,9 @@ from salt.graph.spec import (
     split_key,
     unflatten_spec,
 )
-from salt.logging import console
 from salt.model.bind import resolve_bind_schema
 from salt.schema import dump_schema, load_schema, save_schema
+from salt.utils.logging import console
 
 __all__ = ["GraphConfig", "instantiate", "load_config", "main"]
 
@@ -163,7 +163,8 @@ def load_config(
         On unreadable files or structurally invalid configs, or a config
         stack with no trainer-format member.
     """
-    from salt.config_utils import expand_includes  # local import: avoids a cli<->config_utils cycle
+    # local import: avoids a cli<->config_utils cycle
+    from salt.utils.config_utils import expand_includes
 
     paths = [Path(p) for p in (path if isinstance(path, (list, tuple)) else [path])]
     # a config may declare the configs it stacks on; resolve those before reading
@@ -383,8 +384,8 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
     do). Returns the constructed `SaltCLI` (nothing executed, no data
     touched); raises `ConfigError` on a parse/instantiate failure.
     """
-    from salt.config_utils import disable_logger_in_config
     from salt.main import SaltCLI
+    from salt.utils.config_utils import disable_logger_in_config
 
     args: list[str] = []
     for path in paths:

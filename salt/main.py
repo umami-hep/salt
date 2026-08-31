@@ -28,11 +28,11 @@ from lightning.pytorch.trainer import Trainer
 from salt import cli as graph_cli
 from salt.data.datamodule import SaltDataModule
 from salt.graph.errors import ConfigError, GraphError
-from salt.logging import console, get_logger
 from salt.model.saltmodule import SaltModule
 from salt.outputs.run_task_output import OutputSectionWriter
 from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
+from salt.utils.logging import console, get_logger
 
 __all__ = ["CONFIG_DIR", "SaltCLI", "main"]
 
@@ -946,7 +946,7 @@ def main(args: Sequence[str] | None = None) -> int:
     to the ONNX exporter, ``salt inference`` to the eager export-set
     runner, ``salt merge-config`` to the config-merge + per-stage
     freeze-graph tooling (`salt.merge_config.main`), and ``salt profile
-    dataset``/``model`` to the profiling harnesses (`salt.profiling.main`);
+    dataset``/``model`` to the profiling harnesses (`salt.utils.profiling.main`);
     everything else goes to `SaltCLI` (``salt fit``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
     instead of a Python traceback. `SystemExit` is re-raised from the parser.
@@ -970,7 +970,7 @@ def main(args: Sequence[str] | None = None) -> int:
     if argv and argv[0] == "profile":
         # its own dispatch: `dataset` iterates the datamodule in-process under
         # line_profiler, `model` drives a short capped fit through SaltCLI
-        from salt import profiling as profiling_cli
+        from salt.utils import profiling as profiling_cli
 
         return profiling_cli.main(argv[1:])
     help_requested = bool(argv) and argv[0] in {"-h", "--help"}

@@ -18,7 +18,7 @@ import yaml
 
 from salt.graph.errors import SUGGESTION_CUTOFF, SchemaError
 from salt.graph.spec import KEY_SEP, join_key, split_key
-from salt.logging import get_logger
+from salt.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
 

@@ -30,7 +30,7 @@ import yaml
 from lightning.pytorch.callbacks import Callback
 
 from salt.graph.executor import STEP_SCOPE_PREFIX, record_steps
-from salt.logging import console
+from salt.utils.logging import console
 
 __all__ = [
     "DEFAULT_DATASET_FUNCTIONS",
@@ -592,8 +592,8 @@ def profile_model(
     RuntimeError
         The fit finished without the capture window closing (no summary).
     """
-    from salt.config_utils import disable_logger_in_config
     from salt.main import SaltCLI
+    from salt.utils.config_utils import disable_logger_in_config
 
     # everything that can be rejected without touching the filesystem, first —
     # a bad flag should not cost a config parse (or a confusing FileNotFoundError)
@@ -613,7 +613,7 @@ def profile_model(
     if compile_model:
         args.append("--compile")
     args.extend([
-        "--trainer.callbacks+=salt.profiling.TorchProfilerCallback",
+        "--trainer.callbacks+=salt.utils.profiling.TorchProfilerCallback",
         f"--trainer.callbacks.dirpath={out_dir}",
         f"--trainer.callbacks.tag={tag}",
         f"--trainer.callbacks.wait={schedule['wait']}",
@@ -738,7 +738,7 @@ def _resolve_target(dotted: str) -> tuple[Any, str, Any]:
     if function is None:
         raise ValueError(f"{dotted!r} does not exist")
     if not callable(function):
-        # ValueError, and salt/tests/unit/test_profiling.py pins that contract.
+        # ValueError, and salt/tests/unit/utils/test_profiling.py pins that contract.
         raise ValueError(f"{dotted!r} is not callable")  # noqa: TRY004
     return owner, attr, function
 
@@ -1053,7 +1053,7 @@ _USAGE = (
     "Both default to --steps 100. `salt profile <subcommand> --help` for the full "
     "flag list; see docs/profiling.md. To profile a training run you were going to do "
     "anyway, attach the callback directly instead:\n"
-    "  salt fit ... --trainer.callbacks+=salt.profiling.TorchProfilerCallback \\\n"
+    "  salt fit ... --trainer.callbacks+=salt.utils.profiling.TorchProfilerCallback \\\n"
     "               --trainer.callbacks.dirpath <dir>"
 )
 

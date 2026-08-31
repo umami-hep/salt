@@ -29,7 +29,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/test_main.py",
         "salt/tests/unit/test_merge_config.py",
     ),
-    "salt/config_utils.py": ("salt/tests/unit/test_include.py",),
+    "salt/utils/config_utils.py": ("salt/tests/unit/test_include.py",),
     # needs a Trainer, so its contract tests are integration-level
     "salt/callbacks/schedule.py": (
         "salt/tests/integration/multistage_training/test_training_schedule.py",
@@ -74,7 +74,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     "salt/data/processors/multi_target.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
     "salt/data/readers/reader.py": (
         "salt/tests/unit/data/readers/test_uproot_reader.py",
-        "salt/tests/unit/test_profiling.py",
+        "salt/tests/unit/utils/test_profiling.py",
     ),
     "salt/model/modules/edge_embed.py": ("salt/tests/unit/model/test_compile_regression.py",),
     "salt/model/modules/maskformer_matched_loss.py": (

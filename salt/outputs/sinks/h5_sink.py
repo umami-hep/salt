@@ -23,10 +23,10 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.logging import console, get_logger
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
 from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
+from salt.utils.logging import console, get_logger
 
 _LOG = get_logger(__name__)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from salt.config_utils import disable_logger_in_config  # noqa: F401
+from salt.utils.config_utils import disable_logger_in_config  # noqa: F401
 
 
 @pytest.fixture(scope="session", autouse=True)

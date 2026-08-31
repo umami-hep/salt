@@ -13,9 +13,9 @@ import numpy as np
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.logging import console
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
+from salt.utils.logging import console
 
 __all__ = ["JSONLOutputSink"]
 

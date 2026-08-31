@@ -149,8 +149,8 @@ def test_gn2v2_dummy_carries_the_contract_on_the_sink():
 
 def test_gn2v2_dummy_resolves_its_contract_from_the_declared_sink():
     """The section-declared sink resolves directly: config -> sink -> resolved contract."""
-    from salt.config_utils import disable_logger_in_config
     from salt.main import SaltCLI
+    from salt.utils.config_utils import disable_logger_in_config
 
     cli = SaltCLI(
         args=[

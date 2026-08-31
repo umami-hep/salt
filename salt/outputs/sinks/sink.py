@@ -487,8 +487,8 @@ class RuntimeSink(Node):
     A minimal sink counting the rows it saw::
 
         from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-        from salt.logging import console
         from salt.outputs import RuntimeSink
+        from salt.utils.logging import console
 
 
         class RowCountSink(RuntimeSink):

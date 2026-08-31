@@ -1,11 +1,11 @@
-"""Tests for salt.profiling (the dataset line profiler + model torch.profiler)."""
+"""Tests for salt.utils.profiling (the dataset line profiler + model torch.profiler)."""
 
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from salt.profiling import (
+from salt.utils.profiling import (
     DEFAULT_DATASET_FUNCTIONS,
     DEFAULT_STEPS,
     TorchProfilerCallback,
@@ -29,8 +29,8 @@ class TestResolveTarget:
         assert function is H5StructuredReader.read
 
     def test_resolves_a_module_function(self):
-        owner, attr, _ = _resolve_target("salt.profiling._split")
-        assert owner.__name__ == "salt.profiling"
+        owner, attr, _ = _resolve_target("salt.utils.profiling._split")
+        assert owner.__name__ == "salt.utils.profiling"
         assert attr == "_split"
 
     def test_every_default_target_resolves(self):
@@ -40,7 +40,7 @@ class TestResolveTarget:
 
     def test_unknown_attribute_raises(self):
         with pytest.raises(ValueError, match="does not exist"):
-            _resolve_target("salt.profiling.no_such_function")
+            _resolve_target("salt.utils.profiling.no_such_function")
 
     def test_unimportable_raises(self):
         with pytest.raises(ValueError, match="cannot import"):
@@ -48,7 +48,7 @@ class TestResolveTarget:
 
     def test_non_callable_raises(self):
         with pytest.raises(ValueError, match="not callable"):
-            _resolve_target("salt.profiling.DEFAULT_DATASET_FUNCTIONS")
+            _resolve_target("salt.utils.profiling.DEFAULT_DATASET_FUNCTIONS")
 
 
 class TestStructure:
@@ -131,7 +131,7 @@ class TestCli:
         assert "unknown subcommand" in capsys.readouterr().err
 
     def test_both_subcommands_default_to_the_same_steps(self):
-        from salt.profiling import _dataset_parser, _model_parser
+        from salt.utils.profiling import _dataset_parser, _model_parser
 
         assert _model_parser().parse_args(["--config", "x.yaml"]).steps == DEFAULT_STEPS
         # the dataset parser defaults to None; the dispatcher applies DEFAULT_STEPS

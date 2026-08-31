@@ -18,9 +18,9 @@ from .schema import (
     as_schema,
 )
 
-# Deliberately standalone (not salt.logging.get_logger): this package is kept
+# Deliberately standalone (not salt.utils.logging.get_logger): this package is kept
 # extractable as its own standalone datagen package, so it takes no salt.*
-# imports. Its __name__ is already under "salt.", so once salt.logging
+# imports. Its __name__ is already under "salt.", so once salt.utils.logging
 # configures the "salt" root logger, records from here reach the same handler
 # and level anyway — behaviour is identical either way.
 log = logging.getLogger(__name__)

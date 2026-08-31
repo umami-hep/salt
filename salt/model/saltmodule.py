@@ -32,7 +32,6 @@ from salt.graph.spec import (
     flatten_spec,
     unflatten_spec,
 )
-from salt.logging import get_logger
 from salt.model.base import SaltModelModule
 from salt.model.bind import (
     ResolvedSchema,
@@ -54,6 +53,7 @@ from salt.schedule import (
     reducer_safe_freeze_required,
     trainable_named_params,
 )
+from salt.utils.logging import get_logger
 
 try:
     from lion_pytorch import Lion as ReferenceLion

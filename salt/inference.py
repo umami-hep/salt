@@ -17,7 +17,6 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, GraphError
 from salt.graph.spec import Mode
-from salt.logging import console
 from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
@@ -31,6 +30,7 @@ from salt.outputs.sinks.onnx.export import (
     compile_onnx_plan,
 )
 from salt.outputs.sinks.sink import SinkContext
+from salt.utils.logging import console
 
 __all__ = ["INFERENCE_OUTPUT", "build_inference_sink", "inference_demand", "main", "run_inference"]
 

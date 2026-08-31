@@ -41,7 +41,7 @@ LABEL_LEAK_BRANCHES = ("HF_Classification", "HF_SimpleClassification")
 
 def _load(config: str) -> dict:
     """A shipped config, include-expanded."""
-    from salt.config_utils import expand_includes  # noqa: PLC0415
+    from salt.utils.config_utils import expand_includes  # noqa: PLC0415
 
     path = CONFIG_DIR / f"{config}.yaml"
     assert path.is_file(), f"missing shipped config {path}"

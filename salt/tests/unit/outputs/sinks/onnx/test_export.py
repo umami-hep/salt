@@ -368,10 +368,10 @@ def _real_cli_run(tmp_path_factory, config_path: Path, label: str) -> SimpleName
     """
     import shutil
 
-    from salt.config_utils import disable_logger_in_config
     from salt.main import main as salt_main
     from salt.schema import dump_schema, save_schema
     from salt.testing.inputs import write_dummy_file
+    from salt.utils.config_utils import disable_logger_in_config
 
     tmp_path = tmp_path_factory.mktemp(label)
     nd_path, cd_path = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
@@ -439,8 +439,8 @@ def cli_run_full_family(tmp_path_factory):
 
 class TestSaltSurface:
     def test_export_contract_round_trips_onto_the_dummy_sink(self):
-        from salt.config_utils import disable_logger_in_config
         from salt.main import SaltCLI
+        from salt.utils.config_utils import disable_logger_in_config
 
         cli = SaltCLI(
             args=[
@@ -467,8 +467,8 @@ class TestSaltSurface:
     def test_export_contract_round_trips_onto_the_sink(self):
         # the contract's NEW config home is the ONNX sink: jsonargparse must
         # resolve its `inputs:` entries into ExportInput dataclasses
-        from salt.config_utils import disable_logger_in_config
         from salt.main import CONFIG_DIR, SaltCLI
+        from salt.utils.config_utils import disable_logger_in_config
 
         cli = SaltCLI(
             args=[

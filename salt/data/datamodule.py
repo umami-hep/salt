@@ -25,7 +25,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_setup_plan
 from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import PRIMARY_MODES, Mode
-from salt.logging import get_logger
+from salt.utils.logging import get_logger
 
 __all__ = ["AUTO_PREFETCH_CAP", "SaltDataModule", "auto_prefetch_factor"]
 

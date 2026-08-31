@@ -17,7 +17,7 @@ from salt.graph.errors import GraphError
 from salt.graph.planner import Plan
 from salt.graph.render import dot_source, plan_table
 from salt.graph.spec import Mode, TensorSpec
-from salt.logging import get_logger
+from salt.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
 

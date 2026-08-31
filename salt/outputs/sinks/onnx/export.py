@@ -27,7 +27,6 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.logging import console
 from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.check import CheckResult, check_onnx
 from salt.outputs.sinks.onnx.config import (
@@ -36,6 +35,7 @@ from salt.outputs.sinks.onnx.config import (
     stream_of_input_port,
 )
 from salt.outputs.sinks.onnx.metadata import build_gnn_config, load_run_metadata, write_metadata
+from salt.utils.logging import console
 
 __all__ = [
     "ExportResult",
@@ -420,8 +420,8 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     data touched). Raises `ConfigError` when the parse fails (with the
     ``--set`` hint, mirroring ``salt graph``).
     """
-    from salt.config_utils import disable_logger_in_config
     from salt.main import SaltCLI
+    from salt.utils.config_utils import disable_logger_in_config
 
     args: list[str] = []
     for path in config_paths:

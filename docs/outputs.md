@@ -726,8 +726,8 @@ summary — the whole thing is short:
 ```python
 # row_count_sink.py
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
-from salt.logging import console
 from salt.outputs import RuntimeSink
+from salt.utils.logging import console
 
 
 class RowCountSink(RuntimeSink):

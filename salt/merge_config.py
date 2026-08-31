@@ -25,8 +25,8 @@ from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan, deadcode
 from salt.graph.render import dot_source
 from salt.graph.spec import Mode
-from salt.logging import console
 from salt.schedule import StageConfig, TrainingSchedule
+from salt.utils.logging import console
 
 __all__ = ["main"]
 

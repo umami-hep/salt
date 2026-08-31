@@ -18,8 +18,8 @@ from salt.data.readers.stream import pad_fill
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import PlanStep
 from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.logging import get_logger
 from salt.schema import GroupSchema, Schema
+from salt.utils.logging import get_logger
 
 __all__ = ["MultiSampleReader", "SampleConfig"]
 

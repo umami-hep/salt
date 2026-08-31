@@ -352,7 +352,7 @@ def _load_expanded(config: str) -> dict:
     """A shipped config's include-expanded YAML, as a plain dict."""
     import yaml as _yaml
 
-    from salt.config_utils import expand_includes
+    from salt.utils.config_utils import expand_includes
 
     path = CONFIG_DIR / f"{config}.yaml"
     return _yaml.safe_load(Path(expand_includes(str(path))).read_text()) or {}

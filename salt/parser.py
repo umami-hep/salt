@@ -83,7 +83,7 @@ def _expand_config_includes(args: list[Any]) -> list[Any]:
     before jsonargparse reads the file. Configs without includes are passed
     through untouched.
     """
-    from salt.config_utils import (
+    from salt.utils.config_utils import (
         expand_includes,
     )  # local import: avoids a parser<->config_utils cycle
 

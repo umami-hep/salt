@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-import salt.logging as salt_logging
-from salt.logging import DEFAULT_LEVEL, LEVEL_ENV_VAR, ROOT_NAME, console, get_logger, set_level
+import salt.utils.logging as salt_logging
+from salt.utils.logging import DEFAULT_LEVEL, LEVEL_ENV_VAR, ROOT_NAME, console, get_logger, set_level
 
 
 @pytest.fixture(autouse=True)

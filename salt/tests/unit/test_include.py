@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from salt.config_utils import IncludeError, expand_includes
+from salt.utils.config_utils import IncludeError, expand_includes
 
 
 def _write(path, data) -> str:

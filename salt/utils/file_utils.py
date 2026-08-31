@@ -20,7 +20,7 @@ try:
 except ImportError:
     _boto3 = None
 
-from salt.logging import get_logger
+from salt.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
 

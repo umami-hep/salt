@@ -18,8 +18,8 @@ from typing import Any
 from salt import __version__
 from salt.data.base import Reader, RowBlock
 from salt.graph.errors import ConfigError
-from salt.logging import get_logger
 from salt.schema import GroupSchema, Schema
+from salt.utils.logging import get_logger
 
 __all__ = ["CorpusManifest", "ManifestEntry", "build_manifest", "ensure_manifest"]
 

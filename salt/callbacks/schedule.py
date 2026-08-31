@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 from lightning.pytorch.callbacks import Callback
 
-from salt.logging import get_logger
 from salt.schedule import reducer_safe_freeze_required
+from salt.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from lightning.pytorch import LightningModule, Trainer

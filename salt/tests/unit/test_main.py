@@ -14,7 +14,6 @@ from lightning.pytorch import Callback
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
 
 from salt.callbacks import Checkpoint, ProgressBar
-from salt.config_utils import disable_logger_in_config
 from salt.data import SaltDataModule
 from salt.graph.errors import ConfigError
 from salt.main import (
@@ -29,6 +28,7 @@ from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
 from salt.testing.inputs import write_dummy_file
+from salt.utils.config_utils import disable_logger_in_config
 
 DUMMY_CFG = small_config()
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
