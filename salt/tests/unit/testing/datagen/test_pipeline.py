@@ -8,6 +8,7 @@ import h5py
 import numpy as np
 import pytest
 
+import salt.testing.datagen
 from salt.testing.datagen import RecipeError
 from salt.testing.datagen.modules import (
     Constituents,
@@ -19,7 +20,7 @@ from salt.testing.datagen.modules import (
 )
 from salt.testing.datagen.pipeline import Pipeline, load_pipeline
 
-_RECIPES_DIR = Path(__file__).resolve().parent.parent / "recipes"
+_RECIPES_DIR = Path(salt.testing.datagen.__file__).resolve().parent / "recipes"
 
 _JET_FIELDS = [
     {"name": "pt", "type": "distribution", "dtype": "f4"},
