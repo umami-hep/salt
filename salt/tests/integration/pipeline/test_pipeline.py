@@ -1185,11 +1185,11 @@ def _whole_root_context(row: Row, tmp_path_factory) -> dict[str, Path]:
 
     out = tmp_path_factory.mktemp(f"root_{row.test_name}")
     root = write_minitree(out / "data.root", build_fixture_arrays())
-    variables = _load_expanded(row.config)["data"]["modules"]["features"]["init_args"]["variables"][
-        "jets"
-    ]
+    expanded = _load_expanded(row.config)
+    variables = expanded["data"]["modules"]["features"]["init_args"]["variables"]["jets"]
     norm = write_jets_norm_dict(out / "norm_dict.yaml", variables)
-    fragment = write_standalone_source_fragment(out / "source.yaml", root)
+    reader_node = expanded["data"]["modules"]["reader"]
+    fragment = write_standalone_source_fragment(out / "source.yaml", root, reader_node)
     return {"root": root, "norm": norm, "fragment": fragment}
 
 
@@ -1216,8 +1216,28 @@ def _feed_context(row: Row, tmp_path_factory) -> dict[str, Path]:
     return _root_context(row, arg, tmp_path_factory)
 
 
+def _norm_dict_is_unresolved(init_args: dict) -> bool:
+    """Whether ``init_args`` needs a real ``norm_dict`` override: either it
+    declares none at all (the "bare Normaliser" case), or it declares an
+    UNRESOLVED CCRA runner placeholder (``${VAR_NAME}``, e.g.
+    gn2v2-opendata.yaml's ``norm_dict: ${DATA_NORM_DICT_PATH}``) — the
+    experiment runner's ``update_paths.py`` substitutes those, never this
+    isolated test harness, so the literal ``${...}`` string would otherwise
+    reach ``Normaliser``'s constructor and fail its own file-existence
+    preflight (pipeline #15651451, item 2: gn2v2-opendata is the only
+    shipped config in the matrix whose Normaliser ALREADY declares a
+    norm_dict key, so the old bare ``"norm_dict" not in init_args`` check
+    saw the key present and silently skipped it).
+    """
+    if "norm_dict" not in init_args:
+        return True
+    value = init_args["norm_dict"]
+    return isinstance(value, str) and value.startswith("${") and value.endswith("}")
+
+
 def _norm_overrides(row: Row, ctx: dict[str, Path]) -> list[str]:
-    """``--model.modules.<name>.init_args.norm_dict=<norm>`` for every bare Normaliser.
+    """``--model.modules.<name>.init_args.norm_dict=<norm>`` for every Normaliser
+    that needs one (see ``_norm_dict_is_unresolved``).
 
     Reads the row's own EXPANDED config: an overlay's Normaliser lives in the
     base it includes, and reading the raw file would silently yield none.
@@ -1235,7 +1255,7 @@ def _norm_overrides(row: Row, ctx: dict[str, Path]) -> list[str]:
         for name, node in (modules or {}).items()
         if isinstance(node, dict)
         and "Normaliser" in str(node.get("class_path", ""))
-        and "norm_dict" not in (node.get("init_args") or {})
+        and _norm_dict_is_unresolved(node.get("init_args") or {})
     ]
 
 
