@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# setup/setup_lxplus.sh — set up salt on CERN lxplus, with the (large) CUDA venv
-# on shared, batch-worker-visible storage, mirrored into a /tmp-cached copy for
-# fast interactive activation.
+# setup/setup_lxplus.sh — set up salt on CERN lxplus. The (large) CUDA venv is
+# built into a node-local /tmp copy and published to shared storage as a
+# tarball cache only — see "Dual-copy model" below.
 #
 #   SOURCE this on an lxplus login node (do NOT execute it):
 #       source setup/setup_lxplus.sh
@@ -12,27 +12,22 @@
 # Python 3.14 venv (salt's required interpreter), runs `uv sync`, adds setup/ to
 # PATH (so `salt-lxplus-gpu` is available), and prints next-step instructions.
 #
-# Dual-copy model: the durable, batch-worker-visible venv lives at
-# $SALT_LXPLUS_DIR/.venv (AFS work / EOS home / AFS home — see below); batch jobs
-# (salt-lxplus-gpu) read it directly and are unaffected by anything here.
-# Interactive logins instead activate a second, node-local copy at
-# /tmp/<user>-salt-venv, built once and re-extracted from a tarball cache
-# ($SALT_LXPLUS_DIR/.venv-cache.tar, keyed by a pyproject.toml hash) on every
-# subsequent login — avoiding a slow rebuild/`uv sync` against EOS/AFS on each
-# interactive shell.
+# Dual-copy model: $SALT_LXPLUS_DIR (AFS work / EOS home / AFS home — see below)
+# durably holds ONLY the tarball cache (.venv-cache.tar + .venv-cache.hash, keyed
+# by a pyproject.toml hash), never a bulk-extracted venv directory. Interactive
+# logins extract/reuse a node-local /tmp/<user>-salt-venv from that tarball,
+# avoiding a rebuild/`uv sync` against EOS/AFS on every shell. Batch jobs
+# (salt-lxplus-gpu) extract the same tarball to their own worker-local scratch on
+# demand and are unaffected by anything here.
 #
-# Why tar-moving a uv venv is safe: `.venv/bin/python` is a symlink to the
-# absolute, shared $UV_PYTHON_INSTALL_DIR interpreter on durable storage, so it
-# resolves correctly regardless of where the venv directory itself is relocated.
-# The `.venv/bin/*` console-script shebangs (e.g. a bare `salt`) go stale after a
-# move — the supported invocation `python -m salt.main` never uses them, so do
-# NOT try to "fix" the shebangs. `.venv/bin/activate` also hardcodes an absolute
-# VIRTUAL_ENV by default, which would otherwise point at the wrong location
-# (the /tmp build dir, from the durable copy's perspective) after the tar
-# move/extract — this is why the venv is created with `uv venv --relocatable`:
-# the generated activate then derives VIRTUAL_ENV from its own path at source
-# time, so both the /tmp copy and the durable copy activate correctly regardless
-# of where the tarball was extracted.
+# Why tar-moving a uv venv is safe: `.venv/bin/python` symlinks to the absolute,
+# shared $UV_PYTHON_INSTALL_DIR interpreter on durable storage, so it resolves
+# wherever the venv lands. The `.venv/bin/*` console-script shebangs (e.g. a bare
+# `salt`) do go stale after a move — the supported `python -m salt.main` never
+# uses them, so do NOT try to "fix" them. `activate` would otherwise hardcode an
+# absolute VIRTUAL_ENV (the /tmp build dir), which is why the venv is created with
+# `uv venv --relocatable`: activate then derives VIRTUAL_ENV from its own path, so
+# both the /tmp copy and a batch worker's scratch extraction activate correctly.
 #
 # From the /tmp-cached copy, always prefer `python -m salt.main` over the bare
 # `salt` command (see above).
@@ -44,9 +39,8 @@
 #   3. /eos/user/<i>/<user>             (EOS home — works, FUSE is slower)
 #   4. AFS home                          (only if `fs listquota` shows >=8 GB free)
 #   5. otherwise: fail with guidance
-# $SALT_LXPLUS_DIR itself never uses /tmp (node-local — invisible to the batch
-# worker your job lands on); the /tmp mirror above is a separate, deliberate
-# interactive-only fast path, not a relocation of the durable venv.
+# $SALT_LXPLUS_DIR itself is never /tmp (node-local — batch workers must see the
+# tarball cache); the /tmp mirror above is a separate interactive-only fast path.
 #
 # No AFS workspace? Request one (free, ~100 GB) at the CERN Resources Portal
 # (https://resources.web.cern.ch → Services → AFS Workspaces); it is the best
@@ -360,23 +354,6 @@ _salt_lxplus_setup() {
     mv "$hash_tmp" "$SALT_LXPLUS_DIR/.venv-cache.hash" \
         || { echo "ERROR: failed to publish venv cache hash" >&2; rm -f "$hash_tmp"; return 1; }
 
-    # Refresh the durable, batch-visible venv from the same tarball (slow: many
-    # small writes on EOS/AFS — same cost class as today's uv sync, but now only
-    # on a cache miss/rebuild, not on every login). Swap via rename, never an
-    # in-place overwrite of individual files.
-    local durable_new="$SALT_LXPLUS_DIR/.venv.new.$$"
-    local durable_old="$SALT_LXPLUS_DIR/.venv.old.$$"
-    mkdir -p "$durable_new" || { echo "ERROR: failed to create $durable_new" >&2; return 1; }
-    tar -C "$durable_new" -xf "$SALT_LXPLUS_DIR/.venv-cache.tar" \
-        || { echo "ERROR: failed to extract venv cache into $durable_new" >&2; rm -rf "$durable_new"; return 1; }
-    if [[ -e "$SALT_LXPLUS_DIR/.venv" ]]; then
-        mv "$SALT_LXPLUS_DIR/.venv" "$durable_old" \
-            || { echo "ERROR: failed to move aside existing $SALT_LXPLUS_DIR/.venv" >&2; rm -rf "$durable_new"; return 1; }
-    fi
-    mv "$durable_new" "$SALT_LXPLUS_DIR/.venv" \
-        || { echo "ERROR: failed to swap in refreshed $SALT_LXPLUS_DIR/.venv" >&2; return 1; }
-    rm -rf "$durable_old"
-
     _salt_lxplus_tmp_owned "$local_hash_file"
     local cold_hash_rc=$?
     if [[ $cold_hash_rc -eq 1 ]]; then
@@ -397,7 +374,6 @@ _salt_lxplus_setup() {
    repo             = $SALT_REPO_DIR
    SALT_LXPLUS_DIR  = $SALT_LXPLUS_DIR   (durable, batch-worker-visible)
    active venv      = $local_venv   (activated, /tmp-cached)
-   durable venv     = $SALT_LXPLUS_DIR/.venv   (refreshed for batch jobs)
    cache tarball    = $SALT_LXPLUS_DIR/.venv-cache.tar
 
  Verify:
@@ -415,7 +391,7 @@ _salt_lxplus_setup() {
    salt-lxplus-gpu shell [flavour]           interactive GPU node
    salt-lxplus-gpu submit <config> [flavour] batch GPU training
    salt-lxplus-gpu status                    your condor jobs
-   (This venv/SIF live on EOS, but the submit-file artifacts — the job
+   (This venv cache/SIF live on EOS, but the submit-file artifacts — the job
     executable + logs — go to AFS home: standard schedds reject /eos paths
     inside the submit file. salt-lxplus-gpu handles that split for you.)
 ==================================================================
