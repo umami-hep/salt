@@ -297,7 +297,7 @@ _salt_lxplus_setup() {
     # --- install salt + deps into the /tmp venv (CUDA wheels install fine on the
     #     login node even without a GPU; the GPU only matters at run time) ---
     echo "Installing salt and dependencies with 'uv sync' (this can take a while)..."
-    ( cd "$repo_root" && UV_PROJECT_ENVIRONMENT="$local_venv" uv sync ) || return 1
+    ( cd "$repo_root" && UV_PROJECT_ENVIRONMENT="$local_venv" uv sync --extra root --group dev ) || return 1
 
     # Stamp before the durable publish: an interrupt mid-publish still leaves the
     # /tmp venv good, so the next source takes the warmest path (which does NOT
@@ -375,6 +375,7 @@ _salt_lxplus_setup() {
 
 ==================================================================
  salt lxplus environment ready — tier: COLD (full install ran).
+   dev + root extras installed on this cold build (pytest/ruff/mypy + uproot/awkward)
    repo             = $SALT_REPO_DIR
    SALT_LXPLUS_DIR  = $SALT_LXPLUS_DIR   (durable, batch-worker-visible)
    active venv      = $local_venv   (activated, /tmp-cached)
