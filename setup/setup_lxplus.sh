@@ -286,6 +286,15 @@ _salt_lxplus_setup() {
         return 1
     fi
 
+    # rsync is needed later to publish the freshly built venv to durable storage
+    # with progress output; check now (no install attempt, no cp fallback) so a
+    # missing rsync fails before the expensive uv sync below, not after it.
+    if ! command -v rsync >/dev/null 2>&1; then
+        echo "ERROR: rsync not found on PATH — needed to publish the venv cache" >&2
+        echo "       to durable storage with progress output. Install rsync and re-source." >&2
+        return 1
+    fi
+
     # --- create the venv directly at the /tmp copy (Python 3.14 — salt's requires-python) ---
     rm -rf "$local_venv"
     echo "Creating venv at $local_venv (Python 3.14)..."
@@ -300,13 +309,50 @@ _salt_lxplus_setup() {
     ( cd "$repo_root" && UV_PROJECT_ENVIRONMENT="$local_venv" uv sync ) || return 1
 
     # --- publish to durable storage, atomically, hash-last (readers trust the
-    #     hash file as the commit point — never publish it before the tarball). ---
+    #     hash file as the commit point — never publish it before the tarball).
+    #     Tar locally to /tmp first, then rsync --progress that local tarball
+    #     onto the durable destination — a multi-GB tar written directly onto
+    #     EOS/AFS FUSE gives no progress output; this way the user sees
+    #     percentage/speed/ETA. No INT/TERM trap is installed for a
+    #     user-interrupted transfer — a deliberate scope limit of this change,
+    #     not an oversight; a killed rsync/mv leaves at most a stray local_tar
+    #     or tar_tmp behind for the next run to overwrite. ---
     echo "Publishing venv cache to durable storage ($SALT_LXPLUS_DIR)..."
+
+    # Disk-space preflight: /tmp must hold the venv payload + ~20% headroom,
+    # measured BEFORE creating any tarball.
+    local payload_bytes avail_bytes need_bytes
+    payload_bytes="$(du -sb "$local_venv" 2>/dev/null | awk '{print $1}')"
+    avail_bytes="$(df -P -B1 /tmp 2>/dev/null | awk 'NR==2{print $4}')"
+    if [[ -z "$payload_bytes" || -z "$avail_bytes" ]]; then
+        echo "ERROR: failed to measure disk space for venv publish (du/df failed)." >&2
+        return 1
+    fi
+    need_bytes=$(( payload_bytes + payload_bytes / 5 ))
+    if (( avail_bytes < need_bytes )); then
+        echo "ERROR: not enough space on /tmp to stage the venv cache tarball" >&2
+        echo "       (need ~${need_bytes} bytes incl. 20% headroom, have ${avail_bytes} available)." >&2
+        return 1
+    fi
+
+    local local_tar="/tmp/${user}-salt-venv-publish.$$.tar"
+    _salt_lxplus_tmp_owned "$local_tar"
+    local local_tar_rc=$?
+    if [[ $local_tar_rc -eq 1 ]]; then
+        echo "ERROR: $local_tar exists but is not safely owned (must be owned by" >&2
+        echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+        return 1
+    fi
+
+    tar -C "$local_venv" -cf "$local_tar" . \
+        || { echo "ERROR: failed to tar venv for durable cache" >&2; rm -f "$local_tar"; return 1; }
+
     local tar_tmp="$SALT_LXPLUS_DIR/.venv-cache.tar.$$.tmp"
-    tar -C "$local_venv" -cf "$tar_tmp" . \
-        || { echo "ERROR: failed to tar venv for durable cache" >&2; rm -f "$tar_tmp"; return 1; }
+    rsync --progress "$local_tar" "$tar_tmp" \
+        || { echo "ERROR: failed to rsync venv cache tarball to durable storage" >&2; rm -f "$local_tar" "$tar_tmp"; return 1; }
     mv "$tar_tmp" "$SALT_LXPLUS_DIR/.venv-cache.tar" \
-        || { echo "ERROR: failed to publish venv cache tarball" >&2; rm -f "$tar_tmp"; return 1; }
+        || { echo "ERROR: failed to publish venv cache tarball" >&2; rm -f "$tar_tmp" "$local_tar"; return 1; }
+    rm -f "$local_tar"
 
     local hash_tmp="$SALT_LXPLUS_DIR/.venv-cache.hash.$$.tmp"
     echo "$current_hash" > "$hash_tmp" \
