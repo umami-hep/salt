@@ -126,6 +126,7 @@ class TestTransformerEncoderMup:
             TransformerEncoder(dim=16, num_layers=1, attention={"num_heads": 2}, mup=True)
 
     def test_mup_swaps_out_proj_for_zeroed_mu_readout(self):
+        pytest.importorskip("mup", reason="muP tests need `pip install 'salt[muP]'`")
         from mup import MuReadout
 
         enc = TransformerEncoder(
@@ -140,6 +141,7 @@ class TestTransformerEncoderMup:
         assert enc.encoder.out_proj.width_mult() == 1.0
 
     def test_mup_forward_runs_standalone(self):
+        pytest.importorskip("mup", reason="muP tests need `pip install 'salt[muP]'`")
         # without set_base_shapes the MuReadout forward would assert on infshape;
         # the construction-time set_base_shapes makes a standalone mup encoder
         # forward-runnable
@@ -155,6 +157,7 @@ class TestTransformerEncoderMup:
 
     def test_set_export_mode_folds_mu_readout_to_plain_linear(self):
         """set_export_mode swaps the MuReadout for a plain Linear, forward unchanged."""
+        pytest.importorskip("mup", reason="muP tests need `pip install 'salt[muP]'`")
         torch.manual_seed(3)
         enc = TransformerEncoder(
             dim=16, num_layers=2, out_dim=8, attention={"num_heads": 2}, mup=True
