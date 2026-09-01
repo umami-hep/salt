@@ -299,6 +299,20 @@ _salt_lxplus_setup() {
     echo "Installing salt and dependencies with 'uv sync' (this can take a while)..."
     ( cd "$repo_root" && UV_PROJECT_ENVIRONMENT="$local_venv" uv sync ) || return 1
 
+    # Stamp before the durable publish: an interrupt mid-publish still leaves the
+    # /tmp venv good, so the next source takes the warmest path (which does NOT
+    # retry the publish); an interrupt during uv sync leaves no stamp and rebuilds.
+    "$local_venv/bin/python" -c "import salt.main" \
+        || { echo "ERROR: freshly built venv failed the 'import salt.main' sanity check — not stamping or publishing." >&2; return 1; }
+    _salt_lxplus_tmp_owned "$local_hash_file"
+    local cold_hash_rc=$?
+    if [[ $cold_hash_rc -eq 1 ]]; then
+        echo "ERROR: $local_hash_file exists but is not safely owned (must be owned by" >&2
+        echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+        return 1
+    fi
+    echo "$current_hash" > "$local_hash_file"
+
     # --- publish to durable storage, atomically, hash-last (readers trust the
     #     hash file as the commit point — never publish it before the tarball).
     #     Tar locally to /tmp first, then rsync --progress that local tarball
@@ -313,6 +327,7 @@ _salt_lxplus_setup() {
     # Disk-space preflight: /tmp must hold the venv payload + ~20% headroom,
     # measured BEFORE creating any tarball.
     local payload_bytes avail_bytes need_bytes
+    echo "Measuring venv size (du over the whole venv tree — can take a minute)..."
     payload_bytes="$(du -sb "$local_venv" 2>/dev/null | awk '{print $1}')"
     avail_bytes="$(df -P -B1 /tmp 2>/dev/null | awk 'NR==2{print $4}')"
     if [[ -z "$payload_bytes" || -z "$avail_bytes" ]]; then
@@ -335,6 +350,7 @@ _salt_lxplus_setup() {
         return 1
     fi
 
+    echo "Creating local tarball (no per-file progress — can take a while for a large venv)..."
     tar -C "$local_venv" -cf "$local_tar" . \
         || { echo "ERROR: failed to tar venv for durable cache" >&2; rm -f "$local_tar"; return 1; }
 
@@ -350,15 +366,6 @@ _salt_lxplus_setup() {
         || { echo "ERROR: failed to write venv cache hash" >&2; rm -f "$hash_tmp"; return 1; }
     mv "$hash_tmp" "$SALT_LXPLUS_DIR/.venv-cache.hash" \
         || { echo "ERROR: failed to publish venv cache hash" >&2; rm -f "$hash_tmp"; return 1; }
-
-    _salt_lxplus_tmp_owned "$local_hash_file"
-    local cold_hash_rc=$?
-    if [[ $cold_hash_rc -eq 1 ]]; then
-        echo "ERROR: $local_hash_file exists but is not safely owned (must be owned by" >&2
-        echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
-        return 1
-    fi
-    echo "$current_hash" > "$local_hash_file"
 
     # shellcheck disable=SC1091
     source "$local_venv/bin/activate" || return 1
