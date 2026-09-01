@@ -1,14 +1,33 @@
 # shellcheck shell=bash
-# setup/setup_lxplus.sh — set up salt on CERN lxplus, with the (large) CUDA venv
-# on shared, batch-worker-visible storage.
+# setup/setup_lxplus.sh — set up salt on CERN lxplus. The (large) CUDA venv is
+# built into a node-local /tmp copy and published to shared storage as a
+# tarball cache only — see "Dual-copy model" below.
 #
 #   SOURCE this on an lxplus login node (do NOT execute it):
 #       source setup/setup_lxplus.sh
+#       source setup/setup_lxplus.sh --reinstall   # force a full rebuild
 #
-# Re-sourcing just re-activates the environment (idempotent). It installs uv if
-# missing, creates a Python 3.14 venv (salt's required interpreter), runs
-# `uv sync`, adds setup/ to PATH (so `salt-lxplus-gpu` is available), and prints
-# next-step instructions.
+# Re-sourcing just re-activates the environment (idempotent, and fast after the
+# first run — see "Dual-copy model" below). It installs uv if missing, creates a
+# Python 3.14 venv (salt's required interpreter), runs `uv sync`, adds setup/ to
+# PATH (so `salt-lxplus-gpu` is available), and prints next-step instructions.
+#
+# Dual-copy model: $SALT_LXPLUS_DIR (AFS work / EOS home / AFS home — see below) durably
+# holds ONLY the tarball cache (.venv-cache.tar + .venv-cache.hash, keyed by a
+# pyproject.toml hash), never an extracted venv. Interactive logins extract/reuse a
+# node-local /tmp/<user>-salt-venv from it, avoiding a `uv sync` against EOS/AFS every
+# shell; batch jobs (salt-lxplus-gpu) extract the same tarball to their own worker-local
+# scratch and are unaffected by this script.
+#
+# Why tar-moving a uv venv is safe: `.venv/bin/python` symlinks to the absolute, shared
+# $UV_PYTHON_INSTALL_DIR interpreter on durable storage, so it resolves wherever the venv
+# lands. The `.venv/bin/*` console-script shebangs (e.g. a bare `salt`) DO go stale after
+# a move — the supported `python -m salt.main` never uses them, so do NOT "fix" them.
+# `uv venv --relocatable` is required because a plain `activate` hardcodes an absolute
+# VIRTUAL_ENV (the /tmp build dir); relocatable derives it from activate's own path.
+#
+# From the /tmp-cached copy, always prefer `python -m salt.main` over the bare
+# `salt` command (see above).
 #
 # Storage: the venv holds the CUDA torch wheels (~3–5 GB), which do NOT fit in
 # the 10 GB AFS home quota. The script picks a location in this order:
@@ -17,7 +36,8 @@
 #   3. /eos/user/<i>/<user>             (EOS home — works, FUSE is slower)
 #   4. AFS home                          (only if `fs listquota` shows >=8 GB free)
 #   5. otherwise: fail with guidance
-# It never uses /tmp (node-local — invisible to the batch worker your job lands on).
+# $SALT_LXPLUS_DIR itself is never /tmp (node-local — batch workers must see the
+# tarball cache); the /tmp mirror above is a separate interactive-only fast path.
 #
 # No AFS workspace? Request one (free, ~100 GB) at the CERN Resources Portal
 # (https://resources.web.cern.ch → Services → AFS Workspaces); it is the best
@@ -29,7 +49,34 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 1
 fi
 
+# /tmp is shared across every user on the node. Before trusting or reusing any
+# path under it, verify it is owned by the current UID and not group/world
+# writable — refuse rather than silently proceed on untrusted shared state
+# (same posture as enforce-inner-clone-protection.sh elsewhere in this repo).
+# Returns: 0 = exists and safely owned, 1 = exists but untrusted, 2 = absent.
+_salt_lxplus_tmp_owned() {
+    local path="$1" owner perms group_digit other_digit
+    [[ -e "$path" || -L "$path" ]] || return 2
+    read -r owner perms < <(stat -c '%u %a' "$path" 2>/dev/null) || return 1
+    [[ -n "$owner" && "$owner" == "$(id -u)" ]] || return 1
+    group_digit="${perms: -2:1}"
+    other_digit="${perms: -1}"
+    (( (group_digit & 2) == 0 )) || return 1
+    (( (other_digit & 2) == 0 )) || return 1
+    return 0
+}
+
 _salt_lxplus_setup() {
+    local reinstall=0
+    case "${1:-}" in
+        "") ;;
+        --reinstall) reinstall=1 ;;
+        *)
+            echo "ERROR: usage: source setup/setup_lxplus.sh [--reinstall]" >&2
+            return 1
+            ;;
+    esac
+
     local setup_dir repo_root user initial
     setup_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || return 1
     repo_root="$(dirname -- "$setup_dir")"
@@ -109,16 +156,114 @@ _salt_lxplus_setup() {
             ;;
     esac
 
-    # --- fast path: already installed -> just re-activate ---
-    if [[ -x "$SALT_LXPLUS_DIR/.venv/bin/python" ]] \
-        && "$SALT_LXPLUS_DIR/.venv/bin/python" -c "import salt.main" 2>/dev/null; then
+    # --- /tmp-cached fast path (interactive only) ---
+    local pyproject="$repo_root/pyproject.toml"
+    [[ -f "$pyproject" ]] || { echo "ERROR: cannot find $pyproject" >&2; return 1; }
+    local current_hash
+    current_hash="$(sha256sum "$pyproject" | awk '{print $1}')"
+
+    local local_venv="/tmp/${user}-salt-venv"
+    local local_hash_file="${local_venv}.hash"
+
+    if [[ $reinstall -eq 1 ]]; then
+        _salt_lxplus_tmp_owned "$local_venv"
+        local reinstall_venv_rc=$?
+        if [[ $reinstall_venv_rc -eq 1 ]]; then
+            echo "ERROR: --reinstall refused: $local_venv exists but is not safely owned" >&2
+            echo "       (must be owned by $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+            return 1
+        fi
+        _salt_lxplus_tmp_owned "$local_hash_file"
+        local reinstall_hash_rc=$?
+        if [[ $reinstall_hash_rc -eq 1 ]]; then
+            echo "ERROR: --reinstall refused: $local_hash_file exists but is not safely owned" >&2
+            echo "       (must be owned by $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+            return 1
+        fi
+        echo "NOTE: --reinstall requested — wiping cached venvs and rebuilding from scratch." >&2
+        rm -rf "$local_venv" "$local_hash_file"
+        rm -f "$SALT_LXPLUS_DIR/.venv-cache.tar" "$SALT_LXPLUS_DIR/.venv-cache.hash"
+    fi
+
+    local tier="" local_hash=""
+    if [[ $reinstall -eq 0 ]]; then
+        _salt_lxplus_tmp_owned "$local_venv"
+        local venv_rc=$?
+        if [[ $venv_rc -eq 1 ]]; then
+            echo "ERROR: $local_venv exists but is not safely owned (must be owned by" >&2
+            echo "       $(id -un) and not group/world-writable). Someone/something else may own it," >&2
+            echo "       or it may be a hostile pre-created path. Investigate before re-sourcing." >&2
+            return 1
+        fi
+        if [[ $venv_rc -eq 0 ]]; then
+            _salt_lxplus_tmp_owned "$local_hash_file"
+            local hash_rc=$?
+            if [[ $hash_rc -eq 1 ]]; then
+                echo "ERROR: $local_hash_file exists but is not safely owned (must be owned by" >&2
+                echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+                return 1
+            elif [[ $hash_rc -eq 0 ]]; then
+                local_hash="$(<"$local_hash_file")"
+            fi
+            if [[ "$local_hash" == "$current_hash" && -x "$local_venv/bin/python" ]] \
+                && "$local_venv/bin/python" -c "import salt.main" 2>/dev/null; then
+                tier="warmest"
+            fi
+        fi
+    fi
+
+    if [[ -z "$tier" && $reinstall -eq 0 ]]; then
+        local durable_hash=""
+        [[ -f "$SALT_LXPLUS_DIR/.venv-cache.hash" ]] && durable_hash="$(<"$SALT_LXPLUS_DIR/.venv-cache.hash")"
+        if [[ "$durable_hash" == "$current_hash" && -f "$SALT_LXPLUS_DIR/.venv-cache.tar" ]]; then
+            tier="warm"
+        fi
+    fi
+
+    if [[ "$tier" == "warmest" ]]; then
         # shellcheck disable=SC1091
-        source "$SALT_LXPLUS_DIR/.venv/bin/activate" || return 1
+        source "$local_venv/bin/activate" || return 1
         export PATH="$setup_dir:$PATH"
-        echo "salt env already installed — re-activated ($SALT_LXPLUS_DIR/.venv)."
-        echo "Verify: python -m salt.main --help"
+        echo "salt env WARMEST — /tmp copy already installed and current, re-activated ($local_venv)."
+        echo "Skipped the full install entirely (no uv sync this run)."
+        echo "Verify: python -m salt.main --help   (prefer this over bare 'salt' from the /tmp copy)"
         return 0
     fi
+
+    if [[ "$tier" == "warm" ]]; then
+        echo "salt env WARM — restoring /tmp copy from durable tarball cache (no full install needed)..."
+        rm -rf "$local_venv"
+        local tmp_tar="/tmp/${user}-salt-venv-cache.$$.tar"
+        _salt_lxplus_tmp_owned "$tmp_tar"
+        local tmp_tar_rc=$?
+        if [[ $tmp_tar_rc -eq 1 ]]; then
+            echo "ERROR: $tmp_tar exists but is not safely owned (must be owned by" >&2
+            echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+            return 1
+        fi
+        cp "$SALT_LXPLUS_DIR/.venv-cache.tar" "$tmp_tar" \
+            || { echo "ERROR: failed to copy venv cache tarball to /tmp" >&2; rm -f "$tmp_tar"; return 1; }
+        mkdir -p "$local_venv" || { echo "ERROR: cannot create $local_venv" >&2; rm -f "$tmp_tar"; return 1; }
+        tar -C "$local_venv" -xf "$tmp_tar" \
+            || { echo "ERROR: failed to extract venv cache tarball" >&2; rm -f "$tmp_tar"; return 1; }
+        rm -f "$tmp_tar"
+        _salt_lxplus_tmp_owned "$local_hash_file"
+        local warm_hash_rc=$?
+        if [[ $warm_hash_rc -eq 1 ]]; then
+            echo "ERROR: $local_hash_file exists but is not safely owned (must be owned by" >&2
+            echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+            return 1
+        fi
+        echo "$current_hash" > "$local_hash_file"
+        # shellcheck disable=SC1091
+        source "$local_venv/bin/activate" || return 1
+        export PATH="$setup_dir:$PATH"
+        echo "salt env WARM — restored from durable cache, re-activated ($local_venv)."
+        echo "Verify: python -m salt.main --help   (prefer this over bare 'salt' from the /tmp copy)"
+        return 0
+    fi
+
+    # --- COLD: no matching cache anywhere, pyproject.toml changed, or --reinstall ---
 
     # --- install uv if missing ---
     if ! command -v uv >/dev/null 2>&1; then
@@ -132,55 +277,132 @@ _salt_lxplus_setup() {
         return 1
     fi
 
-    # --- create the venv (Python 3.14 — salt's requires-python) ---
-    if [[ ! -d "$SALT_LXPLUS_DIR/.venv" ]]; then
-        echo "Creating venv at $SALT_LXPLUS_DIR/.venv (Python 3.14)..."
-        uv venv --python 3.14 "$SALT_LXPLUS_DIR/.venv" || return 1
+    # rsync is needed later to publish the freshly built venv to durable storage
+    # with progress output; check now (no install attempt, no cp fallback) so a
+    # missing rsync fails before the expensive uv sync below, not after it.
+    if ! command -v rsync >/dev/null 2>&1; then
+        echo "ERROR: rsync not found on PATH — needed to publish the venv cache" >&2
+        echo "       to durable storage with progress output. Install rsync and re-source." >&2
+        return 1
     fi
 
-    # py-lap-solver 0.1.4 (a salt dependency) ships wheels only up to cp312, but
-    # salt pins Python 3.14, so it is built from sdist — and that build fails with
-    # scikit-build-core >= 0.8 ("Use cmake.version instead of cmake.minimum-version").
-    # Constrain the build backend until py-lap-solver ships cp314 wheels or fixed
-    # metadata (then this file + UV_BUILD_CONSTRAINT can be removed).
-    local bc_file="$SALT_LXPLUS_DIR/.salt-build-constraints.txt"
-    printf 'scikit-build-core<0.8\n' > "$bc_file"
-    export UV_BUILD_CONSTRAINT="${UV_BUILD_CONSTRAINT:-$bc_file}"
+    # --- create the venv directly at the /tmp copy (Python 3.14 — salt's requires-python) ---
+    rm -rf "$local_venv"
+    echo "Creating venv at $local_venv (Python 3.14)..."
+    uv venv --relocatable --python 3.14 "$local_venv" || return 1
 
-    # --- install salt + deps into that venv (CUDA wheels install fine on the
+    # py-lap-solver's cp314 sdist-build workaround now lives in pyproject.toml
+    # ([tool.uv] build-constraint-dependencies) — nothing extra needed here.
+
+    # --- install salt + deps into the /tmp venv (CUDA wheels install fine on the
     #     login node even without a GPU; the GPU only matters at run time) ---
     echo "Installing salt and dependencies with 'uv sync' (this can take a while)..."
-    ( cd "$repo_root" && UV_PROJECT_ENVIRONMENT="$SALT_LXPLUS_DIR/.venv" uv sync ) || return 1
+    ( cd "$repo_root" && UV_PROJECT_ENVIRONMENT="$local_venv" uv sync --extra root --group dev ) || return 1
+
+    # Stamp before the durable publish: an interrupt mid-publish still leaves the
+    # /tmp venv good, so the next source takes the warmest path (which does NOT
+    # retry the publish); an interrupt during uv sync leaves no stamp and rebuilds.
+    "$local_venv/bin/python" -c "import salt.main" \
+        || { echo "ERROR: freshly built venv failed the 'import salt.main' sanity check — not stamping or publishing." >&2; return 1; }
+    _salt_lxplus_tmp_owned "$local_hash_file"
+    local cold_hash_rc=$?
+    if [[ $cold_hash_rc -eq 1 ]]; then
+        echo "ERROR: $local_hash_file exists but is not safely owned (must be owned by" >&2
+        echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+        return 1
+    fi
+    echo "$current_hash" > "$local_hash_file"
+
+    # --- publish to durable storage, atomically, hash-last (readers trust the
+    #     hash file as the commit point — never publish it before the tarball).
+    #     Tar locally to /tmp first, then rsync --progress that local tarball
+    #     onto the durable destination — a multi-GB tar written directly onto
+    #     EOS/AFS FUSE gives no progress output; this way the user sees
+    #     percentage/speed/ETA. No INT/TERM trap is installed for a
+    #     user-interrupted transfer — a deliberate scope limit of this change,
+    #     not an oversight; a killed rsync/mv leaves at most a stray local_tar
+    #     or tar_tmp behind for the next run to overwrite. ---
+    echo "Publishing venv cache to durable storage ($SALT_LXPLUS_DIR)..."
+
+    # Disk-space preflight: /tmp must hold the venv payload + ~20% headroom,
+    # measured BEFORE creating any tarball.
+    local payload_bytes avail_bytes need_bytes
+    echo "Measuring venv size (du over the whole venv tree — can take a minute)..."
+    payload_bytes="$(du -sb "$local_venv" 2>/dev/null | awk '{print $1}')"
+    avail_bytes="$(df -P -B1 /tmp 2>/dev/null | awk 'NR==2{print $4}')"
+    if [[ -z "$payload_bytes" || -z "$avail_bytes" ]]; then
+        echo "ERROR: failed to measure disk space for venv publish (du/df failed)." >&2
+        return 1
+    fi
+    need_bytes=$(( payload_bytes + payload_bytes / 5 ))
+    if (( avail_bytes < need_bytes )); then
+        echo "ERROR: not enough space on /tmp to stage the venv cache tarball" >&2
+        echo "       (need ~${need_bytes} bytes incl. 20% headroom, have ${avail_bytes} available)." >&2
+        return 1
+    fi
+
+    local local_tar="/tmp/${user}-salt-venv-publish.$$.tar"
+    _salt_lxplus_tmp_owned "$local_tar"
+    local local_tar_rc=$?
+    if [[ $local_tar_rc -eq 1 ]]; then
+        echo "ERROR: $local_tar exists but is not safely owned (must be owned by" >&2
+        echo "       $(id -un) and not group/world-writable). Investigate before re-sourcing." >&2
+        return 1
+    fi
+
+    echo "Creating local tarball (no per-file progress — can take a while for a large venv)..."
+    tar -C "$local_venv" -cf "$local_tar" . \
+        || { echo "ERROR: failed to tar venv for durable cache" >&2; rm -f "$local_tar"; return 1; }
+
+    local tar_tmp="$SALT_LXPLUS_DIR/.venv-cache.tar.$$.tmp"
+    rsync --progress "$local_tar" "$tar_tmp" \
+        || { echo "ERROR: failed to rsync venv cache tarball to durable storage" >&2; rm -f "$local_tar" "$tar_tmp"; return 1; }
+    mv "$tar_tmp" "$SALT_LXPLUS_DIR/.venv-cache.tar" \
+        || { echo "ERROR: failed to publish venv cache tarball" >&2; rm -f "$tar_tmp" "$local_tar"; return 1; }
+    rm -f "$local_tar"
+
+    local hash_tmp="$SALT_LXPLUS_DIR/.venv-cache.hash.$$.tmp"
+    echo "$current_hash" > "$hash_tmp" \
+        || { echo "ERROR: failed to write venv cache hash" >&2; rm -f "$hash_tmp"; return 1; }
+    mv "$hash_tmp" "$SALT_LXPLUS_DIR/.venv-cache.hash" \
+        || { echo "ERROR: failed to publish venv cache hash" >&2; rm -f "$hash_tmp"; return 1; }
 
     # shellcheck disable=SC1091
-    source "$SALT_LXPLUS_DIR/.venv/bin/activate" || return 1
+    source "$local_venv/bin/activate" || return 1
     export PATH="$setup_dir:$PATH"
 
     cat <<EOF
 
 ==================================================================
- salt lxplus environment ready.
-   repo            = $SALT_REPO_DIR
-   SALT_LXPLUS_DIR = $SALT_LXPLUS_DIR
-   venv            = $SALT_LXPLUS_DIR/.venv  (activated)
+ salt lxplus environment ready — tier: COLD (full install ran).
+   dev + root extras installed on this cold build (pytest/ruff/mypy + uproot/awkward)
+   repo             = $SALT_REPO_DIR
+   SALT_LXPLUS_DIR  = $SALT_LXPLUS_DIR   (durable, batch-worker-visible)
+   active venv      = $local_venv   (activated, /tmp-cached)
+   cache tarball    = $SALT_LXPLUS_DIR/.venv-cache.tar
 
  Verify:
    python -m salt.main --help
+   (prefer this over the bare 'salt' command when running from the /tmp copy —
+    its console-script shebangs go stale across cache moves; 'python -m
+    salt.main' never depends on them.)
+
+ Re-source any time to re-activate (fast after this first run):
+   source setup/setup_lxplus.sh
+ Force a full rebuild (e.g. after a dependency bump the hash didn't catch):
+   source setup/setup_lxplus.sh --reinstall
 
  GPU access — CERN HTCondor batch farm (the sanctioned GPU route):
    salt-lxplus-gpu shell [flavour]           interactive GPU node
    salt-lxplus-gpu submit <config> [flavour] batch GPU training
    salt-lxplus-gpu status                    your condor jobs
-   (This venv/SIF live on EOS, but the submit-file artifacts — the job
+   (This venv cache/SIF live on EOS, but the submit-file artifacts — the job
     executable + logs — go to AFS home: standard schedds reject /eos paths
     inside the submit file. salt-lxplus-gpu handles that split for you.)
-
- Re-source any time to re-activate:
-   source setup/setup_lxplus.sh
 ==================================================================
 EOF
     return 0
 }
 
-_salt_lxplus_setup
-unset -f _salt_lxplus_setup
+_salt_lxplus_setup "$@"
+unset -f _salt_lxplus_setup _salt_lxplus_tmp_owned

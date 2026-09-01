@@ -14,14 +14,15 @@ of `h5py`. Everything runs on CPU in a few minutes.
 
 ## Prerequisites
 
-You need salt installed ([Setup](../setup.md)). The short version:
+You need salt installed — see [Setup](../setup.md) for the quick paths
+(`source setup/setup_uv.sh`, or `setup/setup_conda.sh` if you prefer conda).
+Verify it worked:
 
 ```bash
-git clone https://gitlab.cern.ch/aft/algorithms/salt.git
-cd salt
-pip install -e .
-cd ..
+salt --help
 ```
+
+This should print the CLI usage (subcommands, options). If it does, you're ready.
 
 !!! info "Running in a container?"
 
@@ -190,7 +191,9 @@ class IdxReader(Reader):
 
 ## 3. Write the config
 
-Save as `config.yaml`. This is the whole model. Each section is explained below.
+Save this as `config.yaml` in `mnist-tutorial/` — the directory you created at the
+start, the parent of `data/` and `my_mnist/`, not inside `my_mnist/` itself. This is
+the whole model. Each section is explained below.
 
 ```yaml
 name: MNIST_MLP

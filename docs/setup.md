@@ -18,11 +18,30 @@ cd salt
 
 You can install salt within a virtual environment or a docker image.
 The recommended workflow is to create the Python environment and install Salt with `uv sync`.
-Salt requires Python 3.10 to 3.14.
+Salt requires Python 3.14.
 
 === "uv"
 
     [uv](https://docs.astral.sh/uv/) is the recommended way to create the Python environment and install Salt.
+
+    On a generic (non-lxplus) machine, the quickest path is the one-shot setup script:
+
+    ```bash
+    source setup/setup_uv.sh
+    ```
+
+    This detects `uv` on your `PATH`; if missing, it installs uv **inside the repo**
+    (`setup/.uv-bin/`, nothing written to your home directory), then creates a `.venv` at
+    the repo root via `uv sync` and activates it. It is idempotent — safe to re-source any
+    time to re-activate. Verify with `python -m salt.main --help`.
+
+    !!! info "lxplus users"
+
+        Use `setup/setup_lxplus.sh` instead — see the "lxplus (CERN)" tab below for CERN
+        batch-farm specifics (AFS/EOS storage placement, container-first workflow).
+
+    **By hand**, instead of the script:
+
     After cloning the repo, install uv if it is not already available:
 
     ```bash
@@ -32,13 +51,33 @@ Salt requires Python 3.10 to 3.14.
     Then create and activate a fresh environment:
 
     ```bash
-    uv venv --python 3.12
+    uv venv --python 3.14
     source .venv/bin/activate
     ```
 
 === "conda"
 
     Conda/mamba remains useful on clusters with managed installations or when you need non-Python system packages.
+
+    On a generic (non-lxplus) machine, the quickest path is the one-shot setup script:
+
+    ```bash
+    source setup/setup_conda.sh
+    ```
+
+    This bootstraps miniforge into a repo-local `conda/` directory if you have no conda
+    installation, creates (or reuses) a conda environment named `salt` with Python 3.14,
+    installs salt with `pip` (including the `py-lap-solver` source-build workaround), and
+    activates it. It is idempotent — safe to re-source any time to re-activate. Verify with
+    `python -m salt.main --help`.
+
+    !!! info "lxplus users"
+
+        Use `setup/setup_lxplus.sh` instead — see the "lxplus (CERN)" tab below for CERN
+        batch-farm specifics (AFS/EOS storage placement, container-first workflow).
+
+    **By hand**, instead of the script:
+
     After cloning the repo, you will need to set up conda/mamba if you don't already have it installed.
 
     ??? info "Check for an existing conda installation"
@@ -48,18 +87,13 @@ Salt requires Python 3.10 to 3.14.
 
         If already present you should skip the installation, and instead just create a new environment.
 
-    You can either perform a manual installation by following the
-    [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html) documentation,
-    or use the provided setup script, which can be run with
+    You can perform a manual installation by following the
+    [mamba](https://mamba.readthedocs.io/en/latest/installation/mamba-installation.html) documentation.
 
-    ```bash
-    source setup/setup_conda.sh
-    ```
-
-    Once you have mamba installed, you can instead create a fresh python environment using
+    Once you have mamba installed, create a fresh python environment using
 
     ```
-    mamba create -n salt python=3.12
+    mamba create -n salt python=3.14
     ```
 
     To activate it, just run
@@ -435,6 +469,38 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     and then re-run `uv sync`.
 
 
+??? failure "`Failed to build py-lap-solver` / `Use cmake.version instead of cmake.minimum-version`"
+
+    `py-lap-solver` 0.1.4 ships no Python 3.14 wheel, so it is built from source, and its
+    build metadata is rejected by `scikit-build-core>=0.8`:
+
+    ```
+    × Failed to build `py-lap-solver==0.1.4`
+    ╰─▶ Call to `scikit_build_core.build.build_wheel` failed (exit status: 7)
+        ERROR: Use cmake.version instead of cmake.minimum-version with scikit-build-core >= 0.8
+    ```
+
+    Current salt fixes this automatically via `[tool.uv] build-constraint-dependencies` in
+    `pyproject.toml` — if you see this error you are on an older checkout: `git pull`, or add
+
+    ```toml
+    [tool.uv]
+    build-constraint-dependencies = ["scikit-build-core<0.8"]
+    ```
+
+    under `[tool.uv]` in `pyproject.toml` and re-run `uv sync`.
+
+    For pip-based (conda) installs, preinstall the build backend and its deps, then install
+    without build isolation:
+
+    ```bash
+    pip install 'scikit-build-core<0.8' cmake ninja pyproject-metadata pathspec 'pybind11[global]'
+    pip install --no-build-isolation 'py-lap-solver>=0.1.4'
+    ```
+
+    (NOT `PIP_CONSTRAINT` — pip's build isolation ignores constraints.)
+
+
 ??? failure "`RuntimeError: The NVIDIA driver on your system is too old` when running salt"
 
     If you see the following error when running `salt fit`, then you need to install suitable pytorch version.
@@ -473,6 +539,42 @@ uv run --no-sync python -m pip install "<URL>"
 ```
 
 This will install the correct FlashAttention version and you should not get any errors or warnings related to FlashAttention.
+
+
+### Install Graphviz
+
+`salt graph plot` renders graph images via the Graphviz `dot` binary — this is a **system**
+binary, not a Python package. The `graphviz`/`pydot` packages on PyPI are pure-Python
+wrappers that shell out to `dot`; they do not provide it, and `uv`/`pip` cannot install it
+at all.
+
+Install it for your platform:
+
+```bash
+# macOS
+brew install graphviz
+
+# Debian / Ubuntu
+sudo apt-get install graphviz
+
+# Fedora / RHEL
+dnf install graphviz
+
+# Arch
+pacman -S graphviz
+```
+
+If you set up with conda/mamba (e.g. via `setup/setup_conda.sh`), conda-forge is the only
+Python-ecosystem-adjacent path that ships real Graphviz binaries:
+
+```bash
+conda install -c conda-forge graphviz
+```
+
+The prebuilt salt docker/apptainer containers already include `dot`, so container users
+need not install anything.
+
+Verify with `dot -V` (prints the version, to stderr) or `which dot`.
 
 
 ### Setup Logging

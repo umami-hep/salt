@@ -5,7 +5,8 @@
 #   * CONTAINER (recommended): run inside an Apptainer image (one loop-mounted file,
 #     so no per-job small-file penalty from EOS). Point SALT_LXPLUS_SIF at a .sif,
 #     or `salt-lxplus-gpu pull` one from the salt registry onto EOS.
-#   * VENV (fallback): the environment built by `source setup/setup_lxplus.sh`.
+#   * VENV (fallback): the venv tarball cache published by `source setup/setup_lxplus.sh`
+#     (extracted to worker-local scratch on demand).
 # Container mode is used when a .sif is found (SALT_LXPLUS_SIF / default EOS path).
 #
 # STORAGE SPLIT (important on lxplus): standard CERN batch schedds REJECT /eos paths
@@ -25,7 +26,7 @@
 #                         reader package) — for packages NOT already in the image.
 #   SALT_LXPLUS_BIND      extra comma-separated bind paths (besides /eos,/afs).
 #   SALT_LXPLUS_AFS       AFS base for submit-file artifacts (default $HOME/.salt-lxplus).
-#   SALT_LXPLUS_DIR       venv install dir (venv fallback), exported by setup_lxplus.sh.
+#   SALT_LXPLUS_DIR       venv cache dir (holds .venv-cache.tar; venv fallback), exported by setup_lxplus.sh.
 #   SALT_REPO_DIR         salt checkout holding this wrapper.
 #
 # Usage:
@@ -66,6 +67,23 @@ GPU_MEM="${SALT_LXPLUS_GPU_MEMORY:-10000}"
 _have_container() { [[ -f "$SIF" ]]; }
 
 _abspath() { case "$1" in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")";; esac; }
+
+# Verbatim copy of `_salt_lxplus_tmp_owned` in setup/setup_lxplus.sh — keep in sync.
+# No shared lib: condor runs a node-local copy of THIS file alone (see `_submit_job`),
+# so no sibling lib would exist on the worker. /tmp is shared by every user on the node,
+# so refuse any path there that is not ours or is group/world-writable.
+# Returns: 0 = exists and safely owned, 1 = exists but untrusted, 2 = absent.
+_salt_lxplus_tmp_owned() {
+    local path="$1" owner perms group_digit other_digit
+    [[ -e "$path" || -L "$path" ]] || return 2
+    read -r owner perms < <(stat -c '%u %a' "$path" 2>/dev/null) || return 1
+    [[ -n "$owner" && "$owner" == "$(id -u)" ]] || return 1
+    group_digit="${perms: -2:1}"
+    other_digit="${perms: -1}"
+    (( (group_digit & 2) == 0 )) || return 1
+    (( (other_digit & 2) == 0 )) || return 1
+    return 0
+}
 
 # Assemble apptainer bind args (APP_BINDS[]) + extra PYTHONPATH (APP_PYTHONPATH).
 _apptainer_args() {
@@ -142,19 +160,60 @@ PY
             exec apptainer exec --nv "${APP_BINDS[@]}" ${APP_PYTHONPATH:+--env PYTHONPATH="$APP_PYTHONPATH"} "$SIF" \
                 python -m salt.main "$@"
         else
-            # venv fallback — fail LOUDLY if it isn't actually usable, rather than
-            # limping into "python: command not found".
-            if [[ ! -x "$SALT_LXPLUS_DIR/.venv/bin/python" ]]; then
-                echo "ERROR: no container selected AND no usable venv." >&2
+            # venv fallback — fail LOUDLY rather than limping into "python: command not found".
+            if [[ ! -f "$SALT_LXPLUS_DIR/.venv-cache.tar" ]]; then
+                echo "ERROR: no container selected AND no venv cache tarball found." >&2
                 echo "  mode decision: SALT_LXPLUS_SIF='${SALT_LXPLUS_SIF:-<empty>}' resolved SIF='$SIF' exists=$([[ -f "$SIF" ]] && echo yes || echo no)" >&2
                 echo "  job_env.sh: '$_jobenv' ($([[ -f "$_jobenv" ]] && echo sourced || echo MISSING)); SALT_JOBDIR='${SALT_JOBDIR:-<unset>}'" >&2
-                echo "  venv python: '$SALT_LXPLUS_DIR/.venv/bin/python' (missing)" >&2
-                echo "  -> set SALT_LXPLUS_SIF to a .sif for container mode, or build the venv (source setup/setup_lxplus.sh)." >&2
+                echo "  venv cache tarball: '$SALT_LXPLUS_DIR/.venv-cache.tar' (missing)" >&2
+                echo "  -> set SALT_LXPLUS_SIF to a .sif for container mode, or build the venv cache (source setup/setup_lxplus.sh)." >&2
                 exit 3
             fi
+            # Extract to worker-local scratch on demand — EOS/AFS never holds a
+            # durable extracted venv (see header).
+            local_venv="${_CONDOR_SCRATCH_DIR:-/tmp}/${_user}-salt-venv-batch"
+            if [[ -n "${_CONDOR_SCRATCH_DIR:-}" ]]; then
+                # HTCondor scratch is private and fresh per job: no ownership
+                # check (unlike the /tmp branch below), no staleness check.
+                rm -rf "$local_venv"
+                mkdir -p "$local_venv"
+                # Plain tar, no rsync --progress: batch output is non-interactive.
+                if ! tar -C "$local_venv" -xf "$SALT_LXPLUS_DIR/.venv-cache.tar"; then
+                    echo "ERROR: failed to extract '$SALT_LXPLUS_DIR/.venv-cache.tar' to '$local_venv'." >&2
+                    exit 3
+                fi
+            else
+                # /tmp fallback (manual non-condor invocation): unlike condor scratch,
+                # /tmp is shared and persists, so two failure classes must stay distinct:
+                # untrusted (not ours — refuse, NEVER rm -rf: that is the symlink attack
+                # this guards) vs stale/partial (ours — safe to wipe and re-extract).
+                _salt_lxplus_tmp_owned "$local_venv"; _venv_owned_rc=$?
+                _salt_lxplus_tmp_owned "${local_venv}.hash"; _hash_owned_rc=$?
+                if [[ $_venv_owned_rc -eq 1 || $_hash_owned_rc -eq 1 ]]; then
+                    echo "ERROR: '$local_venv' exists but is not safely owned (must be owned by $(id -un) and not group/world-writable)." >&2
+                    exit 3
+                fi
+                _venv_fresh=0
+                if [[ -f "${local_venv}.hash" && -f "$SALT_LXPLUS_DIR/.venv-cache.hash" && -x "$local_venv/bin/python" ]] \
+                    && [[ "$(cat "${local_venv}.hash")" == "$(cat "$SALT_LXPLUS_DIR/.venv-cache.hash")" ]]; then
+                    _venv_fresh=1
+                fi
+                if [[ $_venv_fresh -eq 0 ]]; then
+                    rm -rf "$local_venv" "${local_venv}.hash"
+                    mkdir -p "$local_venv"
+                    if ! tar -C "$local_venv" -xf "$SALT_LXPLUS_DIR/.venv-cache.tar"; then
+                        echo "ERROR: failed to extract '$SALT_LXPLUS_DIR/.venv-cache.tar' to '$local_venv'." >&2
+                        exit 3
+                    fi
+                    # Stamp only after a successful extract; no source hash means
+                    # a permanent mismatch, i.e. re-extract on every future run.
+                    [[ -f "$SALT_LXPLUS_DIR/.venv-cache.hash" ]] && cp "$SALT_LXPLUS_DIR/.venv-cache.hash" "${local_venv}.hash"
+                fi
+            fi
             # shellcheck disable=SC1091
-            source "$SALT_LXPLUS_DIR/.venv/bin/activate"
+            source "$local_venv/bin/activate"
             echo "=== salt-lxplus-gpu (venv) on $(hostname) at $(date -u) ==="
+            echo "venv: extracted $SALT_LXPLUS_DIR/.venv-cache.tar -> $local_venv"
             nvidia-smi -L 2>/dev/null || echo "(no nvidia-smi — not on a GPU node?)"
             python - <<'PY' 2>&1 || echo "(torch import failed)"
 import torch
@@ -195,8 +254,12 @@ EOF
             echo "    apptainer shell --nv --bind /eos${SALT_LXPLUS_SRC:+ --bind $SALT_LXPLUS_SRC/salt:${SALT_LXPLUS_IMAGE_SRC:-/opt/salt-src}/salt} \"$SIF\""
             echo "then e.g.:  python -m salt.main fit --config <config.yaml>"
         else
-            echo "When you land on the worker, activate the venv with:"
-            echo "    source \"$SALT_LXPLUS_DIR/.venv/bin/activate\""
+            echo "When you land on the worker, there is no pre-extracted venv to source."
+            echo "Run salt directly via this wrapper (it extracts the cached venv to the"
+            echo "worker's scratch automatically):"
+            echo "    \"$SETUP_DIR/salt-lxplus-gpu\" _run fit --config <config.yaml>"
+            echo "Or extract + activate manually:"
+            echo "    mkdir -p \"\$TMPDIR/salt-venv\" && tar -C \"\$TMPDIR/salt-venv\" -xf \"$SALT_LXPLUS_DIR/.venv-cache.tar\" && source \"\$TMPDIR/salt-venv/bin/activate\""
             echo "then e.g.:  python -m salt.main fit --config <config.yaml>"
         fi
         echo "(Attach to a running batch job instead with: condor_ssh_to_job <jobid>)"

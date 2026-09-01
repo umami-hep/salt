@@ -29,6 +29,8 @@ from salt.model.saltmodule import (
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
 
+pytest.importorskip("mup", reason="muP tests need `pip install 'salt[muP]'`")
+
 DUMMY_CFG = str(small_config())
 LRS = {"initial": 1e-4, "max": 5e-4, "end": 1e-5, "pct_start": 0.1}
 
