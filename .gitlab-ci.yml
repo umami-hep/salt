@@ -28,3 +28,4 @@ include:
   - .gitlab/.ci-coverage.yaml
   - .gitlab/.ci-docs.yaml
   - .gitlab/.ci-publish.yaml
+  - .gitlab/.ci-scheduled.yaml

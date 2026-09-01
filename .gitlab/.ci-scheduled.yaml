@@ -1,0 +1,103 @@
+# .gitlab/.ci-scheduled.yaml — SCHEDULE-ONLY jobs (never on MR/push).
+#
+# Every job here has `rules: schedule -> run, anything else -> never`; every
+# job in the other .ci-*.yaml files has the inverse (schedule -> never), so a
+# scheduled pipeline runs exactly these jobs and an MR/push pipeline runs none
+# of them. Cost is the reason: each job is a COLD install on a plain
+# python:3.14 image (no salt docker image, no cache) followed by the full CPU
+# test suite — ~20 min each — which nobody wants on every MR.
+#
+# What a green run proves, once a week: the two shipped setup scripts
+# (setup/setup_uv.sh, setup/setup_conda.sh) still bootstrap their toolchain
+# and install salt on a clean machine, `python -m salt.main --help` works on
+# the result, and the full CPU suite — salt/tests/unit + every pipeline
+# fixture row + the row-independent integration tests, i.e. the same tests
+# the MR pipeline's unit-tests/per-config jobs run, minus the GPU job — passes
+# on that env. The scripts are sourced EXACTLY as shipped; the test-only deps
+# (dev group + root/muP extras, the CI image's set from setup/Dockerfile) are
+# added afterwards, so an install gap in a script fails at the proof step,
+# not somewhere inside pytest.
+#
+# The schedule itself lives outside the repo: project Settings -> CI/CD ->
+# Pipeline schedules, "Weekly cold-install (uv + conda) + full test suite",
+# cron `7 16 * * 1` (Europe/London). Created via the API — see CCRA study
+# plan 19 for the exact call. Retarget its ref to `main` once this merges.
+
+.weekly-template:
+  stage: unit-tests
+  image: registry.cern.ch/docker.io/library/python:3.14
+  needs: []
+  timeout: 3h
+  # A cold install must not be cancelled by a newer push; overrides the
+  # top-level `default: interruptible: true`.
+  interruptible: false
+  variables:
+    # Fresh checkout every run: a runner that reused a workspace holding a
+    # previous run's .venv/ or conda/ would hit the scripts' "already
+    # installed -> re-activate" fast path and silently test a WARM env.
+    GIT_STRATEGY: clone
+  artifacts:
+    when: always
+    paths:
+      - reports/
+    reports:
+      junit: reports/*.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - when: never
+  before_script:
+    - mkdir -p reports
+    # Cold-env guard (see GIT_STRATEGY) and the tools both scripts rely on.
+    - test ! -e .venv && test ! -e conda && test ! -e setup/.uv-bin
+    - command -v bash curl tar bzip2 gcc g++ && python -VV
+    - |
+      # Same pytest form as .test-template's run_test() minus `coverage run`
+      # (nothing merges coverage here). -p no:nb_regression: the dev group's
+      # pytest_notebook plugin still uses the removed
+      # pytest_collect_file(path, ...) hook and crashes collection on
+      # pytest >= 8; harmless when the plugin is absent. No --run-integration,
+      # exactly like the CI CPU jobs: the pipeline matrix is cpu_always. Both
+      # invocations run even if the first fails, so one weekly report shows
+      # everything.
+      run_full_suite() {
+        local flavour="$1" rc=0
+        python -m pytest -p no:nb_regression --show-capture=stdout --durations=15 \
+          --junitxml="reports/weekly-${flavour}-unit.xml" salt/tests/unit || rc=1
+        python -m pytest -p no:nb_regression --show-capture=stdout --durations=15 \
+          --junitxml="reports/weekly-${flavour}-integration.xml" salt/tests/integration || rc=1
+        return "$rc"
+      }
+
+# uv path. setup_uv.sh bootstraps uv into setup/.uv-bin (the image has no uv —
+# do NOT `pip install uv` first, that would bypass the bootstrap under test),
+# runs bare `uv sync` (base deps only) and activates .venv. The second sync is
+# additive on that same venv: the CI image's test-only set.
+weekly-uv:
+  extends: .weekly-template
+  artifacts:
+    when: always
+    paths:
+      - reports/
+      - uv.lock  # this week's fresh resolution (the repo tracks no lockfile)
+    reports:
+      junit: reports/*.xml
+  script:
+    - source setup/setup_uv.sh
+    - python -m salt.main --help
+    - uv sync --extra root --extra muP --group dev
+    - uv pip freeze > reports/freeze-uv.txt
+    - run_full_suite uv
+
+# conda path. setup_conda.sh downloads miniforge into ./conda, creates the
+# `salt` env (python 3.14), builds py-lap-solver from sdist and installs salt
+# editable. `pip install --group` needs pip >= 25.1 (conda-forge's 3.14 env
+# shipped 26.x on 2026-08-31; the upgrade line is no-op insurance).
+weekly-conda:
+  extends: .weekly-template
+  script:
+    - source setup/setup_conda.sh
+    - python -m salt.main --help
+    - python -m pip install 'pip>=25.1'
+    - python -m pip install --group dev -e '.[root,muP]'
+    - python -m pip freeze > reports/freeze-conda.txt
+    - run_full_suite conda
