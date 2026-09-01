@@ -69,11 +69,9 @@ _have_container() { [[ -f "$SIF" ]]; }
 _abspath() { case "$1" in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")";; esac; }
 
 # Verbatim copy of `_salt_lxplus_tmp_owned` in setup/setup_lxplus.sh — keep in sync.
-# Not sourced from a shared lib: `_submit_job` copies THIS script alone into the
-# AFS jobdir and condor runs a node-local scratch copy of that single file, so no
-# sibling lib would exist on the worker. /tmp is shared across every user on the
-# node, so refuse any path there that is not ours or is group/world-writable
-# rather than silently proceeding on untrusted shared state.
+# No shared lib: condor runs a node-local copy of THIS file alone (see `_submit_job`),
+# so no sibling lib would exist on the worker. /tmp is shared by every user on the node,
+# so refuse any path there that is not ours or is group/world-writable.
 # Returns: 0 = exists and safely owned, 1 = exists but untrusted, 2 = absent.
 _salt_lxplus_tmp_owned() {
     local path="$1" owner perms group_digit other_digit
@@ -162,8 +160,7 @@ PY
             exec apptainer exec --nv "${APP_BINDS[@]}" ${APP_PYTHONPATH:+--env PYTHONPATH="$APP_PYTHONPATH"} "$SIF" \
                 python -m salt.main "$@"
         else
-            # venv fallback — fail LOUDLY if it isn't actually usable, rather than
-            # limping into "python: command not found".
+            # venv fallback — fail LOUDLY rather than limping into "python: command not found".
             if [[ ! -f "$SALT_LXPLUS_DIR/.venv-cache.tar" ]]; then
                 echo "ERROR: no container selected AND no venv cache tarball found." >&2
                 echo "  mode decision: SALT_LXPLUS_SIF='${SALT_LXPLUS_SIF:-<empty>}' resolved SIF='$SIF' exists=$([[ -f "$SIF" ]] && echo yes || echo no)" >&2
@@ -173,26 +170,23 @@ PY
                 exit 3
             fi
             # Extract to worker-local scratch on demand — EOS/AFS never holds a
-            # durable extracted venv (see header + setup_lxplus.sh).
+            # durable extracted venv (see header).
             local_venv="${_CONDOR_SCRATCH_DIR:-/tmp}/${_user}-salt-venv-batch"
             if [[ -n "${_CONDOR_SCRATCH_DIR:-}" ]]; then
                 # HTCondor scratch is private and fresh per job: no ownership
                 # check (unlike the /tmp branch below), no staleness check.
                 rm -rf "$local_venv"
                 mkdir -p "$local_venv"
-                # Plain tar, no --progress/rsync: batch output is captured
-                # non-interactively, so progress plumbing would be wasted here.
+                # Plain tar, no rsync --progress: batch output is non-interactive.
                 if ! tar -C "$local_venv" -xf "$SALT_LXPLUS_DIR/.venv-cache.tar"; then
                     echo "ERROR: failed to extract '$SALT_LXPLUS_DIR/.venv-cache.tar' to '$local_venv'." >&2
                     exit 3
                 fi
             else
-                # /tmp fallback (manual non-condor invocation): /tmp is shared and
-                # persists across runs, unlike condor scratch, so two failure
-                # classes must not be conflated: untrusted (not ours: refuse,
-                # NEVER rm -rf, that is exactly the symlink attack this guards)
-                # vs stale/partial (ours, old tarball or a killed extract: safe
-                # to wipe and re-extract).
+                # /tmp fallback (manual non-condor invocation): unlike condor scratch,
+                # /tmp is shared and persists, so two failure classes must stay distinct:
+                # untrusted (not ours — refuse, NEVER rm -rf: that is the symlink attack
+                # this guards) vs stale/partial (ours — safe to wipe and re-extract).
                 _salt_lxplus_tmp_owned "$local_venv"; _venv_owned_rc=$?
                 _salt_lxplus_tmp_owned "${local_venv}.hash"; _hash_owned_rc=$?
                 if [[ $_venv_owned_rc -eq 1 || $_hash_owned_rc -eq 1 ]]; then

@@ -12,22 +12,19 @@
 # Python 3.14 venv (salt's required interpreter), runs `uv sync`, adds setup/ to
 # PATH (so `salt-lxplus-gpu` is available), and prints next-step instructions.
 #
-# Dual-copy model: $SALT_LXPLUS_DIR (AFS work / EOS home / AFS home — see below)
-# durably holds ONLY the tarball cache (.venv-cache.tar + .venv-cache.hash, keyed
-# by a pyproject.toml hash), never a bulk-extracted venv directory. Interactive
-# logins extract/reuse a node-local /tmp/<user>-salt-venv from that tarball,
-# avoiding a rebuild/`uv sync` against EOS/AFS on every shell. Batch jobs
-# (salt-lxplus-gpu) extract the same tarball to their own worker-local scratch on
-# demand and are unaffected by anything here.
+# Dual-copy model: $SALT_LXPLUS_DIR (AFS work / EOS home / AFS home — see below) durably
+# holds ONLY the tarball cache (.venv-cache.tar + .venv-cache.hash, keyed by a
+# pyproject.toml hash), never an extracted venv. Interactive logins extract/reuse a
+# node-local /tmp/<user>-salt-venv from it, avoiding a `uv sync` against EOS/AFS every
+# shell; batch jobs (salt-lxplus-gpu) extract the same tarball to their own worker-local
+# scratch and are unaffected by this script.
 #
-# Why tar-moving a uv venv is safe: `.venv/bin/python` symlinks to the absolute,
-# shared $UV_PYTHON_INSTALL_DIR interpreter on durable storage, so it resolves
-# wherever the venv lands. The `.venv/bin/*` console-script shebangs (e.g. a bare
-# `salt`) do go stale after a move — the supported `python -m salt.main` never
-# uses them, so do NOT try to "fix" them. `activate` would otherwise hardcode an
-# absolute VIRTUAL_ENV (the /tmp build dir), which is why the venv is created with
-# `uv venv --relocatable`: activate then derives VIRTUAL_ENV from its own path, so
-# both the /tmp copy and a batch worker's scratch extraction activate correctly.
+# Why tar-moving a uv venv is safe: `.venv/bin/python` symlinks to the absolute, shared
+# $UV_PYTHON_INSTALL_DIR interpreter on durable storage, so it resolves wherever the venv
+# lands. The `.venv/bin/*` console-script shebangs (e.g. a bare `salt`) DO go stale after
+# a move — the supported `python -m salt.main` never uses them, so do NOT "fix" them.
+# `uv venv --relocatable` is required because a plain `activate` hardcodes an absolute
+# VIRTUAL_ENV (the /tmp build dir); relocatable derives it from activate's own path.
 #
 # From the /tmp-cached copy, always prefer `python -m salt.main` over the bare
 # `salt` command (see above).
