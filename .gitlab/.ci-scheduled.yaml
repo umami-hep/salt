@@ -87,6 +87,8 @@ weekly-uv:
     - uv sync --extra root --extra muP --group dev
     - uv pip freeze > reports/freeze-uv.txt
     - run_full_suite uv
+    # Reached only if every line above passed: the marker weekly-badge reads.
+    - echo success > reports/status-uv
 
 # conda path. setup_conda.sh downloads miniforge into ./conda, creates the
 # `salt` env (python 3.14), builds py-lap-solver from sdist and installs salt
@@ -101,3 +103,57 @@ weekly-conda:
     - python -m pip install --group dev -e '.[root,muP]'
     - python -m pip freeze > reports/freeze-conda.txt
     - run_full_suite conda
+    - echo success > reports/status-conda
+
+# README badges. Each weekly job writes reports/status-<flavour> as its LAST
+# script line, so the marker exists iff the job passed; reports/ uploads with
+# `when: always`, so the marker (or its absence) arrives here even from a
+# failed job. This job turns the markers into dated SVGs.
+#
+# It is a SEPARATE job that must stay green when weekly markers are missing:
+# the README hot-links the badges through GitLab's
+# `.../-/jobs/artifacts/main/raw/<path>?job=weekly-badge` URL, which serves the
+# latest SUCCESSFUL job of that name on the ref. If the weekly jobs produced
+# their own badges, a failing week would leave last week's green badge on show.
+# `expire_in: never` for the same reason. Best-effort by design — anybadge is
+# unpinned; pin it only if this job ever breaks.
+weekly-badge:
+  stage: per-config
+  image: registry.cern.ch/docker.io/library/python:3.14
+  needs: [weekly-uv, weekly-conda]
+  timeout: 10m
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - when: never
+  artifacts:
+    when: always
+    paths:
+      - badges/
+    expire_in: never
+  script:
+    - python -m pip install anybadge
+    - mkdir -p badges
+    - |
+      d=$(date -u +%Y-%m-%d)
+      overall=passing
+      overall_colour=green
+      for flavour in uv conda; do
+        if grep -qs '^success$' "reports/status-${flavour}"; then
+          verdict=passing
+          colour=green
+        else
+          verdict=failing
+          colour=red
+          overall=failing
+          overall_colour=red
+        fi
+        echo "weekly-${flavour}: ${verdict} (${d})"
+        anybadge --label="weekly ${flavour}" --value="${verdict} ${d}" \
+          --color="${colour}" --file="badges/weekly-${flavour}.svg" --overwrite
+      done
+      echo "weekly (combined): ${overall} (${d})"
+      anybadge --label="weekly cold-install" --value="${overall} ${d}" \
+        --color="${overall_colour}" --file=badges/weekly.svg --overwrite
+    - "true"
