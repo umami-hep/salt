@@ -156,4 +156,4 @@ weekly-badge:
       echo "weekly (combined): ${overall} (${d})"
       anybadge --label="weekly cold-install" --value="${overall} ${d}" \
         --color="${overall_colour}" --file=badges/weekly.svg --overwrite
-    - true
+    - "true"
