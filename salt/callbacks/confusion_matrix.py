@@ -20,7 +20,9 @@ class ConfusionMatrixCallback(Callback):
     """
 
     def __init__(
-        self, task_name: str, class_names_override: list[str] | dict[str, str] | None = None
+        self,
+        task_name: str,
+        class_names_override: list[str] | dict[str, str] | None = None,
     ) -> None:
         self.task_name = task_name
         self.class_names_override = class_names_override
@@ -62,8 +64,8 @@ class ConfusionMatrixCallback(Callback):
             self.task_label_name
         ]
 
-        self.truth_labels.extend(truth_labels_batch)
-        self.pred_labels.extend(pred_labels_batch)
+        self.truth_labels.extend(truth_labels_batch.flatten())
+        self.pred_labels.extend(pred_labels_batch.flatten())
 
     def on_validation_epoch_end(
         self,
