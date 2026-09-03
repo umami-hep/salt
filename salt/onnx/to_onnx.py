@@ -601,7 +601,7 @@ def get_default_onnx_feature_map(
                 "name_salt": input_name,
                 "is_global": False,
             })
-        elif "electrons" in input_name:
+        elif "electrons" in input_name or "muons" in input_name:
             feature_map.append({
                 "name_athena_in": f"{input_name}_r22default",
                 "name_athena_out": f"{input_name.removesuffix('s')}_features",
