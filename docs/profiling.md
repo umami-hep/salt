@@ -205,7 +205,7 @@ between encoder, task heads and normalisation is read straight off the summary
 rather than reverse-engineered from aten ops.
 
 The scope sits **outside** the module call. Salt compiles each graph module in
-place (see [Compiled Models](configuration.md#compiled-models)), so the scope
+place (see [torch.compile](training.md#torchcompile)), so the scope
 introduces no graph break and the compiled region is byte-for-byte the same as
 in an unprofiled run — the eager and compiled captures are directly comparable.
 
@@ -223,7 +223,7 @@ and does nothing else.
 
 `profiled_it_s` in the summary is the rate measured *inside* the active window.
 Run the same cell once without the callback and divide: that ratio is the
-profiler overhead, and it is the only honest way to report it.
+profiler overhead, and it is the correct way to report it.
 
 On GN3V00 / one A100 / `flash-varlen` the measured overhead was **1.5–1.7x at
 batch 1000** and **1.07–1.11x at batch 4500–5000** — it is a per-step cost, so

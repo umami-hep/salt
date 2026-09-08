@@ -26,8 +26,8 @@ covered there, and this page only restates the parts Athena constrains.
 
 ## The one thing to understand first
 
-Athena is stricter than salt about names. It does not simply read whatever your
-model declares and adapt — several names are **parsed by regex or looked up in
+Athena is stricter than salt about names. It does not read whatever your
+model declares and adapt to it — several names are **parsed by regex or looked up in
 hard-coded tables**, and a mismatch is a hard failure, usually at the first
 event or at configuration time.
 

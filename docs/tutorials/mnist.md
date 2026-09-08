@@ -156,38 +156,18 @@ class IdxReader(Reader):
         return out
 ```
 
-### The reader contract, method by method
+### What the reader has to implement
 
-- **`streams`** — the stream names this reader serves. One here (`mnist`);
-  a jet reader might serve `jets` and `tracks`. Downstream modules refer to
-  streams by these names.
-- **`with_source(filename, num, ...)`** — clone the configured reader prototype
-  onto a concrete file. You configure *one* reader; the datamodule calls
-  `with_source` three times to derive the train/val/test readers from
-  `data.train_file` / `val_file` / `test_file`. Config-only: no file I/O here.
-- **`prepare()` / `__len__()`** — main-process file probing. `prepare` is
-  idempotent and lazy; `__len__` is the row count the sampler slices over.
-  MNIST fits in memory, so this reader just loads both arrays up front.
-- **`bind(ctx)`** — per-worker setup (open handles, allocate buffers), called
-  once per dataloader worker. The only place a dataset module may touch files
-  at serving time.
-- **`declare_io(mode)`** — the static half of the contract. Before any data is
-  read, salt compiles a plan from every module's declared `requires`/`produces`
-  and validates the whole pipeline connects. A reader requires nothing and
-  produces three keys here:
-    - `raw.mnist` — the label record (a structured array with a `digit` field).
-      The `raw.*` namespace is what label/feature processors consume.
-    - `inputs.mnist` — the pixel block, with the **concrete** shape
-      `("B", 784)`. Producing model-ready `inputs.*` directly (instead of
-      routing through the `Features` processor) is deliberate: `Features`
-      derives a stream's width from its list of named variables, which is right
-      for named physics variables and wrong for 784 anonymous pixels.
-    - `meta.rows` — the `[start, stop)` row window of each batch, TEST mode
-      only. The H5 output sink requires it to anchor each batch of predictions
-      at the correct rows of the output file.
-- **`read(rows, mode)`** — the runtime half: return exactly what you declared,
-  as numpy arrays for one contiguous row slice. Copy anything that aliases a
-  reusable internal buffer before handing it out.
+A `Reader` is required to serve named `streams`, clone itself onto a concrete
+file via `with_source`, probe the file once in `prepare`/`__len__`, and
+return exactly its declared keys from `read` for one contiguous row slice at
+a time. `declare_io` is the static half of this: before any data is read,
+salt compiles a plan from every module's declared `requires`/`produces` and
+checks the whole pipeline connects, which is why `IdxReader` above declares
+`raw.mnist`, `inputs.mnist`, and `meta.rows` up front. The full
+method-by-method reference, including `bind(ctx)`'s per-worker role and the
+one mandatory buffer copy in `read`, lives in
+[Data modules](../modules/data.md).
 
 ## 3. Write the config
 
@@ -256,8 +236,9 @@ trainer:
 ### `data:`
 
 The reader is wired in by `class_path: my_mnist.reader.IdxReader` — a plain
-Python import path pointing at *your* module. Any importable class satisfying
-the `Reader` contract can go here; nothing needs to be added to salt itself.
+Python import path pointing at *your* module. Any importable class that
+implements what a `Reader` requires can go here; nothing needs to be added to
+salt itself.
 
 `Labels` is salt's demand-driven label producer: it watches which labels the
 model's tasks ask for (here `digit`, declared by the classification task below)
@@ -345,8 +326,8 @@ module produces), this command tells you now, with the producer/consumer names,
 instead of a shape error mid-training.
 
 Two warnings are expected and harmless here: no `schema:` artifact (field
-spellings can't be checked statically for a custom reader) and no export
-contract declared (this tutorial does not export to ONNX).
+spellings can't be checked statically for a custom reader) and no ONNX
+export surface declared (this tutorial does not export to ONNX).
 
 !!! warning "Stale validate results after editing your config"
 
@@ -399,7 +380,7 @@ Wrote eval file run/ckpts/epoch=001-loss=17.51267__test_t10k-images-idx3-ubyte.h
 If `ckpts/` also contains `-v1` variants (e.g. `epoch=001-loss=17.51267-v1.ckpt`),
 you ran `salt fit` more than once into the same `run/` directory — the seeded
 re-run reproduces identical filenames and Lightning appends a version suffix
-instead of overwriting, so the `-v1` file is simply the newer (equivalent) save:
+instead of overwriting, so the `-v1` file is the newer, equivalent save:
 pass `salt test` one explicit filename, or `rm -rf run` and retrain.
 
 The eval H5 has one structured dataset per stream. Read it back and compute the
@@ -431,9 +412,10 @@ around **0.95–0.97**.
 The only code you wrote was a reader for a binary format salt has never heard
 of. Everything else was **configuration of existing modules**:
 
-- **The data side is pluggable.** Any class satisfying the `Reader` contract —
-  `streams`, `with_source`, `prepare`/`__len__`, `bind`, `declare_io`, `read` —
-  can feed salt, wired in with a `class_path` from your own workspace. The same
+- **The data side is pluggable.** Any class implementing what a `Reader`
+  requires — `streams`, `with_source`, `prepare`/`__len__`, `bind`,
+  `declare_io`, `read` — can feed salt, wired in with a `class_path` from
+  your own workspace. The same
   seam serves H5 jets, ROOT ntuples, and MNIST alike.
 - **Demand drives the pipeline.** You never listed which labels to load: the
   task declared `label: digit`, `Labels` narrowed to it, and the reader was

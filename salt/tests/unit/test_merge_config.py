@@ -384,6 +384,33 @@ class TestClassPathOrdering:
 class TestStageCaption:
     """The per-stage graph caption reflects early_stop + callbacks."""
 
+    def test_null_deleted_modules_are_not_freezable(self):
+        # an overlay's `module: null` is a deletion, not a module: it must not
+        # appear in a stage's frozen set (and therefore not in the caption)
+        from salt.merge_config import _schedule_from_merged
+
+        merged = {
+            "model": {
+                "init_args": {
+                    "modules": {
+                        "norm": None,
+                        "norm_new": {"class_path": "x.Y"},
+                        "encoder": {"class_path": "x.Z"},
+                        "head": {"class_path": "x.H"},
+                    }
+                }
+            },
+            "training_schedule": {
+                "stages": {
+                    "warmup": {"epochs": 1, "trainable": ["norm_new", "head"]},
+                    "full": {"frozen": []},
+                }
+            },
+        }
+        sched = _schedule_from_merged(merged)
+        assert sched.module_names == ("norm_new", "encoder", "head")
+        assert sched.frozen_names(sched.stages[0]) == {"encoder"}
+
     def test_plain_stage_caption(self):
         from salt.merge_config import _stage_title
         from salt.schedule import StageConfig

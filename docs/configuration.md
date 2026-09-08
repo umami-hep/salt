@@ -1,560 +1,613 @@
-# Advanced Configuration
+# Configuration
 
+This page is the settings reference: how a salt config is assembled from several files, what each top-level block does, how to delete or override a key, and the full set of `data:` and `model:` keys that do not have their own page. `outputs:` has its own page ([Outputs](outputs.md)), the module reference lives under [Writing modules](modules/index.md), and everything about running a training (`salt fit`, resuming, `torch.compile`, dataloader performance) is on [Training](training.md).
 
-### Dataloading
+## How a config is assembled
 
-#### Using Multiple Small H5 Files (Wildcards)
+Every `salt fit` / `salt test` invocation auto-loads `salt/configs/base.yaml` first; your own config (or configs) stack on top of it, so you only need to state what differs from the defaults (trainer, callbacks, seed).
 
-Training files for can become quite large these days. To still have the possibility to store them properly, the big training
-files are broken up into smaller training files. To use them similar to a big file, you can use so-called wildcards. Let's
-assume you have your smaller files, which are named `pp_output_train_split_000.h5`, `pp_output_train_split_001.h5` and so on.
-When all of them are stored in the same folder, the path used to define the training h5 file in the config can be given as:
+**What `base.yaml` already gives you.** Every run auto-loads `seed_everything: 42`, Lightning trainer defaults (`accelerator: auto`, `devices: 1`, a `CometLogger`, `log_every_n_steps: 50`), and five callbacks: `checkpoint`, `progress`, `lr_monitor`, `model_summary`, `artifacts` (see the callbacks table below). None of this needs restating in your own config; override only the keys that differ.
 
-```yaml
-data:
-  train_file: /path/to/somewhere/pp_output_train_split_*.h5
-```
-
-This will automatically trigger the Virtual Dataset (VDS) creation of Salt, using the VDS
-capabilities of the [`atlas-ftag-tools`](https://github.com/umami-hep/atlas-ftag-tools). The VDS is
-something like a symlink to the actual files and allows Salt to correctly read in the h5 files. The
-VDS will be created by default in the same folder where also the wildcard points to. In the example
-given above, the VDS file path would be `/path/to/somewhere/pp_output_train_split_vds/vds.h5`. If
-you want a specific path, you can define this like this:
+A config file can list further files to merge underneath it with a top-level `include:` key, before jsonargparse ever sees the file:
 
 ```yaml
-data:
-  train_file: /path/to/somewhere/pp_output_train_split_*.h5
-  train_vds_file: /path/to/something/completely/else/my_train_vds_file.h5
-```
+include: [../base_model.yaml, ../base_data.yaml]
 
-All the aformentioned settings are also usable for the validation and test file(s):
-
-```yaml
-data:
-  train_file: /path/to/somewhere/pp_output_train_split_*.h5
-  train_vds_file: /path/to/something/completely/else/my_train_vds_file.h5
-  val_file: /path/to/somewhere/pp_output_val_split_*.h5
-  val_vds_file: /path/to/something/completely/else/my_val_vds_file.h5
-  test_file: /path/to/somewhere/pp_output_test_split_*.h5
-  test_vds_file: /path/to/something/completely/else/my_test_vds_file.h5
-```
-
-#### Selecting Training Variables
-
-Training files are structured arrays, so it is easy to specify which variables you want to include in the training by name.
-
-In your `data` config there is a `variables` key which specifies which variables to include in the training for each input type.
-These are defined in the model files, rather than the `base.yaml` config.
-
-??? warning "Make sure you do not train on truth information!"
-
-    The variables listed under `data.variables` are the inputs to the training.
-    You should _not_ include any truth information (unless you are testing this explicitly),
-    but rather specify truth labels for each task in your model config.
-
-For example, in [`gn2v2-opendata.yaml`]({{repo_url}}-/blob/main/salt/configs/gn2v2-opendata.yaml) you will find the following variables:
-
-```yaml
-data:
-  variables:
-    jets:
-      - pt_btagJes
-      - eta_btagJes
-    tracks:
-      - d0
-      - z0SinTheta
-      - dphi
-      - deta
-      ...
-```
-
-The number of variables specified here will be used to automatically set the `input_size` of your `salt.model.modules.StreamEmbed` modules.
-
-Training with multiple types of inputs beyond jets and tracks is supported to create a heterogeneous model. An example of this can be found in [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) which includes a separate electrons input type.
-
-#### Mapping Input Dataset Names
-
-By default, the input names are used to directly retrieve dataset in the input h5 files.
-If you want to use a different name to retrieve the h5 datasets, you can specify a mapping in the `data` config, using the `input_map` key.
-
-```yaml
-data:
-  input_map:
-    internal_name: h5_dataset_name
-```
-
-In this example, `h5_dataset_name` will be used to retrieve the datasets from the input h5 files, while internally (and elsewhere in the configuration) this input type will be referred to as `internal_name`.
-
-
-#### Truncating Inputs
-
-You can truncate the number of tracks used for training.
-This can be useful to speed up training.
-To do so, pass `--data.num_inputs.tracks=10` to limit the training to the first ten tracks.
-This can also be configured in yaml via
-
-```yaml
-data:
-  num_inputs:
-    tracks: 10
-```
-
-#### Remapping Labels
-
-This section is about remapping labels on the fly, which is useful in case they are not already mapped to `0, 1, 2...`.
-In the config block for each task, you can specify a `label_map` which maps the label values as stored in the input file to the ones you want to use in the task loss calculation.
-For example, instead of using the pre-mapped `flavour_label`, you could directly train on `HadronConeExclTruthLabelID` using,
-
-```yaml
-class_path: salt.models.ClassificationTask
-init_args:
-    input_name: jets
-    name: jet_classification
-    label: HadronConeExclTruthLabelID
-    label_map: { 0: 0, 4: 1, 5: 2 }
-    class_names: [ujets, cjets, bjets]
-    ...
-```
-
-Note, when using `label_map` you also need to provide `class_names`.
-When using `flavour_label` as the target, the class names are automatically determined for you from the training file.
-
-#### Relabelling on the fly
-
-Similarly, it is possible to modify the labels available from the dataloading to use different ones during training. If a set of flavour labels has been used during preprocessing, these can be changed by relabelling on-the-fly to a new set of classes. These will typically be a more granular breakdown of the inital classes.
-For example, if in preprocessing the classes `hbb`, `hcc`, `top`, `qcd`, have been used, one may want to breakdown the qcd class into its subclasses `qcdbb`, `qcdbx`, `qcdcx`, `qcdll`.
-Another use case occurs when evaluating a test file which does not contain the `flavour_label` field; this typically happens when the test file has not been processed via UPP. In this case, the classification task (which would otherwise fail with an error on the missing flavour label), runs and the `flavour_label` is generated on-the-fly.
-To apply the relabelling on-the-fly, the following config can be used:
-
-```yaml
-data:
-
-  labeller_config:
-    use_labeller: True
-    class_names: ['hbb', 'hcc', 'top', 'qcdbb', 'qcdbx', 'qcdcx', 'qcdll']
-    require_labels: False
-    ...
-```
-The option `class_names` will contain the list of new target classes to apply the relabelling scheme; these will be different from the ones available in the preprocessing output.
-The option `require_labels` controls whether all the jets will be relabelled to the new target classes. If set to `True` (default), the job will fail if some jets do not verify the selection criteria of any of the new target classes; if set to `False`, a warning is thrown and some jets will not be relabelled.
-Note, when using `use_labeller: True` you also need to provide `class_names`. The model output size for the ClassificationTask will also need to be modified accordingly to match the new number of output classes.
-The labeller is disabled either by removing the `labeller_config` block entirely, or by setting `use_labeller: False`.
-At present, this feature is only available for jets and for the `flavour_label` label in the ClassificationTask.
-
-#### Input Augmentation
-
-Different transformations ("transforms") can be applied to input data after being loaded but before training. You can choose from the classes defined in `salt.data.transforms` and they are applied in the same order that they are defined in the configuration file. Transforms are specified under the `data` configuration block.
-
-The `GaussianNoise` class is available for applying noise to the input features of your choice. The input type (usually `jets` or `tracks`), variable name, and mean and standard deviation of the desired noise are specified. The mean and standard deviation are fractions of the input values. An example config for this is shown below.
-
-```yaml
-transforms:
-  - class_path: salt.data.transforms.GaussianNoise
-    init_args:
-      noise_params:
-        - input_type: jets
-          variable: pt_btagJes
-          mean: 0.0
-          std: 0.1
-        - input_type: tracks
-          variable: d0
-          mean: 0.1
-          std: 0.05
-```
-
-This will add noise with mean 0 and standard deviation 0.1 to the `pt_btagJes` jet feature and separately add noise with mean 0.1 and standard deviation 0.05 to the `d0` track feature.
-
-#### Having multiple targets
-
-You can set up your config so alternative labels are used during training. For example, if you would like to use a $\tau$-specific truth $p_T$ for $\tau$ jets and the standard `pt_btagJes` for all other jets, you can set up a `multi_target` config block in data to swap the target based on a condition:
-
-```yaml
-multi_target:
-    - input_name: jets
-      sel_label: HadronConeExclTruthLabelID
-      opp: '=='
-      value: 15
-      target: pt_btagJes
-      source: pt_visFromTruthTaus
-```
-In this case `pt_visFromTruthTaus` will replace `pt_btagJes` for $\tau$ jets (`HadronConeExclTruthLabelID == 15`). The `source` field remains available in the labels, so it can be reused by other conditions or other tasks.
-
-You can also use this to create a custom label from scratch. For example, if you would like to set up a $p_T$ regression task specifically for $\tau$ jets without having a matching label in the H5 file. You can define a placeholder name in your task config:
-```yaml
-- class_path: salt.models.RegressionTask
+model:
   init_args:
-    name: regression_with_custom_labels
-    input_name: jets
-    targets: pt_label_handle
+    modules:
+      encoder:
+        init_args: {num_layers: 8}
 ```
-Then in the data config, use `custom_target` to create the placeholder and fill it conditionally:
-```yaml
-multi_target:
-    - input_name: jets
-      sel_label: HadronConeExclTruthLabelID
-      opp: '=='
-      value: 15
-      custom_target: pt_label_handle
-      source: pt_visFromTruthTaus
-```
-`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config]({{repo_url}}-/blob/main/salt/configs/regression/regression_multi_target.yaml).
 
-The allowed values of `opp` are: `"=="`, `"!="`, `">="`, `"<="`, `">"`, `"<"`.
+`include:` must sit at the file's top level, not nested under `data:` or `model:`. Each entry is resolved as an absolute path if given as one, otherwise tried first against the including file's own directory and then against the shipped `salt/configs/` root, so a config can name a sibling without knowing where the caller keeps it. An included file's own `include:` is expanded the same way, depth-first, with a cycle raising an error naming the chain. The including file's own keys win over anything it includes.
 
-#### Data From S3
+Stacking multiple `--config` flags on the command line does the same kind of merge: `salt fit --config a.yaml --config b.yaml` deep-merges the two files' dict-typed sections key-by-key, later file wins per key, and keys neither file mentions are untouched. This differs from stock jsonargparse, which replaces a whole dict-typed section wholesale when a later file touches any key inside it; salt's parser unions instead, so `b.yaml` can add one task to `model.init_args.modules` without silently dropping every other module `a.yaml` declared.
 
-To use S3 as an ATLAS user, some upstream setting up must be done with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html). In particular, you must have access to a bucket and initialised your own public and secret keys. Once you have this information, you can access your bucket from anywhere using your credentials. To set up the credentials for salt, please incluse the following configuration in the `base_config.yaml` or your model config, under the `data` option:
-```yaml
-config_s3:
-  use_S3: False  # Set to true to setup S3 (needed for storing results)
-  download_S3: False # Set to true to download files in download_files from S3
-  pubKey: # public key
-  secKey: # private key
-  url: https://s3.cern.ch # url, for OpenStack at cern used this.
-  bucket: # bucket name
-  download_path: # local path to download the files to
-  download_files: # files key to download, matching an entry in the config.data
-    - train_file
-    - val_file
-    - norm_dict
-    - class_dict
-```
-Note that you can setup salt to use S3 to download your data locally with the `download_S3` key set to True and the files key (matching entries in the config `data` part of the yaml) being download locally to the `download_path`. Note that you can run a salt training directly on data located on S3 and downloading it locally: the download S3 scripts will update the paths to point locally automatically. You can also choose to first download the script with the salt-installed `download_S3` as such: 
+A key is deleted with `null`: `--model.init_args.modules.track_vertexing=null` on the command line, or `track_vertexing: null` in an override file, removes that module. CLI overrides otherwise use the dotted spelling of the YAML path you would otherwise write, and combine with `--config` in the same merge:
 
 ```bash
-download_S3 --config configs/gn2v2-opendata.yaml
+salt fit --config salt/configs/gn2v2-opendata.yaml \
+  --model.init_args.modules.encoder.init_args.num_layers=3
 ```
 
-This will run the downloading script without starting the salt CLI. 
+To see the fully-resolved config after every include, merge and override has been applied, without training anything, see [`--print_config`](cli.md#previewing-the-resolved-config-print_config) in the command-line reference.
 
-Importantly, if your aim is to use S3 to store training data (configs, checkpoints of model, performance, ...), you must modify some entries in the callbacks in the base config. 
+### Worked example: add a task from an override file
+
 ```yaml
-trainer:
-  ...
-  default_root_dir: s3://BUCKET/FOLDER
-  ...
-  logger:
-    class_path:  lightning.pytorch.loggers.TensorBoardLogger
+# my_aux_task.yaml — stack with: --config salt/configs/gn2v2-opendata.yaml --config my_aux_task.yaml
+model:
+  init_args:
+    modules:
+      track_type:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          dense: {hidden_layers: [16], activation: ReLU}
 ```
-As highlighted above, the `default_root_dir` should be a valid url to an S3 folder under your bucket. The default CometLogger will not work with S3 and you must instead use the TensorBoardLogger (please take care to not keep the instantiate arguments of commet by commenting `init_args: { project_name: salt, display_summary_level: 0 }`). 
 
+`class_names` is index-aligned with the label's on-disk integer values and sets the head width, because `output_size = len(class_names)` (`salt/model/modules/tasks/classification.py:170`). A wrong-length list is not caught by `salt graph validate`: `check_class_names` (`salt/model/saltmodule.py:1970`) runs only when the reader carries a `schema:` artifact, and returns immediately when it does not (`:1979-1980`). Without one, a short list fails on the first training batch with a `CrossEntropyLoss` index error, and a right-length but reordered list silently mislabels the head with no error at all. Check the list against the label column before you fit.
 
-### Model Architecture
+Every module the base config already declared survives the merge unchanged, and the new task's label is demanded from the dataset automatically. The task produces its loss at `losses.<its config key>` (`salt/model/modules/tasks/base.py:104`); the `LossSum` module already present in the base config narrows the framework's `losses.**` wildcard to every such key and sums them into the single scalar `loss.total` that FIT and VAL anchor on. You do not list the new task anywhere inside `LossSum` yourself, it is collected automatically. A config with no `LossSum` module fails FIT with the `ConfigError` that names the empty loss-key narrow, see [the minimum graph that compiles](#the-minimum-graph-that-compiles). Use `LossSum`'s `weights:` init arg only to re-weight one task's loss against another's, or set `weight:` on the task itself; either changes only the weighting, never which losses get collected. To persist its predictions in the eval file and declare its ONNX output, add the task's name to a `RunTaskOutput` `tasks:` list in the top-level `outputs:` section, one line, see [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section). If the head is a training-time regulariser that must never reach eval or Athena, set `expose: [fit, val]` on the task instead: its prediction is pruned out of the TEST/ONNX plans while it keeps training.
 
+### Task-head keys: `input`, `context` and `sequence`
 
-#### Global Object Features
+Every task class accepts these three keys with the same meaning:
 
-By default, inputs from the global object are concatenated with each of the input constituents at the beginning of the model
-in the `salt.model.modules.StreamEmbed`.
-You can instead choose to concatenate global inputs with the pooled representation after the encoder step.
-In order to this you should add a `global` key under `data.variables` and specify which global-level variables do you want to use.
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `input` | the bundle key the head reads its features from | `encoded.<stream>` (`salt/model/modules/tasks/base.py:57`) |
+| `context` | an extra conditioning vector concatenated into the head's `Dense`, for example `pooled.global` for a track head conditioned on the jet | unset |
+| `sequence` | whether the head predicts per-token (`true`) or once per jet (`false`) | inferred as `input is None` when unset (`classification.py:108`, `regression.py:156`) |
 
-??? warning "Don't forget to change pooling and task input size accordingly"
+A jet head that reads a pooled vector such as `pooled.global` must set `input:` explicitly. A per-token track head must leave `input:` unset and pass any jet-level conditioning through `context:` instead: setting `input:` on it silently converts it to a global head, because `sequence` then infers to `false`, the prediction shape changes from one row per constituent to one row per jet, the pad-mask require is dropped, and the H5 column axis changes. Set `sequence: true` explicitly only for a head that needs both an explicit `input:` and per-token predictions. `VertexingTaskModule` has no `sequence` parameter at all (`salt/model/modules/tasks/edge.py:43-57`); its `input`/`context` behave the same as the other two task classes.
 
-    If you concatenate 2 global variables you should increase the `input_size` by 2 for all tasks (except vertexing, here you should increase by 4).
+When `context:` is set, the head's internal `Dense` gains an extra `context_size` input equal to the context vector's resolved width (`classification.py:171`), so the head's parameter count grows with the context stream, not just with `input:`.
 
-For example you can concatenate jet features after the gnn model with:
+## The minimum graph that compiles
 
-`variables` section
+A trainer config needs a specific minimum set of pieces before it compiles in any of the four primary modes (FIT, VAL, TEST, ONNX). Elsewhere on this page and on the [module reference](modules/index.md) pages you find how to write your own module; this section names what has to be *present* before any of that matters, because a config that is missing one of these pieces produces a specific, named error rather than a vague failure.
+
+The block below is derived from the shipped, account-free `salt/configs/gn2v2-opendata.yaml`, trimmed to the smallest classification graph that still compiles. Nothing here is schematic: every entry is a real module with real `init_args`, taken from that file. Replace the file paths, the norm-dict path, and the input variable names with values from your own dataset and it runs as is.
+
 ```yaml
 data:
-    variables:
-        global:
-        - pt_btagJes
-        - eta_btagJes
-        ...
-```
-
-You can find a complete example of adding jet-level SMT variables in the [`GN2emu.yaml`]({{repo_url}}-/blob/main/salt/configs/GN2/GN2emu.yaml) config.
-
-
-#### Edge Features
-
-It is possible to include edge features as network input, representing relational information between constituent tracks. These have to be implemented on an individual basis since they are not stored in the input files, but rather calculated on the fly within Salt. As such, the information is drawn from the track container (or equivalent) and requires the presence of track variables relevant to the calculation of each edge feature. Currently implemented features are:
-
-- `dR` = $log(\sqrt{d\eta^2 + d\phi^2})$ (requires `phi`, `eta`)
-- `kt` = $log(min(p_T)\sqrt{d\eta^2 + d\phi^2})$ (requires `pt`)
-- `z` = $log(\frac{min(p_T)}{\Sigma(p_T)})$ (requires `pt`, `phi`, `eta`)
-- `isSelfLoop` = 1 if edge represents self-connection, 0 if not
-- `subjetIndex` = 1 if tracks are part of same subjet, 0 if not (requires `subjetIndex`)
-- `mass` = $\ln\sqrt{\left(\Sigma E\right)^2 - \left(\Sigma p_T\cos\phi\right)^2 - \left(\Sigma p_T\sin\phi\right)^2 - \left(\Sigma p_T\sinh\eta\right)^2}$ (requires `pt`, `eta`, `phi`, `energy`)
-
-
-#### Heterogeneous Models
-If multiple input types are provided, separate initialiser networks should be provided for each input type.
-An example using both track and electron input types is provided below:
-
-```yaml
-init_nets:
-  - input_name: tracks
-    dense_config: &init
-    output_size: &embed_dim 192
-    hidden_layers: [256]
-    activation: &activation SiLU
-  - input_name: electrons
-    dense_config:
-    <<: *init
-```
-
-The separate input types are by default combined and treated homogeneously within the GNN layers. 
-
-#### Parameterisation
-
-It is possible to condition the network output on particular variables (such as an exotic particles mass) to create a so-called *parameterised  neural network*. Parameters are treated as additional input variables during training and the user can chose which values to use when evaluating the model.
-
-A parameterised network can be configured in the following way:
-
-- `variables` section: Add your parameters to lists of variables used in training.
-    ```yaml
-    data:
+  modules:
+    input_samples:
+      class_path: salt.data.InputSamples
+      init_args:
+        files: {train: ${DATA_TRAIN_PATH}, val: ${DATA_VAL_PATH}, test: ${DATA_TEST_PATH}}
+        num: {train: -1, val: -1, test: -1}
+    reader:
+      class_path: salt.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {global_object: true}
+          tracks: {global_object: false, pad_max: 40}
+    features:
+      class_path: salt.data.Features
+      init_args:
         variables:
-            ...
-            parameters:
-            - mass
-            ...
-    ```
-- `parameters` section: In a dedicated section, for each parameter, specify the values of the parameter that appear in your training set (as a list in `train`) and the value you wish to evaluate the model at (`test`). Optionally you can include a list of probabilties for each parameter corresponding to the probabilities of assigning background jets one of the parameter values given in `train`. These probabilties should reflect how each parameter value is represented within the training data set. If probabilities are not given, values will be assigned to background jets with equal probability. Ensure parameters appear in the same order in `parameters` as in `variables`.
-    ```yaml
-    parameters:
-        mass:
-            train: [5, 16, 55]
-            test: 40
-            prob: [0.2, 0.3, 0.5]
-    ```
+          jets: [pt_btagJes, eta_btagJes]
+          tracks: [d0, z0SinTheta, qOverP]
+    labels:
+      class_path: salt.data.Labels
 
-The implementation above produces the default parameterisation mechanism in which parameters are concatenated to the inputs of the model, as described by [Baldi et al](https://arxiv.org/pdf/1601.07913.pdf). Alternatively, one may instead apply feature wise transformations, as described
-by [Dumoulin et al](https://distill.pub/2018/feature-wise-transformations/). Here, parameters are passed as inputs to seperate networks whose outputs can be used to scale or bias the features of a layer. To use feature transformations you must add `featurewise_nets` to your models configuration as follows:
+model:
+  class_path: salt.model.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 5.0e-4, end: 1.0e-5, pct_start: 0.01}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.model.modules.Normaliser
+        init_args:
+          norm_dict: ${DATA_NORM_DICT_PATH}
+          streams: [jets, tracks]
+          global_object: jets
+      track_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets]
+          out_dim: 64
+          dense: {hidden_layers: [64], activation: ReLU}
+      concat:
+        class_path: salt.model.modules.Concat
+        init_args: {streams: [tracks]}
+      encoder:
+        class_path: salt.model.modules.TransformerEncoder
+        init_args:
+          dim: 64
+          out_dim: 64
+          num_layers: 2
+          attention: {num_heads: 4}
+      pool:
+        class_path: salt.model.modules.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      jets_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [bjets, cjets, ujets, taujets]
+      loss:
+        class_path: salt.model.modules.LossSum
 
-
-```yaml
-  model:
-    class_path: salt.models.SaltModel
+outputs:
+  run_tasks:
+    class_path: salt.outputs.RunTaskOutput
     init_args:
-    ...     
-      featurewise_nets:
-        - layer: input
-          dense_config_scale:
-            hidden_layers: [4]
-            output_size: 17
-          dense_config_bias:
-            hidden_layers: [4]
-            output_size: 17
-        - layer: encoder
-          apply_norm: True
-          dense_config_scale:
-            hidden_layers: [128]
-            output_size: 256
-          dense_config_bias:
-            hidden_layers: [128]
-            output_size: 256
-        - layer: global
-          dense_config_scale:
-            output_size: 128
-            hidden_layers: [64]
-            final_activation: Sigmoid
-    ...
+      tasks: [jets_classification]
 ```
 
-Here, two instances of featurewise transformations have been added to the model. For each, you must specify the layer whose features you would
-like to transform (this can currently be either `input`, which applies the transformations to the features before they are passed into the initialisation network, `encoder`, which applies the transformations to the inputs of each layer to the encoder using separate networks, or `global`, which applies them to the global track representations outputted by the encoder). For each instance, you can specify either one or both of `dense_config_scale` or `dense_config_bias`, which configure dense networks whose output scales and biases the features of the chosen layer, respectively. It is important to ensure the `output_size` of these networks matches the number of features in the layer you are transforming. In this case, the transformations are applied to a model with 17 inputs per track, the layers of an encoder with 256 features, and the output of the encoder, which has 128 features for each track representation. You can optionally apply a layer normalisation after applying the transformations by setting `apply_norm: True` for a given network, as shown above.
+`salt/configs/gn2v2-opendata.yaml` is the complete, runnable, production-scale version of this same graph, carrying two further task heads (`track_origin`, `track_vertexing`) and an ONNX export sink that this trimmed-down graph omits. That file also carries a `split` module (`salt.model.modules.Split`) feeding `encoded.tracks` to its per-track heads; the trimmed graph above has no track-level head, so `split` is left out rather than kept as a dead module.
 
+Leaving any one of these pieces out raises a specific, named error:
 
-### Training
+| Omit | What happens |
+| --- | --- |
+| `salt.data.Features` | nothing produces `inputs.*`; the normaliser fails with `ConnectivityError` |
+| `salt.data.Labels` (and no `FtagLabeller`) | nothing produces `labels.<stream>.<label>`; the task head fails with `ConnectivityError` |
+| the reader, or a second one | `ConfigError`: `SaltDataModule needs exactly one Reader in modules, got N ([names])` |
+| any task head | `LossSum` narrows to an empty loss-key list; `ConfigError` at `SaltModule.__init__` |
+| `LossSum` | `ConfigError`: no module produces `loss.total` in mode FIT |
+| the `outputs:` section, or a task missing from `RunTaskOutput.tasks` | TEST compilation fails; `ConfigError`: no module produces a `preds.*` key in mode TEST |
+| `tasks: []` as a placeholder | `ConfigError` at construction: `RunTaskOutput` needs a non-empty `tasks` list (full rule at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section)) |
+| `class_path: salt.model.SaltModule` under `model:` | the model is parsed in subclass mode (`salt/main.py:452`), so a bare `init_args` block is rejected |
+| a module whose output nothing consumes | `AllModesDeadError` in a trainer config; only a warning in a toy `modules:` config |
 
-#### Compiled Models
+`RunTaskOutput.tasks` must name at least one existing task instance. There is no empty or placeholder form for it, and a config with no task head cannot declare an `outputs:` section at all, because there is nothing for that section to name. Check a graph with no task head using the toy `modules:` format instead (below), not by writing an empty `outputs:` section. The full `RunTaskOutput` rule, including the merge-replaces-lists warning, is at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section).
 
-`torch.compile()` traces the model into a graph and hands it to a backend compiler
-(inductor), which can fuse kernels and cut Python overhead. Enable it with the `--compile`
-flag on `salt fit`. The first step will take a while — that is the compilation — and you may
-see warnings.
+Which pieces matter depends on the mode. FIT and VAL only need the data half (a reader, `Features`, `Labels`) plus a `LossSum` producing `loss.total`, because those two modes anchor on that key. TEST and ONNX additionally need at least one task head and an `outputs:` section naming it, because those two modes anchor on a `preds.*` key instead, see [`salt graph`](cli.md#salt-graph) for the command that checks each mode on its own.
 
-Salt compiles **each graph module in place** (`nn.Module.compile()`), not the whole
-`SaltModule`, because in salt there is no single `nn.Module` spanning the forward: the graph
-is a `Plan` executed module-by-module. Compiling in place keeps every module instance, plan
-step and `state_dict` key unchanged, so a checkpoint written under `--compile` loads into an
-uncompiled model with no repair step.
+Three further things worth knowing about this graph:
 
-!!! warning "Measure before you enable it — compilation is not free, and the answer depends on the model"
+- `data:` is not parsed in subclass mode, so it needs no `class_path`; `model:` is, so it does (`salt/main.py:452`). Every shipped config carries `class_path: salt.model.SaltModule`, for example `gn2v2-opendata.yaml:58`.
+- `train_file` / `val_file` / `test_file` are the legacy path superseded by `InputSamples`. When no explicit `InputSamples` module is configured and one of those legacy keys is set, `SaltDataModule` synthesises one automatically (`salt/data/datamodule.py:361-399`); see [Shipped data modules](modules/data.md#shipped-data-modules) for the full mechanism.
+- `salt.data.SaltDataset` is the internal runtime object the datamodule builds for you; it is never a `data.modules` entry.
 
-    On a GN2-sized model `--compile` was **slower than eager on every attention backend
-    except `torch-math`**. On a GN3-sized one it is a win on every backend measured.
-    Both matrices are below. It is worth trying, not worth assuming.
+**Checking a graph without data.** `salt graph validate -c cfg.yaml` compiles all four modes against the config alone, no data file or checkpoint read; add `--mode fit` to check only the data half when there is not yet a task head or an `outputs:` section, see [`salt graph`](cli.md#salt-graph). Every shipped module's full `init_args` are catalogued at [Shipped model modules](modules/model.md#shipped-model-modules) and [Shipped data modules](modules/data.md#shipped-data-modules).
 
-??? failure "If you see `g++` compile errors, you may need to update your compiler"
+This is why building a graph piece by piece works well in practice, running `salt graph validate --mode fit` after each of the first three steps and a bare `salt graph validate` (no `--mode`, checking all four modes) after the fourth:
 
-    You can check your `g++`/`gcc` version with `g++ --version`.
-    To use `torch.compile()`, you'll need `gcc` version 10 or later.
+1. Add the reader alone.
+2. Add `Features` and `Labels`.
+3. Add the model modules, one at a time, ending at `LossSum`.
+4. Add a task head and the `outputs:` section naming it.
 
-    You can install a more recent version with
-    ```bash
-    conda install -c conda-forge cxx-compiler
-    ```
+Each step either passes or names exactly the missing piece from the table above, which is a shorter loop than writing the whole graph first and debugging one error message against an unfamiliar config.
 
-#### `--compile` and the attention backend
+## The blocks of a config
 
-Compilation interacts strongly with `attn_type` (see [Attention backends](#attention-backends)),
-so the two must be chosen together.
+A salt config has up to six top-level blocks. `base.yaml` supplies defaults for most of them; a run config states only what it changes.
 
-??? abstract "Measured: `--compile` x attention backend, GN2v2 on one A100 80GB"
+### `data:`
 
-    GN2v2 open-data (256/128, 4 layers, 8 heads), batch 1000, `16-mixed`, seed 42,
-    220 training steps per cell, torch 2.12.1+cu126. Rates exclude a 20-step warmup;
-    "first step" is the one-off compilation cost.
+Configures `SaltDataModule`. `data.modules` is a dict of named `SaltDatasetModule`s, exactly one `Reader` plus any number of processors; a `null` entry deletes a module. The reader and processor surfaces (`groups:`, `variables:`, `label_map`, and so on) are covered section by section below. The datamodule's own constructor keys, straight from its docstring:
 
-    | backend        | eager      | `--compile` | speedup | peak memory (eager) |
-    | -------------- | ---------- | ----------- | ------- | ------------------- |
-    | `torch-math`   | 19.1 it/s  | 23.1 it/s   | 1.21x   | 2.57 GB             |
-    | `torch-flash`  | 18.9 it/s  | —           | —       | 2.57 GB             |
-    | `torch-meff`   | 27.97 it/s | 25.2 it/s   | 0.90x   | 2.15 GB             |
-    | `flash-varlen` | 27.96 it/s | 26.3 it/s   | 0.94x   | **1.36 GB**         |
+| Key | Meaning |
+| --- | --- |
+| `train_file` / `val_file` / `test_file` | per-stage input file path; a wildcard filename triggers VDS creation (see below) |
+| `batch_size` | rows per contiguous batch slab, default `1000` |
+| `num_workers` | dataloader worker processes, default `0` |
+| `num_train` / `num_val` / `num_test` | row counts per stage; `-1` means all |
+| `test_suff` | suffix appended to the eval-file `{sample}` name by the writer callback |
+| `move_files_temp` | opt-in staging root (for example `/dev/shm/<user>/tmp`); each per-stage reader restages its own file(s) there at `setup` and the root is removed at `teardown`; ignored under `fast_dev_run` |
+| `train_vds_path` / `val_vds_path` / `test_vds_path` | explicit VDS output paths for wildcard files |
+| `pin_memory` | pin host memory for faster GPU transfer, default `true` |
+| `persistent_workers` | keep worker processes and their H5 handles alive between epochs, default `true` |
+| `prefetch_factor` | batches prefetched per worker; unset derives one (`2` for the map-style path, more for `iterable`, see [Dataloading performance](training.md#dataloading-performance)) |
+| `multiprocessing_context` | worker start method: `fork`, `spawn`, or `forkserver` |
+| `seed` | base augmentation seed for non-worker reads, default `42` |
+| `debug` | enable the boundary non-aliasing assertion |
+| `iterable` | stream a large corpus with `IterableSaltDataset` instead of the map-style dataset, default `false`; the streaming-specific keys below only matter when this is on |
+| `block_rows` | rows per reader call when `iterable`, default `16384` |
+| `interleave_block` | rows per turn of the per-shard round robin when `iterable`, default `1` |
+| `max_live_streams` | samples holding a resident block at once when `iterable`, default `2` |
+| `manifest` | `CorpusManifest` path or per-stage mapping, required when `iterable` |
+| `shuffle_stream` | shuffle block order and within-batch row order on the fit streaming loader, default `true` |
 
-    Read this carefully before enabling `--compile`:
+The streaming keys (`iterable` onward) are covered in full at [Dataloading performance](training.md#dataloading-performance).
 
-    - **The fastest configuration is eager**, on either `torch-meff` or `flash-varlen`
-      (~28 it/s). No compiled cell beats it.
-    - Compilation only pays off on `torch-math`, and even then the result (23.1 it/s)
-      is still slower than plain eager `flash-varlen`.
-    - It also costs 35–65 s of compilation per run before the first step.
-    - `torch-flash` measures identically to `torch-math` because PyTorch's flash SDPA
-      kernel rejects padding masks and silently falls back to math — see the warning
-      under [Attention backends](#attention-backends).
-    - Peak memory is *not* unaffected by compiling (an older version of this page
-      claimed it was): it moved by −6% to +3% depending on backend.
+### `model:`
 
-    The `flash-varlen` figure requires the unpad/repad seam to be excluded from the
-    compiled region (`torch.compiler.disable` in `salt/utils/tensor_utils.py`).
-    Without that, the same cell runs at 20.4 it/s (0.73x) — the boolean-mask index
-    lowers to `aten.nonzero`, which inductor cannot lower on CUDA, and the resulting
-    graph breaks and recompiles cost ~29% of throughput.
+Configures `SaltModule` (`class_path: salt.model.SaltModule`). Its `init_args` carry `lrs`, `optimizer`, `mup` (see [muP](#mup) below), and `modules`, a dict of named `SaltModelModule`s in the same `{name: {class_path, init_args}}` shape as `data.modules`. Every class you can put here, and how to write your own, is the [module reference](modules/index.md); the full `init_args` of every shipped module are catalogued at [Shipped model modules](modules/model.md#shipped-model-modules).
 
-??? abstract "Measured: `--compile` x attention backend, GN3V00 on one A100 80GB"
+`optimizer:` accepts exactly four values, and the match is case-sensitive: `AdamW` (the default), `lion`, `lion-pytorch`, `HybridMuonAdamW` (`salt/model/saltmodule.py:86`). Any other value, including a differently-cased spelling such as `adam`, is rejected at `SaltModule.__init__` with:
 
-    The GN2 verdict above does **not** carry over. GN3V00 (512/256, 4 layers, 8 heads,
-    8 registers, two padded streams of 50 slots each, five task heads), batch 1000,
-    `16-mixed`, seed 42, 220 training steps per cell, torch 2.12.1+cu126.
-
-    | backend        | eager      | `--compile` | speedup | first step (compile) | peak memory (eager -> compile) |
-    | -------------- | ---------- | ----------- | ------- | -------------------- | ------------------------------ |
-    | `torch-math`   | 4.95 it/s  | 6.99 it/s   | 1.41x   | 88 s                 | 15.6 -> 13.4 GB                |
-    | `torch-meff`   | 7.46 it/s  | 8.82 it/s   | 1.18x   | 35 s                 | 13.1 -> 12.1 GB                |
-    | `flash-varlen` | 10.34 it/s | 10.87 it/s  | 1.05x   | 69 s                 | 8.6 -> 8.2 GB                  |
-
-    - **The fastest configuration is `flash-varlen`**, compiled or not; compiled is
-      fastest overall. Unlike GN2, `flash-varlen` here is a large *speed* win over the
-      SDPA backends (1.4x over `torch-meff`, 2.1x over `torch-math`) as well as a memory
-      win — because 64.8% of the padded slot budget is padding at this configuration, and
-      that is exactly the work `flash-varlen` skips.
-    - The `flash-varlen` speedup is small (+5%). It was measured against an in-job
-      control — the same eager cell re-run last in the same allocation — which came out
-      within 0.9% of the first, so the +5% is real but modest. Do not read a compile
-      claim of this size from two separate jobs: run-to-run scatter across jobs on this
-      benchmark is ~5-7%.
-    - Compilation costs 35-90 s before the first step. On a fixed-work benchmark that is
-      most of the gain; on a real multi-epoch training run it is noise.
-    - Loss parity held everywhere (worst drift 0.02% against a 2% tolerance).
-
-??? abstract "Measured: what actually goes fastest, GN3V00 on one A100 80GB"
-
-    The table above holds batch size fixed at 1000 to isolate the backend. That is not
-    how you would train. `flash-varlen` uses less than a quarter of the memory, so it
-    also fits a much larger batch — and the batch is where most of the throughput is.
-    Same model, same data, same job; rate measured over a fixed 250,000-jet budget per
-    cell so jets/s is comparable across batch sizes.
-
-    | configuration                             | batch | jets/s | 1.5M-jet epoch | peak memory | first step |
-    | ----------------------------------------- | ----- | ------ | -------------- | ----------- | ---------- |
-    | `torch-math`, eager (the shipped default) | 1000  | 5,191  | 4.82 min       | 15.6 GB     | 10 s       |
-    | `flash-varlen`, eager                     | 1000  | 11,375 | 2.20 min       | 8.6 GB      | 11 s       |
-    | `flash-varlen`, eager                     | 5000  | 14,835 | 1.69 min       | 40.6 GB     | 12 s       |
-    | `flash-varlen`, `--compile`               | 5000  | 17,223 | **1.45 min**   | 38.6 GB     | 70 s       |
-
-    **3.3x** end to end, and two thirds of it is free: switching the attention backend
-    and raising the batch costs nothing but a config edit. The last step —
-    `--compile` — buys a further 1.16x for a 70 s charge before the first batch, so it
-    is worth it from roughly the seventh epoch onwards and clearly worth it over
-    GN3V00's shipped 40.
-
-    Note the memory column: the compiled cell is not just as fast as it can be, it also
-    holds batch 5000 in **less** memory than the eager cell does.
-
-    Practical recipe, in the order the wins arrive:
-
-    1. `attn_type: flash-varlen` — 2.2x, and it frees the memory that funds step 2.
-    2. Raise the batch until it stops helping — a further 1.3x here.
-    3. `--compile` if you are training for more than ~7 epochs — a further 1.16x.
-    4. `optimizer: lion` rather than `lion-pytorch` (this is the default) — see below.
-
-    The optimizer is worth calling out because it is invisible in a backend table.
-    Profiling put `lion-pytorch`'s per-parameter Python loop at 20.6 ms of a 96 ms step
-    for 1.33 ms of actual kernel work — 595 launches at 6% GPU-busy. `salt.optim.Lion`
-    issues the identical arithmetic through `torch._foreach_*`; the profiled optimizer
-    span drops from **20.6 ms to 2.9 ms**, worth 1.11x at batch 1000 and 1.02-1.03x at
-    batch 5000 (the saving is roughly constant in absolute terms, so it matters most
-    when the step is short). Parameters and `exp_avg` are **bit-identical** between the
-    two, gated on both CPU and A100 in fp32, bf16 and fp16.
-
-#### Graph breaks
-
-A compiled salt model is not one graph. Dynamo splits the trace wherever it meets
-something it cannot capture, and each split costs the fusion across it. Two splits are
-deliberate and permanent:
-
-| Seam | Where | Why it cannot be captured |
-| ---- | ----- | ------------------------- |
-| flash-varlen unpad/repad | `salt/utils/tensor_utils.py` | boolean-mask index -> `aten.nonzero`, which inductor refuses to lower on CUDA |
-| vertexing head | `VertexingTaskModule.head_forward` | compresses a `[B, N, N]` adjacency to one row per valid edge: both the allocation size and the indices are data-dependent |
-
-Everything else is expected to capture. `salt/tests/unit/model/test_compile_regression.py`
-is the gate: it replays a compiled plan module-by-module under `torch._dynamo.explain`
-and fails on any graph break at a site that is not on its checked-in allowlist, on any
-module that captures no graph at all, and on an encoder that will not compile with
-`fullgraph=True`. It runs on CPU in CI. If you add a `.item()`, a boolean mask, or a
-branch on a tensor value to a module's `forward`, that test tells you.
-
-It is worth the gate. A GN3V00 `--compile` + `flash-varlen` run previously took **14
-distinct break sites and 49 break events**, plus one hard fallback where dynamo skipped
-the whole loss frame and ran it eagerly. The breaks were four cheap habits — a generator
-inside a reduction, a bool read off a buffer, a NaN check on a tensor value, and boolean
-stream selection where a slice would do — and one head that genuinely cannot be traced.
-Removing them left **3 sites, 8 events, no fallback** (the two seams above) and cut
-recompiles from 44 to 18.
-
-If you are chasing the remainder: the dominant recompile guard is
-`GLOBAL_STATE changed: grad_mode`, which fires when the trainer flips between training
-and validation. It settles once both variants are cached; it is not a per-batch cost.
-
-!!! warning "`--compile` has not been tested with multi-GPU training"
-
-
-### Hyperparameter Optimisation
-
-#### Katib
-
-In order to train salt on Katib, the performance must be printed to the output stream. The `PerformanceWriter` callback is available for that very purpose. It also stores the printed metrics in a json file stored at a writable local path `dir_path` (by default `trainer.log_dir`). For katib, it is important to set the stdout value to True and pointing the Katib metric collector to std_out. 
-
-An example configuration to be added to the `base.yaml` config file is: 
-
-```yaml
-callbacks:
-  - class_path: salt.callbacks.PerformanceWriter
-    init_args:
-      dir_path: /mylocal/path #any local path that is writable
-      add_metrics: # a list of string of potential additional metrics - included by default: train_loss, val_loss, val_accuracy_loss
-        - a_fancy_new_metric
-        - another_fancy_new_metric 
-      std_out: True # whether to print to std_out 
+```
+optimizer 'adam' is not supported — choose from ['AdamW', 'lion', 'lion-pytorch', 'HybridMuonAdamW']
 ```
 
+(`salt/model/saltmodule.py:258-260`.)
 
+`optimizer:` is not the last word when `mup:` is also configured: with `mup` set, the optimizer is swapped to `mup.optim.MuAdamW` regardless of whatever name `optimizer:` names (`salt/model/saltmodule.py:189-190`). See [muP](#mup) below for the rest of that mechanism.
 
-#### muTransfer
+A task's `loss:` key is optional. Each task family falls back to its own default when `loss:` is unset:
 
-Salt is compatible with the muTransfer technique outline in the paper [Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer](https://arxiv.org/abs/2203.03466).
+| Task class | Default loss | Where |
+| --- | --- | --- |
+| `ClassificationTaskModule` | `torch.nn.CrossEntropyLoss` | `salt/model/modules/tasks/classification.py:26` |
+| `RegressionTaskModule` | `torch.nn.MSELoss`, or `torch.nn.GaussianNLLLoss` when `gaussian: true` | `tasks/regression.py:24-25`, selected at `:147-148` |
+| `VertexingTaskModule` | `torch.nn.BCEWithLogitsLoss(reduction="none")` | `tasks/edge.py:21-24` |
 
-##### Setup
+Set `loss:` to override this: either a bare `torch.nn` class name (`loss: MSELoss`), which resolves under `torch.nn` because a dotless name is looked up there (`tasks/base.py:283-299`), or a `{class_path, init_args}` mapping for a loss that needs constructor arguments or lives outside `torch.nn`, for example:
 
-To setup mup, the model configuration (e.g., `GN2.yaml`) has to include the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+```yaml
+loss: {class_path: torch.nn.SmoothL1Loss, init_args: {beta: 0.5}}
+```
+
+### `outputs:`
+
+A dict of named output sinks and writers controlling what `salt test` writes to the eval H5 and what `salt export` puts in the ONNX graph. This is fully documented at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section); this page does not restate it.
+
+### `trainer:`
+
+Passed straight through to Lightning's `Trainer`. `base.yaml` sets `accelerator: auto`, `devices: 1`, a `CometLogger`, and `log_every_n_steps: 50`. `trainer.callbacks` is reserved for stock Lightning callbacks; salt's own callbacks belong under `callbacks:` below, not here. `--trainer.default_root_dir` and the run-directory layout it controls are covered at [`salt fit`](cli.md#salt-fit).
+
+### `callbacks:`
+
+A dict of named callbacks, deep-merged the same way as `data.modules` and `model.init_args.modules`; a `null` entry removes one. `base.yaml` ships:
+
+| Key | Class | Purpose |
+| --- | --- | --- |
+| `checkpoint` | `salt.callbacks.Checkpoint` | writes `epoch=NNN-loss=<val/loss>.ckpt` under `ckpts/`, monitoring the metric named by its own `monitor_loss` init arg (default `val/loss`) — this is salt's parameter name, not Lightning's `monitor`. Keep the `loss=` filename stem in sync with any `fname_string` override: `salt test` run without `--ckpt_path` resolves the best epoch by globbing `{ckpts,checkpoints}/*.ckpt` and parsing that stem. |
+| `progress` | `salt.callbacks.ProgressBar` | training progress bar |
+| `lr_monitor` | `lightning.pytorch.callbacks.LearningRateMonitor` | logs the learning rate; dropped automatically when no logger is attached (it hard-raises on a logger-less trainer), or delete it explicitly with `lr_monitor: null` |
+| `model_summary` | `lightning.pytorch.callbacks.ModelSummary` | prints the module tree at fit start |
+| `artifacts` | `salt.callbacks.GraphArtifacts` | writes `plan_<mode>.txt` and `graph_<stage>.{dot,svg}` into the trainer log dir at fit/test start |
+
+### `name:`
+
+A plain string naming the run, default `"salt"` when unset. It becomes the Comet experiment name (set as `experiment_name` on the logger's `init_args`, or the `COMET_EXPERIMENT_NAME` environment variable on a Comet build whose constructor no longer declares that parameter) and is also written into the logger's `dict_kwargs.name`.
+
+## Deleting and overriding
+
+A module or callback entry is deleted with `null`: `--model.init_args.modules.track_vertexing=null`, or the equivalent in an override file. This works because `data.modules`, `model.init_args.modules` and `callbacks:` are each filtered at assembly time (by `SaltDataModule`, `SaltModule`, and the CLI respectively): a `None` entry is dropped before the module dict reaches its consumer.
+
+That deletion mechanism is specific to those three dicts. It does not extend to a nested key inside one module's own `init_args`. Because `--config` stacking (and `include:`) unions dict-typed sections key-by-key rather than replacing them, an overlay that restates only part of a nested dict does not drop the base's other entries under that same key: `groups: {jets: {...}}` in an override adds or updates the `jets` group in the reader's `groups:` dict, but any `tracks` or `flows` group the base config declared survives untouched, merged straight in. The same holds for `variables:` under `Features`. Setting a group to `null` does not delete it either; `GroupConfig` treats a `None` (or empty) value as "use the defaults for this stream", so `groups: {tracks: null}` keeps the `tracks` group with its dataset name defaulted to `tracks`, not remove it. To drop a group or a variable that an inherited config declared, stop inheriting that block: write a config that does not `include:` the file whose `groups:`/`variables:` you want to shrink, or delete the whole reader/processor module by name and declare a fresh one under a new name with the smaller dict.
+
+Renaming a module to a new key is also how you force a clean swap under `--init_from` warm-starting, and the general pattern behind every kind of fine-tuning surgery: a module present in both the checkpoint and your config but only partially compatible (different width, a missing sub-key) is a hard error, while a renamed module has no checkpoint counterpart at all, so the old weights are dropped and the new name is treated as a fresh, randomly-initialised module. See [What else can you change?](finetuning.md#what-else-can-you-change) for the full cost table across every kind of module surgery.
+
+### Wildcard files and the VDS
+
+Training files can grow large enough that they are split into several smaller ones. Point `train_file` (or `val_file` / `test_file`) at a glob pattern and salt reads them as one:
+
+```yaml
+data:
+  train_file: /path/to/somewhere/pp_output_train_split_*.h5
+```
+
+A wildcard filename triggers Virtual Dataset (VDS) creation, using the VDS support in [`atlas-ftag-tools`](https://github.com/umami-hep/atlas-ftag-tools). The VDS is an HDF5 file of external links into the real member files, so the reader sees one contiguous dataset. It is built once (a `FileLock` plus a `.done` marker keep concurrent workers or DDP ranks from racing the build) and rebuilt automatically if any member file is newer than the existing VDS. By default it lands next to the wildcard, at a sibling directory: the pattern `pp_output_train_split_*.h5` writes to `pp_output_train_split_vds/vds.h5`. Give it an explicit path instead with `train_vds_path`:
+
+```yaml
+data:
+  train_file: /path/to/somewhere/pp_output_train_split_*.h5
+  train_vds_path: /path/to/something/else/my_train_vds.h5
+```
+
+The same applies per stage:
+
+```yaml
+data:
+  train_file: /path/to/somewhere/pp_output_train_split_*.h5
+  train_vds_path: /path/to/something/else/my_train_vds.h5
+  val_file: /path/to/somewhere/pp_output_val_split_*.h5
+  val_vds_path: /path/to/something/else/my_val_vds_file.h5
+  test_file: /path/to/somewhere/pp_output_test_split_*.h5
+  test_vds_path: /path/to/something/else/my_test_vds_file.h5
+```
+
+### Choosing input variables
+
+Training files are structured arrays, so the variables that end up in the model are whichever ones you list, by name, in the `Features` processor's `variables:` key, one list per stream:
+
+```yaml
+data:
+  modules:
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          jets: [pt_btagJes, eta_btagJes]
+          tracks: [d0, z0SinTheta, dphi, deta, ...]
+```
+
+??? warning "Don't train on truth information"
+
+    `Features` has no way to tell a truth variable from an input variable; if
+    you list one, it is treated as an input. Keep truth information out of
+    `variables:` and specify it as a task's `label` instead.
+
+The number of variables listed for a stream sets the `[B, T, F]` (or `[B, F]` for a `global_object` stream) width the planner resolves for `inputs.<stream>`. A downstream module's own output width, such as `StreamEmbed`'s `out_dim`, is a separate, independently-configured number; the planner infers and checks the input width at `bind` time from the resolved schema, it is not something you set to match `variables:` by hand. Heterogeneous models with more than one input type are covered at [More than one input stream](#more-than-one-input-stream) below.
+
+### Naming streams and groups
+
+By default a stream's name in the config is also the H5 dataset name the reader reads. To read from a differently-named dataset, set `dataset:` on that stream's entry in the reader's `groups:` dict:
+
+```yaml
+data:
+  modules:
+    reader:
+      class_path: salt.data.H5StructuredReader
+      init_args:
+        groups:
+          tracks: {global_object: false, dataset: tracks_ghost}
+```
+
+Here the stream is called `tracks` everywhere else in the config (in `variables:`, in a `StreamEmbed`'s `stream:`, and so on), but the reader pulls it from the H5 dataset named `tracks_ghost`. Leaving `dataset:` unset (or the whole group value empty, `tracks: {}`) defaults it to the stream name.
+
+### Limiting constituents per row
+
+`GroupConfig.pad_max` caps a stream at N constituents per row: shorter sequences are padded up to N, longer ones truncated down to N. Set it per stream on the reader:
+
+```yaml
+data:
+  modules:
+    reader:
+      class_path: salt.data.H5StructuredReader
+      init_args:
+        groups:
+          tracks: {pad_max: 10}
+```
+
+### Remapping labels
+
+Task modules can remap on-disk label values to a smaller or reordered set with `label_map`, useful when the values are not already `0, 1, 2, ...`. For example, to train on the raw `HadronConeExclTruthLabelID` PDG-style ids instead of the pre-mapped `flavour_label`:
+
+```yaml
+jets_classification:
+  class_path: salt.model.modules.ClassificationTaskModule
+  init_args:
+    stream: jets
+    input: pooled.global
+    label: HadronConeExclTruthLabelID
+    label_map: {0: 0, 4: 1, 5: 2}
+    class_names: [ujets, cjets, bjets]
+    dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+```
+
+`class_names` is required whenever `label_map` is set; the head width is `len(class_names)`. Using `flavour_label` as the label needs no `label_map` at all, since the file already carries `0, 1, 2, ...`. See `salt/configs/GN3/GN3_Charge.yaml` for a real ~300-entry `label_map`.
+
+### Deriving finer labels
+
+To relabel on the fly, for example splitting a preprocessed `qcd` class into finer subclasses, or deriving `flavour_label` for a test file that was never run through UPP, wire the `salt.data.FtagLabeller` processor as its own `data.modules` entry:
+
+```yaml
+data:
+  modules:
+    labeller:
+      class_path: salt.data.FtagLabeller
+      init_args:
+        stream: jets
+        label: flavour_label
+        require_labels: true
+        class_names: [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
+```
+
+`class_names` lists the derived classes in label-index order and is required. `require_labels: true` (the default) raises if any object matches none of the classes; `false` drops unmatched objects instead, so the derived label array can end up shorter than the batch. `FtagLabeller` becomes the sole producer of `labels.<stream>.<label>`, so a task's `class_names` must match this processor's `class_names` index-for-index. See `salt/configs/GN3X.yaml` for the real config this example is drawn from (GN3X derives its boosted-Higgs classes from `R10TruthLabel_R22v1` plus ghost-hadron counts, since they are not a precomputed column).
+
+### Multiple regression targets
+
+`MultiTarget` replaces or creates a label conditionally, row by row, from a list of rules evaluated in order:
+
+```yaml
+data:
+  modules:
+    multi_target:
+      class_path: salt.data.MultiTarget
+      init_args:
+        replacements:
+          - stream: jets
+            sel_label: HadronConeExclTruthLabelID
+            op: "=="
+            value: 15
+            source: HadronConeExclTruthLabelPt
+            custom_target: pt_label_handle
+          - stream: jets
+            sel_label: HadronConeExclTruthLabelID
+            op: "!="
+            value: 15
+            source: pt
+            custom_target: pt_label_handle
+```
+
+Each rule needs `stream`, `sel_label`, `op` (one of `== != >= <= > <`), `value`, `source`, and exactly one of `target:` (replace an existing label) or `custom_target:` (create a new one, `nan`-filled where no rule matches). Multiple rules may target the same output; they apply in order over a running array, which is how the example above builds one `pt_label_handle` covering both the tau and non-tau cases. A regression task then reads it like any other label:
+
+```yaml
+reg_multi_target:
+  class_path: salt.model.modules.tasks.RegressionTaskModule
+  init_args:
+    stream: jets
+    input: pooled.global
+    targets: pt_label_handle
+    norm_params: {mean: 1.0, std: 1.0}
+    loss: MSELoss
+    dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+    # MultiTarget labels exist only in FIT|VAL, so TEST cannot demand or dump them
+    write_targets: false
+```
+
+The full example, including the model and outputs blocks, is `salt/configs/regression/regression_multi_target.yaml`.
+
+### Reading from S3
+
+`salt.utils.file_utils` can read training data and configs from an S3 bucket. Set up your own bucket and keys with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html), then add a `config_s3` block under `data:`:
+
+```yaml
+data:
+  config_s3:
+    use_S3: false        # true if this run needs S3 access at all
+    download_S3: false   # true to download download_files locally before training
+    pubKey:               # public key
+    secKey:               # private key
+    url: https://s3.cern.ch
+    bucket:                # bucket name
+    download_path:         # local path the files are downloaded to
+    download_files:        # keys under data: to fetch, e.g.
+      - train_file
+      - val_file
+      - norm_dict
+      - class_dict
+```
+
+There is no `salt` subcommand that reads `config_s3` automatically today; call `import_data_S3` yourself before `salt fit`/`salt test`. It downloads every file in `download_files` to `download_path` in parallel, rewrites their paths in the config, and writes the patched config to `<download_path>/local_base.yaml`:
+
+```bash
+python -c "from salt.utils.file_utils import import_data_S3; \
+  print(import_data_S3('salt/configs/gn2v2-opendata.yaml'))"
+```
+
+Pass the printed path to `salt fit --config <that path>`. The S3 client libraries (`boto3`, `s3fs`, `s3path`) ship in the `muP` pip extra (`pip install 'salt-ml[muP]'`), not a dedicated `s3` extra.
+
+If you also want the trainer itself to write checkpoints and configs to S3, point `trainer.default_root_dir` at an S3 URL and swap the logger, since the default `CometLogger` does not work with an S3 root:
+
+```yaml
+trainer:
+  default_root_dir: s3://BUCKET/FOLDER
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+```
+
+### Global-object features
+
+A stream can be a per-object vector rather than a padded sequence: set `global_object: true` on it in the reader's `groups:`, and list its variables under `Features` like any other stream. By default such a stream is concatenated as context onto every other stream's `StreamEmbed`, before the encoder (see `context:` in [More than one input stream](#more-than-one-input-stream)). To instead concatenate it onto the pooled representation, after the encoder, give it its own `Normaliser` and combine with `VectorConcat`:
+
+```yaml
+data:
+  modules:
+    reader:
+      class_path: salt.data.H5StructuredReader
+      init_args:
+        groups:
+          global: {global_object: true}
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          global: [softMuon_pt, softMuon_dR, ...]
+
+model:
+  init_args:
+    modules:
+      norm_global:
+        class_path: salt.model.modules.Normaliser
+        init_args: {streams: [global], global_object: global}
+      pool:
+        class_path: salt.model.modules.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      vconcat:
+        # concat order fixes the output feature order: pooled first, global last
+        class_path: salt.model.modules.VectorConcat
+        init_args: {inputs: [pooled.global, normed.global], out: vconcat.global}
+      jets_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args: {input: vconcat.global, ...}
+```
+
+`VectorConcat`'s output width is `sum` of its inputs' widths, resolved at `bind`. The full worked example is `salt/configs/GN2/GN2emu.yaml`.
+
+### Edge features
+
+`salt.model.modules.EdgeFeatures` builds pairwise edge features between constituents on the fly from raw (un-normalised) track variables. Currently implemented:
+
+- `dR` = log(sqrt(deta^2 + dphi^2)), requires `phi`, `eta`
+- `kt` = log(min(pt) * sqrt(deta^2 + dphi^2)), requires `pt`
+- `z` = log(min(pt) / sum(pt)), requires `pt`, `phi`, `eta`
+- `isSelfLoop`: 1 if the edge is a self-connection, 0 otherwise
+- `subjetIndex`: 1 if both tracks are in the same subjet, 0 otherwise; requires `subjetIndex`
+- `mass`: the pairwise invariant mass; requires `pt`, `eta`, `phi`, `energy`
+
+```yaml
+model:
+  init_args:
+    modules:
+      edge_features:
+        class_path: salt.model.modules.EdgeFeatures
+        init_args:
+          stream: tracks
+          features: [dR, z, kt, subjetIndex, isSelfLoop]
+      edge_embed:
+        class_path: salt.model.modules.EdgeEmbed
+        init_args:
+          stream: tracks
+          out_dim: 32
+          dense: {hidden_layers: [32], activation: SiLU}
+```
+
+`features` names cannot repeat and must come from the list above; the variables each one requires are checked at `bind` against the resolved input fields. See `salt/configs/GN2/GN2XE.yaml` for the full config.
+
+### Vertexing origin weighting
+
+`salt.model.modules.tasks.VertexingTaskModule`'s per-edge loss needs to know which
+track-origin classes count as heavy-flavour and which count as fake, so it can weight
+edges accordingly. The `origin_weighting` init arg supplies this split; leaving it unset
+falls back to the tagger default, `{"heavy": [3, 4, 5], "fake": [1]}`:
+
+```yaml
+model:
+  init_args:
+    modules:
+      track_vertexing:
+        class_path: salt.model.modules.tasks.VertexingTaskModule
+        init_args:
+          origin_label: ftagTruthOriginLabel
+          origin_weighting: {heavy: [3, 4, 5], fake: [1]}
+```
+
+Each of `heavy`/`fake` is a list of either integer origin ids or origin class-name
+strings, never a mix of the two within one list; any key other than `heavy`/`fake` is
+rejected. Class names are resolved to ids at fit/test setup, against the origin label's
+class-name attr in the dataset's schema artifact. A name-based `origin_weighting` used
+without such a schema artifact therefore fails at bind, with a `ConfigError` naming the
+`origin_weighting` config key; dump a schema that carries the origin class names (see
+[`salt schema dump`](cli.md#salt-schema-dump)) or write integer origin ids instead.
+`origin_label:` names the label the weighting reads (`labels.<stream>.<origin_label>`).
+
+### More than one input stream
+
+When a model reads more than one input type, give each stream its own `StreamEmbed` under a distinct module name, then combine the embedded streams with `Concat` before the encoder:
+
+```yaml
+model:
+  init_args:
+    modules:
+      track_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets]
+          out_dim: &embed_dim 512
+          dense: {hidden_layers: [512], activation: SiLU}
+      flow_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: flows
+          context: [normed.jets]
+          out_dim: *embed_dim   # Concat requires equal embed width
+          dense: {hidden_layers: [512], activation: SiLU}
+      concat:
+        class_path: salt.model.modules.Concat
+        init_args: {streams: [tracks, flows]}
+```
+
+Each `StreamEmbed`'s `out_dim` must match across streams that feed the same `Concat`. The full config is `salt/configs/GN3/GN3V00.yaml`.
+
+## muP
+
+Salt is compatible with the muTransfer technique outlined in the paper [Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer](https://arxiv.org/abs/2203.03466).
+
+`salt mup-shapes` generates the `shape_path` artifact used below, `salt mup-coord-check` runs the coordinate check against it, and the `setup_mup` console script is a thin alias that forwards to `salt mup-shapes`. The live config surface is `mup: true` on the modules being scaled plus `model.init_args.mup.apply_to` (see `salt/configs/GN2/GN2_muP.yaml`), not the `mup_config` key the walkthrough below names.
+
+### Setup
+
+To setup mup, the model configuration (e.g., `GN2.yaml`) has to include the following extra-configuration setup to be placed under the `config.model` (e.g., after the model's other settings and before `model.model`):
 
 ```yaml
 mup_config:
@@ -562,13 +615,13 @@ mup_config:
     embed_dim:
       apply_to: [init_nets, encoder]
       parameter_name: [output_size, embed_dim]
-      parameter_base: 128 
+      parameter_base: 128
       parameter_delta: 4
 ```
 
 Such that the `base` (`delta`) models are instantiated with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_mup/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup).
 
-To run a GN2 training with mup, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `mup` configuration with the following boolean parameters: 
+To run a GN2 training with mup, you also need to specify in `encoder` (and the `init_nets` if it is affected) config that it should be in `mup` configuration with the following boolean parameters:
 
 - for `init_nets` (only if changing embedding dim):
 
@@ -584,18 +637,17 @@ init_nets:
 
 ```yaml
 encoder:
-    class_path: salt.models.TransformerEncoder
+    class_path: salt.model.modules.TransformerEncoder
     init_args:
         ...
         mup: True
 ```
 
+### Run
 
-##### Run
+To run mup, you must instantiate a GN2 model into the Maximal Update Parametrisation (mup). To do this, you must follow the following steps, which are further detailed next.
 
-To run mup, you must instantiate a GN2 model into the Maximal Update Parametrisation (mup). To do this, you must follow the following steps, which are further detailed next. 
-
-- step 1: create `storeshapes` file using a model config file with mup configuration: 
+- step 1: create `storeshapes` file using a model config file with mup configuration:
 
 ```bash
 setup_mup -config GN2/GN2.yaml
@@ -613,16 +665,15 @@ A gentle introduction to mup is available in this [talk](https://indico.cern.ch/
 
 Important note: mup has been implemented to scale the transformer encoder (and init_nets if the embedding is changed). The last layer in the scaling __must__ be the out-projecting of the encoder (controlled with `out_dim`), which in particular must be set!
 
-
 **Step 1:**
 
-To leverage the existing [mup library](https://github.com/microsoft/mup), a `base` and `delta` models have to be instantiated using the `main_mup` script to generate a `storeshapes` file to be passed to the mup library. Note that you __must__ vary a parameter between the `base` and `delta` models, as this will define the dimension to muTransfer along (embedding dimension and num_heads are supported). This script is installed with salt and callable under the name `setup_mup`. For example, run: 
+To leverage the existing [mup library](https://github.com/microsoft/mup), a `base` and `delta` models have to be instantiated using the `main_mup` script to generate a `storeshapes` file to be passed to the mup library. Note that you __must__ vary a parameter between the `base` and `delta` models, as this will define the dimension to muTransfer along (embedding dimension and num_heads are supported). This script is installed with salt and callable under the name `setup_mup`. For example, run:
 
 ```bash
 setup_mup -c GN2/GN2.yaml
 ```
 
-Where the `GN2.yaml` is your usual model configuration file, endowed with the following extra-configuration setup to be placed under the `config.model` (e.g., after `model.lrs_config` and before `model.model`):
+Where the `GN2.yaml` is your usual model configuration file, endowed with the following extra-configuration setup to be placed under the `config.model` (e.g., after the model's other settings and before `model.model`):
 
 ```yaml
 mup_config:
@@ -630,19 +681,17 @@ mup_config:
     embed_dim:
       apply_to: [init_nets, encoder]
       parameter_name: [output_size, embed_dim]
-      parameter_base: 128 
+      parameter_base: 128
       parameter_delta: 4
 ```
 
 The `setup_mup` script will instantiate a `base` (`delta`) model with the parameters highlighted in `parameter_name`, respectively corresponding to the module `apply_to`, taking the value `parameter_base` (`parameter_delta`). The `storeshapes` file will be placed at the path `shape_path` or, if this parameter is not set, at `./temp_mup/` with the `base` and `delta` models as well as their configuration (useful to debug they were correctly setup). Note: currently supporting the num_heads & embedding size of the transformer `encoder`, with the latter being also relevant to `init_nets`. Both the base and delta value have to be divided by your chosen `num_heads`!
 
-
-
 **Step 2:**
 
-With step 1 creating a `storeshapes` under the path `shape_path` or the default `./temp_mup`, you can now turn to training a GN2 models with your desired widths. The model will have to load the `storeshapes` in the initialiser of `ModelWrapper`, and you must make sure the model has the mup_config passed to it with, in particular, the right path to the `storeshapes` (easiest is to not change the config w.r.t. base and delta model initialisation). 
+With step 1 creating a `storeshapes` under the path `shape_path` or the default `./temp_mup`, you can now turn to training a GN2 models with your desired widths. The model will have to load the `storeshapes` in the initialiser of `ModelWrapper`, and you must make sure the model has the mup_config passed to it with, in particular, the right path to the `storeshapes` (easiest is to not change the config w.r.t. base and delta model initialisation).
 
-To run a GN2 training with mup, you also need to specify in  `encoder` (and the `init_nets` if it is affected) config that it should be in `mup` configuration with the following boolean parameters: 
+To run a GN2 training with mup, you also need to specify in `encoder` (and the `init_nets` if it is affected) config that it should be in `mup` configuration with the following boolean parameters:
 - for `init_nets` (only if changing embedding dim):
 ```yaml
 init_nets:
@@ -654,15 +703,18 @@ init_nets:
 - for `encoder`:
 ```yaml
 encoder:
-    class_path: salt.models.Transformer
+    class_path: salt.model.modules.TransformerEncoder
     init_args:
         ...
         mup: True
 ```
 
-If correctly setup, you can just run a salt training in the usual way: 
+If correctly setup, you can just run a salt training in the usual way:
 ```bash
 salt fit --config GN2/GN2.yaml
 ```
 
 You are now training a mup-GN2!
+
+
+

@@ -218,7 +218,7 @@ Salt requires Python 3.14.
 
         See [the table above](#which-image-do-i-need) if you are unsure which one you want.
 
-        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
+        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](#install-the-salt-package).
 
     === "Pull the image"
 
@@ -253,7 +253,7 @@ Salt requires Python 3.14.
         Keeping the tag in the filename matters if you ever pull both — a bare `salt.simg`
         gives no way to tell which architectures it covers once it is on disk.
 
-        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](contributing.md#install-the-salt-package).
+        The image comes with salt installed under `/salt/`, but if you want an editable install, you can follow the package install instructions [below](#install-the-salt-package).
 
 
     --------------------------------------------------------
@@ -594,7 +594,7 @@ Consider adding these variables to your [bashrc](https://www.journaldev.com/4147
 
     To ensure the environment variables are defined every time you log in,
     you can add the definitions to your bashrc.
-    Simply add the lines
+    Add the lines
 
     ```bash
     export COMET_API_KEY="<Your API Key>"

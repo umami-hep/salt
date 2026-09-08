@@ -21,7 +21,7 @@ things it fixes actually bites you:
    substantially faster, because one call's basket ranges coalesce.
 2. **Scale.** The map-style index is proportional to corpus ROWS and exists once
    per reader process. Multiply by (ranks x dataloader workers) and there is a
-   point past which it simply cannot be held. The streaming index is
+   point past which memory cannot hold it. The streaming index is
    proportional to BLOCKS.
 
 ## Turning it on
@@ -199,7 +199,7 @@ a sub-reader and injects that sample's label.
   correct thing for a progress bar and for `max_steps`-free schedules, but it is
   not the dataset size.
 - **Evaluation ordering.** Validation and test streams keep source order and the
-  ragged tail, matching the writers' row-alignment contract. Do not enable
+  ragged tail, matching the row alignment the writers require. Do not enable
   shuffling for a stage whose outputs are consumed positionally.
 - **Very high shard counts eventually hurt.** Per-shard read span is
   `rows / n_shards`; drive that below the knee and each read is small again. The

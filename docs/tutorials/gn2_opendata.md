@@ -12,11 +12,11 @@ commands and the config anatomy differ because a v2 model is built from
 composable modules instead of one monolithic config block. That page has been
 removed rather than left to rot — it taught retired config surfaces
 (`train_file`, `scale_dict`, `--data.move_files_temp`) that now fail on
-contact. Its two genuinely useful exercises, the auxiliary-task ablation and
+contact. Its two useful exercises, the auxiliary-task ablation and
 the ONNX walkthrough, live on as steps 6 and 7 below; `git log` has the rest.
 
 Unlike parts [1](mnist.md)–[3](event_classifier.md), this dataset is real
-(14 GB download, 13.5M training jets) and the full recipe is a genuine GPU
+(14 GB download, 13.5M training jets) and the full recipe is a real GPU
 training job (tens of minutes to hours depending on hardware) — not
 something to run start-to-finish on a laptop while reading. Each step below
 gives the full-scale command **and** a CPU-safe quick-check variant that
@@ -284,8 +284,8 @@ shipped) — expect a GPU and a real training budget.
 
 ## 4. Evaluate
 
-Evaluate on `pp_output_test_ttbar.h5` (no kinematic resampling — the honest
-evaluation set). Because the `test:` path was already
+Evaluate on `pp_output_test_ttbar.h5` (no kinematic resampling, so scores
+reflect the real class balance). Because the `test:` path was already
 set in `config.yaml`'s `input_samples` block, no extra flag is needed —
 `salt test` needs only the saved config and a checkpoint, exactly as in
 [part 1](mnist.md#7-evaluate):

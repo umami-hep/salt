@@ -38,12 +38,12 @@ them up in your graph. Get one wrong and the job throws. That is a *feature* —
 the failure is loud, immediate, and points at the mistake.
 
 **Self-written consumers** — a python analysis script, or an algorithm you add
-to an analysis framework — have no such contract. Nothing derives names,
+to an analysis framework — get none of that help. Nothing derives names,
 because nothing else knows what your model is. You read the input name out of
 the file and feed a tensor you built yourself. Naming is free, there are no
 traps to fall into... and nothing checks your work. Feed the columns in the
 wrong order, or truncate differently from the training reader, and the model
-still runs and still returns plausible numbers. They are simply wrong.
+still runs and still returns plausible numbers. They are wrong.
 
 So the two routes fail in opposite ways, and that dictates the discipline:
 
@@ -68,6 +68,15 @@ So the two routes fail in opposite ways, and that dictates the discipline:
 
 Training and export are configured in the same file. A config that only trains
 is missing three things.
+
+!!! warning "There is no `export.outputs` section"
+
+    There is no `export.outputs:` config key. The ONNX output manifest is
+    declared by an `OnnxExportSink` naming the conversion `outputs.*` leaves,
+    which is what the three numbered steps below do. A config that still
+    carries an `export.outputs:` block is rejected up front with a
+    `ConfigError` telling you to delete it and declare the conversion nodes
+    plus the sink instead.
 
 ### 1. A conversion node
 
@@ -124,7 +133,7 @@ the writers makes no difference.
 ### 3. The sink's init args
 
 Five of `OnnxExportSink`'s init args name the graph *inputs* and the model —
-this is the config home for the ONNX artifact contract:
+this is where you configure the ONNX artifact's inputs and model name:
 
 ```yaml
 outputs:
@@ -188,7 +197,7 @@ Beyond that, whether naming is yours to choose depends on the consumer:
 ## Preview the manifest
 
 `--manifest` needs no checkpoint and fails in seconds on a malformed export
-contract, so run it first:
+config, so run it first:
 
 ```bash
 salt export --manifest -c config.yaml
@@ -211,7 +220,7 @@ salt export \
 ```
 
 `-c/--config` is repeatable and the configs deep-merge left to right, exactly
-as `salt fit` stacks them. This is the supported way to add an export contract
+as `salt fit` stacks them. This is the supported way to add export configuration
 to a run that was trained without one — keep the run config untouched and
 stack a small config on top carrying just the `outputs.onnx_export` sink
 entry. If you omit `-c` entirely, the config is inferred from the checkpoint's
@@ -221,6 +230,13 @@ Other options worth knowing: `-n/--name` overrides `model_name`,
 `--set KEY=VALUE` applies ad-hoc config overrides (e.g.
 `--set outputs.onnx_export.init_args.model_name=GN2v2`), and `-o/--overwrite`
 replaces an existing file.
+
+**Programmatic surface**, for tests that need to export without a checkpoint:
+`salt.outputs.sinks.onnx.export_graph(modules, export_cfg, variables, path)`
+derives the output set from the folded `OnnxExportSink` in `modules`; passing
+a legacy reduce-manifest `outputs=` list is a hard `ConfigError`. Pair it with
+`salt.outputs.sinks.onnx.check_onnx(adapter, path, ...)` to run the same
+eager-vs-onnxruntime comparison the `--check` sweep below runs.
 
 ### The `--check` sweep
 
@@ -263,8 +279,8 @@ salt writes a `gnn_config` JSON blob into the ONNX metadata:
 | `output_names` | what each output tensor means |
 | `onnx_model_version` | which metadata schema Athena should parse |
 
-**The ordered variable list is the contract that matters.** It tells a consumer
-which column is which. Read it from the file; do not hardcode it.
+**The ordered variable list is what tells a consumer which column is which.**
+Read it from the file; do not hardcode it.
 
 Reading it takes five lines:
 
@@ -294,7 +310,7 @@ print(cfg["output_names"])
        (sequences shorter than it are padded up, longer ones truncated down)
        is not in the file.
 
-    All three are part of the deployment contract and all three fail silently.
+    All three matter for a correct deployment and all three fail silently.
     Carry them alongside the model, and check them by parity.
 
 ### Renaming and combining outputs
@@ -323,7 +339,7 @@ The `--check` sweep proves the export traced correctly. It does not prove the
 model anywhere, run it through its real consumer and compare against
 `salt test` on the same events:
 
-- self-written consumer → [Run it in Python](python.md#check-it-against-salt)
+- self-written consumer → [Run it in Python](python.md#4-check-it-against-salt)
 - Athena / TDD → [Deploy in the TDD](tdd.md)
 - analysis framework → [Deploy in easyjet](easyjet.md)
 

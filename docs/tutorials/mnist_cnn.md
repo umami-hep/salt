@@ -25,7 +25,7 @@ export PYTHONPATH=$PWD
 
 The container notes from part 1 apply unchanged.
 
-## 1. The model-module contract
+## 1. The model-module lifecycle
 
 A model module's life has strictly separated phases, and salt calls each hook
 for you at the right time:
@@ -120,45 +120,16 @@ class MnistCNN(SaltModelModule):
 `SaltModelModule` and `ResolvedSchema` come straight from `salt.model.modules` —
 the same public API the shipped modules use.
 
-### The contract, method by method
+### What a model module has to implement
 
-- **`__init__`** — config knobs only: which stream, the output embedding
-  width, and the conv stack shape (`channels`, `kernel_size`). Note what is
-  *not* here: no `784`, no `28`. The module works for any square image stream.
-- **`declare_io(mode)`** — requires `normed.mnist` with shape
-  `("B", "F:mnist")`: rank two, batch dim, and a **symbolic** feature width
-  (any string is a symbol) that the planner unifies with the `784` your reader
-  declared concretely. Produces `embed.mnist` with the **concrete** shape
-  `("B", out_dim)` — publishing the concrete width is what lets the
-  downstream `ClassificationTaskModule` size its own dense head at bind,
-  without the config repeating "128" anywhere.
-- **`bind(schema)`** — `schema.width("normed.mnist")` returns the resolved
-  `784`; the module derives `side = 28` and builds its conv/pool/linear
-  stack. Per config default, two blocks: `28×28 → 14×14 → 7×7`, ending in
-  `Linear(32·7·7 → out_dim)`. This is the only place layer objects are
-  constructed — and the only place widths appear, all derived.
-- **`forward(b, mode)`** — reads the declared input off the bundle and
-  returns exactly the declared output. The first line is the interesting one:
-
-    ```python
-    x = x.reshape(x.shape[0], 1, self.side, self.side)
-    ```
-
-    The reader from part 1 still emits flat `[B, 784]` rows — byte-unchanged,
-    it never heard about this tutorial. **Modules own their view of the
-    data**: the normaliser treats those 784 columns as anonymous features,
-    your CNN views the same tensor as a `1×28×28` image. One producer, two
-    consumers, each with its own interpretation — the pipeline contract is
-    just "a `[B, 784]` float tensor", so neither consumer constrains the
-    other.
-
-!!! note "When the produced width is not a config constant"
-
-    Some modules cannot state their output width in `declare_io` — e.g. a
-    concat whose width is the *sum* of its resolved inputs. Those declare
-    `shape=None` and implement `derived_widths()` instead (`StreamEmbed`
-    does this). A concrete `produces` shape, as here, is the simpler
-    spelling whenever the width is a config constant.
+`MnistCNN` requires `normed.mnist` with a **symbolic** feature width and
+produces `embed.mnist` with a **concrete** one, so `bind` derives its conv
+stack from whatever width the planner resolves rather than a hardcoded
+`784`, and `forward` reshapes that same flat tensor into a `1×28×28` image
+without changing what the normaliser upstream or the classification head
+downstream see it as. The full method-by-method reference, including when to
+declare a width as `None` and implement `derived_widths()` instead, lives in
+[Model modules](../modules/model.md).
 
 ## 3. The config: swap one module
 
@@ -314,11 +285,11 @@ which is why every shape is known before any data is read.
 - **The model side is pluggable, exactly like the data side.** Part 1 wired a
   custom reader in with a `class_path`; part 2 did the same for a model
   module. Both sit in *your* workspace; salt gained no MNIST code.
-- **The contract keeps config and construction apart.** `__init__` captured
+- **The lifecycle keeps config and construction apart.** `__init__` captured
   knobs, `declare_io` published the interface, `bind` built layers from
   resolved widths, `forward` did the math. No width was configured twice.
 - **Modules own their view of the data.** The reader kept serving flat
-  vectors; the CNN reshaped them internally. Upstream contracts never changed.
+  vectors; the CNN reshaped them internally. Nothing upstream had to change.
 - **Swapping an implementation is a one-block config edit.** Topology,
   neighbours, and outputs all held still — validated statically, then
   confirmed by a ~2 point accuracy gain over part 1's MLP.

@@ -43,8 +43,8 @@ the `gnn_config` keys.
 
 ## 2. Supply what the metadata does not carry
 
-Three things are part of the contract but are *not* in the file. You have to
-state them, and getting any of them wrong produces plausible, wrong numbers
+Three things you are required to supply are *not* in the file. State them
+yourself, because getting any of them wrong produces plausible, wrong numbers
 rather than an error.
 
 ```python

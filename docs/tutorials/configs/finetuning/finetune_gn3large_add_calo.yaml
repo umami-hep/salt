@@ -1,0 +1,89 @@
+# Fine-tuning worked example 1: add ONLY the `calo` input stream (47 cluster-
+# level variables, up to 50 clusters per jet) from the p7085 FTAG training
+# sample to the public GN3Large bundle, as a fifth stream feeding a fresh
+# normaliser + stream embed into the same Concat -> encoder -> pool backbone.
+# No other module, head or loss changes.
+#
+# `--init_from` accounting: **11 loaded / 2 new / 0 dropped** (`concat`/`split`/
+# `loss` are param-free and excluded; `norm` counts -- buffers, no params).
+#   Loaded (11): norm, track_embed, flow_embed, electron_embed, encoder, pool,
+#     jets_classification, track_origin, track_vertexing, track_type,
+#     jet_pt_regression -- all still shape-compatible. `norm` has no `calo`
+#     stream configured and keeps reading `norm_dict_v2.yaml` unchanged.
+#   New (2): norm_calo -- a SECOND Normaliser (streams: [calo]) producing
+#     `normed.calo` only -- and calo_embed.
+#
+#   export GN3LARGE=<dir with converted.ckpt, config_v2.yaml, norm_dict_v2.yaml>
+#   salt fit \
+#     --config $GN3LARGE/config_v2.yaml \
+#     --config docs/tutorials/configs/finetuning/finetune_gn3large_add_calo.yaml \
+#     --init_from $GN3LARGE/converted.ckpt \
+#     --model.init_args.modules.norm.init_args.norm_dict=$GN3LARGE/norm_dict_v2.yaml \
+#     --model.init_args.modules.norm_calo.init_args.norm_dict=<repo>/docs/tutorials/configs/finetuning/norm_dicts/norm_dict_p7085_calo.yaml \
+#     --data.modules.input_samples.init_args.files.train=<pp_output_train_260331_split_127.h5> \
+#     --data.modules.input_samples.init_args.files.val=<pp_output_val_260331_split_003.h5>
+#
+# Both `norm_dict` overrides are needed because both paths are RELATIVE to
+# DIFFERENT roots: the base's to the bundle directory, this overlay's to the
+# repo root. The sample's own `norm_dict_260331.yaml` serves `norm_calo`
+# equally well -- its `calo:` group is byte-identical and Normaliser.preflight
+# ignores extra groups. `gn3large_base.yaml` (this repo's mirror of the
+# bundle's config_v2.yaml) can replace `$GN3LARGE/config_v2.yaml`; CI parses
+# this overlay stacked on that mirror.
+#
+# Do NOT set `name:` here -- pre/post eval columns must align with the base's
+# `GN4_big`, and this overlay changes only the input side, not the task.
+#
+# Walk-through: docs/tutorials/finetuning.md (worked example 1).
+
+data:
+  modules:
+    reader:
+      init_args:
+        groups:
+          calo: {global_object: false}      # dict key ADDED by deep-merge; dataset name == stream name for calo
+    features:
+      init_args:
+        variables:
+          # 47 cluster-level variables, in the h5 order they are written (must match
+          # the key order of norm_dicts/norm_dict_p7085_calo.yaml).
+          calo: [usedInChargedFlow, ENG_BAD_CELLS, ISOLATION, CENTER_MAG, CELL_SIGNIFICANCE, ENG_FRAC_MAX, LATERAL, SIGNIFICANCE, LONGITUDINAL, ENG_POS, EM_PROBABILITY, CENTER_LAMBDA, SECOND_LAMBDA, FIRST_ENG_DENS, SECOND_R, AVG_LAR_Q, MASS, rawPhi, calPhi, rawEta, calEta, rawE, calE, PreSamplerB, EMB1, EMB2, EMB3, PreSamplerE, EME1, EME2, EME3, HEC0, HEC1, HEC2, HEC3, TileBar0, TileBar1, TileBar2, TileGap1, TileGap2, TileGap3, TileExt0, TileExt1, TileExt2, FCAL0, FCAL1, FCAL2]
+
+model:
+  init_args:
+    modules:
+      norm_calo:                       # SECOND normaliser: only its own streams get `normed.<stream>`, so the bundle's `norm` stays loaded unchanged
+        class_path: salt.model.modules.Normaliser
+        init_args: {norm_dict: norm_dicts/norm_dict_p7085_calo.yaml, streams: [calo]}
+      calo_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args: {stream: calo, context: [normed.jets], out_dim: 1024, dense: {hidden_layers: [512], activation: SiLU}}  # out_dim 1024 = encoder dim (Concat constraint)
+      concat:
+        init_args: {streams: [tracks, flows, electrons, calo]}   # list replaces on merge; calo appended LAST -- `Split` takes `tracks` by position, so tracks must stay first
+
+outputs:
+  onnx_export:
+    init_args:
+      # Lists replace on merge -- the base's four entries are restated verbatim, then the new one appended.
+      inputs:
+        - {port: inputs.jets, name: jets_features}
+        - {port: inputs.tracks, name: tracks_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flows, name: flows_features, sequence: true, dyn_axis: n_flows}
+        - {port: inputs.electrons, name: electrons_features, sequence: true, dyn_axis: n_electrons}
+        - {port: inputs.calo, name: calo_features, sequence: true, dyn_axis: n_calo}
+
+training_schedule:
+  stages:
+    calo_warmup:                       # only the two NEW modules + every task head train; norm/embeds/encoder/pool stay frozen + eval()
+      epochs: 3
+      trainable: [norm_calo, calo_embed, jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression]
+      lrs: {max: 1.0e-4}
+      early_stop: {monitor: val/loss, mode: min, patience: 1}
+    full_finetune:
+      frozen: []
+      lrs: {initial: 1.0e-7, max: 1.0e-5}
+      early_stop: {monitor: val/loss, mode: min, patience: 2}
+
+trainer:
+  max_epochs: 8
+  precision: 16-mixed                  # flash-varlen attention is fp16/bf16-only on GPU
