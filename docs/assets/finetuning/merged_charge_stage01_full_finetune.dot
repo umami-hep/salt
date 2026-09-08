@@ -1,0 +1,271 @@
+digraph salt_core_fit {
+  rankdir=LR;
+  splines=ortho;
+  nodesep=0.6;
+  ranksep=1.5;
+  pad=0.4;
+  bgcolor="white";
+  node [shape=plaintext, fontname="Helvetica"];
+  edge [color="#777777", arrowsize=0.8, penwidth=1.3];
+  labelloc="t";
+  fontname="Helvetica";
+  label="stage 2/2: full_finetune — frozen: (none) — early_stop: val/loss (min, patience 2)";
+  "reader" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#b5d99c" ALIGN="CENTER"><B>reader</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">H5StructuredReader</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>raw.jets</B>  <FONT COLOR="#888888">(B)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>raw.tracks</B>  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>raw.flows</B>  <FONT COLOR="#888888">(B, T:flows)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>raw.electrons</B>  <FONT COLOR="#888888">(B, T:electrons)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>masks.tracks</B>  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>masks.flows</B>  <FONT COLOR="#888888">(B, T:flows)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>masks.electrons</B>  <FONT COLOR="#888888">(B, T:electrons)</FONT></FONT></TD></TR>
+    </TABLE>>];
+  "features" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#7fbf7b" ALIGN="CENTER"><B>features</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">Features</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.electrons  <FONT COLOR="#888888">(B, T:electrons)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.flows  <FONT COLOR="#888888">(B, T:flows)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.electrons  <FONT COLOR="#888888">(B, T:electrons)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.flows  <FONT COLOR="#888888">(B, T:flows)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.jets  <FONT COLOR="#888888">(B)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>inputs.jets</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>inputs.tracks</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>inputs.flows</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>inputs.electrons</B></FONT></TD></TR>
+    </TABLE>>];
+  "labels" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#4daf4a" ALIGN="CENTER"><B>labels</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">Labels</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.electrons  <FONT COLOR="#888888">(B, T:electrons)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.flows  <FONT COLOR="#888888">(B, T:flows)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.jets  <FONT COLOR="#888888">(B)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">raw.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.jets.HadronGhostInitialTruthLabelPdgId</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.jets.flavour_label</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.jets.ptFromTruthDressedWZJet</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.jets.pt_btagJes</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.tracks.ftagTruthOriginLabel</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.tracks.ftagTruthTypeLabel</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d"><B>labels.tracks.ftagTruthVertexIndex</B></FONT></TD></TR>
+    </TABLE>>];
+  "norm" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#9ecae1" ALIGN="CENTER"><B>norm</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">Normaliser</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">inputs.electrons</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">inputs.flows</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">inputs.jets</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">inputs.tracks</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>normed.jets</B>  <FONT COLOR="#888888">(B, 2)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>normed.tracks</B>  <FONT COLOR="#888888">(B, T:tracks, 24)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>normed.flows</B>  <FONT COLOR="#888888">(B, T:flows, 5)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>normed.electrons</B>  <FONT COLOR="#888888">(B, T:electrons, 28)</FONT></FONT></TD></TR>
+    </TABLE>>];
+  "track_embed" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#6baed6" ALIGN="CENTER"><B>track_embed</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">StreamEmbed</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">normed.jets  <FONT COLOR="#888888">(B, 2)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">normed.tracks  <FONT COLOR="#888888">(B, T:tracks, 24)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>embed.tracks</B></FONT></TD></TR>
+    </TABLE>>];
+  "flow_embed" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#6baed6" ALIGN="CENTER"><B>flow_embed</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">StreamEmbed</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">normed.flows  <FONT COLOR="#888888">(B, T:flows, 5)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">normed.jets  <FONT COLOR="#888888">(B, 2)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>embed.flows</B></FONT></TD></TR>
+    </TABLE>>];
+  "electron_embed" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#6baed6" ALIGN="CENTER"><B>electron_embed</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">StreamEmbed</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">normed.electrons  <FONT COLOR="#888888">(B, T:electrons, 28)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">normed.jets  <FONT COLOR="#888888">(B, 2)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>embed.electrons</B></FONT></TD></TR>
+    </TABLE>>];
+  "concat" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#6baed6" ALIGN="CENTER"><B>concat</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">Concat</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">embed.electrons</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">embed.flows</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.electrons  <FONT COLOR="#888888">(B, T:electrons)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.flows  <FONT COLOR="#888888">(B, T:flows)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">embed.tracks</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>seq.x</B>  <FONT COLOR="#888888">(B, S:seq, 1024)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>seq.mask</B>  <FONT COLOR="#888888">(B, S:seq)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>seq.layout</B></FONT></TD></TR>
+    </TABLE>>];
+  "encoder" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#3182bd" ALIGN="CENTER"><B>encoder</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">TransformerEncoder</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">seq.mask  <FONT COLOR="#888888">(B, S:seq)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">seq.x  <FONT COLOR="#888888">(B, S:seq, 1024)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>encoded.seq</B>  <FONT COLOR="#888888">(B, L:enc, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>masks.registers</B>  <FONT COLOR="#888888">(B, 8)</FONT></FONT></TD></TR>
+    </TABLE>>];
+  "split" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#3182bd" ALIGN="CENTER"><B>split</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">Split</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">seq.layout</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">encoded.seq  <FONT COLOR="#888888">(B, L:enc, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>encoded.tracks</B>  <FONT COLOR="#888888">(B, T:tracks, 256)</FONT></FONT></TD></TR>
+    </TABLE>>];
+  "pool" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#3182bd" ALIGN="CENTER"><B>pool</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">GlobalAttentionPooling</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">seq.mask  <FONT COLOR="#888888">(B, S:seq)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">encoded.seq  <FONT COLOR="#888888">(B, L:enc, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.registers  <FONT COLOR="#888888">(B, 8)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333"><B>pooled.global</B>  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    </TABLE>>];
+  "jets_classification" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#fb6a4a" ALIGN="CENTER"><B>jets_classification</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">ClassificationTaskModule</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.jets.flavour_label</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">pooled.global  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#1f6fb2"><B>preds.jets.jets_classification</B>  <FONT COLOR="#888888">(B, 6)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>losses.jets_classification</B></FONT></TD></TR>
+    </TABLE>>];
+  "track_origin" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#fb6a4a" ALIGN="CENTER"><B>track_origin</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">ClassificationTaskModule</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.tracks.ftagTruthOriginLabel</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">pooled.global  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">encoded.tracks  <FONT COLOR="#888888">(B, T:tracks, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#1f6fb2"><B>preds.tracks.track_origin</B>  <FONT COLOR="#888888">(B, T:tracks, 8)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>losses.track_origin</B></FONT></TD></TR>
+    </TABLE>>];
+  "track_vertexing" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#fb6a4a" ALIGN="CENTER"><B>track_vertexing</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">VertexingTaskModule</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.tracks.ftagTruthOriginLabel</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.tracks.ftagTruthVertexIndex</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">pooled.global  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">encoded.tracks  <FONT COLOR="#888888">(B, T:tracks, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#1f6fb2"><B>preds.tracks.track_vertexing</B></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>losses.track_vertexing</B></FONT></TD></TR>
+    </TABLE>>];
+  "track_type" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#fb6a4a" ALIGN="CENTER"><B>track_type</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">ClassificationTaskModule</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.tracks.ftagTruthTypeLabel</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">pooled.global  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">masks.tracks  <FONT COLOR="#888888">(B, T:tracks)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">encoded.tracks  <FONT COLOR="#888888">(B, T:tracks, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#1f6fb2"><B>preds.tracks.track_type</B>  <FONT COLOR="#888888">(B, T:tracks, 6)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>losses.track_type</B></FONT></TD></TR>
+    </TABLE>>];
+  "jet_pt_regression" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#fb6a4a" ALIGN="CENTER"><B>jet_pt_regression</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">RegressionTaskModule</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.jets.ptFromTruthDressedWZJet</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.jets.pt_btagJes</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">pooled.global  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#1f6fb2"><B>preds.jets.jet_pt_regression</B>  <FONT COLOR="#888888">(B, 1)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>losses.jet_pt_regression</B></FONT></TD></TR>
+    </TABLE>>];
+  "jets_bccharge" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#fb6a4a" ALIGN="CENTER"><B>jets_bccharge</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">ClassificationTaskModule</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#b5651d">labels.jets.HadronGhostInitialTruthLabelPdgId</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#333333">pooled.global  <FONT COLOR="#888888">(B, 256)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#1f6fb2"><B>preds.jets.jets_bccharge</B>  <FONT COLOR="#888888">(B, 5)</FONT></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>losses.jets_bccharge</B></FONT></TD></TR>
+    </TABLE>>];
+  "loss" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#de2d26" ALIGN="CENTER"><B>loss</B><BR/><FONT POINT-SIZE="8" COLOR="#555555">LossSum</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">losses.jet_pt_regression</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">losses.jets_bccharge</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">losses.jets_classification</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">losses.track_origin</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">losses.track_type</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">losses.track_vertexing</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>out</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b"><B>loss.total</B></FONT></TD></TR>
+    </TABLE>>];
+  "<sinks>" [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">
+    <TR><TD BGCOLOR="#f5f5f5" ALIGN="CENTER"><B>&lt;sinks&gt;</B></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#aaaaaa"><I>in</I></FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT COLOR="#c0392b">loss.total</FONT></TD></TR>
+    </TABLE>>];
+  "concat" -> "split";
+  "concat" -> "encoder";
+  "concat" -> "pool";
+  "electron_embed" -> "concat";
+  "encoder" -> "pool";
+  "encoder" -> "split";
+  "features" -> "norm";
+  "flow_embed" -> "concat";
+  "jet_pt_regression" -> "loss";
+  "jets_bccharge" -> "loss";
+  "jets_classification" -> "loss";
+  "labels" -> "jets_bccharge";
+  "labels" -> "jets_classification";
+  "labels" -> "jet_pt_regression";
+  "labels" -> "track_origin";
+  "labels" -> "track_vertexing";
+  "labels" -> "track_type";
+  "loss" -> "<sinks>";
+  "norm" -> "electron_embed";
+  "norm" -> "flow_embed";
+  "norm" -> "track_embed";
+  "pool" -> "jet_pt_regression";
+  "pool" -> "jets_bccharge";
+  "pool" -> "jets_classification";
+  "pool" -> "track_origin";
+  "pool" -> "track_type";
+  "pool" -> "track_vertexing";
+  "reader" -> "concat";
+  "reader" -> "features";
+  "reader" -> "track_origin";
+  "reader" -> "track_type";
+  "reader" -> "track_vertexing";
+  "reader" -> "labels";
+  "split" -> "track_origin";
+  "split" -> "track_type";
+  "split" -> "track_vertexing";
+  "track_embed" -> "concat";
+  "track_origin" -> "loss";
+  "track_type" -> "loss";
+  "track_vertexing" -> "loss";
+}

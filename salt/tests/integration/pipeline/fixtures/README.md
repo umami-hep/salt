@@ -35,12 +35,33 @@ xfail:                        # leg-scoped, reason mandatory
   eval: "reason..."
   export: "reason..."
   compile_plot: "reason..."
+stack: [<relpath under salt/configs/>.yaml, ...]  # optional; shipped configs
+                              # stacked before this row's own config (compile+plot
+                              # and fit) — for overlay templates whose base cannot
+                              # itself be a producer row
 fragment: <value>             # fragment files only: "paired" | "included" | free text
 ```
 
 `expected_outputs` semantics: **containment, not equality** for `eval`/`onnx`
 (a declared name must be present; extra columns are fine and expected) —
 except the inference ONNX-name gate, which checks **exact tuple order**.
+
+## No real `--init_from` warm start in CI (currently)
+
+`finetune_same_heads.yaml` — the fixture for the old `finetune_gn3large.yaml`
+overlay — was a GPU row that ran a real `--init_from` warm start onto
+`gn3v00_base`'s checkpoint. Both the overlay and its fixture were deleted
+(plan 18): the checkpoint-chaining producer/consumer relationship they
+exercised no longer exists anywhere in the tree.
+
+The overlays that later replaced it (`finetune_gn3large_add_calo`,
+`finetune_gn3large_add_charge_head`, `finetune_gn3large_add_jet_vars`,
+`finetune_gn3large_xbb_transfer`, `gn3large_base`) moved to
+`docs/tutorials/configs/finetuning/` and their `stack:`-overlay pipeline
+fixtures were deleted along with them — they are tutorial material, not
+shipped configs. **No branch-CI row exercises a real `--init_from` warm
+start.** The overlays' static partitions and accounting (loaded/new/dropped
+modules) are covered by `salt/tests/unit/test_finetune_configs.py` instead.
 
 ## No regeneration script — ever
 

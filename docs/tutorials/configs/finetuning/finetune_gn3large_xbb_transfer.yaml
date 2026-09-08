@@ -1,0 +1,149 @@
+# Fine-tuning overlay — backbone TRANSFER from the public GN3Large baseline to
+# the public boosted-Xbb sample (https://cernbox.cern.ch/s/t1WnJ8UMUgEycjp).
+# Stack it on the public GN3Large bundle's base config and warm-start from that
+# bundle's checkpoint. Unlike worked examples 1-3 (same inputs and heads as the
+# bundle, one addition each), this overlay changes the input schema and the
+# task, so it keeps only the parts of the pretrained network whose shapes and
+# semantics still apply:
+#
+#   KEPT (loaded from the checkpoint): encoder, pool, track_origin,
+#     track_vertexing — the shared jet/track representation, plus the two
+#     track-level auxiliary heads whose labels exist in the Xbb sample's tracks
+#     and which regularise the transfer.
+#   FRESH (randomly initialised): norm_xbb, track_embed_xbb, flow_embed_xbb,
+#     xbb_classification — the Xbb sample has different track/flow variable
+#     counts and no electrons stream, so the input normaliser and stream
+#     embedders must be re-initialised for the new shapes; xbb_classification
+#     is a genuinely NEW jet classification task (6 Xbb classes), not a
+#     resumption of the old one.
+#   DROPPED (removed entirely): norm, track_embed, flow_embed, electron_embed,
+#     jets_classification, track_type, jet_pt_regression — the old
+#     normaliser/embedders no longer match the new input shapes, there is no
+#     electrons stream, `jets_classification` IS what `xbb_classification`
+#     replaces (not restored alongside it), the Xbb tracks carry no
+#     `ftagTruthTypeLabel`, and `jet_pt_regression`'s target is irrelevant here.
+#
+# Expected `--init_from` accounting: **4 loaded / 4 new / 7 dropped**.
+#
+#   export GN3LARGE=<dir with converted.ckpt, config_v2.yaml, norm_dict_v2.yaml>
+#   salt fit \
+#     --config $GN3LARGE/config_v2.yaml \
+#     --config docs/tutorials/configs/finetuning/finetune_gn3large_xbb_transfer.yaml \
+#     --init_from $GN3LARGE/converted.ckpt \
+#     --data.modules.input_samples.init_args.files.train=<train.h5> \
+#     --data.modules.input_samples.init_args.files.val=<val.h5>
+#
+# No `norm_dict` override here (unlike examples 1-3) — `norm` is deleted below, so
+# passing one is a no-op at best and a `ConfigError` at worst. Run from the
+# directory holding `data/pp_output_*.h5` as in docs/tutorials/xbb.md, or
+# override the three `input_samples` files as shown above.
+#
+# `flavour_label` is Higgs-first 6-class (docs/tutorials/xbb.md §2) — not the
+# same class order as GN3Large's `jets_classification`.
+#
+# `docs/tutorials/configs/finetuning/gn3large_base.yaml` is the in-repo mirror of
+# `config_v2.yaml` and can be used in its place — CI parses this overlay
+# against it. Preview the merged config (freeze graph, per-stage
+# trainable/frozen sets) with `salt merge-config`.
+#
+# Walk-through: docs/tutorials/finetuning.md (worked example 4).
+
+name: GN3LargeXbb
+
+data:
+  batch_size: 100
+  num_workers: 4
+  modules:
+    input_samples:
+      class_path: salt.data.InputSamples
+      init_args:
+        files:
+          train: data/pp_output_train_small.h5
+          val: data/pp_output_val-full_0_100k.h5
+          test: data/pp_output_test-full_0_100k.h5
+        num: {train: -1, val: -1, test: -1}
+    # Data modules follow the same rule as model modules: a stacked config
+    # deep-merges dicts KEY BY KEY, so restating `groups:` / `variables:` without
+    # `electrons` would NOT drop the inherited electrons entry (and `electrons: null`
+    # inside `groups:` is a default group, not a deletion). Delete the inherited
+    # module with `null` and declare the Xbb one under a new name.
+    reader: null
+    reader_xbb:
+      class_path: salt.data.H5StructuredReader
+      init_args:
+        groups:                                  # no electrons; tracks is a plain `tracks` dataset (no tracks_ghost alias)
+          jets: {global_object: true}
+          tracks: {global_object: false, pad_max: 100}   # Xbb files store 100 tracks/jet; shipped GN3X.yaml also uses 100
+          flows: {global_object: false, dataset: flow, pad_max: 100}  # same: 100 flows/jet, matching GN3X.yaml
+    features: null
+    features_xbb:
+      class_path: salt.data.Features
+      init_args:
+        variables:                               # 19 track vars, verbatim from docs/tutorials/xbb.md; 4 flow vars; no electrons
+          jets: [pt, eta, mass, Tau21, C2, D2]
+          tracks: [d0, z0SinTheta, dphi, deta, qOverP, lifetimeSignedD0Significance, lifetimeSignedZ0SinThetaSignificance, phiUncertainty, thetaUncertainty, qOverPUncertainty, numberOfPixelHits, numberOfSCTHits, numberOfInnermostPixelLayerHits, numberOfNextToInnermostPixelLayerHits, numberOfInnermostPixelLayerSharedHits, numberOfInnermostPixelLayerSplitHits, numberOfPixelSharedHits, numberOfPixelSplitHits, numberOfSCTSharedHits]
+          flows: [flow_pt, flow_energy, flow_deta, flow_dphi]
+
+model:
+  init_args:
+    modules:
+      norm: null                       # dropped: Normaliser buffers are per-stream/per-variable — shapes change, and the Xbb sample ships no norm_dict
+      norm_xbb:
+        class_path: salt.model.modules.MaskedInputNormaliser   # learns masked running stats online, no file
+        init_args: {streams: [jets, tracks, flows], global_object: jets}
+      track_embed: null                # dropped: 24 -> 19 track variables (fresh initialiser network below)
+      flow_embed: null                 # dropped: 5 -> 4 flow variables
+      electron_embed: null             # dropped: no electrons in the Xbb sample
+      track_embed_xbb:
+        class_path: salt.model.modules.StreamEmbed
+        init_args: {stream: tracks, context: [normed.jets], out_dim: 1024, dense: {hidden_layers: [512], activation: SiLU}}   # out_dim 1024 = encoder dim (Concat constraint)
+      flow_embed_xbb:
+        class_path: salt.model.modules.StreamEmbed
+        init_args: {stream: flows, context: [normed.jets], out_dim: 1024, dense: {hidden_layers: [512], activation: SiLU}}
+      concat:
+        init_args: {streams: [tracks, flows]}   # list replaces: electrons gone
+      jets_classification: null        # dropped: this IS a new jet classification (6 Xbb classes)
+      track_type: null                 # dropped: ftagTruthTypeLabel is not in the Xbb tracks
+      jet_pt_regression: null          # dropped: irrelevant target (and pt_btagJes absent)
+      xbb_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: [hbb, hcc, htautauhad, top, qcd, wqq]   # Higgs-first order — see docs/tutorials/xbb.md
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+          weight_source: null
+
+outputs:
+  inputs_copy:
+    class_path: salt.outputs.InputCopyWriter
+    init_args:
+      streams: [jets]
+      variables: {jets: [pt, eta, mass, R10TruthLabel_R22v1, flavour_label]}
+  run_tasks:
+    class_path: salt.outputs.RunTaskOutput
+    init_args: {tasks: [xbb_classification, track_origin, track_vertexing]}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: GN3LargeXbb
+      inputs:
+        - {port: inputs.jets, name: jets_features}
+        - {port: inputs.tracks, name: tracks_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flows, name: flows_features, sequence: true, dyn_axis: n_flows}
+
+training_schedule:
+  stages:
+    backbone_frozen:                   # only the fresh modules train; encoder/pool + eval() the two kept track heads frozen
+      epochs: 5
+      trainable: [norm_xbb, track_embed_xbb, flow_embed_xbb, xbb_classification]
+      lrs: {max: 1.0e-4}
+    full_finetune:
+      frozen: []
+      lrs: {initial: 1.0e-7, max: 1.0e-5}
+      early_stop: {monitor: val/loss, mode: min, patience: 3}   # protects the first real run on 100k jets
+
+trainer:
+  max_epochs: 15
+  precision: 16-mixed                  # flash-varlen attention is fp16/bf16-only on GPU

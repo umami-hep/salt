@@ -66,18 +66,23 @@ are already resampled and shuffled and can be fed to salt directly.
     The same files are staged on EOS, which is faster from inside CERN:
 
     ```
-    /eos/user/n/npond/salt-data/finetune_cernbox/
+    /eos/user/n/npond/salt-data/finetuning/xbb-finetune/
+    ```
+
+    Recommended copy — this is a directory copy, so it lands as
+    `xbb-finetune/` containing all three files:
+
+    ```bash
+    cd <where you keep data> && xrdcp -r root://eosuser.cern.ch//eos/user/n/npond/salt-data/finetuning/xbb-finetune/ .
     ```
 
     From a batch node — or from inside a container, where EOS FUSE is not
-    visible — use xrootd rather than the POSIX path:
-
-    ```bash
-    xrdcp root://eosuser.cern.ch//eos/user/n/npond/salt-data/finetune_cernbox/pp_output_train_small.h5 $TMPDIR/
-    ```
+    visible — use xrootd rather than the POSIX path, as above.
 
     That EOS directory is not world-readable; the CERNBox link above is the
-    one to share with people outside the group.
+    one to share with people outside the group. If you are following the
+    [fine-tuning tutorial](finetuning.md), its Prerequisites already fetch
+    this folder for you.
 
 !!! warning "The three files do not have identical schemas"
 
@@ -152,8 +157,8 @@ Jet selection is already applied: pT 200–2100 GeV, mass 50–300 GeV, |eta| < 
 !!! info "The reference scores are a free baseline"
 
     `GN2Xv01_phbb` and friends are the *existing* production taggers' outputs,
-    stored per jet. You can plot them on the same axes as your own model for an
-    honest comparison — see the closing exercise.
+    stored per jet. You can plot them on the same axes as your own model for a
+    like-for-like comparison — see the closing exercise.
 
 ## 3. The config
 
@@ -604,7 +609,9 @@ Four figures: `disc_Hbb.png`, `disc_Hcc.png`, `roc_Hbb.png`, `roc_Hcc.png`.
   the resolved-jet GN3Large model is adapted to these boosted jets by module
   surgery — swapping the input streams and the classification head, then
   warm-starting the shared encoder. That is the realistic way to train an Xbb
-  tagger with only 100k jets.
+  tagger with only 100k jets. To warm-start this task from the pretrained
+  GN3Large backbone instead of training from scratch, see
+  [Fine-tuning → worked example 4](finetuning.md#worked-example-4-backbone-transfer-to-boosted-xbb).
 - **Understand the eval file.** [Outputs](../outputs.md) explains where every
   column name comes from and how to add or remove them.
 - **Ship the model to Athena.** [Export to ONNX](../deployment/export.md), and part 4's

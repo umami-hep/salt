@@ -60,12 +60,13 @@ modular-unit-tests:
 # NOT `pytest -k` (a `-k` substring match can silently select the wrong
 # subset while staying green, e.g. `gn3_v00` also matching `gn3v00_base`).
 #
-# Chained rows (finetune_new_head, finetune_same_heads) re-fit their producer
-# row inside their own job before their own fit — a genuinely chained config,
-# not a slow row for no reason — so their wall time is expected ~2x a plain
-# row's, same accepted cost as the GPU split's chained row.
+# No fine-tuning rows remain in this matrix at all. The fine-tuning overlay
+# configs live under docs/tutorials/configs/finetuning/ — they are not
+# shipped configs, carry no pipeline fixture, and are covered instead by
+# a dedicated unit suite under salt/tests/unit/ (see its module docstring
+# for the config paths it resolves).
 #
-# PIPELINE_ROW here must equal exactly the 33 runnable fixture stems (fixture
+# PIPELINE_ROW here must equal exactly the 31 runnable fixture stems (fixture
 # YAMLs under pipeline/fixtures/ with no top-level `fragment` key) — the
 # both-ways consistency test `test_cpu_ci_matrix_matches_runnable_fixtures` in
 # test_pipeline.py enforces this both ways (CI-only names AND fixture-only
@@ -80,7 +81,7 @@ integration-cpu:
   stage: per-config
   parallel:
     matrix:
-      - PIPELINE_ROW: [dips, dipz, dl1, easyjet_flavour, event_tagger_easyjet, finetune_new_head, finetune_same_heads, ftag1lite_empflow, gn2_mup, gn2emu, gn2v2_opendata, gn2x_qcdsplit, gn2xe, gn3_baseline, gn3_baseline_loose, gn3_charge, gn3_dr, gn3_flow, gn3_hybrid, gn3_lepid_smt, gn3_softe, gn3_tracklabel, gn3_v00, gn3epclv01, gn3v00_base, gn3x, hitz, maskformer, nan_regression, regression, regression_gaussian, regression_multi_target, regression_weighted]
+      - PIPELINE_ROW: [dips, dipz, dl1, easyjet_flavour, event_tagger_easyjet, ftag1lite_empflow, gn2_mup, gn2emu, gn2v2_opendata, gn2x_qcdsplit, gn2xe, gn3_baseline, gn3_baseline_loose, gn3_charge, gn3_dr, gn3_flow, gn3_hybrid, gn3_lepid_smt, gn3_softe, gn3_tracklabel, gn3_v00, gn3epclv01, gn3v00_base, gn3x, hitz, maskformer, nan_regression, regression, regression_gaussian, regression_multi_target, regression_weighted]
   script:
     - JUNIT_FILE="reports/integration-cpu-${PIPELINE_ROW}.xml" run_test salt/tests/integration/pipeline --pipeline-row="${PIPELINE_ROW}" --pipeline-row-scope=all
 
@@ -95,14 +96,12 @@ integration-cpu:
 # the fixtures<->CI consistency tests (this job's own
 # test_cpu_ci_matrix_matches_runnable_fixtures AND
 # test_gpu_ci_matrix_matches_gpu_fixtures below), the non-parametrized
-# row-artifact tests (regression/regression_gaussian sink mechanics, the
-# finetune residual assertions in test_pipeline.py §3 that check chained
-# artifacts rather than a single row's rc==0), and all of
-# multistage_training/. Coverage note: this job's .coverage* artifact,
-# combined with unit-tests' and all 33 per-config jobs', is what the coverage
-# job (stage: coverage, no needs:/dependencies:, stage-collects from every
-# prior job) merges via `coverage combine` — 35 artifact sets total (33 rows +
-# unit-tests + this job; the 4 manual tests-gpu jobs contribute only when
+# row-artifact tests (regression/regression_gaussian sink mechanics), and all
+# of multistage_training/. Coverage note: this job's .coverage* artifact, plus
+# unit-tests' and all 31 per-config jobs', is what the coverage job (stage:
+# coverage, no needs:/dependencies:, stage-collects from every prior job)
+# merges via `coverage combine` — 33 artifact sets total (31 rows + unit-tests
+# + this job; the 3 manual tests-gpu jobs contribute only when
 # someone actually triggers them).
 integration-misc:
   extends: .test-template
@@ -131,11 +130,11 @@ integration-misc:
 #
 # `tags: [k8s-gpu]` selects the GPU runner; we keep the .test-template salt
 # image (overrides the runner's default AlmaLinux9). FAIR USE: keep k8s-gpu
-# jobs <= 5 in parallel — this matrix's 4 cells satisfy that on their own.
+# jobs <= 5 in parallel — this matrix's 3 cells satisfy that on their own.
 #
 # The old job took 46 min end to end on a contended k8s-gpu fleet; splitting
 # into one job per row means total wall = the SLOWEST row, not the sum of all
-# four serially — see the TODO(release) block below for why that split alone
+# three serially — see the TODO(release) block below for why that split alone
 # was not enough and the rows are now manual.
 #
 # The diagnostic preamble (nproc / cgroup cpu.max / nvidia-smi / a timed
@@ -145,7 +144,7 @@ integration-misc:
 # future run now self-reports where its time went (also see --durations=15
 # on every pytest invocation, set in .test-template).
 #
-# TODO(release): the 4 GPU rows are `when: manual` with `allow_failure: true` —
+# TODO(release): the 3 GPU rows are `when: manual` with `allow_failure: true` —
 # manual + allow_failure: false would hold the whole pipeline in the "blocked"
 # state until someone clicks them, making a green pipeline unreachable. GitLab
 # consequence: a manually-triggered GPU row that goes RED shows as a warning,
@@ -180,7 +179,7 @@ integration-gpu:
       allow_failure: true
   parallel:
     matrix:
-      - PIPELINE_ROW: [gn2v2_opendata, maskformer, gn3v00_base, finetune_same_heads]
+      - PIPELINE_ROW: [gn2v2_opendata, maskformer, gn3v00_base]
   script:
     - nproc
     - cat /sys/fs/cgroup/cpu.max || true

@@ -953,9 +953,10 @@ class TestFanOutInstantiated:
 # the nested model.init_args home is rejected fail-loud.
 
 
-# structural twin of examples/finetune_gn3large.yaml: head warm-up (only the
-# classification head trainable, per-stage lrs override) then full-network
-# fine-tune (frozen: [] = everything trainable, epochs omitted = remainder).
+# structural twin of docs/tutorials/configs/finetuning/finetune_gn3large_add_charge_head.yaml:
+# a head warm-up (only the new head trainable, per-stage lrs override) then a
+# full-network fine-tune (frozen: [] = everything trainable, epochs omitted =
+# remainder).
 TOP_LEVEL_SCHEDULE_YAML = """
 training_schedule:
   stages:

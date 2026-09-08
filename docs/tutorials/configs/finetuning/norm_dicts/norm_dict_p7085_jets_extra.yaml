@@ -1,0 +1,219 @@
+# Norm dict for worked example 3, which widens the `jets` collection by ONE
+# variable, `mass`. Complete and usable: `finetune_gn3large_add_jet_vars.yaml`
+# fits and evaluates against this file as shipped.
+#
+# `Normaliser.preflight` (`salt/model/modules/norm.py`) requires every
+# configured stream's every `features.variables` entry to have a {mean, std}
+# entry here, and fails loud rather than silently if one is missing. The
+# overlay's jets list is [pt_btagJes, eta_btagJes, mass]; all three are below.
+#
+# Provenance of the body: copied VERBATIM (byte-for-byte, this header excluded)
+# from the bundle checkpoint's own norm dict —
+#   /data/ccra-data/projects/salt-improvements/studies/2026_06_11_modularise-salt/studies/2026_07_19_fine-tuning-approaches/experiments/08_demo_gn3large_sameheads_finetune/model/norm_dict_v2.yaml
+#   sha256: 82929f1946f8bfb86e6f822d509df59044fe622da3ef5c5f961207a2ac49d698
+# (same body + sha as `docs/tutorials/configs/finetuning/gn3large_base.yaml`'s
+# own `norm_dict_v2.yaml` reference), plus exactly ONE appended entry,
+# `jets.mass`. Nothing else differs from that dict.
+#
+# `jets.mass` is not in the bundle's dict and not in p7085's own
+# `norm_dict_260331.yaml` — it is an input the pretrained model does not read,
+# so neither dict has stats for it. The values below were computed over the
+# first 1,000,000 jets of `pp_output_train_260331_split_127.h5` on 2026-09-06
+# at salt `94eb2d9b68d98f64e75342f7d136dd764a4f2cda`, and are the same values
+# the tutorial's own DIAS run of worked example 3 used.
+#
+# Keyed by STREAM name (`tracks`, not `tracks_ghost`; `jets`, `tracks`, `flows`,
+# `electrons` — matching `Normaliser(streams: [...])`, not the p7085 h5 dataset
+# names). This dict feeds `norm_p7085` ONLY (the fresh Normaliser this overlay
+# introduces in place of the bundle's `norm`) — it is not consumed by `norm`,
+# `norm_calo`, or any other example's normaliser in this study.
+#
+# Sanity check (PyYAML only, no salt import needed):
+#   python3 -c 'import yaml; d=yaml.safe_load(open("norm_dict_p7085_jets_extra.yaml")); assert {k: len(v) for k, v in d.items()} == {"jets": 3, "tracks": 24, "flows": 5, "electrons": 28}, {k: len(v) for k, v in d.items()}'
+# (true as shipped: `jets` carries the bundle's 2 entries plus `mass`. If a
+# future change adds another variable, update this assertion with it.)
+
+jets:
+  pt_btagJes:
+    mean: 307092.2981249999
+    std: 626629.5724018117
+  eta_btagJes:
+    mean: 0.001146319947511074
+    std: 1.1873786753573183
+  mass:
+    mean: 65768.65014375019
+    std: 98246.55071722216
+tracks:
+  d0:
+    mean: -0.002053291090996936
+    std: 0.734065568401038
+  z0SinTheta:
+    mean: -0.0007898530250531623
+    std: 1.1010916920381113
+  dphi:
+    mean: 0.00016984736817903467
+    std: 0.13072256629728343
+  deta:
+    mean: -1.4233885945031944e-05
+    std: 0.12973072565397847
+  qOverP:
+    mean: 1.9171658163941165e-06
+    std: 0.0004791893171201977
+  lifetimeSignedD0Significance:
+    mean: 1.7390915179252622
+    std: 9.96408644724043
+  lifetimeSignedZ0SinThetaSignificance:
+    mean: 0.7379144179821016
+    std: 8.613009446488569
+  phiUncertainty:
+    mean: 0.0016247798991389569
+    std: 0.001886677016320009
+  thetaUncertainty:
+    mean: 0.0012516551185399291
+    std: 0.0010645518532673031
+  qOverPUncertainty:
+    mean: 6.28958723609685e-06
+    std: 7.764329760372755e-06
+  numberOfPixelHits:
+    mean: 3.8416315438602293
+    std: 1.058001295046831
+  numberOfSCTHits:
+    mean: 8.07771366802451
+    std: 1.4019604489361386
+  numberOfInnermostPixelLayerHits:
+    mean: 0.9412885165938784
+    std: 0.4105548070742284
+  numberOfNextToInnermostPixelLayerHits:
+    mean: 0.936740384566545
+    std: 0.4519258507478999
+  numberOfInnermostPixelLayerSharedHits:
+    mean: 0.026727643478418644
+    std: 0.161374966141783
+  numberOfInnermostPixelLayerSplitHits:
+    mean: 0.07102098000175396
+    std: 0.2712535873313958
+  numberOfPixelSharedHits:
+    mean: 0.05184355499328018
+    std: 0.22807688912511412
+  numberOfPixelSplitHits:
+    mean: 0.19942978517580423
+    std: 0.6824824887611932
+  numberOfSCTSharedHits:
+    mean: 0.3417586407484006
+    std: 0.7192201582170791
+  leptonID:
+    mean: -0.008406702895696068
+    std: 1.3435523570589045
+  muon_quality:
+    mean: -0.9874589448268173
+    std: 0.15543403198473257
+  muon_qOverPratio:
+    mean: -98.1867950439453
+    std: 22.20392802640815
+  muon_momentumBalanceSignificance:
+    mean: -98.18522567749021
+    std: 8.984373839404041
+  muon_scatteringNeighbourSignificance:
+    mean: -98.1888543701172
+    std: 9.496312969172271
+flows:
+  pt:
+    mean: 12944.39900390625
+    std: 95385.30903920243
+  energy:
+    mean: 19492.469804687506
+    std: 123300.50972811335
+  deta:
+    mean: 2.241035806946457e-05
+    std: 0.1511254364434676
+  dphi:
+    mean: -0.00016121179242873035
+    std: 0.1542766111037464
+  isCharged:
+    mean: 0.3967790619899567
+    std: 0.4892294328393649
+electrons:
+  pt:
+    mean: 10566.991933593752
+    std: 9162.70322149264
+  ptfrac:
+    mean: 0.1113558503985405
+    std: 0.10907342582252759
+  ptrel:
+    mean: 946.5315686035157
+    std: 837.1125393837314
+  dr:
+    mean: 0.11862723350524902
+    std: 0.09379154323492557
+  abs_eta:
+    mean: 0.9701032841205597
+    std: 0.6423802292345305
+  eta:
+    mean: 0.0014034422015538443
+    std: 1.1635079641605852
+  phi:
+    mean: 0.00423466728942003
+    std: 1.808438787169705
+  ftag_et:
+    mean: 10566.992343750004
+    std: 9162.704047793251
+  qOverP:
+    mean: 5.647234067396311e-07
+    std: 0.0003589040141699852
+  d0RelativeToBeamspot:
+    mean: -0.00016217332842643372
+    std: 0.19120032116375504
+  d0RelativeToBeamspotSignificance:
+    mean: -0.009740362418870063
+    std: 5.347973157974233
+  ftag_ptVarCone30OverPt:
+    mean: 7.148752107620239
+    std: 8.546251703923419
+  numberOfPixelHits:
+    mean: 3.955460778873141
+    std: 0.9296264708128932
+  numberOfSCTHitsInclDead:
+    mean: 8.225967426300052
+    std: 1.3148174232313912
+  ftag_deltaPOverP:
+    mean: 0.07413441494107247
+    std: 0.30861093406202217
+  eProbabilityHT:
+    mean: 0.3432223606109619
+    std: 0.25903727350040945
+  deltaEta1:
+    mean: 6.482540036813589e-05
+    std: 0.02566300837164231
+  deltaPhiRescaled2:
+    mean: 0.0016867055022157728
+    std: 0.054806248418760375
+  ftag_energyOverP:
+    mean: 2.5110663795471186
+    std: 3.021482376488033
+  Rhad:
+    mean: 1.0575140452384948
+    std: 1.775852224377623
+  Rhad1:
+    mean: 0.5591286981105803
+    std: 0.7488025024724404
+  Eratio:
+    mean: 0.4327972090244293
+    std: 0.2952274347667747
+  weta2:
+    mean: 0.013246669098734856
+    std: 0.003327695962173048
+  Rphi:
+    mean: 0.7306583905220032
+    std: 0.17881436597460088
+  Reta:
+    mean: 0.7100122201442717
+    std: 0.17593252461483136
+  wtots1:
+    mean: 4.152006397247314
+    std: 2.5802503723926584
+  f1:
+    mean: 0.27416985094547275
+    std: 0.1372248746980404
+  f3:
+    mean: 0.03385095871984958
+    std: 0.0679404173711709

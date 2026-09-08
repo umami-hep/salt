@@ -1,0 +1,132 @@
+# Fine-tuning overlay — add variables to an EXISTING collection. Stacks on the
+# public GN3Large bundle's base config (`gn3large_base.yaml` / `config_v2.yaml`)
+# and warm-starts from that bundle's checkpoint on the p7085 FTAG-tau training
+# sample (docs/tutorials/finetuning.md, Prerequisites → Target data).
+#
+# ONE thing changes: one extra JET-LEVEL variable, `mass`, present in p7085's
+# train/val `jets` group but not read by the bundle model and not covered by
+# the bundle's own norm dict.
+#
+# SPEC DEVIATION from the original plan (why this is a jets change, not a
+# tracks change): the plan's original worked example 3 wanted to add
+# `d0Uncertainty` + `z0SinThetaUncertainty` to the `tracks` collection, but
+# p7085's TRAIN and VAL files carry EXACTLY the 24 track variables the bundle
+# model already reads (plus labels) — the extra track variables the sample
+# advertises exist ONLY in the two TEST files (UPP writes just the
+# training-config variables into train/val). The only collection with unused
+# input variables in train+val is `jets`, so this overlay widens `jets`
+# instead.
+#
+# Expected `--init_from` accounting: **7 loaded / 4 new / 4 dropped**.
+#   loaded:  encoder, pool, jets_classification, track_origin, track_vertexing,
+#            track_type, jet_pt_regression
+#   new:     norm_p7085, track_embed_p7085, flow_embed_p7085, electron_embed_p7085
+#   dropped: norm, track_embed, flow_embed, electron_embed
+#
+# Why ALL FOUR renames are forced, not just the normaliser's: every
+# `StreamEmbed` in this model (`track_embed`, `flow_embed`, `electron_embed`)
+# takes `context: [normed.jets]` — the normalised JET-LEVEL features are
+# concatenated onto every stream's per-element features before its first Dense
+# layer. Widening `jets` from 2 to 3 variables changes `means_jets`/`stds_jets`
+# in the normaliser's buffers (a real shape/width change, not a value change —
+# the partial-coverage rule: the module's own weights no longer describe the
+# thing it will run on) AND changes the INPUT width of every embed's first
+# Dense layer. Salt has no rename-with-weights path for a width change
+# (`saltmodule.py`'s `--init_from` warm-start is per-module, all-or-nothing:
+# a module either loads its checkpoint weights unchanged or is freshly
+# initialised) — that is deliberately out of scope here, so `norm`,
+# `track_embed`, `flow_embed`, and `electron_embed` are each deleted and
+# replaced by a `_p7085`-suffixed fresh module of the same class.
+#
+# Why encoder / pool / the five task heads stay LOADED: none of them reads
+# `normed.jets` directly or has a Dense layer sized on a stream's raw variable
+# count. The encoder's token width (1024, `Concat` output) and the pool's
+# pooled-representation width (`out_dim: 256`) are both UNCHANGED by this
+# overlay, so the pretrained weights are still shape-compatible and get reused
+# as-is.
+#
+# Where the new stats come from: unit 15's `data` stage (this study)
+# computes `jets.mass` `{mean, std}` over the first
+# 1,000,000 jets of `pp_output_train_260331_split_127.h5` and appends them to
+# `docs/tutorials/configs/finetuning/norm_dicts/norm_dict_p7085_jets_extra.yaml` in the
+# study's closing commit (see that file's own header for the full contract).
+# Neither p7085's own `norm_dict_260331.yaml` nor the bundle's `norm_dict_v2.yaml`
+# has stats for this variable — until the closing commit lands, this
+# overlay parses and merge-previews fine but CANNOT fit or evaluate a real
+# model: `Normaliser.preflight` (`salt/model/modules/norm.py`) fails loud (not
+# silently) on the missing `jets.mass` key.
+#
+# Honest cost note: adding a variable to the `jets` collection — the one
+# stream every other stream's embed takes as context — re-initialises EVERY
+# input embed in the network. This is the most expensive single change short
+# of a full backbone swap (compare: adding a whole new stream, worked example
+# 1, costs only that stream's own fresh normaliser + embed; this costs FOUR
+# fresh modules for widening one existing, always-present stream).
+#
+#   export GN3LARGE=<dir with converted.ckpt, config_v2.yaml, norm_dict_v2.yaml>
+#   salt fit \
+#     --config $GN3LARGE/config_v2.yaml \
+#     --config docs/tutorials/configs/finetuning/finetune_gn3large_add_jet_vars.yaml \
+#     --init_from $GN3LARGE/converted.ckpt \
+#     --model.init_args.modules.norm_p7085.init_args.norm_dict=<repo>/docs/tutorials/configs/finetuning/norm_dicts/norm_dict_p7085_jets_extra.yaml \
+#     --data.modules.input_samples.init_args.files.train=<split_127.h5> \
+#     --data.modules.input_samples.init_args.files.val=<split_003.h5>
+#
+# NOTE: no `--model.init_args.modules.norm.init_args.norm_dict=...` override
+# here (unlike worked example 1) — `norm` is DELETED below, so passing an
+# override for it is a `ConfigError` (unknown init_args target), not a no-op.
+#
+# `concat`, `reader`, `onnx_export`, and `run_tasks` are NOT restated: the set
+# of streams `concat` combines and the module names feeding it are unchanged
+# (only their input widths change internally), each `StreamEmbed` still emits
+# `embed.<stream>` regardless of its own module name, and the ONNX `inputs.jets`
+# port simply widens from 2 to 3 features. `jet_pt_regression`'s
+# `target_denominators: pt_btagJes` is read by variable name from the widened
+# `jets` collection and is unaffected by the addition.
+#
+# `docs/tutorials/configs/finetuning/gn3large_base.yaml` is the in-repo mirror of
+# `config_v2.yaml` and can be used in its place — CI parses this overlay
+# against it. Preview the merged config (freeze graph, per-stage
+# trainable/frozen sets) with `salt merge-config`.
+#
+# Walk-through: docs/tutorials/finetuning.md (worked example 3).
+
+data:
+  modules:
+    features:
+      init_args:
+        variables:
+          jets: [pt_btagJes, eta_btagJes, mass]   # list replaces: the base's 2 + the 1 new one
+model:
+  init_args:
+    modules:
+      norm: null                 # partial-coverage rule: `means_jets`/`stds_jets` change width -> rename
+      norm_p7085:
+        class_path: salt.model.modules.Normaliser
+        init_args: {norm_dict: norm_dicts/norm_dict_p7085_jets_extra.yaml, streams: [jets, tracks, flows, electrons], global_object: jets}
+      track_embed: null          # every embed takes normed.jets as context -> its Dense input width changes -> rename
+      flow_embed: null
+      electron_embed: null
+      track_embed_p7085:
+        class_path: salt.model.modules.StreamEmbed
+        init_args: {stream: tracks, context: [normed.jets], out_dim: 1024, dense: {hidden_layers: [512], activation: SiLU}}
+      flow_embed_p7085:
+        class_path: salt.model.modules.StreamEmbed
+        init_args: {stream: flows, context: [normed.jets], out_dim: 1024, dense: {hidden_layers: [512], activation: SiLU}}
+      electron_embed_p7085:
+        class_path: salt.model.modules.StreamEmbed
+        init_args: {stream: electrons, context: [normed.jets], out_dim: 1024, dense: {hidden_layers: [512], activation: SiLU}}
+training_schedule:
+  stages:
+    embed_warmup:
+      epochs: 3
+      trainable: [norm_p7085, track_embed_p7085, flow_embed_p7085, electron_embed_p7085, jets_classification, track_origin, track_vertexing, track_type, jet_pt_regression]
+      lrs: {max: 1.0e-4}
+      early_stop: {monitor: val/loss, mode: min, patience: 1}
+    full_finetune:
+      frozen: []
+      lrs: {initial: 1.0e-7, max: 1.0e-5}
+      early_stop: {monitor: val/loss, mode: min, patience: 2}
+trainer:
+  max_epochs: 8
+  precision: 16-mixed

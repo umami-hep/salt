@@ -248,7 +248,10 @@ def _schedule_from_merged(merged: Any) -> TrainingSchedule:
     ``training_schedule`` desugars to the single ``fit`` stage.
     """
     try:
-        module_names = list(merged["model"]["init_args"]["modules"].keys())
+        # null-valued entries are config deletions (an overlay dropping an inherited
+        # module) — not modules, so they are neither freezable nor listed in captions
+        modules = merged["model"]["init_args"]["modules"]
+        module_names = [name for name, spec in modules.items() if spec is not None]
     except (TypeError, KeyError, AttributeError) as err:
         raise ConfigError(
             "salt merge-config: merged config has no model.init_args.modules block"

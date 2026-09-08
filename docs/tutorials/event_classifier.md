@@ -19,8 +19,8 @@ under a minute on CPU.
 
 ## Prerequisites
 
-Complete [part 1](mnist.md) first if you have not (the reader/model-module
-contracts are assumed knowledge here). As in part 1:
+Complete [part 1](mnist.md) first if you have not (this tutorial assumes you
+already know what a reader and a model module are required to do). As in part 1:
 
 ```bash
 git clone https://gitlab.cern.ch/aft/algorithms/salt.git
@@ -263,7 +263,7 @@ Both samples share one `groups:` block via a YAML anchor (`&groups`/`*groups`)
 — the config's way of saying "same schema, different files". A real two-era
 dataset (different production tags) would instead give each sample its own
 `groups:` with different branch names on the right-hand side of `branches:`
-— the reader contract does not care, since field names (`pt`, `eta`, ...) are
+— the reader does not care, since field names (`pt`, `eta`, ...) are
 resolved to on-disk branch names per sample, independently.
 
 `jets` is `jagged: true` with `pad_max: 10` — the leading 10 jets per event
@@ -311,7 +311,7 @@ task's TEST-mode output already emits both the class probabilities *and* the
     probing the source file's branches (`Reader.prepare()`), and `graph
     validate` calls this on the raw config-instantiated reader — before any
     file has been bound via `with_source` — which raises `reader 'unnamed'
-    has no source file`. This is a genuine, currently-open gap for the whole
+    has no source file`. This is a currently-open gap for the whole
     uproot-reader family (tracked; not specific to this config). Skip
     straight to `salt fit` below — the plan validates the SAME graph at fit
     time, just with a real error location if something is wrong (a missing
@@ -407,7 +407,7 @@ njets-only baseline AUC: 0.8054
 
 With this exact recipe (seed 42, the fixture as generated above) expect the
 network to land around **0.88**, ahead of njets alone (**~0.81**) — a real
-but modest margin. That margin is the honest number: the fixture's two
+but modest margin. That margin reflects the fixture as built: the fixture's two
 classes differ mainly in jet *count* and *hardness* by construction, so a
 lot of the separating power really is available to a single cheap feature.
 A leading-jet-pT baseline (not shown above, but the same `auc()` function

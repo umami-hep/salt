@@ -60,8 +60,8 @@ wrong scores.
 
 ## Configuring it
 
-The algorithm is off unless a RunConfig turns it on. The whole contract between
-the ntupler and the model is one block:
+The algorithm is off unless a RunConfig turns it on. Everything the ntupler
+needs to know about the model is required in one block:
 
 ```yaml
 event_onnx:
@@ -89,7 +89,7 @@ on the framework side:
 - **`variables`** is the ordered variable list, copied from `gnn_config`.
 - **`variableScales`** is the unit conversion. xAOD serves MeV; a model trained
   on GeV needs `0.001` on `pt` and `m`. Nothing detects this — the scores are
-  simply wrong at the wrong scale.
+  wrong at the wrong scale.
 - **`truncate`** must match the training reader's `pad_max:` — the reader's
   semantics: sequences **shorter** than `pad_max` are **padded** up to it,
   sequences **longer** are **truncated** down to it. This algorithm only
@@ -207,7 +207,7 @@ inframework = tree["EventTagger_psignal_NOSYS"].array()
 print("worst |in-framework - python|:", np.abs(posthoc - inframework).max())
 ```
 
-Run it over two samples with genuinely different jet content, so that a mistake
+Run it over two samples whose jet content actually differs, so that a mistake
 which happens to cancel on one does not pass unnoticed.
 
 !!! success "What a passing gate looks like"

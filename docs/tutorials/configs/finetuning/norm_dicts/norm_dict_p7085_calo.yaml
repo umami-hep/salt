@@ -1,0 +1,163 @@
+# Norm dict for the `calo` stream: the `calo:` group ONLY (47 variables, each
+# {mean, std}), copied byte-identical (same key order, same float text) from
+# the p7085 FTAG training sample's own norm dict.
+#   Source rucio DID: user.alfroch:user.alfroch.FTAG-Tau-Training-Samples-260331_p7085.Preprocessed
+#   Source file:      norm_dict_260331.yaml
+#   Source sha256:    df8eca4ced299446294ce59b300858c74a977a1dc62267331b690aae9c01aa93
+#
+# Keyed by STREAM name `calo` — for calo the h5 dataset name equals the stream
+# name, so no dataset/stream aliasing applies (unlike e.g. `tracks_ghost`).
+# Passing norm_dict_260331.yaml itself would be equally correct
+# (`Normaliser.preflight` only requires its configured streams + variables and
+# ignores extra groups, salt/model/modules/norm.py); this file exists so the
+# overlay depends on no external sample path.
+#
+# Consumer: ONLY the second normaliser `norm_calo` of
+# docs/tutorials/configs/finetuning/finetune_gn3large_add_calo.yaml — the bundle's own
+# `norm` (jets/tracks/flows/electrons) is untouched and keeps reading
+# `norm_dict_v2.yaml`.
+#
+# Not a model config: test_pipeline.py's `_discover` skips everything under
+# `finetune/norm_dicts/` — no `class_path`/`init_args` to stack or fit.
+calo:
+  usedInChargedFlow:
+    mean: 0.45512170756613096
+    std: 0.4979818660033918
+  ENG_BAD_CELLS:
+    mean: 10.683188037872313
+    std: 754.680979848872
+  ISOLATION:
+    mean: 0.6340772294998169
+    std: 0.2605646745189057
+  CENTER_MAG:
+    mean: 2853.83265625
+    std: 1052.9172558593564
+  CELL_SIGNIFICANCE:
+    mean: 57.48028228759765
+    std: 231.8350866978885
+  ENG_FRAC_MAX:
+    mean: 0.31025643646717055
+    std: 0.2217229395889022
+  LATERAL:
+    mean: 0.7190616583824158
+    std: 0.2569742579914134
+  SIGNIFICANCE:
+    mean: 31.90743236541748
+    std: 131.92348245011775
+  LONGITUDINAL:
+    mean: 0.6544818890094757
+    std: 0.2665288401558229
+  ENG_POS:
+    mean: 55178.69984375
+    std: 283056.19350950705
+  EM_PROBABILITY:
+    mean: 0.2436511453986168
+    std: 0.29399953511896026
+  CENTER_LAMBDA:
+    mean: 449.37872009277345
+    std: 569.5494728719158
+  SECOND_LAMBDA:
+    mean: 64595.049453125
+    std: 115807.3619948374
+  FIRST_ENG_DENS:
+    mean: 0.00914962144568562
+    std: 0.08282887750895629
+  SECOND_R:
+    mean: 18239.878554687504
+    std: 41067.29510669308
+  AVG_LAR_Q:
+    mean: 669.2753979492187
+    std: 3185.599062628871
+  MASS:
+    mean: 2194.497622070313
+    std: 10269.426126957847
+  rawPhi:
+    mean: 0.005988840009085834
+    std: 1.8134069425365358
+  calPhi:
+    mean: 0.006006395453587174
+    std: 1.8134060271232935
+  rawEta:
+    mean: 0.0027113030789769257
+    std: 1.1311872746463496
+  calEta:
+    mean: 0.0027036305636283942
+    std: 1.1310625774047849
+  rawE:
+    mean: 54544.003046875
+    std: 282909.02539584663
+  calE:
+    mean: 64631.623984375
+    std: 312366.0337517934
+  PreSamplerB:
+    mean: 1256.3114916992185
+    std: 7511.179207642087
+  EMB1:
+    mean: 4535.781015625
+    std: 28212.1256700413
+  EMB2:
+    mean: 22128.9449609375
+    std: 169317.20554893033
+  EMB3:
+    mean: 1451.406501464844
+    std: 11557.212416402546
+  PreSamplerE:
+    mean: 198.27565948486327
+    std: 3487.3935613998506
+  EME1:
+    mean: 1245.9058642578125
+    std: 15344.764902532077
+  EME2:
+    mean: 3753.4527734375
+    std: 60292.44373180199
+  EME3:
+    mean: 371.92136657714843
+    std: 5642.699308850874
+  HEC0:
+    mean: 1117.2509643554686
+    std: 16516.937132554463
+  HEC1:
+    mean: 990.1900537109375
+    std: 17626.518073538904
+  HEC2:
+    mean: 178.8422866821289
+    std: 4815.004750886461
+  HEC3:
+    mean: 31.56523620605469
+    std: 1435.4684374786034
+  TileBar0:
+    mean: 6566.08232421875
+    std: 50962.860767483115
+  TileBar1:
+    mean: 6412.078847656251
+    std: 55731.259374953755
+  TileBar2:
+    mean: 512.5093078613282
+    std: 6796.079593785507
+  TileGap1:
+    mean: 72.88103729248047
+    std: 1656.1563736828896
+  TileGap2:
+    mean: 47.697772903442385
+    std: 1355.682976367925
+  TileGap3:
+    mean: 956.8332312011719
+    std: 12312.269087003453
+  TileExt0:
+    mean: 1237.500327148437
+    std: 21489.122487584533
+  TileExt1:
+    mean: 1029.4001208496088
+    std: 18699.64180835141
+  TileExt2:
+    mean: 449.1652545166016
+    std: 10168.592279661909
+  FCAL0:
+    mean: 0.005306581750082844
+    std: 34.709853753781275
+  FCAL1:
+    mean: 0.0014834063126545516
+    std: 9.89172118348909
+  FCAL2:
+    mean: 0.00036955711755808806
+    std: 3.3229904702041964

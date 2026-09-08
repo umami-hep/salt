@@ -3,7 +3,8 @@ gpu: true
 fit:
   args:
     - "--trainer.max_epochs=1"
-# do_eval=do_onnx=False in MATRIX (fit-only, warms the finetune templates) —
+# do_eval=do_onnx=False in MATRIX (fit-only; formerly the producer for the
+# deleted chained finetune_same_heads row) —
 # no eval/onnx keys for this row. The `inference:` block below is the
 # ONNX-name contract the folded inference gate checks for fit=True rows
 # without a do_onnx leg.

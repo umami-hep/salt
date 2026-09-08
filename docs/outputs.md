@@ -164,6 +164,27 @@ outputs:
 | `InputCopyWriter` | source-file variables re-read by row | `streams:` (`null` = every stream with a task), `variables:` to narrow |
 | `PadMaskWriter` | a bool `mask` column per stream | `streams:` |
 
+`RunTaskOutput.tasks` must name **at least one existing task instance**;
+there is no empty or placeholder form. `tasks: []` is rejected at
+construction, before any graph work:
+
+```text
+RunTaskOutput needs a non-empty 'tasks' list — name the task instances whose get_output() fields this writer serialises
+```
+
+(`salt/outputs/run_task_output.py:126-129`.) A config with no task head
+therefore cannot declare an `outputs:` section at all; check a graph like
+that with the standalone toy `modules:` format instead, see
+[`cli.md#salt-graph`](cli.md#salt-graph).
+
+The related failure runs later, at TEST compile time, not at parse time: a
+task present in `model.init_args.modules` but missing from every
+`RunTaskOutput`'s `tasks:` list hard-fails TEST compilation
+(`salt/model/saltmodule.py:1749-1793`), because a computed prediction that
+reaches no writer is dead. And because YAML lists **replace** rather than
+merge on a config overlay, an overlay that touches `tasks:` must restate the
+full list, not just the entries it wants to add.
+
 **Sinks** describe the destination — a file, the ONNX output tuple. You rarely
 declare one (the usual sinks are wired by the command, see [How sinks get
 attached](#how-sinks-get-attached)), but when you do it goes in this same
@@ -277,6 +298,13 @@ model:
         write_targets: false
 ```
 
+### Vertex column naming
+
+`VertexingTaskModule` writes its eval column as a bare `VertexIndex` (`i8`) by
+default — the v1 byte schema. To get the run-name prefix instead, set
+`prefix_vertex_column: true` on the task module's `init_args` (the default
+polarity may change once v1 byte-parity gating retires).
+
 ### Choose which input variables are copied
 
 ```yaml
@@ -333,8 +361,8 @@ validation steps.
 
 ## Extending: a new column
 
-Two seams, by scope. Both are documented with a worked example in
-[Architecture — Add a custom output column](architecture.md#add-a-custom-output-column-design-8):
+Two seams, by scope. Both are documented with a worked example
+[below](#extending-a-new-column):
 
 - **A new column family for an existing task** — implement `get_output()` /
   `get_output_manifest()` on the task. Right when the column is a rendering of
@@ -346,6 +374,49 @@ Two seams, by scope. Both are documented with a worked example in
 
 Neither of these needs a new sink — they add columns to the files you already
 get.
+
+Worked example — one new `jets` column counting each jet's valid tracks:
+
+```python
+# my_output.py
+import torch
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.outputs import OutputField, OutputSectionWriter
+
+_LEAF = "outputs.jets.n_tracks_valid"
+
+
+class ValidTrackCountWriter(OutputSectionWriter):
+    @staticmethod
+    def _field(value=None):
+        return OutputField(h5_name="n_tracks_valid", dtype="i4", axis="global",
+                           prefix=False, value=value)
+
+    def declare_io(self, mode: Mode) -> IO:
+        if not (self.runs_in_mode(mode) and mode & Mode.TEST):
+            return IO(requires={}, produces={})
+        req = {"masks.tracks": TensorSpec(shape=None, dtype="bool", kind="pad_mask")}
+        prod = {_LEAF: TensorSpec(shape=None, dtype=None, kind="data")}
+        return IO(requires=unflatten_spec(req), produces=unflatten_spec(prod))
+
+    def forward(self, b, mode: Mode):
+        mask = b.get("masks.tracks")  # True = padded
+        return {_LEAF: (~mask).sum(-1).to(torch.int32)}
+
+    def is_run_task_output(self) -> bool:
+        return True  # the dumb sinks source their column schema from these
+
+    def manifest_fields(self, mode: Mode):
+        if not (self.runs_in_mode(mode) and mode & Mode.TEST):
+            return []
+        return [(_LEAF, self._field())]
+```
+
+```yaml
+# add_output.yaml — stack as a second --config on salt test
+outputs:
+  n_valid: {class_path: my_output.ValidTrackCountWriter, init_args: {modes: [test]}}
+```
 
 ## Writing your own sink
 
@@ -366,7 +437,7 @@ for it, and `salt inference` — which runs no Lightning at all — calls the sa
 methods directly. So you never write a Lightning hook, and no driver is
 privileged.
 
-### The contract
+### What a sink must provide
 
 | You provide | Called | Does |
 |---|---|---|
@@ -380,8 +451,8 @@ privileged.
 | `close_if_open()` | on every exit path, including a crash | idempotent cleanup |
 
 `open_schema` receives a **`SinkContext`**, not a trainer: a small frozen
-record of the run facts a sink actually reads, which every driver can build
-honestly.
+record of the run facts a sink actually reads, so every driver builds it the
+same way, with nothing hidden in trainer state.
 
 | `SinkContext` field | Is |
 |---|---|
@@ -444,10 +515,10 @@ Each sink class declares `allowed_modes`, the modes it may be configured for —
 that with a `modes:` list, which must be a subset (anything else is a
 `ConfigError` naming both sets).
 
-`modes:` is load-bearing, not decorative: outside its effective modes a sink
-declares empty IO, so the planner prunes it **and every producer that was kept
-alive only for it**. Narrowing therefore changes the compiled plan — that is
-the point of it.
+`modes:` changes what gets compiled, not just how the sink presents itself:
+outside its effective modes a sink declares empty IO, so the planner prunes it
+**and every producer that was kept alive only for it**. Narrowing therefore
+changes the compiled plan — that is the point of it.
 
 Omitting `modes:` means `allowed_modes`, which for every shipped sink is
 exactly what its `declare_io` already gated on, so omitting it changes nothing.
@@ -587,7 +658,7 @@ get right, and the reasons they are not optional:
   raised inside the test loop unwinds past `teardown`, and `on_exception` is
   the only hook Lightning still calls there. The generated adapter wires both,
   so a crashed `salt test` still releases the handle — but only because
-  `close_if_open` is genuinely idempotent, which is your side of the contract.
+  `close_if_open` is idempotent, which you are required to implement.
 
 ### Reading the section schema
 

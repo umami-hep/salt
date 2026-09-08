@@ -1,9 +1,0 @@
-config: finetune/finetune_gn3large.yaml
-gpu: true
-fit:
-  args:
-    - "--config {config:gn3v00_base}"
-    - "--init_from={ckpt:gn3v00_base}"
-    - "--trainer.max_epochs=6"
-    - "--trainer.limit_train_batches=1"
-    - "--trainer.limit_val_batches=1"

@@ -7,13 +7,11 @@ leg every row gets regardless of ``fit``, plus three parametrized lifecycle
 legs: fit runs when the row declares ``fit=True``; eval/export additionally
 skip when the row declares ``do_eval=False``/``do_onnx=False``), the xfail
 lookup (from each fixture's own ``xfail:`` block), the fixture<->discovery
-completeness checks (see ``FRAGMENT_FIXTURES`` below), the two residual
-finetune-template assertions (claims about the chained artifacts that a
-fixture row cannot itself express), the regression/gaussian-regression
-per-config semantics (de-scale, doubled-column and ONNX-rank assertions) that
-are per-config and cannot be expressed by the generic runner, and (folded in
-from the deleted ``test_inference.py``) the post-fit ``salt inference`` gate
-over every fit-capable row's own artifacts.
+completeness checks (see ``FRAGMENT_FIXTURES`` below), the
+regression/gaussian-regression per-config semantics (de-scale, doubled-column
+and ONNX-rank assertions) that are per-config and cannot be expressed by the
+generic runner, and (folded in from the deleted ``test_inference.py``) the
+post-fit ``salt inference`` gate over every fit-capable row's own artifacts.
 
 **``fixtures/`` is the curated, hand-maintained source of truth.** Each
 ``fixtures/<id>.yaml`` is either a fragment stub (``config`` + ``fragment``)
@@ -101,6 +99,12 @@ class Row:
     ``expected_h5``/``expected_onnx``/``inference_onnx`` are containment
     contracts (not necessarily exhaustive): a declared name must be present
     in what the corresponding leg actually produces.
+
+    ``stack``: shipped configs (relpaths under ``salt/configs/``, no
+    ``.yaml``) stacked BEFORE this row's own config in both the compile+plot
+    floor leg and the fit leg — for overlay templates whose base cannot
+    itself be a producer row (e.g. a bundle mirror no synthetic fixture can
+    feed). The row's own config is always stacked last and wins.
     """
 
     test_name: str
@@ -108,6 +112,7 @@ class Row:
     do_eval: bool
     do_onnx: bool
     train_args: tuple[str, ...] = ()
+    stack: tuple[str, ...] = ()
     fit: bool = True
     gpu: bool = False
     xfail: tuple[tuple[str, str], ...] = ()
@@ -150,7 +155,7 @@ class RootDepsMissingError(RuntimeError):
 # fixture loader (§ loader) — reads fixtures/*.yaml at module-import time
 # ---------------------------------------------------------------------------
 
-_ROW_TOP_KEYS = {"config", "gpu", "fit", "eval", "onnx", "inference", "xfail"}
+_ROW_TOP_KEYS = {"config", "gpu", "fit", "eval", "onnx", "inference", "xfail", "stack"}
 _FRAGMENT_TOP_KEYS = {"config", "fragment"}
 _VALID_XFAIL_LEGS = {"fit", "eval", "export", "compile_plot"}
 
@@ -198,6 +203,24 @@ def _load_onnx_like(path: Path, raw: dict, key: str) -> tuple[str, ...] | None:
     if not names:
         raise _fixture_error(path, f"{key!r} present but 'expected_outputs' is missing/empty")
     return tuple(names)
+
+
+def _load_stack(path: Path, raw: dict) -> tuple[str, ...]:
+    """``row.stack`` from a row fixture's ``stack:`` key (absent -> ())."""
+    node = raw.get("stack")
+    if node is None:
+        return ()
+    if not isinstance(node, list) or not node:
+        raise _fixture_error(path, "'stack' must be a non-empty list of config relpaths")
+    resolved: list[str] = []
+    for item in node:
+        s = str(item)
+        if not s.endswith(".yaml"):
+            raise _fixture_error(path, f"'stack' entries must end in .yaml, got {s!r}")
+        if not (CONFIG_DIR / s).is_file():
+            raise _fixture_error(path, f"'stack' names {s!r}, not found under {CONFIG_DIR}")
+        resolved.append(s)
+    return tuple(resolved)
 
 
 def _load_xfail(path: Path, raw: dict) -> tuple[tuple[str, str], ...]:
@@ -278,6 +301,7 @@ def _load_fixtures() -> tuple[list[Row], dict[str, str]]:
                 do_eval=do_eval,
                 do_onnx=expected_onnx is not None,
                 train_args=train_args,
+                stack=_load_stack(path, raw),
                 fit=fit,
                 gpu=bool(raw.get("gpu", False)),
                 xfail=_load_xfail(path, raw),
@@ -311,7 +335,12 @@ def _discover() -> list[str]:
     found = sorted(
         p.relative_to(CONFIG_DIR).with_suffix("").as_posix() for p in CONFIG_DIR.rglob("*.yaml")
     )
-    return [c for c in found if c not in _EXEMPT]
+    result = []
+    for c in found:
+        if c in _EXEMPT:
+            continue
+        result.append(c)
+    return result
 
 
 def _config_includes(config: str) -> set[str]:
@@ -386,8 +415,6 @@ FEEDS: dict[str, Feed] = {
     "regression/nan_regression": ("dummy", "default"),
     "regression/regression_multi_target": ("dummy", "default"),
     "GN3/GN3V00": ("dummy", "gn3"),
-    "finetune/finetune_gn3large": ("dummy", "gn3"),
-    "finetune/finetune_gn3large_new_head": ("dummy", "gn3_large_r"),
     # completeness rows (§2) — configs not listed above take the plain
     # 3-class "default" fixture (compile+plot never reads the file, only the
     # norm_dict path, so a schema mismatch on a fit=False row is harmless).
@@ -576,84 +603,10 @@ def _build_gn3_dummy(tmp_path_factory) -> dict[str, Path]:
     return {"h5": h5, "schema": schema, "norm": nd, "class_dict": cd}
 
 
-def _write_schema_override_fragment(out: Path, schema: Path) -> Path:
-    """A ``--config``-stackable overlay pinning the reader's ``schema:`` to
-    ``schema``.
-
-    Needed by rows that chain onto ANOTHER row's saved config
-    (``{config:NAME}`` in ``train_args``, e.g. finetune_new_head onto
-    gn3v00_base): that producer config is schema-bound too (from ITS OWN
-    fixture), and jsonargparse's config-file deep-merge is key-by-key — a
-    later ``--config``/``-c`` that never mentions ``schema:`` does not clear
-    an earlier one, so the producer's schema silently survives unless this
-    row explicitly re-pins its OWN schema on top (pipeline #15651154, item 3:
-    finetune_new_head's compile+plot leg saw gn3v00_base's "gn3" schema —
-    missing ``large_r_flavour_label`` — instead of its own "gn3_large_r"
-    one). The real fit leg never hit this: ``_base_data_args``'s
-    ``--data.modules.reader.init_args.schema=`` is a CLI override applied
-    after every ``-c``/``--config``, so it always won there regardless; the
-    compile+plot floor leg passes no such override at all (discards
-    override_argv, see ``run_compile_plot``), so this row needs the
-    correction to survive as a stacked config file instead.
-    """
-    import yaml as _yaml
-
-    overlay = {"data": {"modules": {"reader": {"init_args": {"schema": str(schema)}}}}}
-    out = Path(out)
-    out.write_text(_yaml.safe_dump(overlay, sort_keys=False))
-    return out
-
-
-def _build_gn3_large_r_dummy(tmp_path_factory) -> dict[str, Path]:
-    """The ``gn3`` fixture plus a ``large_r_flavour_label`` jets column — row 15.
-
-    ``finetune_gn3large_new_head.yaml`` bolts a head onto exactly that label;
-    its absence from the base checkpoint IS the domain shift the template
-    demonstrates, so it lives only in this derived fixture, never in the base
-    one rows 13-14 share.
-    """
-    import h5py as _h5py
-    import numpy as _np
-
-    from salt.utils.array_utils import join_structured_arrays
-
-    base = _dummy_context("gn3", tmp_path_factory)
-    out = tmp_path_factory.mktemp("dummy_gn3_large_r")
-    h5 = out / "pp_output_train.h5"
-    with _h5py.File(base["h5"]) as src, _h5py.File(h5, "w") as dst:
-        for key, value in src.attrs.items():
-            dst.attrs[key] = value
-        for name, dataset in src.items():
-            if name != "jets":
-                dst.create_dataset(name, data=dataset[:])
-                for key, value in dataset.attrs.items():
-                    dst[name].attrs[key] = value
-                continue
-            jets = dataset[:]
-            rng = _np.random.default_rng(42)
-            extra = rng.integers(0, 4, size=len(jets)).astype("i4")
-            extra = extra.view(_np.dtype([("large_r_flavour_label", "i4")]))
-            dst.create_dataset("jets", data=join_structured_arrays([jets, extra]))
-            for key, value in dataset.attrs.items():
-                dst["jets"].attrs[key] = value
-            dst["jets"].attrs["large_r_flavour_label"] = ["hbb", "hcc", "top", "qcd"]
-    schema = out / "schema.yaml"
-    save_schema(dump_schema(h5), schema)
-    schema_fragment = _write_schema_override_fragment(out / "schema_override.yaml", schema)
-    return {
-        "h5": h5,
-        "schema": schema,
-        "schema_fragment": schema_fragment,
-        "norm": base["norm"],
-        "class_dict": base["class_dict"],
-    }
-
-
 _DUMMY_BUILDERS = {
     "default": _build_default_dummy,
     "regression": _build_regression_dummy,
     "gn3": _build_gn3_dummy,
-    "gn3_large_r": _build_gn3_large_r_dummy,
     "taus": _build_taus_dummy,
 }
 _DUMMY_CACHE: dict[str, dict[str, Path]] = {}
@@ -802,7 +755,10 @@ def _norm_overrides(row: Row, ctx: dict[str, Path]) -> list[str]:
         f"--model.modules.{name}.init_args.norm_dict={norm}"
         for name, node in (modules or {}).items()
         if isinstance(node, dict)
-        and "Normaliser" in str(node.get("class_path", ""))
+        # exact class-name match only: MaskedInputNormaliser has no norm_dict
+        # init arg (it learns stats online), so a substring match would wrongly
+        # try to override it.
+        and str(node.get("class_path", "")).rsplit(".", 1)[-1] == "Normaliser"
         and _norm_dict_is_unresolved(node.get("init_args") or {})
     ]
 
@@ -980,6 +936,18 @@ def _fail_with_stderr(
     raise LegFailedError(name, leg, reason)
 
 
+def _stack_argv(row: Row, flag: str) -> list[str]:
+    """``[flag, path]`` pairs for each shipped config in ``row.stack``, in order.
+
+    Stacked BEFORE the row's own ``-c``/``--config`` (see ``Row.stack``), so
+    the row's own config always wins the deep-merge.
+    """
+    argv: list[str] = []
+    for s in row.stack:
+        argv += [flag, str(CONFIG_DIR / s)]
+    return argv
+
+
 def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     """Every row's floor leg: ``graph validate`` (all modes) + ``graph plot --mode fit``.
 
@@ -1007,7 +975,8 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
         sets += ["--set", override]
 
     cfg_path = str(CONFIG_DIR / f"{row.config}.yaml")
-    argv = ["graph", "validate", *config_argv, "-c", cfg_path]
+    stack_argv = _stack_argv(row, "-c")
+    argv = ["graph", "validate", *stack_argv, *config_argv, "-c", cfg_path]
     for mode in ("fit", "val", "test", "onnx"):
         argv += ["--mode", mode]
     _salt_main(row.test_name, "validate", [*argv, *sets])
@@ -1016,6 +985,7 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     plot_argv = [
         "graph",
         "plot",
+        *stack_argv,
         *config_argv,
         "-c",
         cfg_path,
@@ -1145,6 +1115,9 @@ def _do_fit(
         mup_shape_overrides = [f"--model.init_args.mup.shape_path={shape_path}"]
     root = tmp_path_factory.mktemp(row.test_name)
     argv = ["fit"]
+    # row.stack (shipped configs, e.g. an overlay's base bundle) goes first —
+    # before both the {config:NAME} producer chain and this row's own config.
+    argv += _stack_argv(row, "--config")
     # a {config:NAME} dependency is a producer row's *saved* config.yaml —
     # stack it BEFORE this row's own template (docs/tutorials/finetuning.md's
     # worked order: saved base config first, template second), so the
@@ -1511,39 +1484,11 @@ def test_cpu_ci_matrix_matches_runnable_fixtures():
 
 
 # ----------------------------------------------- residual finetune assertions (§3)
-# What a matrix row cannot express: claims about the CHAINED artifacts (rows
-# 13-15), not observable from rc == 0 on a fit.
-
-
-def test_base_run_carries_the_modules_the_templates_freeze(tmp_path_factory):
-    """The saved base config names the head both finetune templates warm up."""
-    import yaml as _yaml
-
-    try:
-        artifacts = run_row("gn3v00_base", tmp_path_factory)
-    except LegFailedError as exc:
-        pytest.skip(f"gn3v00_base fit failed: {exc}")
-    modules = _yaml.safe_load(artifacts.saved_config.read_text())["model"]["init_args"]["modules"]
-    assert "jets_classification" in modules, (
-        "finetune_gn3large.yaml warms up `jets_classification`; the base config "
-        "no longer defines it"
-    )
-
-
-def test_added_head_is_absent_from_the_pretrained_checkpoint(tmp_path_factory):
-    """The new head really is new — the warm start cannot be a no-op."""
-    import torch
-
-    try:
-        artifacts = run_row("gn3v00_base", tmp_path_factory)
-    except LegFailedError as exc:
-        pytest.skip(f"gn3v00_base fit failed: {exc}")
-    state = torch.load(artifacts.ckpt, map_location="cpu", weights_only=False)
-    keys = state.get("state_dict", state)
-    assert not any("large_r_jet_classification" in k for k in keys), (
-        "the base checkpoint already carries the head the template adds, so this "
-        "test would no longer prove the new-head path works"
-    )
+# The fine-tuning overlays live under docs/tutorials/configs/finetuning/ —
+# they are not shipped configs, so they carry no pipeline fixture and no CI
+# row here. Their static partitions and accounting (loaded/new/dropped
+# modules) are asserted by `salt/tests/unit/test_finetune_configs.py`, not
+# here.
 
 
 # ---------------------------------------------------------------------------
@@ -1630,9 +1575,9 @@ def test_gaussian_eval_h5_has_stddev_columns(gaussian_eval_h5):
         n_rows = f["jets"].shape[0]
     assert n_rows > 0
     assert any(c.endswith("_stddev") for c in jet_cols), f"no gaussian stddev in jets: {jet_cols}"
-    assert any(
-        c.endswith("_stddev") for c in track_cols
-    ), f"no gaussian stddev in tracks: {track_cols}"
+    assert any(c.endswith("_stddev") for c in track_cols), (
+        f"no gaussian stddev in tracks: {track_cols}"
+    )
 
 
 class TestRegressionOnnxContract:
