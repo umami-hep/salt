@@ -6,6 +6,7 @@ from salt.models.edge_constructor import EdgeConstructor
 from salt.models.featurewise import FeaturewiseTransformation
 from salt.models.initnet import InitNet
 from salt.models.inputnorm import InputNorm
+from salt.models.mdn_task import MixtureDensityTask, MixtureGaussianNLLLoss
 from salt.models.pooling import (
     ClassAttentionPooling,
     GlobalAttentionPooling,
@@ -39,6 +40,8 @@ __all__ = [
     "GlobalAttentionPooling",
     "InitNet",
     "InputNorm",
+    "MixtureDensityTask",
+    "MixtureGaussianNLLLoss",
     "NodeQueryGAP",
     "Pooling",
     "PositionalEncoder",

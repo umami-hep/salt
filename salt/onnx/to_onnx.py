@@ -674,14 +674,16 @@ def parse_output_combination(arg_str: str) -> tuple[str, list[tuple[float, str]]
 def update_config(config):
     """Update config in-place to be compatible with ONNX export."""
     for task in config["model"]["init_args"]["tasks"]["init_args"]["modules"]:
-        if task["init_args"]["loss"]["init_args"].get("weight", None) is not None:
-            task["init_args"]["loss"]["init_args"]["weight"] = torch.Tensor(
-                task["init_args"]["loss"]["init_args"]["weight"]
-            )
-        if "size_average" in task["init_args"]["loss"]["init_args"]:
-            task["init_args"]["loss"]["init_args"].pop("size_average")
-        if "reduce" in task["init_args"]["loss"]["init_args"]:
-            task["init_args"]["loss"]["init_args"].pop("reduce")
+        loss = task["init_args"].get("loss")
+        if not isinstance(loss, dict) or "init_args" not in loss:
+            # e.g. `loss: null` (loss constructed internally by the task, as for
+            # MixtureDensityTask) or a bare class-path string without init_args
+            continue
+        loss_args = loss["init_args"]
+        if loss_args.get("weight") is not None:
+            loss_args["weight"] = torch.Tensor(loss_args["weight"])
+        loss_args.pop("size_average", None)
+        loss_args.pop("reduce", None)
 
 
 def main(args: list[str] | None = None) -> None:

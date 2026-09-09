@@ -94,6 +94,7 @@ test-regression:
     - JUNIT_FILE=reports/regression-nan.xml run_test salt/tests/test_pipeline.py::test_nan_regression
     - JUNIT_FILE=reports/regression-gauss.xml run_test salt/tests/test_pipeline.py::test_regression_gaussian
     - JUNIT_FILE=reports/regression-betaNLL.xml run_test salt/tests/test_pipeline.py::test_regression_betaNLL
+    - JUNIT_FILE=reports/regression-mdn.xml run_test salt/tests/test_pipeline.py::test_regression_mdn
     - JUNIT_FILE=reports/regression-multi-target.xml run_test salt/tests/test_pipeline.py::test_regression_multi_target
     - JUNIT_FILE=reports/regression-weighted.xml run_test salt/tests/test_pipeline.py::test_regression_weighted
 

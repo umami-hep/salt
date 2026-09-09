@@ -502,6 +502,28 @@ It weights the Gaussian negative log-likelihood by $\sigma^{2\beta}$ to reduce t
 
 See [`regression_betaNLL.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_betaNLL.yaml) for a complete example.
 
+For regression targets whose posterior is multimodal (e.g. a discrete set of candidate values, where a single Gaussian would regress towards the prior mean with a large variance), [`salt.models.MixtureDensityTask`][salt.models.MixtureDensityTask] models the target with a K-component Gaussian mixture.
+The head outputs `3 * n_components` values per object, interpreted as component means, (pre-softplus) variances and mixture-weight logits, and the task is trained with the mixture negative log-likelihood ([`salt.models.MixtureGaussianNLLLoss`][salt.models.MixtureGaussianNLLLoss], constructed internally — omit `loss` from the config).
+At inference time the component with the largest mixture weight is selected and its de-scaled mean and weight are written out as `{name}_{target}` and `{name}_{target}_modeweight`; the `{name}_{target}_stddev` output carries sigma_fair = sqrt(Var[z] + (mean_mix - mean_dom)^2) — the law-of-total-variance uncertainty consistent with the reported dominant-mode mean (the conditional dominant-mode sigma understates the risk whenever rival modes exist). The H5 writer additionally serializes the mixture summaries (`_mubar`, `_sigmix`, `_sigfair`) and the full mixture (`_mu{k}`, `_sigma{k}`, `_pi{k}`, raw component order), so distribution-level analyses (PIT, calibration, selection) run from the H5 alone:
+
+```yaml
+- class_path: salt.models.MixtureDensityTask
+  init_args:
+    name: mdn_regression
+    input_name: jets
+    targets: HadronConeExclTruthLabelPt
+    n_components: 8
+    norm_params: { mean: 1.0, std: 1.0 }
+    dense_config:
+      input_size: *embed_dim
+      output_size: 24 # must equal 3 * n_components
+      hidden_layers: [128, 64, 32]
+      activation: *activation
+```
+
+Exactly one target is supported per task instance.
+See [`regression_mdn.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_mdn.yaml) for a complete example.
+
 #### MaskFormer
 
 Salt supports MaskFormer-style object reconstruction, where a mask decoder predicts a set of objects (e.g. truth hadrons) together with the mask of constituents (e.g. tracks) belonging to each of them.
