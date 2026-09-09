@@ -4,5 +4,7 @@
 ## ::: salt.models.RegressionTaskBase
 ## ::: salt.models.RegressionTask
 ## ::: salt.models.GaussianRegressionTask
+## ::: salt.models.MixtureDensityTask
 ## ::: salt.models.VertexingTask
 ## ::: salt.models.BetaNLLLoss
+## ::: salt.models.MixtureGaussianNLLLoss
