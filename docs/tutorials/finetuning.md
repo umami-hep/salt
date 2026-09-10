@@ -34,23 +34,54 @@ config structure from [part 1](mnist.md) (the `model.modules` dict, task heads,
 apply unchanged.
 
 **You need a CERN account.** The pretrained bundle and both target datasets live
-on CERN EOS and are copied with `xrdcp`, which needs a valid Kerberos ticket:
+on CERN EOS, and for now they are downloaded from CERNBox in a browser.
 
-```bash
-kinit USER@CERN.CH   # USER = your CERN username; klist should then show a krbtgt/CERN.CH ticket
-```
+### Get the data
 
-On lxplus you already have one. Off-site you need the `xrootd` client and
-`krb5` configured for the `CERN.CH` realm, nothing else.
+Download these three folders from CERNBox and put them inside `my-finetune/`
+(created below). Roughly 18.5 GB in total:
+
+<https://cernbox.cern.ch/files/spaces/eos/user/n/npond/salt-data/finetuning>
+
+- `gn3large_model/` -- the pretrained bundle
+- `xbb-finetune/` -- the boosted-Xbb target sample
+- `ftag-finetune/` -- the p7085 FTAG target sample
+
+Sign in with your CERN account when prompted. `wget` and `curl` cannot fetch
+this link: it is a personal-space CERNBox URL rather than a public share, so an
+unauthenticated request is rejected. Use a browser.
+
+!!! warning "The `xrdcp` route does not work yet"
+
+    A scripted copy would be preferable to downloading three folders by hand,
+    and the commands below are what it will look like:
+
+    ```bash
+    for d in gn3large_model xbb-finetune ftag-finetune; do
+      xrdcp -r root://eosuser.cern.ch/<PUBLIC_EOS_PATH>/$d/ .
+    done
+    ```
+
+    `<PUBLIC_EOS_PATH>` is a placeholder and there is nothing to substitute
+    into it today. The files currently sit in a personal EOS area that other
+    CERN users cannot read, so `xrdcp` fails for anyone but the owner. They
+    will be copied to a public EOS space, at which point this box is replaced
+    by the real path and the browser download becomes the fallback rather than
+    the main route.
+
+    `xrdcp` needs a Kerberos ticket (`kinit USER@CERN.CH`; on lxplus you
+    already have one, off-site you need the `xrootd` client and `krb5`
+    configured for the `CERN.CH` realm). `xrdcp -r <folder>/ .` lands the
+    folder by its own name in the current directory, so the loop is run from
+    inside `my-finetune/`; pointing it at a destination that does not yet
+    exist is refused.
 
 ### Set up your fine-tuning directory
 
 ```bash
 export SALT=/path/to/your/salt/checkout        # the one placeholder on this page
 mkdir my-finetune && cd my-finetune            # any name you like; every command below runs from here
-for d in gn3large_model xbb-finetune ftag-finetune; do   # CERN account; ~18.5 GB total
-  xrdcp -r root://eosuser.cern.ch//eos/user/n/npond/salt-data/finetuning/$d/ .
-done
+# ... move the three downloaded folders in here ...
 mkdir -p configs logs
 cp -r $SALT/docs/tutorials/configs/finetuning/. configs/   # your editable copies of the shipped base + overlays + norm_dicts/
 ls
@@ -86,9 +117,8 @@ configs/
 logs/
 ```
 
-`xrdcp -r <folder>/ .` lands the folder by its own name in the current directory, which is why the
-loop above runs from inside `my-finetune/`; pointing `xrdcp -r` at a destination that does not yet
-exist is refused.
+The three downloaded folders sit alongside `configs/` and `logs/` in
+`my-finetune/`, matching the listing above.
 
 **Every command on this page is run from `my-finetune/`.** Two more placeholders are used from
 here on, both run-output rather than environment variables: **`<run_dir>`**: the directory `salt
