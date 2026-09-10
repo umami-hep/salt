@@ -63,6 +63,10 @@ are already resampled and shuffled and can be fed to salt directly.
 
 ??? info "If you are on lxplus or another CERN machine"
 
+    This EOS area is readable by its owner only, so the copy below currently
+    works for them and no one else. Until the files are moved to a public EOS
+    space, use the CERNBox download above, which needs no CERN account at all.
+
     The same files are staged on EOS, which is faster from inside CERN:
 
     ```
