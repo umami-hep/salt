@@ -581,6 +581,17 @@ The total loss is a combination of the individual task losses, controlled by `mo
 
 - `wsum` (default): weighted sum of the task losses using the per-task `weight` values.
 - `GLS`: [geometric loss combination](https://arxiv.org/abs/1904.08492) of the task losses. Task weights are not used and must all be left at 1.
+- `DWA`: [dynamic weight averaging](https://arxiv.org/abs/1803.10704) of the task losses. Task weights are not used and must all be left at 1.
+
+`DWA` sets each task's weight from how quickly its loss came down over the last two epochs, so a task making slow progress, or getting worse, is given more weight instead of less. The weights are fixed within an epoch, sum to the number of tasks and are logged as `{stage}/{task}_dwa_weight`. The first two epochs have no history to work from and use uniform weights. How sharply the weights react is set by `model.dwa_temperature`, where larger values keep them closer to uniform:
+
+```yaml
+model:
+  loss_mode: DWA
+  dwa_temperature: 2.0 # the default, as in the paper
+```
+
+The loss history is stored in the checkpoint, so a resumed training carries on with the weights it had rather than starting from uniform again.
 
 #### Optimiser & Learning Rate Schedule
 

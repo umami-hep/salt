@@ -71,7 +71,10 @@ class ModelWrapper(lightning.LightningModule):
     mup_config : dict | None, optional
         Configuration for mup scaling. Default is ``None``.
     loss_mode : str, optional
-        Loss reduction mode. Default is ``"wsum"``. Other option: ``"GLS"``.
+        Loss reduction mode. Default is ``"wsum"``. Other options: ``"GLS"``, ``"DWA"``.
+    dwa_temperature : float, optional
+        Softmax temperature ``T`` for ``loss_mode="DWA"``. Larger values flatten the
+        weights towards uniform. Default is ``2.0``, as in the original paper.
     optimizer : str, optional
         Optimizer to use. Default is ``"AdamW"``. Other options: ``"lion"``, ``"HybridMuonAdamW"``.
     optimizer_kwargs : dict | None, optional
@@ -90,6 +93,7 @@ class ModelWrapper(lightning.LightningModule):
         name: str = "salt",
         mup_config: dict | None = None,
         loss_mode: str = "wsum",
+        dwa_temperature: float = 2.0,
         optimizer: str = "AdamW",
         optimizer_kwargs: dict | None = None,
         edge_constructors: list[dict] | None = None,
@@ -137,13 +141,21 @@ class ModelWrapper(lightning.LightningModule):
         assert norm_config is not None
         self.norm = InputNorm(**norm_config)
 
-        allowed_loss_modes = ["wsum", "GLS"]
+        allowed_loss_modes = ["wsum", "GLS", "DWA"]
         assert loss_mode in allowed_loss_modes, f"Loss mode must be one of {allowed_loss_modes}"
         self.loss_mode = loss_mode
-        if loss_mode == "GLS":
+        if loss_mode in {"GLS", "DWA"}:
             assert all(task.weight == 1.0 for task in self.model.tasks), (
-                "GLS does not utilise task weights - set all weights to 1"
+                f"{loss_mode} does not utilise task weights - set all weights to 1"
             )
+
+        assert dwa_temperature > 0.0, "dwa_temperature must be positive"
+        self.dwa_temperature = dwa_temperature
+        # per-task mean losses of the last two epochs, and the weights derived from them
+        self._dwa_prev: dict[str, float] = {}
+        self._dwa_prev2: dict[str, float] = {}
+        self._dwa_weights: dict[str, float] = {}
+        self._dwa_reset_accumulator()
 
         # Set the optimizer
         self.optimizer = optimizer
@@ -196,6 +208,11 @@ class ModelWrapper(lightning.LightningModule):
         Tensor
             Final reduced loss.
         """
+        if self.loss_mode == "DWA":
+            # the first two epochs have no loss ratio yet, so weights stay uniform
+            if not self._dwa_weights:
+                return torch.stack(list(loss.values())).sum()
+            return torch.stack([self._dwa_weights[k] * v for k, v in loss.items()]).sum()
         if self.loss_mode == "GLS":
             loss_prod = math.prod(subloss for subloss in loss.values())
             return torch.pow(loss_prod, 1.0 / len(loss))
@@ -228,6 +245,84 @@ class ModelWrapper(lightning.LightningModule):
         x = self.norm(inputs)
         return self.model(x, pad_masks, labels)
 
+    def _dwa_reset_accumulator(self) -> None:
+        """Clear the running per-task loss sums for the current epoch."""
+        self._dwa_epoch_sums: dict[str, torch.Tensor] = {}
+        self._dwa_epoch_count: int = 0
+
+    def _dwa_accumulate(self, loss: dict[str, torch.Tensor]) -> None:
+        """Add this step's per-task losses to the running epoch sums.
+
+        Parameters
+        ----------
+        loss : dict[str, torch.Tensor]
+            Per-task losses, plus the reduced ``"loss"`` entry which is skipped.
+        """
+        for name, value in loss.items():
+            if name == "loss":
+                continue
+            detached = value.detach()
+            current = self._dwa_epoch_sums.get(name)
+            self._dwa_epoch_sums[name] = detached.clone() if current is None else current + detached
+        self._dwa_epoch_count += 1
+
+    def _dwa_update_weights(self) -> None:
+        """Roll the loss history forward and recompute the DWA task weights.
+
+        Weights follow Liu et al., "End-to-End Multi-Task Learning with Attention":
+        ``w_i = N * softmax(r_i / T)`` with ``r_i = L_i(t-1) / L_i(t-2)``, so a task
+        whose loss is falling slowly, or rising, receives more weight. They sum to
+        ``N``, matching the scale of a plain sum. As in the reference, the ratios are
+        not bounded, so a task whose loss jumps by orders of magnitude between epochs
+        can saturate the softmax and take most of the weight.
+        """
+        if not self._dwa_epoch_count:
+            return
+
+        names = sorted(self._dwa_epoch_sums)
+        means = torch.stack([self._dwa_epoch_sums[k] for k in names]) / self._dwa_epoch_count
+        # average across ranks so every process derives identical weights
+        if self.trainer.world_size > 1:
+            gathered = self.all_gather(means)
+            assert isinstance(gathered, torch.Tensor)
+            means = gathered.mean(dim=0)
+        self._dwa_prev2 = self._dwa_prev
+        self._dwa_prev = {k: float(v) for k, v in zip(names, means, strict=True)}
+        self._dwa_reset_accumulator()
+
+        if not self._dwa_prev2:
+            return
+
+        assert set(self._dwa_prev) == set(self._dwa_prev2), "DWA task names changed between epochs"
+        assert all(v > 0.0 for v in self._dwa_prev2.values()), (
+            "DWA needs positive task losses to form the loss ratio"
+        )
+        ratios = torch.tensor(
+            [self._dwa_prev[k] / self._dwa_prev2[k] for k in names], dtype=torch.float32
+        )
+        weights = len(names) * torch.softmax(ratios / self.dwa_temperature, dim=0)
+        self._dwa_weights = {k: float(weights[i]) for i, k in enumerate(names)}
+
+    def on_train_epoch_end(self) -> None:
+        """Recompute the DWA weights from the epoch that just finished."""
+        if self.loss_mode == "DWA":
+            self._dwa_update_weights()
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Persist the DWA loss history so a resumed run keeps its weights.
+
+        Parameters
+        ----------
+        checkpoint : dict[str, Any]
+            Checkpoint dict that Lightning is about to write.
+        """
+        if self.loss_mode == "DWA":
+            checkpoint["dwa_state"] = {
+                "prev": self._dwa_prev,
+                "prev2": self._dwa_prev2,
+                "weights": self._dwa_weights,
+            }
+
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Normalise ``torch.compile`` key prefixes in the saved state_dict.
 
@@ -238,6 +333,12 @@ class ModelWrapper(lightning.LightningModule):
         Mirrors the offline :mod:`salt.utils.repair_ckpt` logic, applied
         in-memory before Lightning calls ``load_state_dict``.
         """
+        if "dwa_state" in checkpoint:
+            dwa_state = checkpoint["dwa_state"]
+            self._dwa_prev = dwa_state["prev"]
+            self._dwa_prev2 = dwa_state["prev2"]
+            self._dwa_weights = dwa_state["weights"]
+
         state_dict = checkpoint.get("state_dict")
         if not state_dict or not any("_orig_mod." in k for k in state_dict):
             return
@@ -283,11 +384,14 @@ class ModelWrapper(lightning.LightningModule):
         stage : str
             Training stage, e.g. ``"train"`` or ``"val"``.
         """
-        kwargs = {"sync_dist": len(self.trainer.device_ids) > 1}
+        kwargs: dict[str, Any] = {"sync_dist": len(self.trainer.device_ids) > 1}
         self.log(f"{stage}/loss", loss["loss"], **kwargs)
         for t, loss_value in loss.items():
             n = f"{stage}/{t}_loss" if "loss" not in t else f"{stage}/{t}"
             self.log(n, loss_value, **kwargs)
+        # effective per-task gradient weights, empty unless running under DWA
+        for t_name, weight in self._dwa_weights.items():
+            self.log(f"{stage}/{t_name}_dwa_weight", weight, **kwargs)
 
     def training_step(self, batch: tuple) -> dict[str, Any]:
         """Lightning training step.
@@ -313,6 +417,8 @@ class ModelWrapper(lightning.LightningModule):
                 "Loss is NaN - check dataset for NaNs or infs. "
                 "See 'docs/training.md - NaNs' for more info."
             )
+        if self.loss_mode == "DWA":
+            self._dwa_accumulate(loss)
         self.log_losses(loss, stage="train")
         outputs = {"preds": preds, "labels": labels, "pad_masks": pad_masks}
         return {**loss, "outputs": outputs}
