@@ -59,7 +59,9 @@ def feature_map():
     return get_default_onnx_feature_map("r22default", list(VARIABLES), "event")
 
 
-def build_task(name: str, input_name: str = "event") -> ClassificationTask:
+def build_task(
+    name: str, input_name: str = "event", hidden_layers: list[int] | None = None
+) -> ClassificationTask:
     return ClassificationTask(
         name=name,
         input_name=input_name,
@@ -69,7 +71,7 @@ def build_task(name: str, input_name: str = "event") -> ClassificationTask:
         dense_config={
             "input_size": 4,
             "output_size": 2,
-            "hidden_layers": [4],
+            "hidden_layers": hidden_layers or [4],
         },
     )
 
@@ -306,6 +308,107 @@ def test_auxiliary_task_names_are_ordered_last(norm_dict_path, feature_map):
     assert onnx_model.dynamic_axes["salt_TrackOrigin"] == {0: "n_tracks"}
     assert onnx_model.dynamic_axes["salt_VertexIndex"] == {0: "n_tracks"}
     assert onnx_model.dynamic_axes["salt_TrackType"] == {0: "n_tracks"}
+
+
+def test_include_latent_numbers_outputs_sequentially(norm_dict_path, feature_map):
+    onnx_model = build_onnx_model(norm_dict_path, feature_map, include_latent=True)
+
+    # L1 is the pooled latent, L2+ the hidden layers of the classification head
+    assert onnx_model.latent_output_names == ["salt_LatentL1", "salt_LatentL2"]
+    assert onnx_model.output_names == ["salt_psig", "salt_pbkg", "salt_LatentL1", "salt_LatentL2"]
+
+
+def test_include_latent_keeps_auxiliary_outputs_last(norm_dict_path, feature_map):
+    tasks = nn.ModuleList([
+        build_task("events_classification"),
+        build_task("track_origin", input_name="jet"),
+    ])
+
+    onnx_model = build_onnx_model(
+        norm_dict_path,
+        feature_map,
+        tasks=tasks,
+        tasks_to_output=["events_classification", "track_origin"],
+        include_latent=True,
+    )
+
+    # latents sit between the global outputs and the per-track tail, so name slicing
+    # that reads track outputs from the end is unaffected
+    assert onnx_model.output_names == [
+        "salt_psig",
+        "salt_pbkg",
+        "salt_LatentL1",
+        "salt_LatentL2",
+        "salt_TrackOrigin",
+    ]
+
+
+def test_include_latent_numbers_repeated_hidden_widths_uniquely(norm_dict_path, feature_map):
+    tasks = nn.ModuleList([build_task("events_classification", hidden_layers=[4, 4, 4])])
+
+    onnx_model = build_onnx_model(
+        norm_dict_path, feature_map, tasks=tasks, include_latent=True
+    )
+
+    # every hidden layer here has the same width, so names must not be keyed on it
+    assert onnx_model.latent_output_names == [
+        "salt_LatentL1",
+        "salt_LatentL2",
+        "salt_LatentL3",
+        "salt_LatentL4",
+    ]
+
+    onnx_model(torch.rand(1, 2), torch.rand(3, 2), torch.rand(3, 1))
+    captures = onnx_model._latent_captures
+    assert len({id(captures[name]) for name in onnx_model.latent_output_names}) == 4
+
+
+def test_include_latent_forward_shape_matches_interface(norm_dict_path, feature_map):
+    athena = build_onnx_model(norm_dict_path, feature_map, include_latent=True)
+    outputs = athena(torch.rand(1, 2), torch.rand(3, 2), torch.rand(3, 1))
+    # Athena runs one global object per call, so latents are rank-1 [D]
+    assert [tuple(out.shape) for out in outputs[-2:]] == [(4,), (4,)]
+
+    batched = build_onnx_model(
+        norm_dict_path, feature_map, include_latent=True, batched_standalone=True
+    )
+    outputs = batched(
+        torch.rand(2, 2),
+        torch.rand(2, 3, 2),
+        torch.zeros(2, 3, dtype=torch.bool),
+        torch.rand(2, 3, 1),
+        torch.zeros(2, 3, dtype=torch.bool),
+    )
+    # the batched interface keeps the batch dimension its dynamic_axes declares
+    assert [tuple(out.shape) for out in outputs[-2:]] == [(2, 4), (2, 4)]
+    for name in batched.latent_output_names:
+        assert batched.dynamic_axes[name] == {0: "batch"}
+
+
+def test_latent_task_selects_the_named_head(norm_dict_path, feature_map):
+    tasks = nn.ModuleList([
+        build_task("events_classification"),
+        build_task("events_charge", hidden_layers=[4, 4]),
+    ])
+
+    # global_object is "event", so "<global_object>_classification" does not match either
+    # head and the two candidates are ambiguous
+    with pytest.raises(ValueError, match="events_classification, events_charge"):
+        build_onnx_model(norm_dict_path, feature_map, tasks=tasks, include_latent=True)
+
+    onnx_model = build_onnx_model(
+        norm_dict_path,
+        feature_map,
+        tasks=tasks,
+        include_latent=True,
+        latent_task="events_charge",
+    )
+    assert onnx_model.latent_output_names == ["salt_LatentL1", "salt_LatentL2", "salt_LatentL3"]
+
+    with pytest.raises(ValueError, match="not a global classification task"):
+        build_onnx_model(
+            norm_dict_path, feature_map, tasks=tasks, include_latent=True, latent_task="nope"
+        )
 
 
 def test_batched_standalone_schema_adds_batch_axes_and_masks(norm_dict_path, feature_map):

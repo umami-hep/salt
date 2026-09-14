@@ -10,7 +10,7 @@ import yaml
 from ftag.git_check import check_for_uncommitted_changes, get_git_hash
 
 from salt.models.maskformer import get_maskformer_outputs
-from salt.models.task import mask_fill_flattened
+from salt.models.task import ClassificationTask, mask_fill_flattened
 from salt.models.transformer import change_attn_backends
 from salt.modelwrapper import ModelWrapper
 from salt.onnx.check import compare_outputs
@@ -145,6 +145,30 @@ def parse_args(args: list[str] | None) -> argparse.Namespace:
         action="store_true",
     )
 
+    # Expose internal jet representations as extra graph outputs
+    parser.add_argument(
+        "--include_latent",
+        action="store_true",
+        help=(
+            "Also export internal jet representations as extra graph outputs, named "
+            "'<name>_LatentL<i>' and numbered from the input side: LatentL1 is the "
+            "pooled transformer latent, LatentL2 onwards are the post-activation "
+            "hidden layers of a global classification head, so that each output is "
+            "the tensor entering the next stage. "
+        ),
+    )
+    parser.add_argument(
+        "--latent_task",
+        type=str,
+        default=None,
+        help=(
+            "Name of the global classification task whose hidden layers are exposed by "
+            "--include_latent. Defaults to '<global_object>_classification', falling back "
+            "to the sole global classification task; an error lists the candidates if "
+            "neither resolves."
+        ),
+    )
+
     # Parse provided args list (or sys.argv if None)
     return parser.parse_args(args)
 
@@ -176,6 +200,8 @@ class ONNXModel(ModelWrapper):
         combine_outputs: list[tuple] | None = None,
         rename_outputs: dict[str, str] | None = None,
         batched_standalone: bool = False,
+        include_latent: bool = False,
+        latent_task: str | None = None,
         **kwargs,
     ) -> None:
         # Initialize base wrapper (loads underlying model and config)
@@ -208,6 +234,11 @@ class ONNXModel(ModelWrapper):
         self.rename_outputs = rename_outputs or {}
         self.batched_standalone = batched_standalone
         self.object = object_name
+
+        # Optional internal-latent export (hooks registered at the end of __init__)
+        self.include_latent = include_latent
+        self.latent_task = latent_task
+        self.latent_output_names: list[str] = []
 
         unsupported_batched_tasks = {
             "track_origin",
@@ -280,6 +311,10 @@ class ONNXModel(ModelWrapper):
         # Tuple of inputs in export order (ONNX expects a tuple)
         self.example_input_array = tuple(example_input_list)
 
+        # Register forward hooks that capture internal representations for export
+        if self.include_latent:
+            self._setup_latent_outputs()
+
     @property
     def global_tasks(self) -> list:
         """Tasks operating on the global object stream.
@@ -290,6 +325,96 @@ class ONNXModel(ModelWrapper):
             List of task modules associated with :attr:`global_object`.
         """
         return [t for t in self.model.tasks if t.input_name == self.global_object]
+
+    def _find_latent_task(self):
+        """Find the global classification head exposed by ``--include_latent``.
+
+        Resolved in order: ``--latent_task`` if given, else
+        ``<global_object>_classification`` (the naming convention every salt config
+        follows), else the sole global classification task.
+
+        Returns
+        -------
+        ClassificationTask
+            The task whose hidden layers are exposed.
+
+        Raises
+        ------
+        ValueError
+            If the requested task is not a global classification head, or if no
+            default can be resolved unambiguously.
+        """
+        candidates = [t for t in self.global_tasks if isinstance(t, ClassificationTask)]
+        names = ", ".join(t.name for t in candidates) or "none"
+
+        if self.latent_task is not None:
+            for t in candidates:
+                if t.name == self.latent_task:
+                    return t
+            raise ValueError(
+                f"--latent_task '{self.latent_task}' is not a global classification task "
+                f"on '{self.global_object}'. Candidates: {names}."
+            )
+
+        default = f"{self.global_object}_classification"
+        for t in candidates:
+            if t.name == default:
+                return t
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ValueError(
+            f"--include_latent: no task named '{default}' and "
+            f"{'no' if not candidates else 'several'} global classification tasks to fall "
+            f"back on. Pass --latent_task. Candidates: {names}."
+        )
+
+    def _setup_latent_outputs(self) -> None:
+        """Register forward hooks capturing internal representations of the global object.
+
+        Outputs are ``<name>_LatentL<i>``, numbered from the input side along the chain:
+        ``LatentL1`` is the pooled transformer latent (``pool_net`` output, before the
+        global-feature concat), ``LatentL2`` onwards are the post-activation hidden
+        layers of the classification head chosen by ``--latent_task``. Captured tensors
+        are stashed in ``self._latent_captures`` during forward() and appended as extra
+        float32 graph outputs. onnxruntime/FlavorTagInference then decorate each as a
+        per-jet ``vector<float>``; the pre-existing outputs are untouched.
+
+        Raises
+        ------
+        ValueError
+            If the model has no pooling network to take the pooled latent from.
+        """
+        self._latent_captures: dict = {}
+        base = f"{self.name}_Latent"
+
+        def make_hook(key):
+            def hook(_module, _inputs, output):
+                self._latent_captures[key] = output
+
+            return hook
+
+        # L1) pooled transformer latent (pure pool_net output, pre global-feat concat)
+        if self.model.pool_net is None:
+            raise ValueError("--include_latent requires a pooling network (pool_net).")
+        self.model.pool_net.register_forward_hook(make_hook(f"{base}L1"))
+        self.latent_output_names.append(f"{base}L1")
+
+        # L2+) hidden layers of the chosen classification head
+        dense = self._find_latent_task().net  # salt Dense
+        modules = list(dense.net)  # nn.Sequential(Linear, Act, ...)
+        linear_idx = [i for i, m in enumerate(modules) if isinstance(m, torch.nn.Linear)]
+        for i, li in enumerate(linear_idx[:-1], 2):  # L1 is the pooled latent above
+            # Hook the activation, not the Linear, so that each output is exactly the
+            # tensor entering the next stage. Falls back to the Linear where a layer
+            # has no activation after it.
+            nxt = modules[li + 1] if li + 1 < len(modules) else None
+            target = modules[li] if nxt is None or isinstance(nxt, torch.nn.Linear) else nxt
+            # Numbered from the input side rather than named by width: two hidden layers
+            # of the same width would collide on one name, silently exporting one tensor
+            # twice and dropping the other.
+            name = f"{base}L{i}"
+            target.register_forward_hook(make_hook(name))
+            self.latent_output_names.append(name)
 
     @property
     def output_names(self) -> list[str]:
@@ -329,6 +454,12 @@ class ONNXModel(ModelWrapper):
                         f"Output {input_name} not found in outputs"
                     )
                 outputs.append(f"{self.name}_{output_name}")
+
+        # Internal latent representations (pooled + classification-head hidden layers).
+        # Inserted before the per-track/aux tail so downstream name-slicing that reads
+        # global outputs from the head and track outputs from the tail is unaffected.
+        if self.include_latent:
+            outputs += self.latent_output_names
 
         # Append auxiliary per-track outputs if requested
         if "track_origin" in self.tasks_to_output:
@@ -491,6 +622,16 @@ class ONNXModel(ModelWrapper):
                     for scale, input_name in parsed_inputs
                 )
                 onnx_outputs += (output,)
+
+        # Internal latent representations captured by the forward hooks registered in
+        # __init__, in the same position they occupy in output_names.
+        if self.include_latent:
+            for latent_name in self.latent_output_names:
+                latent = self._latent_captures[latent_name]
+                # The Athena interface runs one global object per call, so flatten to
+                # rank-1 [D] to match the per-jet vector decoration path. The batched
+                # interface keeps [batch, D], as dynamic_axes declares for every output.
+                onnx_outputs += (latent if self.batched_standalone else latent.reshape(-1),)
 
         # Auxiliary per-track outputs: track_origin (argmax of per-track logits)
         if "track_origin" in self.tasks_to_output:
@@ -782,6 +923,8 @@ def main(args: list[str] | None = None) -> None:
             combine_outputs=combine_outputs,
             rename_outputs=rename_outputs,
             batched_standalone=parsed_args.batched_standalone,
+            include_latent=parsed_args.include_latent,
+            latent_task=parsed_args.latent_task,
             **config["model"],
         )
 
