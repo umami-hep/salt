@@ -311,6 +311,17 @@ def test_gls_weighting(tmp_path) -> None:
     run_combined(tmp_path, "legacy/dips.yaml", train_args=args)
 
 
+def test_dwa_weighting(tmp_path) -> None:
+    # Should fail, as we still have weights here
+    args = ["--model.loss_mode=DWA"]
+    with pytest.raises(AssertionError):
+        run_combined(tmp_path, "GN2/GN2.yaml", train_args=args)
+
+    # Three epochs, so the weights are actually derived and applied rather than left uniform
+    args += ["--trainer.max_epochs=3"]
+    run_combined(tmp_path, "legacy/dips.yaml", train_args=args)
+
+
 def test_hybrid_muon_adamw(tmp_path) -> None:
     args = ["--model.optimizer=HybridMuonAdamW"]
     run_combined(tmp_path, CONFIG, do_onnx=False, train_args=args)
