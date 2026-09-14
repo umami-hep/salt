@@ -269,12 +269,14 @@ class SaltCLI(LightningCLI):
 
         config.data.labels = labels
 
-        # add norm
+        # add norm, keeping a user-set clamp
+        user_norm_config = config.model.get("norm_config") or {}
         config.model.norm_config = {
             "norm_dict": config.data.norm_dict,
             "variables": config.data.variables,
             "global_object": config.data.global_object,
             "input_map": config.data.input_map,
+            "clamp": user_norm_config.get("clamp"),
         }
 
         # add edge constructors

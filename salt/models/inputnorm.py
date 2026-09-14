@@ -22,6 +22,9 @@ class InputNorm(nn.Module):
     input_map : dict[str, str]
         Map names to the corresponding dataset names in the input h5 file.
         Set automatically by the framework.
+    clamp : float | None, optional
+        If set, clamp normalised inputs to ``[-clamp, clamp]`` to bound outliers.
+        Also applied in the exported ONNX model. By default None.
 
     Raises
     ------
@@ -30,6 +33,7 @@ class InputNorm(nn.Module):
         If norm values for an input can't be found in the normalisation dict
         If there is a non-finite normalisation value for an input
         If there is a zero standard deviation for one input
+        If ``clamp`` is not positive
     """
 
     def __init__(
@@ -38,8 +42,12 @@ class InputNorm(nn.Module):
         variables: Vars,
         global_object: str,
         input_map: dict[str, str],
+        clamp: float | None = None,
     ) -> None:
         super().__init__()
+        if clamp is not None and clamp <= 0:
+            raise ValueError(f"clamp must be positive, got {clamp}.")
+        self.clamp = clamp
         self.variables = variables
         self.global_object = global_object
         self.NO_NORM = ["EDGE", "parameters", "objects"]
@@ -109,4 +117,6 @@ class InputNorm(nn.Module):
             if k in self.NO_NORM or k.startswith("_"):
                 continue
             inputs[k] = (x - getattr(self, f"{k}_means")) / getattr(self, f"{k}_stds")
+            if self.clamp is not None:
+                inputs[k] = inputs[k].clamp(-self.clamp, self.clamp)
         return inputs

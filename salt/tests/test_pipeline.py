@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest import mock
 
 import h5py
+import onnx
 import pytest
 import yaml
 
@@ -313,3 +314,12 @@ def test_gls_weighting(tmp_path) -> None:
 def test_hybrid_muon_adamw(tmp_path) -> None:
     args = ["--model.optimizer=HybridMuonAdamW"]
     run_combined(tmp_path, CONFIG, do_onnx=False, train_args=args)
+
+
+def test_clamped_inputs(tmp_path) -> None:
+    run_combined(tmp_path, "legacy/dips.yaml", train_args=['--model.norm_config={"clamp": 5}'])
+    train_dir = next(x for x in tmp_path.iterdir() if x.is_dir() and (x / "config.yaml").exists())
+    config = yaml.safe_load((train_dir / "config.yaml").read_text())
+    assert config["model"]["norm_config"]["clamp"] == 5
+    graph = onnx.load(str(train_dir / "network.onnx")).graph
+    assert "Clip" in {node.op_type for node in graph.node}
