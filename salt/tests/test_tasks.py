@@ -319,6 +319,24 @@ def test_input_norm_zero_std_raises(tmp_path):
         InputNorm(nd_path, {"jets": ["pt"]}, "jets", {"jets": "jets"})
 
 
+def test_input_norm_clamp(tmp_path):
+    norm_dict = {"jets": {"pt": {"mean": 0.0, "std": 1.0}, "eta": {"mean": 0.0, "std": 1.0}}}
+    nd_path = tmp_path / "norm.yaml"
+    nd_path.write_text(yaml.dump(norm_dict))
+    norm = InputNorm(nd_path, {"jets": ["pt", "eta"]}, "jets", {"jets": "jets"}, clamp=5.0)
+    out = norm({"jets": torch.tensor([[1e6, -1e6], [-7.0, 1.0]])})
+    torch.testing.assert_close(out["jets"], torch.tensor([[5.0, -5.0], [-5.0, 1.0]]))
+
+
+@pytest.mark.parametrize("clamp", [0.0, -1.0])
+def test_input_norm_clamp_must_be_positive(tmp_path, clamp):
+    norm_dict = {"jets": {"pt": {"mean": 0.0, "std": 1.0}}}
+    nd_path = tmp_path / "norm.yaml"
+    nd_path.write_text(yaml.dump(norm_dict))
+    with pytest.raises(ValueError, match="clamp must be positive"):
+        InputNorm(nd_path, {"jets": ["pt"]}, "jets", {"jets": "jets"}, clamp=clamp)
+
+
 def test_regression_get_h5_uses_output_names():
     task = make_regression_task(norm_params={"mean": 0.0, "std": 1.0})
     task.model_name = "test"

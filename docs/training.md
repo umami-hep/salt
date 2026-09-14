@@ -284,6 +284,7 @@ Here are some mitigation strategies you can try:
 - Try lowering your max learning rate in the `lrs_config`.
 - If you apply very large loss weights in your task configs, these might contribute to large gradients, so you can try removing any loss weights provided to your [Tasks][salt.models.TaskBase].
 - Check your training precision: if you have done the above and still have problems, you can try  `--trainer.precision=32` or `--trainer.precision=bf16-mixed`. See [here](https://lightning.ai/docs/pytorch/stable/common/trainer.html#precision) for more info. 
+- If single inputs have extreme outliers after normalisation, clamp them (see [Clamping Normalised Inputs](configuration.md#clamping-normalised-inputs)).
 - Apply gradient clipping to negate the effects of exploding gradients. See [here] for more info.
 - Auto detect gradient anomalies. See [here](https://lightning.ai/docs/pytorch/stable/debug/debugging_intermediate.html#detect-autograd-anomalies) for more info.
 - If you are running on multiple GPUs, try running on a single GPU with `--trainer.devices=1`

@@ -135,6 +135,20 @@ Three flags in the `data` config control this behaviour:
 - `ignore_finite_checks: True` downgrades the error to a warning, in case you handle non-finite inputs deliberately.
 - `recover_malformed: True` converts malformed `truthOriginLabel` values to the invalid label instead of failing.
 
+#### Clamping Normalised Inputs
+
+Rare extreme outliers can destabilise the training even after normalisation.
+You can clamp the normalised inputs to `[-clamp, clamp]` with
+
+```yaml
+model:
+  norm_config:
+    clamp: 50
+```
+
+Unlike `selections`, the clamp is part of the model, so it is also applied in the exported ONNX model.
+By default no clamp is applied.
+
 #### Remapping Labels
 
 This section is about remapping labels on the fly, which is useful in case they are not already mapped to `0, 1, 2...`.
