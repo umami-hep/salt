@@ -52,9 +52,10 @@ ENV PIP_PREFER_BINARY=1
 ARG DEBIAN_FRONTEND=noninteractive
 WORKDIR /salt
 
-# add some packages
+# graphviz: the dot binary salt fit's graph render + salt graph plot need
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git openssh-client ca-certificates h5utils wget curl vim nano build-essential jq krb5-user \
+    graphviz \
     && rm -rf /var/lib/apt/lists/*
 
 # install uv for Python package + interpreter management

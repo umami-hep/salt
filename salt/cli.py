@@ -691,15 +691,19 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
                 "the attention backend is edge-compatible (no silent flash bypass)"
             )
-    # duck-typed `preflight()` checks file-backed materialise sources. Warning-
-    # level: `validate` must stay runnable on data-less machines; a real
-    # fit/test promotes these to hard errors (SaltModule.setup).
+    # duck-typed `preflight()` checks file-backed materialise sources at warning
+    # level — `validate` must run on data-less machines; a real fit/test promotes
+    # them to hard errors (SaltModule.setup). datasets= (the reader's stream->dataset
+    # map) is passed explicitly because validate never binds, so both look up the same keys.
+    from salt.model.bind import reader_stream_datasets
+
+    datasets = reader_stream_datasets(cfg.reader)
     for name, module in cfg.modules.items():
         preflight = getattr(module, "preflight", None)
         if not callable(preflight):
             continue
         try:
-            preflight()
+            preflight(datasets=datasets)
         except GraphError as err:
             warnings.append(f"preflight of module {name!r}: {err}")
     for mode in _modes_for(args):

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import re
+import time
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -18,9 +22,14 @@ from salt.data import SaltDataModule
 from salt.graph.errors import ConfigError
 from salt.main import (
     CONFIG_DIR,
+    RUN_DIR_TIMESTAMP_FORMAT,
+    SALT_AUTO_RESUME_ENV,
     SaltCLI,
     _best_checkpoint,  # noqa: PLC2701 - the fallback glob under test
+    latest_checkpoint,
     main,
+    run_dir_path,
+    run_root,
 )
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
@@ -31,6 +40,7 @@ from salt.testing.inputs import write_dummy_file
 from salt.utils.config_utils import disable_logger_in_config
 
 DUMMY_CFG = small_config()
+NAME = yaml.safe_load(DUMMY_CFG.read_text())["name"]
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
 TOY_GRAPH_CFG = Path(__file__).parent.parent / "_fixtures" / "configs" / "toy.yaml"
 GN2V2_MODULES = {
@@ -278,7 +288,7 @@ class TestCallbacksDict:
         cli = make_cli(data, extra=["--callbacks.checkpoint.init_args.monitor_loss=train/loss"])
         ckpt = next(cb for cb in cli.trainer.callbacks if isinstance(cb, ModelCheckpoint))
         assert ckpt.monitor == "train/loss"
-        assert ckpt.filename == "epoch={epoch:03d}-loss={train/loss:.5f}"
+        assert ckpt.filename == "epoch={epoch:03d}-step={step}-loss={train/loss:.5f}"
         # the sibling dict entry survives the one-key override
         assert any(isinstance(cb, ModelSummary) for cb in cli.trainer.callbacks)
 
@@ -387,13 +397,25 @@ class TestFitSmoke:
         assert all("loss=" in ckpt.name for ckpt in ckpts), [c.name for c in ckpts]
         # the Checkpoint forces the v1 'ckpts/' run-dir layout
         assert any(ckpt.parent.name == "ckpts" for ckpt in ckpts), [str(c) for c in ckpts]
-        # the resolved config was persisted (SaveConfigCallback)
+        # exactly one timestamped run dir, whose name's field after the last
+        # '_' is the RUN_DIR_TIMESTAMP_FORMAT stamp
+        run_dirs = [d for d in tmp_path.glob(f"{NAME}_*") if d.is_dir()]
+        assert len(run_dirs) == 1, run_dirs
+        run_dir = run_dirs[0]
+        datetime.strptime(run_dir.name.rsplit("_", 1)[-1], RUN_DIR_TIMESTAMP_FORMAT)
+        assert all(ckpt.name.startswith("epoch=000-step=2-loss=") for ckpt in ckpts), [
+            c.name for c in ckpts
+        ]
+        # the resolved config was persisted (SaveConfigCallback) directly in the run dir
         configs = list(tmp_path.rglob("config.yaml"))
         assert configs, f"no config.yaml written under {tmp_path}"
+        assert configs[0].parent == run_dir
         assert "class_path: salt.model.SaltModule" in configs[0].read_text()
         # the SAVED run config (which carries ckpt_path: null) round-trips
         # into the salt graph tooling
         assert "ckpt_path" in configs[0].read_text()
+        saved = yaml.safe_load(configs[0].read_text())
+        assert saved["trainer"]["default_root_dir"].endswith(run_dir.name)
         assert main(["graph", "validate", "-c", str(configs[0]), "--mode", "fit"]) == 0
         assert main(["graph", "plan", "-c", str(configs[0]), "--mode", "test"]) == 0
 
@@ -555,7 +577,9 @@ class TestFitRetryLoop:
     def test_second_fit_overwrites_stale_config(self, data, tmp_path, capsys):
         # a leftover config.yaml from a previous run
         # must not abort the retry loop (SaveConfigCallback overwrite=True),
-        # and the artifact locations are announced at end of fit
+        # and the artifact locations are announced at end of fit.
+        # --log_suffix pins both runs to the SAME dir, deterministically
+        # exercising the overwrite path (no timestamp-collision guesswork).
         args = [
             "fit",
             "--config",
@@ -570,10 +594,20 @@ class TestFitRetryLoop:
             "--trainer.num_sanity_val_steps=0",
             "--trainer.log_every_n_steps=1",
             "--callbacks.progress=null",  # see test_two_step_fit
+            "--log_suffix=retry",
         ]
         assert main(list(args)) == 0
-        assert "salt fit artifacts" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "salt fit artifacts" in out
+        assert "not yet implemented" not in out
+        run_dir = tmp_path / f"{NAME}_retry"
+        assert run_dir.is_dir()
         assert main(list(args)) == 0  # used to raise: "expected ... to NOT exist"
+        out = capsys.readouterr().out
+        assert "not yet implemented" not in out
+        # both runs landed in the SAME suffix dir — no second sibling minted
+        run_dirs = [d for d in tmp_path.glob(f"{NAME}_*") if d.is_dir()]
+        assert run_dirs == [run_dir]
 
 
 class TestGraphFitConfigAdapter:
@@ -1351,3 +1385,476 @@ class TestInitFromCLI:
         fake = tmp_path / "fake.ckpt"
         cli = make_cli(data, extra=[f"--init_from={fake}"])
         assert str(cli.config.get("init_from")) == str(fake)
+
+
+# run-dir layout, native --auto_resume, step-based checkpointing (main.py:
+# run_root/run_dir_path/latest_checkpoint/auto_resume_requested + the
+# before_instantiate_classes fit-branch wiring).
+
+
+class StopAfterFirstEpoch(Callback):
+    """Cuts a fit after epoch 0 so a resume leg can continue it.
+
+    Referenced by class_path ``salt.tests.unit.test_main.StopAfterFirstEpoch``
+    (precedent: `StageCallbackProbe`, above).
+    """
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        trainer.should_stop = True
+
+
+def _fit_args(data, root: Path, *extra: str) -> list[str]:
+    """`TestFitSmoke`'s CPU/tiny recipe, parametrised by run dir + extra flags.
+
+    ``--trainer.max_epochs`` is deliberately NOT included — every call site
+    passes it explicitly (the OneCycleLR total_steps constraint means a
+    producer/resume pair must agree on it).
+    """
+    return [
+        "fit",
+        "--config",
+        str(DUMMY_CFG),
+        *required_overrides(data),
+        f"--trainer.default_root_dir={root}",
+        "--trainer.accelerator=cpu",
+        "--trainer.logger=false",
+        "--trainer.limit_train_batches=2",
+        "--trainer.limit_val_batches=2",
+        "--trainer.num_sanity_val_steps=0",
+        "--trainer.log_every_n_steps=1",
+        "--callbacks.progress=null",
+        *extra,
+    ]
+
+
+def _newest_ckpt(run_dir: Path) -> Path:
+    """The checkpoint under `run_dir` with the highest ``(epoch, step)``."""
+    ckpts = list(run_dir.rglob("*.ckpt"))
+    assert ckpts, f"no checkpoint under {run_dir}"
+
+    def key(path: Path) -> tuple[int, int]:
+        epoch = int(re.search(r"epoch=(\d+)", path.name).group(1))
+        step = int(re.search(r"step=(\d+)", path.name).group(1))
+        return (epoch, step)
+
+    return max(ckpts, key=key)
+
+
+def _run_dirs(root: Path, name: str = NAME) -> list[Path]:
+    """Sibling ``<name>_*`` run dirs directly under `root`, sorted by name."""
+    return sorted(d for d in root.glob(f"{name}_*") if d.is_dir())
+
+
+class TestRunDirLayout:
+    def test_no_root_is_logs(self):
+        assert run_root(None, "n") == Path("logs")
+
+    def test_strips_trailing_timestamp(self):
+        assert run_root("/x/n_20260912-T134455", "n") == Path("/x")
+
+    def test_strips_trailing_timestamp_with_underscored_name(self):
+        # name-agnostic: only the text after the LAST '_' must parse
+        assert run_root("/x/my_run_20260912-T134455", "my_run") == Path("/x")
+
+    def test_strips_exact_suffix_only_when_it_matches(self):
+        assert run_root("/x/n_foo", "n", "foo") == Path("/x")
+        assert run_root("/x/n_foo", "n") == Path("/x/n_foo")  # no suffix given
+        assert run_root("/x/n_bar", "n", "foo") == Path("/x/n_bar")  # wrong suffix
+
+    def test_run_dir_path_with_suffix(self):
+        assert run_dir_path("/x", "n", "foo") == Path("/x/n_foo")
+
+    def test_run_dir_path_without_suffix_matches_timestamp_pattern(self):
+        name = run_dir_path("/x", "n").name
+        assert re.match(r"^n_\d{8}-T\d{6}$", name), name
+
+    def test_run_dir_path_repass_yields_sibling(self):
+        assert run_dir_path("/x/n_20260912-T134455", "n").parent == Path("/x")
+
+    def test_log_suffix_restack_stays_one_run_dir(self, data, tmp_path):
+        assert main(_fit_args(data, tmp_path, "--trainer.max_epochs=1", "--log_suffix=foo")) == 0
+        run_dir = tmp_path / f"{NAME}_foo"
+        assert run_dir.is_dir()
+        saved_config = run_dir / "config.yaml"
+        assert saved_config.is_file()
+        # a second fit stacks the SAVED config.yaml (its own default_root_dir
+        # already points AT the suffix run dir) as an extra --config
+        rc = main([
+            "fit",
+            "--config",
+            str(DUMMY_CFG),
+            *required_overrides(data),
+            "--config",
+            str(saved_config),
+            "--trainer.accelerator=cpu",
+            "--trainer.logger=false",
+            "--trainer.max_epochs=1",
+            "--trainer.limit_train_batches=2",
+            "--trainer.limit_val_batches=2",
+            "--trainer.num_sanity_val_steps=0",
+            "--trainer.log_every_n_steps=1",
+            "--callbacks.progress=null",
+            "--log_suffix=foo",
+        ])
+        assert rc == 0
+        assert _run_dirs(tmp_path) == [run_dir]  # still exactly one, nothing nested
+        assert not list(tmp_path.glob(f"{NAME}_*/{NAME}_*"))
+
+    def test_timestamp_restack_yields_sibling_not_nested(self, data, tmp_path):
+        assert main(_fit_args(data, tmp_path, "--trainer.max_epochs=1")) == 0
+        run_dirs_a = _run_dirs(tmp_path)
+        assert len(run_dirs_a) == 1
+        saved_config = run_dirs_a[0] / "config.yaml"
+        time.sleep(1.1)  # guarantee run B mints a distinct timestamp
+        rc = main([
+            "fit",
+            "--config",
+            str(DUMMY_CFG),
+            *required_overrides(data),
+            "--config",
+            str(saved_config),
+            "--trainer.accelerator=cpu",
+            "--trainer.logger=false",
+            "--trainer.max_epochs=1",
+            "--trainer.limit_train_batches=2",
+            "--trainer.limit_val_batches=2",
+            "--trainer.num_sanity_val_steps=0",
+            "--trainer.log_every_n_steps=1",
+            "--callbacks.progress=null",
+        ])
+        assert rc == 0
+        run_dirs_b = _run_dirs(tmp_path)
+        assert len(run_dirs_b) == 2  # two SIBLINGS, not one nested inside the other
+        assert not list(tmp_path.glob(f"{NAME}_*/{NAME}_*"))
+
+
+class TestLatestCheckpoint:
+    NAME = "run"
+
+    def test_empty_root_is_none(self, tmp_path):
+        assert latest_checkpoint(tmp_path, self.NAME) is None
+
+    def test_missing_root_is_none(self, tmp_path):
+        assert latest_checkpoint(tmp_path / "does_not_exist", self.NAME) is None
+
+    def test_mid_epoch_step_beats_epoch_end_checkpoints(self, tmp_path):
+        a = tmp_path / f"{self.NAME}_a" / "ckpts"
+        b = tmp_path / f"{self.NAME}_b" / "checkpoints"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        winner = a / "epoch=001-step=7.ckpt"
+        winner.touch()
+        (a / "epoch=001-step=5-loss=0.1.ckpt").touch()
+        (b / "epoch=000-step=9-loss=0.01.ckpt").touch()
+        assert latest_checkpoint(tmp_path, self.NAME) == winner
+
+    def test_same_epoch_higher_step_wins(self, tmp_path):
+        ckpts = tmp_path / f"{self.NAME}_a" / "ckpts"
+        ckpts.mkdir(parents=True)
+        (ckpts / "epoch=002-step=3-loss=0.2.ckpt").touch()
+        high = ckpts / "epoch=002-step=8-loss=0.1.ckpt"
+        high.touch()
+        assert latest_checkpoint(tmp_path, self.NAME) == high
+
+    def test_unparseable_names_ignored(self, tmp_path):
+        ckpts = tmp_path / f"{self.NAME}_a" / "ckpts"
+        ckpts.mkdir(parents=True)
+        (ckpts / "last.ckpt").touch()
+        (ckpts / "epoch=3.ckpt").touch()  # no step=
+        (ckpts / "garbage.ckpt").touch()
+        assert latest_checkpoint(tmp_path, self.NAME) is None
+
+    def test_other_run_dir_not_scanned(self, tmp_path):
+        other = tmp_path / "other_x" / "ckpts"
+        other.mkdir(parents=True)
+        (other / "epoch=005-step=10.ckpt").touch()
+        assert latest_checkpoint(tmp_path, self.NAME) is None
+
+    def test_mtime_tie_break(self, tmp_path):
+        ckpts = tmp_path / f"{self.NAME}_a" / "ckpts"
+        ckpts.mkdir(parents=True)
+        older = ckpts / "epoch=001-step=4-a.ckpt"
+        newer = ckpts / "epoch=001-step=4-b.ckpt"
+        older.touch()
+        newer.touch()
+        old_time = time.time() - 100
+        os.utime(older, (old_time, old_time))
+        assert latest_checkpoint(tmp_path, self.NAME) == newer
+
+    def test_step_only_beats_best_checkpoints_disregard_of_it(self, tmp_path):
+        # _best_checkpoint (loss=-keyed) ignores the step-only file at the
+        # SAME step; latest_checkpoint accepts it as a legitimate candidate.
+        run_dir = tmp_path / f"{self.NAME}_a"
+        ckpts = run_dir / "ckpts"
+        ckpts.mkdir(parents=True)
+        step_only = ckpts / "epoch=000-step=3.ckpt"
+        epoch_end = ckpts / "epoch=000-step=3-loss=0.5.ckpt"
+        step_only.touch()
+        epoch_end.touch()
+        assert _best_checkpoint(run_dir / "config.yaml").endswith(
+            "epoch=000-step=3-loss=0.5.ckpt"
+        )
+        assert latest_checkpoint(tmp_path, self.NAME) in (step_only, epoch_end)
+
+
+class TestAutoResume:
+    """Each test uses its own ``tmp_path`` root."""
+
+    @staticmethod
+    def _leg_a(data, root: Path, *extra: str) -> list[str]:
+        return _fit_args(
+            data,
+            root,
+            "--trainer.max_epochs=2",
+            "--callbacks.stop.class_path=salt.tests.unit.test_main.StopAfterFirstEpoch",
+            *extra,
+        )
+
+    def test_flag_resumes_from_sibling_checkpoint(self, data, tmp_path, capsys):
+        root = tmp_path
+        assert main(self._leg_a(data, root)) == 0
+        a_dir = _run_dirs(root)[0]
+        a_ckpt = _newest_ckpt(a_dir)
+        a_state = torch.load(a_ckpt, map_location="cpu", weights_only=False)
+        assert a_state["epoch"] == 0
+        assert a_state["global_step"] == 2
+        capsys.readouterr()  # drain leg A's stdout
+
+        time.sleep(1.1)  # guarantee leg B mints a distinct timestamp
+        assert main(_fit_args(data, root, "--trainer.max_epochs=2", "--auto_resume")) == 0
+        out = capsys.readouterr().out
+        assert f"auto-resume: resuming run '{NAME}' from " in out
+        assert str(a_ckpt) in out
+
+        run_dirs_after = _run_dirs(root)
+        assert len(run_dirs_after) == 2  # a NEW sibling, not a reuse of A's dir
+        b_dir = next(d for d in run_dirs_after if d != a_dir)
+        assert not list(b_dir.rglob("epoch=000*"))  # never trained epoch 0
+        b_ckpt = _newest_ckpt(b_dir)
+        b_state = torch.load(b_ckpt, map_location="cpu", weights_only=False)
+        assert b_state["epoch"] == 1
+        assert b_state["global_step"] == 4
+        assert b_ckpt.name.startswith("epoch=001-step=4-")
+
+        saved = yaml.safe_load((b_dir / "config.yaml").read_text())
+        assert saved["ckpt_path"] is None  # the resolved path never leaked
+        assert saved["auto_resume"] is True
+
+    @pytest.mark.parametrize("value", ["1", "TRUE", "yes"])
+    def test_env_variants_resume(self, data, tmp_path, capsys, monkeypatch, value):
+        root = tmp_path
+        assert main(self._leg_a(data, root)) == 0
+        a_dir = _run_dirs(root)[0]
+        a_ckpt = _newest_ckpt(a_dir)
+        capsys.readouterr()
+
+        monkeypatch.setenv(SALT_AUTO_RESUME_ENV, value)
+        time.sleep(1.1)
+        assert main(_fit_args(data, root, "--trainer.max_epochs=2")) == 0
+        out = capsys.readouterr().out
+        assert f"auto-resume: resuming run '{NAME}' from " in out
+        assert str(a_ckpt) in out
+
+        run_dirs_after = _run_dirs(root)
+        assert len(run_dirs_after) == 2
+        b_dir = next(d for d in run_dirs_after if d != a_dir)
+        assert not list(b_dir.rglob("epoch=000*"))
+        b_state = torch.load(_newest_ckpt(b_dir), map_location="cpu", weights_only=False)
+        assert b_state["epoch"] == 1
+        assert b_state["global_step"] == 4
+
+    def test_env_falsy_zero_trains_from_scratch(self, data, tmp_path, capsys, monkeypatch):
+        root = tmp_path
+        assert main(self._leg_a(data, root)) == 0
+        a_dir = _run_dirs(root)[0]
+        capsys.readouterr()
+
+        monkeypatch.setenv(SALT_AUTO_RESUME_ENV, "0")
+        time.sleep(1.1)
+        assert main(_fit_args(data, root, "--trainer.max_epochs=2")) == 0
+        out = capsys.readouterr().out
+        assert "auto-resume:" not in out
+
+        run_dirs_after = _run_dirs(root)
+        assert len(run_dirs_after) == 2
+        b_dir = next(d for d in run_dirs_after if d != a_dir)
+        # no --auto_resume, no stop callback -> a full fresh 2-epoch run
+        assert list(b_dir.rglob("epoch=000*"))
+        b_state = torch.load(_newest_ckpt(b_dir), map_location="cpu", weights_only=False)
+        assert b_state["epoch"] == 1
+        assert b_state["global_step"] == 4
+
+    def test_no_sibling_starts_fresh(self, data, tmp_path, capsys):
+        rc = main(_fit_args(data, tmp_path, "--trainer.max_epochs=1", "--auto_resume"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert (
+            f"auto-resume: no checkpoint of run '{NAME}' under {tmp_path} — starting fresh"
+            in out
+        )
+
+    def test_no_sibling_falls_back_to_ckpt_path(self, data, tmp_path, capsys):
+        root_a = tmp_path / "root_a"
+        root_b = tmp_path / "root_b"
+        root_a.mkdir()
+        root_b.mkdir()
+        assert main(self._leg_a(data, root_a)) == 0
+        a_ckpt = _newest_ckpt(_run_dirs(root_a)[0])
+        capsys.readouterr()
+
+        rc = main(_fit_args(
+            data, root_b, "--trainer.max_epochs=2", "--auto_resume", f"--ckpt_path={a_ckpt}"
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "falling back to --ckpt_path" in out
+        assert str(a_ckpt) in out
+
+        b_state = torch.load(
+            _newest_ckpt(_run_dirs(root_b)[0]), map_location="cpu", weights_only=False
+        )
+        assert b_state["global_step"] == 4
+        assert b_state["epoch"] == 1
+
+    def test_sibling_checkpoint_beats_ckpt_path(self, data, tmp_path, capsys):
+        root = tmp_path / "root"
+        root_d = tmp_path / "root_d"
+        root.mkdir()
+        root_d.mkdir()
+        assert main(self._leg_a(data, root)) == 0
+        a_dir = _run_dirs(root)[0]
+        a_ckpt = _newest_ckpt(a_dir)
+
+        rc = main(_fit_args(
+            data,
+            root_d,
+            "--trainer.limit_train_batches=1",
+            "--trainer.max_epochs=2",
+            "--callbacks.stop.class_path=salt.tests.unit.test_main.StopAfterFirstEpoch",
+        ))
+        assert rc == 0
+        d_ckpt = _newest_ckpt(_run_dirs(root_d)[0])
+        assert d_ckpt.name.startswith("epoch=000-step=1-")
+        capsys.readouterr()
+
+        time.sleep(1.1)
+        rc = main(_fit_args(
+            data, root, "--trainer.max_epochs=2", "--auto_resume", f"--ckpt_path={d_ckpt}"
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"resuming run '{NAME}' from {a_ckpt}" in out
+        assert f"(overriding --ckpt_path {d_ckpt})" in out
+
+        run_dirs_after = _run_dirs(root)
+        assert len(run_dirs_after) == 2
+        b_dir = next(d for d in run_dirs_after if d != a_dir)
+        b_state = torch.load(_newest_ckpt(b_dir), map_location="cpu", weights_only=False)
+        assert b_state["global_step"] == 4  # A's 2 steps, not D's 1
+
+    def test_init_from_and_resolved_resume_mutually_exclusive(self, data, tmp_path):
+        root = tmp_path
+        assert main(self._leg_a(data, root)) == 0
+        a_ckpt = _newest_ckpt(_run_dirs(root)[0])
+
+        cfg = disable_logger_in_config(str(DUMMY_CFG))
+        args = [
+            "fit",
+            "--config",
+            cfg,
+            *required_overrides(data),
+            "--trainer.accelerator=cpu",
+            "--trainer.logger=false",
+            "--trainer.fast_dev_run=1",
+            "--callbacks.progress=null",
+            f"--trainer.default_root_dir={root}",
+            "--auto_resume",
+            f"--init_from={a_ckpt}",
+        ]
+        with pytest.raises(ConfigError, match="auto-resume"):
+            SaltCLI(args=args)
+
+    def test_log_suffix_with_auto_resume_writes_into_same_dir(self, data, tmp_path, capsys):
+        root = tmp_path
+        assert main(self._leg_a(data, root, "--log_suffix=foo")) == 0
+        run_dir = root / f"{NAME}_foo"
+        assert run_dir.is_dir()
+        a_ckpt = _newest_ckpt(run_dir)
+        assert a_ckpt.name.startswith("epoch=000-step=2-")
+        capsys.readouterr()
+
+        rc = main(_fit_args(
+            data, root, "--trainer.max_epochs=2", "--log_suffix=foo", "--auto_resume"
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"resuming run '{NAME}' from {a_ckpt}" in out
+
+        assert _run_dirs(root) == [run_dir]  # same dir — no new sibling
+        b_state = torch.load(_newest_ckpt(run_dir), map_location="cpu", weights_only=False)
+        assert b_state["global_step"] == 4
+        assert b_state["epoch"] == 1
+
+
+class TestStepCheckpointFit:
+    @staticmethod
+    def _args(data, root: Path, save_top_k: int | None = None) -> list[str]:
+        extra = [
+            "--trainer.max_epochs=2",
+            "--trainer.limit_train_batches=3",
+            "--callbacks.stop.class_path=salt.tests.unit.test_main.StopAfterFirstEpoch",
+            "--callbacks.step_checkpoint.class_path=salt.callbacks.StepCheckpoint",
+            "--callbacks.step_checkpoint.init_args.every_n_train_steps=1",
+        ]
+        if save_top_k is not None:
+            extra.append(f"--callbacks.step_checkpoint.init_args.save_top_k={save_top_k}")
+        return _fit_args(data, root, *extra)
+
+    @staticmethod
+    def _step_only_names(run_dir: Path) -> set[str]:
+        pattern = re.compile(r"^epoch=\d{3}-step=\d+\.ckpt$")
+        return {p.name for p in (run_dir / "ckpts").glob("*.ckpt") if pattern.match(p.name)}
+
+    def test_keep_latest_one_default_pruning(self, data, tmp_path):
+        assert main(self._args(data, tmp_path)) == 0
+        run_dir = _run_dirs(tmp_path)[0]
+        assert self._step_only_names(run_dir) == {"epoch=000-step=3.ckpt"}
+        assert list((run_dir / "ckpts").glob("epoch=000-step=3-loss=*.ckpt"))
+
+    def test_save_top_k_minus_one_keeps_all(self, data, tmp_path):
+        assert main(self._args(data, tmp_path, save_top_k=-1)) == 0
+        run_dir = _run_dirs(tmp_path)[0]
+        assert self._step_only_names(run_dir) == {
+            "epoch=000-step=1.ckpt",
+            "epoch=000-step=2.ckpt",
+            "epoch=000-step=3.ckpt",
+        }
+
+    def test_auto_resume_picks_mid_epoch_step_checkpoint(self, data, tmp_path, capsys):
+        root = tmp_path
+        assert main(self._args(data, root, save_top_k=-1)) == 0
+        capsys.readouterr()
+
+        time.sleep(1.1)
+        rc = main(_fit_args(
+            data,
+            root,
+            "--trainer.max_epochs=2",
+            "--trainer.limit_train_batches=3",
+            "--auto_resume",
+        ))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "auto-resume: resuming" in out
+        assert "step=3" in out
+        # NOT asserting the absence of an epoch=000 file here: resuming from a
+        # mid-epoch step-only checkpoint legitimately re-emits an epoch-0
+        # epoch-end checkpoint on the way through the rest of that epoch.
+
+        run_dirs = _run_dirs(root)
+        assert len(run_dirs) == 2
+        b_state = torch.load(
+            _newest_ckpt(run_dirs[-1]), map_location="cpu", weights_only=False
+        )
+        assert b_state["epoch"] == 1
+        assert b_state["global_step"] == 6

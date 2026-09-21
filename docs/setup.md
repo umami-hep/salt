@@ -571,8 +571,9 @@ Python-ecosystem-adjacent path that ships real Graphviz binaries:
 conda install -c conda-forge graphviz
 ```
 
-The prebuilt salt docker/apptainer containers already include `dot`, so container users
-need not install anything.
+The prebuilt salt docker/apptainer containers are built from `setup/Dockerfile`, whose
+`apt-get` line installs `graphviz`, so `dot` is already on `PATH` inside the image —
+container users need not install anything.
 
 Verify with `dot -V` (prints the version, to stderr) or `which dot`.
 

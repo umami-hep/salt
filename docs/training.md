@@ -21,10 +21,14 @@ for the different ways to specify which GPUs to use.
 ## Checkpoints and resume
 
 Model checkpoints are saved per epoch under `ckpts/` next to the run's saved
-config (`config.yaml`), named `epoch=<NNN>-loss=<value>.ckpt`; see
+config (`config.yaml`), named `epoch=<NNN>-step=<N>-loss=<value>.ckpt`
+(`step` is Lightning's global step); see
 [what a run writes](cli.md#what-a-run-writes) for the full run-directory layout.
-Checkpoints carry the resolved schema and per-mode plan hashes under the
-top-level `salt_core` key.
+An opt-in callback can also write intra-epoch checkpoints into the same
+`ckpts/` directory, named `epoch=<NNN>-step=<N>.ckpt` with no `loss=` tag —
+see [Intra-epoch checkpoints](#intra-epoch-checkpoints) below. Checkpoints
+carry the resolved schema and per-mode plan hashes under the top-level
+`salt_core` key.
 
 Resuming with `--ckpt_path` restores the full training state, including the
 optimiser. On resume, a FIT plan-hash mismatch is fatal: it means the graph or
@@ -44,6 +48,94 @@ Resuming a run past its original `--trainer.max_epochs` needs that schedule
 re-armed: set `lrs.last_epoch: 0` in the config (or `--model.lrs.last_epoch 0`
 on the command line for a single-stage run) alongside the new
 `--trainer.max_epochs` so the total-step count is recomputed.
+
+### Auto-resume
+
+`--auto_resume` (fit only) or the environment variable `SALT_AUTO_RESUME`
+(`1`/`true`/`yes`, case-insensitive) continues *this* run from its own
+furthest-trained checkpoint, if one exists — the crash/requeue case. It is
+a different concern from `--ckpt_path`: `--ckpt_path` names the state a run
+*starts* from, `--auto_resume` asks salt to *continue* this run if it
+crashed or was requeued, and the two are usable together.
+
+**"Furthest-trained"** means the highest `(epoch, global_step)` across
+every sibling run directory of this run's name —
+`<root>/<name>_*/{ckpts,checkpoints}/*.ckpt` — with an mtime tie-break.
+Step-only checkpoints (written by
+[`StepCheckpoint`](#intra-epoch-checkpoints)) count towards this ranking;
+a checkpoint name that does not carry both `epoch=` and `step=` (for
+example `last.ckpt`) is ignored. This is a different rule from `salt
+test`'s [best-checkpoint selection](cli.md#salt-test) (lowest `loss=`), by
+design — auto-resume cares about how far training got, not how good the
+model already is.
+
+**Precedence**, the crash-recovery model:
+
+- A sibling checkpoint is found → resume from it. This overrides a
+  supplied `--ckpt_path`, and is announced.
+- No sibling checkpoint, `--ckpt_path` given → start from that checkpoint
+  as normal (a plain resume, not an auto-resume).
+- No sibling checkpoint, no `--ckpt_path` → start fresh.
+
+Every case prints exactly one `auto-resume: ...` line on stdout, naming
+which of the three happened and why (for example `resuming run '<name>'
+from <path>`, or `no checkpoint of run '<name>' under <root> — falling back
+to --ckpt_path <path>` / `... — starting fresh`). There is no silent path:
+if auto-resume was requested and found nothing, that shows up in the log.
+
+**The resolved checkpoint never leaks into the saved `config.yaml`.** Its
+`ckpt_path` key stays `null` after an auto-resumed run, so a later `salt
+test --config <that saved config>` still evaluates the best epoch by its
+own [best-checkpoint selection](cli.md#salt-test) rather than the resume
+point. (This is unlike a manually-passed `--ckpt_path`, which is not
+scrubbed from the saved config — a pre-existing, separate trap.)
+
+`--init_from` together with a checkpoint that auto-resume actually resolves
+to is a `ConfigError`, the same family as the existing `--init_from` /
+`--ckpt_path` exclusivity above. A requeued fine-tune launched with
+`--init_from ... --auto_resume` hits this on its **second** launch by
+design, once a checkpoint of its own exists: drop `--init_from` once
+training has produced a checkpoint, or have the relaunch script drop it
+for you.
+
+The `lrs.last_epoch` re-arming note above applies here exactly as it does
+to a plain `--ckpt_path` resume.
+
+### Intra-epoch checkpoints
+
+The default `Checkpoint` callback only saves at epoch end. For a long
+epoch, or a schedule that may requeue mid-epoch, opt in to intra-epoch
+checkpoints with `salt.callbacks.StepCheckpoint`:
+
+```yaml
+callbacks:
+  step_checkpoint:
+    class_path: salt.callbacks.StepCheckpoint
+    init_args:
+      every_n_train_steps: 500
+```
+
+Trigger on either `every_n_train_steps: <int>` or `train_time_interval:
+<seconds>` — exactly one, never both (a `ConfigError` otherwise). It writes
+into the same `ckpts/` directory as the epoch-end callback, named
+`epoch=<NNN>-step=<N>.ckpt` (no `loss=` tag, since there is no end-of-epoch
+metric to attach). `save_top_k: 1` by default, so only the single latest
+step checkpoint is kept and a long-running fit does not fill the disk with
+intermediate saves; pass `save_top_k: -1` to keep every one instead. Other
+`save_top_k` values are refused: Lightning only prunes an unmonitored save
+(which this is) down to the single latest one, not to an arbitrary top-k
+count.
+
+`--auto_resume` treats a step-only checkpoint exactly like an epoch-end one
+for ranking purposes (see [Auto-resume](#auto-resume) above), so it can
+resume **mid-epoch** from one. For a schedule-aware fine-tune whose stage
+boundaries are epoch-aligned (see
+[`training_schedule:`](finetuning.md#the-training_schedule-schema)), a
+mid-epoch resume still restores the correct stage — stage position is a
+function of the epoch counter — but restarts partway through that epoch's
+data rather than at its start. If that partial-epoch restart matters for
+your schedule, leave `StepCheckpoint` off and accept only epoch-boundary
+resumes.
 
 ### Loading an older checkpoint
 

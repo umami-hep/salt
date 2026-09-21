@@ -42,6 +42,21 @@ carry on as if nothing happened. Use **`--init_from`** when you have a
 weights instead of random init, on new data or with the network surgically
 modified.
 
+`--auto_resume` sits on the `--ckpt_path` side of this table, not the
+`--init_from` side: it is a resume mechanism (continue *this* run if it
+crashed or was requeued), not a warm start — it picks `--ckpt_path` for you
+automatically, from a run's own sibling checkpoint directories. It is
+therefore mutually exclusive with `--init_from` the same way `--ckpt_path`
+is: once a checkpoint for this run exists, `--init_from ... --auto_resume`
+together raise the same `ConfigError` family as `--init_from ...
+--ckpt_path`. This is a trap for a requeue pattern that always passes
+`--init_from` to seed weights alongside `--auto_resume` for crash recovery:
+it works on the *first* launch (no checkpoint yet, so `--init_from`
+applies) and fails on the *second* (a checkpoint now exists, auto-resume
+resolves it, and the two flags collide) — drop `--init_from` once training
+has produced a checkpoint, or have the chain script do so. Full mechanics:
+[Training → Auto-resume](training.md#auto-resume).
+
 ### What `--init_from` accounts for
 
 A warm start does not blindly `load_state_dict`. It classifies every module (by
@@ -485,3 +500,15 @@ Resume respects **epoch boundaries**: restore from an epoch-boundary checkpoint,
 not a mid-epoch one, so the stage math and the LR envelope pick up cleanly.
 (`--ckpt_path` and `--init_from` remain mutually exclusive: resume continues a
 run, warm-start begins one.)
+
+`--auto_resume` (see [Training → Auto-resume](training.md#auto-resume)) finds
+the furthest-trained checkpoint by `(epoch, global_step)`, and that ranking
+includes step-only checkpoints from an opt-in
+[`StepCheckpoint`](training.md#intra-epoch-checkpoints) callback — so an
+auto-resumed schedule-aware run can restart **mid-epoch**, not just at an
+epoch boundary. Stage position is still correct either way (it is a pure
+function of the epoch counter), but a mid-epoch restart is not the clean
+epoch-boundary resume described above. If your schedule's stage boundaries
+should only ever line up with full epochs, either leave `StepCheckpoint`
+disabled for this run, or accept that `--auto_resume` may hand you a
+mid-epoch restart.

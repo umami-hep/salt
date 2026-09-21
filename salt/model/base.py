@@ -79,7 +79,9 @@ class SaltModelModule(nn.Module):
         themselves config-derived, so this stays a pure function of config.
         The ONLY place a graph module may construct submodules sized from
         resolved bundle widths/fields. Called once per model, after every
-        mode's plan compiles and before any forward.
+        mode's plan compiles and before any forward. The schema also carries
+        the reader's stream->dataset map (`schema.dataset_of`) for modules
+        that index file-keyed dicts (e.g. norm/class dicts).
         """
 
     def materialise(self) -> None:
@@ -87,7 +89,9 @@ class SaltModelModule(nn.Module):
 
         Runs ONLY before a fresh fit, after `bind` — skipped on checkpoint
         load, where values arrive via the state_dict. The only hook
-        permitted to touch the filesystem beyond config.
+        permitted to touch the filesystem beyond config. Dict-style sources
+        (norm/class dicts) are keyed by dataset name — resolve the key via
+        the map captured at `bind`.
         """
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:

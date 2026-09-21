@@ -31,6 +31,7 @@ from salt.inference import (
     _parse_args,  # noqa: PLC2701 - the argparse surface under test
     build_inference_sink,
     inference_demand,
+    run_inference,
 )
 from salt.main import CONFIG_DIR, main
 from salt.model.modules import bind_all, resolve_bind_schema
@@ -73,7 +74,10 @@ class TestParseArgs:
         capsys.readouterr()
 
     def test_full_surface(self):
-        """Config stacking, --set repeats, --output, --batch_size all land."""
+        """Config stacking, --set repeats, --output, --batch_size, --data.num_test
+        all land (both --data.num_test and a --set data.num_test= entry coexist
+        on the parse surface — precedence is run_inference's job, not the parser's).
+        """
         parsed = _parse_args([
             "--ckpt_path",
             "run/ckpt.ckpt",
@@ -87,6 +91,8 @@ class TestParseArgs:
             "out.h5",
             "--batch_size",
             "128",
+            "--data.num_test",
+            "77",
             "--set",
             "data.num_test=10",
             "--set",
@@ -97,15 +103,29 @@ class TestParseArgs:
         assert parsed.test_file == Path("test.h5")
         assert parsed.output == Path("out.h5")
         assert parsed.batch_size == 128
+        assert parsed.num_test == 77
         assert parsed.set_overrides == ["data.num_test=10", "name=foo"]
 
     def test_defaults(self):
-        """Output/config/batch_size default to None (template/inferred/datamodule)."""
+        """Output/config/batch_size/num_test default to None (template/inferred/datamodule)."""
         parsed = _parse_args(["--ckpt_path", "c.ckpt", "--data.test_file", "t.h5"])
         assert parsed.output is None
         assert parsed.config is None
         assert parsed.batch_size is None
+        assert parsed.num_test is None
         assert parsed.set_overrides == []
+
+    def test_num_test_accepts_minus_one(self):
+        """-1 (every row, the SaltDataModule sentinel) parses to an int, not a flag."""
+        parsed = _parse_args([
+            "--ckpt_path",
+            "c.ckpt",
+            "--data.test_file",
+            "t.h5",
+            "--data.num_test",
+            "-1",
+        ])
+        assert parsed.num_test == -1
 
 
 class TestDispatch:
@@ -447,3 +467,152 @@ class TestUnlabelledDatasetPath:
         rows = batch["meta"]["rows"]
         assert int(rows[0]) == 0
         assert int(rows[1]) == 64
+
+
+class TestNumTestRowCap:
+    """``run_inference(num_test=...)`` end-to-end: a real row cap over a live
+    checkpoint, driven through the actual eager loop (not a parse-surface stub).
+    """
+
+    # ftag's H5Writer hardcodes 100-row chunks (a file under 100 rows fails
+    # dataset creation) and write_dummy_file always writes 1000 jets, so both
+    # constants must sit in [100, 1000].
+    N = 128
+    M = 256
+
+    @pytest.fixture(scope="class")
+    def rowcap_data(self, tmp_path_factory) -> dict[str, Path]:
+        """Synthetic norm dict + dummy H5 + schema artifact, private to this class
+        (distinct fixture name from TestUnlabelledDatasetPath.stripped)."""
+        base = tmp_path_factory.mktemp("rowcap_data")
+        nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
+        write_parity_norm_dict(nd_path, cd_path)
+        h5_path = base / "pp_output_test_rowcap.h5"
+        write_dummy_file(h5_path, nd_path)
+        schema_path = base / "schema.yaml"
+        save_schema(dump_schema(h5_path), schema_path)
+        return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
+
+    @staticmethod
+    def _overrides(data: dict[str, Path]) -> list[str]:
+        return [
+            f"--data.modules.reader.init_args.schema={data['schema']}",
+            f"--model.modules.norm.init_args.norm_dict={data['nd']}",
+            "--trainer.accelerator=cpu",
+            "--trainer.logger=false",
+            "--callbacks.progress=null",
+        ]
+
+    @pytest.fixture(scope="class")
+    def rowcap_ckpt(self, rowcap_data, tmp_path_factory) -> Path:
+        """A live 1-epoch fit of small_config() — num_workers: 0 (baked into
+        small_config()) so --data.num_test= is honoured with no DataLoader
+        worker spawn.
+        """
+        fit_dir = tmp_path_factory.mktemp("rowcap_fit")
+        rc = main([
+            "fit",
+            "--config",
+            str(small_config()),
+            f"--data.train_file={rowcap_data['h5']}",
+            f"--data.val_file={rowcap_data['h5']}",
+            *self._overrides(rowcap_data),
+            f"--trainer.default_root_dir={fit_dir}",
+            "--trainer.max_epochs=1",
+            "--trainer.limit_train_batches=2",
+            "--trainer.limit_val_batches=2",
+            "--trainer.num_sanity_val_steps=0",
+            "--trainer.log_every_n_steps=1",
+        ])
+        assert rc == 0, "salt fit on small_config() must run end-to-end"
+        ckpts = sorted(fit_dir.rglob("*.ckpt"))
+        assert ckpts, f"no checkpoint under {fit_dir}"
+        return ckpts[0]
+
+    @pytest.fixture(scope="class")
+    def rowcap_config(self, rowcap_ckpt) -> Path:
+        """The saved run config next to the checkpoint (TestNoCkptFallback's contract)."""
+        config = rowcap_ckpt.parent.parent / "config.yaml"
+        assert config.is_file(), f"no saved run config next to {rowcap_ckpt.parent}"
+        return config
+
+    @staticmethod
+    def _row_counts(path: Path) -> dict[str, int]:
+        """{dataset name: row count} for every row-bearing (ndim>=1) H5 dataset.
+
+        Scalar/metadata datasets (ndim==0) are skipped EXPLICITLY — they carry
+        no per-row cap to assert against.
+        """
+        counts: dict[str, int] = {}
+
+        def _collect(name: str, obj: object) -> None:
+            if isinstance(obj, h5py.Dataset) and obj.ndim >= 1:
+                counts[name] = obj.shape[0]
+
+        with h5py.File(path) as f:
+            f.visititems(_collect)
+        assert counts, f"no row-bearing datasets found in {path}"
+        return counts
+
+    def test_num_test_caps_every_row_bearing_dataset(
+        self, rowcap_data, rowcap_config, rowcap_ckpt, tmp_path
+    ):
+        """num_test=N caps every row-bearing dataset to N rows, jets included
+        (small_config()'s jets_out RunTaskOutput is export-mode, so jets
+        carries the pb/pc/pu columns)."""
+        out = run_inference(
+            [rowcap_config],
+            rowcap_ckpt,
+            rowcap_data["h5"],
+            output=tmp_path / "capped.h5",
+            num_test=self.N,
+        )
+        counts = self._row_counts(out)
+        assert set(counts.values()) == {self.N}
+        assert counts.get("jets") == self.N
+
+    def test_num_test_flag_wins_over_set_override(
+        self, rowcap_data, rowcap_config, rowcap_ckpt, tmp_path
+    ):
+        """num_test=N wins over a coexisting --set data.num_test=M (M != N)."""
+        out = run_inference(
+            [rowcap_config],
+            rowcap_ckpt,
+            rowcap_data["h5"],
+            output=tmp_path / "precedence.h5",
+            set_overrides=[f"data.num_test={self.M}"],
+            num_test=self.N,
+        )
+        counts = self._row_counts(out)
+        assert set(counts.values()) == {self.N}
+
+    def test_set_override_alone_still_applies(
+        self, rowcap_data, rowcap_config, rowcap_ckpt, tmp_path
+    ):
+        """Control: num_test omitted (None) — a --set data.num_test=M override
+        alone still applies, proving num_test does not silently override when absent."""
+        out = run_inference(
+            [rowcap_config],
+            rowcap_ckpt,
+            rowcap_data["h5"],
+            output=tmp_path / "set_only.h5",
+            set_overrides=[f"data.num_test={self.M}"],
+        )
+        counts = self._row_counts(out)
+        assert set(counts.values()) == {self.M}
+
+    def test_minus_one_reads_every_row(self, rowcap_data, rowcap_config, rowcap_ckpt, tmp_path):
+        """num_test=-1 reads every row of the source file (the SaltDataModule
+        'all rows' sentinel) — the full count is read from the source H5, not
+        hardcoded."""
+        with h5py.File(rowcap_data["h5"]) as f:
+            total = f["jets"].shape[0]
+        out = run_inference(
+            [rowcap_config],
+            rowcap_ckpt,
+            rowcap_data["h5"],
+            output=tmp_path / "all.h5",
+            num_test=-1,
+        )
+        counts = self._row_counts(out)
+        assert set(counts.values()) == {total}

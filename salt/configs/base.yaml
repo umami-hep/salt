@@ -22,9 +22,11 @@ callbacks:
   checkpoint:
     class_path: salt.callbacks.Checkpoint
     init_args:
-      # also the filename loss tag ('epoch=NNN-loss=<val/loss>.ckpt') that the
+      # also the filename loss tag ('epoch=NNN-step=N-loss=<val/loss>.ckpt') the
       # salt-test no-ckpt_path fallback globs on — keep in sync with any
-      # fname_string override.
+      # fname_string override. Intra-epoch checkpoints are OPT-IN via
+      # salt.callbacks.StepCheckpoint (docs/training.md); --auto_resume picks
+      # the highest (epoch, step) across both callbacks.
       monitor_loss: val/loss
   progress:
     class_path: salt.callbacks.ProgressBar

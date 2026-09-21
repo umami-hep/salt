@@ -38,7 +38,8 @@ class ClassificationTaskModule(_TaskModuleBase):
     allocates the CE ``weight`` buffer at `bind`, fills it at `materialise()`
     on fresh fits (the only file I/O), and inherits it from the checkpoint on
     resume. A literal ``loss.init_args.weight`` list is exclusive with
-    ``weight_source``.
+    ``weight_source``. The class dict is indexed by the stream's dataset name
+    (`ResolvedSchema.dataset_of`), not the raw stream name.
     """
 
     def __init__(
@@ -110,6 +111,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         # per-sample loss weighting is not part of this module's config surface
         self.sample_weight: str | None = None
         self.weight_source = _checked_weight_source(weight_source)
+        self._class_dict_key: str = stream
         if self.weight_source is not None and "weight" in self.loss_cfg.get("init_args", {}):
             raise ConfigError(
                 "ClassificationTaskModule: class weights already specified in the loss config — "
@@ -156,6 +158,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         """Builds the head; when `weight_source` is set, allocates a ones-initialised
         loss ``weight`` buffer for `materialise` to fill on fresh fits.
         """
+        self._class_dict_key = schema.dataset_of(self.stream)
         init_args = dict(self.loss_cfg.get("init_args", {}))
         if self.weight_source is not None:
             init_args["weight"] = torch.ones(len(self.class_names))
@@ -266,13 +269,14 @@ class ClassificationTaskModule(_TaskModuleBase):
         path = self.weight_source["from_class_dict"]
         with open(path) as fh:
             class_dict = yaml.safe_load(fh)
+        key = self._class_dict_key
         try:
-            values = class_dict[self.stream][self.label]
+            values = class_dict[key][self.label]
         except (KeyError, TypeError):
             raise ValueError(
-                f"Label {self.label!r} for stream {self.stream!r} not found in class dict "
-                f"{path} — drop weight_source and specify class weights manually "
-                f"(cli.py:483-488 semantics)"
+                f"Label {self.label!r} for stream {self.stream!r} (class-dict key {key!r}) "
+                f"not found in class dict {path} — drop weight_source and specify class "
+                f"weights manually (cli.py:483-488 semantics)"
             ) from None
         if len(values) != len(self.class_names):
             raise ValueError(
