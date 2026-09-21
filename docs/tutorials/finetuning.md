@@ -39,7 +39,7 @@ on CERN EOS, and for now they are downloaded from CERNBox in a browser.
 ### Get the data
 
 Download these three folders from CERNBox and put them inside `my-finetune/`
-(created below). Roughly 18.5 GB in total:
+(created below). About 4.08 GB in total:
 
 <https://cernbox.cern.ch/files/spaces/eos/user/n/npond/salt-data/finetuning>
 
@@ -99,10 +99,10 @@ xbb-finetune/
   pp_output_val-full_0_100k.h5
   pp_output_test-full_0_100k.h5
 ftag-finetune/p7085/
-  pp_output_train_260331_split_127.h5
-  pp_output_val_260331_split_003.h5
-  pp_output_test_ttbar_260331_split_002.h5
-  pp_output_test_zprime_260331_split_001.h5
+  train_500k.h5
+  val_100k.h5
+  test_ttbar_100k.h5
+  test_zprime_100k.h5
   class_dict_260331.yaml
   ghost-highstat_260331.yaml
   norm_dict_260331.yaml
@@ -130,7 +130,7 @@ last epoch.
 | Folder | Contents | Used by |
 |---|---|---|
 | `gn3large_model/` | the pretrained GN3Large bundle: `converted.ckpt` (345 MB), `config_v2.yaml`, `norm_dict_v2.yaml` | every example |
-| `ftag-finetune/p7085/` | p7085 FTAG training sample: train `split_127` (~3 M jets), val `split_003` (~850 k), test ttbar `split_002` / Z' `split_001`, `norm_dict_260331.yaml`, `class_dict_260331.yaml`, `ghost-highstat_260331.yaml`, `SHA256SUMS` | worked examples 1–3 |
+| `ftag-finetune/p7085/` | p7085 FTAG training sample: `train_500k.h5` (500,000 jets), `val_100k.h5`, `test_ttbar_100k.h5`, `test_zprime_100k.h5` (100,000 jets each), `norm_dict_260331.yaml`, `class_dict_260331.yaml`, `ghost-highstat_260331.yaml`, `SHA256SUMS` | worked examples 1–3 |
 | `xbb-finetune/` | boosted-Xbb triple, 100 k jets each: `pp_output_train_small.h5`, `pp_output_val-full_0_100k.h5`, `pp_output_test-full_0_100k.h5` (schema: [Boosted Xbb tagging §1](xbb.md#1-get-the-data)) | worked example 4 |
 
 `gn3large_model/config_v2.yaml` sets `norm_dict: norm_dict_v2.yaml`, relative to the current
@@ -142,15 +142,20 @@ the current directory and are overridden the same way, with `configs/norm_dicts/
 
 Three files are used:
 
-- **Train**: `ftag-finetune/p7085/pp_output_train_260331_split_127.h5`, only
-  the first **1,000,000 jets** (`input_samples.num.train: 1000000`; the file
-  has ~3 M, UPP output is pre-shuffled, so a prefix is a fair sample).
-- **Validation**: `ftag-finetune/p7085/pp_output_val_260331_split_003.h5`,
-  the first **200,000** jets **per epoch** (`num.val: 200000`).
-- **Test**: the **same file**, evaluated **in full**. Val doubles as test
-  for now. A disjoint `pp_output_test_ttbar_260331_split_002.h5` exists for
-  when real test statistics (independent of anything seen during validation)
-  are wanted; it is not used for the numbers quoted on this page.
+- **Train**: `ftag-finetune/p7085/train_500k.h5`, **500,000 jets**, read
+  whole (`input_samples.num.train: -1`, which the bundle's `config_v2.yaml`
+  and the shipped `gn3large_base.yaml` already set, so no `num` override is
+  needed). It is the first 500,000 jets of the p7085 train split; UPP output
+  is pre-shuffled, so a prefix is a fair sample.
+- **Validation**: `ftag-finetune/p7085/val_100k.h5`, **100,000 jets**
+  (10,012 b / 21,067 c / 59,471 light), read whole every epoch (`num.val:
+  -1`).
+- **Test**: the **same file**, `val_100k.h5`, evaluated in full. Val doubles
+  as test for the numbers quoted on this page. Two disjoint test sets,
+  `test_ttbar_100k.h5` and `test_zprime_100k.h5` (100,000 jets each, 18,971 b
+  / 18,594 c in each), ship in the same folder for when test statistics
+  independent of anything seen during validation are wanted; point
+  `files.test` at either one to use it.
 
 ## The model you start from
 
@@ -379,20 +384,18 @@ salt fit \
   --init_from gn3large_model/converted.ckpt \
   --model.init_args.modules.norm.init_args.norm_dict=gn3large_model/norm_dict_v2.yaml \
   --model.init_args.modules.norm_calo.init_args.norm_dict=configs/norm_dicts/norm_dict_p7085_calo.yaml \
-  --data.modules.input_samples.init_args.files.train=ftag-finetune/p7085/pp_output_train_260331_split_127.h5 \
-  --data.modules.input_samples.init_args.files.val=ftag-finetune/p7085/pp_output_val_260331_split_003.h5 \
-  --data.modules.input_samples.init_args.num.train=1000000 \
-  --data.modules.input_samples.init_args.num.val=200000 \
+  --data.modules.input_samples.init_args.files.train=ftag-finetune/p7085/train_500k.h5 \
+  --data.modules.input_samples.init_args.files.val=ftag-finetune/p7085/val_100k.h5 \
   --trainer.default_root_dir logs/01_add_calo
 ```
 
-Then evaluate the best-`val/loss` checkpoint on the full test split:
+Then evaluate the best-`val/loss` checkpoint on the full `val_100k.h5`:
 
 ```bash
 salt test \
   --config <run_dir>/config.yaml \
   --ckpt_path <best val/loss ckpt> \
-  --data.modules.input_samples.init_args.files.test=ftag-finetune/p7085/pp_output_val_260331_split_003.h5
+  --data.modules.input_samples.init_args.files.test=ftag-finetune/p7085/val_100k.h5
 ```
 
 ### Reading the evidence
@@ -430,8 +433,8 @@ is a lower bound on the configured `OneCycleLR` `max` for that stage
 | `full_finetune` LR | 9.40e-06 | 9.40e-06 | 3.78e-06 |
 
 **3. The validation loss.** `val/loss` across the `calo_warmup` →
-`full_finetune` boundary: 2.64702 → 2.57295 → 2.55104 across the three
-`calo_warmup` epochs, then 2.45459 at the boundary epoch (epoch 3), which is
+`full_finetune` boundary: 2.85216 → 2.68946 → 2.65955 across the three
+`calo_warmup` epochs, then 2.48043 at the boundary epoch (epoch 3), which is
 also `best_val_loss` at `best_epoch` 3.
 
 `full_finetune` early-stopped after 3 of its 5 available epochs, at epoch 5 of
@@ -442,24 +445,23 @@ epoch itself).
 
 | Stage | Epochs used | Early-stop verdict | Best `val/loss` |
 |---|---|---|---|
-| `calo_warmup` | 3 | ran to its 3-epoch cap | 2.55104 |
-| `full_finetune` | 3 | early-stopped after 3 of 5 | 2.45459 |
+| `calo_warmup` | 3 | ran to its 3-epoch cap | 2.65955 |
+| `full_finetune` | 3 | early-stopped after 3 of 5 | 2.48043 |
 
 Pre → post light-jet and c-jet rejection at fixed b-efficiency working points,
-on the full `pp_output_val_260331_split_003.h5` (901,485 jets: 90,141 b /
-188,663 c / 538,102 light):
+on the full `val_100k.h5` (100,000 jets: 10,012 b / 21,067 c / 59,471 light):
 
 | b-eff WP | light-jet rejection (pre) | light-jet rejection (post) | c-jet rejection (pre) | c-jet rejection (post) |
 |---|---|---|---|---|
-| 60% | 225.9 | 401.3 | 7.320 | 6.991 |
-| 70% | 63.56 | 102.4 | 4.016 | 3.586 |
-| 77% | 27.96 | 44.05 | 2.939 | 2.663 |
-| 85% | 11.56 | 17.30 | 2.179 | 2.035 |
+| 60% | 213.9 | 287.3 | 7.001 | 5.499 |
+| 70% | 59.59 | 73.79 | 3.842 | 3.097 |
+| 77% | 26.59 | 31.57 | 2.873 | 2.349 |
+| 85% | 10.56 | 11.91 | 2.109 | 1.839 |
 
-Light-jet rejection rises at every working point (roughly 1.8x at the 60% WP);
-c-jet rejection falls slightly at every working point. Adding the calo stream
-helps the flavour tagger separate light jets at the cost of a small amount of
-c-jet rejection.
+Light-jet rejection rises at every working point (roughly 1.3x at the 60% WP);
+c-jet rejection falls at every working point (7.001 → 5.499 at 60%, a 21%
+loss). Adding the calo stream helps the flavour tagger separate light jets at
+the cost of c-jet rejection.
 
 ## Worked example 2 — add a jet task (b/c-charge head)
 
@@ -547,8 +549,9 @@ trainer:
     built-in check for this. Before training on a new sample, verify every
     `HadronGhostInitialTruthLabelPdgId` value that occurs in it is a key of
     this `label_map`. The tutorial's own experiment runs exactly this check,
-    as a `data`-stage pass over the first 1,000,000 train jets and the full
-    validation file, before any training starts.
+    as a `data`-stage pass over the whole of `train_500k.h5` and
+    `val_100k.h5`, before any training starts (114 distinct PDG ids seen, all
+    mapped, 0 unmapped).
 
 ### The accounting
 
@@ -605,10 +608,8 @@ salt fit \
   --config configs/finetune_gn3large_add_charge_head.yaml \
   --init_from gn3large_model/converted.ckpt \
   --model.init_args.modules.norm.init_args.norm_dict=gn3large_model/norm_dict_v2.yaml \
-  --data.modules.input_samples.init_args.files.train=ftag-finetune/p7085/pp_output_train_260331_split_127.h5 \
-  --data.modules.input_samples.init_args.files.val=ftag-finetune/p7085/pp_output_val_260331_split_003.h5 \
-  --data.modules.input_samples.init_args.num.train=1000000 \
-  --data.modules.input_samples.init_args.num.val=200000 \
+  --data.modules.input_samples.init_args.files.train=ftag-finetune/p7085/train_500k.h5 \
+  --data.modules.input_samples.init_args.files.val=ftag-finetune/p7085/val_100k.h5 \
   --trainer.default_root_dir logs/02_add_charge_head
 ```
 
@@ -616,7 +617,7 @@ salt fit \
 salt test \
   --config <run_dir>/config.yaml \
   --ckpt_path <best val/loss ckpt> \
-  --data.modules.input_samples.init_args.files.test=ftag-finetune/p7085/pp_output_val_260331_split_003.h5
+  --data.modules.input_samples.init_args.files.test=ftag-finetune/p7085/val_100k.h5
 ```
 
 ### Results
@@ -626,27 +627,32 @@ the base model has no charge head, so there is no "pre" to compare against):
 
 | | pred. bquark | pred. antibquark | pred. cquark | pred. anticquark | pred. other |
 |---|---|---|---|---|---|
-| **true bquark** | 52.8% | 25.2% | 0.9% | 0.9% | 20.2% |
-| **true antibquark** | 26.7% | 51.7% | 1.1% | 0.6% | 20.0% |
-| **true cquark** | 6.5% | 13.0% | 19.8% | 5.2% | 55.5% |
-| **true anticquark** | 13.1% | 7.0% | 10.5% | 14.0% | 55.4% |
-| **true other** | 1.1% | 1.2% | 0.3% | 0.2% | 97.2% |
+| **true bquark** | 26.4% | 44.2% | 1.2% | 1.4% | 26.7% |
+| **true antibquark** | 17.2% | 54.4% | 1.0% | 1.1% | 26.3% |
+| **true cquark** | 5.4% | 11.8% | 19.0% | 6.0% | 57.8% |
+| **true anticquark** | 6.0% | 11.4% | 19.8% | 6.0% | 56.8% |
+| **true other** | 0.1% | 1.5% | 0.3% | 0.2% | 98.0% |
 
-Overall charge accuracy: 75.9%.
+Overall charge accuracy: 74.2%.
+
+The head predicts `antibquark` for 44.2% of true b-quark jets and `bquark`
+for only 26.4%; for true anti-b jets the split is 54.4% / 17.2%. It separates
+b-flavoured jets from `other` but does not resolve the sign of the charge on
+this training set.
 
 The existing flavour tagger should not regress just because a sibling head
 was added. Pre → post light/c rejection at the same four working points as
-example 1, on this run's own `pp_output_val_260331_split_003.h5` eval:
+example 1, on this run's own `val_100k.h5` eval:
 
 | b-eff WP | light-jet rejection (pre) | light-jet rejection (post) | c-jet rejection (pre) | c-jet rejection (post) |
 |---|---|---|---|---|
-| 60% | 225.9 | 470.8 | 7.320 | 11.39 |
-| 70% | 63.56 | 122.5 | 4.016 | 5.322 |
-| 77% | 27.96 | 54.38 | 2.939 | 3.477 |
-| 85% | 11.56 | 21.08 | 2.179 | 2.318 |
+| 60% | 215.5 | 328.6 | 7.029 | 7.100 |
+| 70% | 59.65 | 89.97 | 3.844 | 3.572 |
+| 77% | 26.61 | 40.18 | 2.872 | 2.622 |
+| 85% | 10.57 | 14.64 | 2.110 | 1.929 |
 
-The flavour tagger did not regress: light-jet rejection and c-jet rejection
-both rise at every working point.
+Light-jet rejection rises at every working point; c-jet rejection is flat at
+60% (7.029 → 7.100) and slightly lower at 70%, 77%, and 85%.
 
 ## Worked example 3 — add variables to an existing collection
 
@@ -659,12 +665,11 @@ overlay itself.
 collection: p7085 advertises a couple of spare track-level variables beyond
 the 24 the bundle reads. But UPP only writes
 the *training-config* variables into its train/val output: p7085's
-`pp_output_train_260331_split_127.h5` and `pp_output_val_260331_split_003.h5`
-carry **exactly** the 24 track / 5 flow / 28 electron variables the bundle's
-config already reads, no more. The spare track variables exist only in the
-two **test** files. The only collection with unused input variables
-in the files this tutorial trains and validates on is **`jets`**, so that is
-what this example widens, adding `mass`.
+`train_500k.h5` and `val_100k.h5` carry **exactly** the 24 track / 5 flow /
+28 electron variables the bundle's config already reads, no more. The spare
+track variables exist only in the two **test** files. The only collection
+with unused input variables in the files this tutorial trains and validates
+on is **`jets`**, so that is what this example widens, adding `mass`.
 
 ### The overlay
 
@@ -741,12 +746,14 @@ shape-compatible.
 **Where the new stats come from.** Neither p7085's own
 `norm_dict_260331.yaml` nor the bundle's `norm_dict_v2.yaml` has a `{mean, std}`
 entry for `jets.mass`: it is an unused-by-model input, not missing
-documentation. The parent experiment's `data` stage
-computes it over the first 1,000,000 jets of
-`pp_output_train_260331_split_127.h5` and appends them to
+documentation. The parent experiment's `data` stage computes it over the
+first 1,000,000 jets of the full p7085 train split (of which `train_500k.h5`
+is the first 500,000 jets) and appends them to
 `docs/tutorials/configs/finetuning/norm_dicts/norm_dict_p7085_jets_extra.yaml` (your
 copy is `configs/norm_dicts/norm_dict_p7085_jets_extra.yaml`), which
 otherwise starts as an exact copy of the bundle's `norm_dict_v2.yaml` body.
+The shipped file already carries the value; nothing needs recomputing to run
+this example.
 
 !!! note "A note on `MaskedInputNormaliser`"
 
@@ -816,10 +823,8 @@ salt fit \
   --config configs/finetune_gn3large_add_jet_vars.yaml \
   --init_from gn3large_model/converted.ckpt \
   --model.init_args.modules.norm_p7085.init_args.norm_dict=configs/norm_dicts/norm_dict_p7085_jets_extra.yaml \
-  --data.modules.input_samples.init_args.files.train=ftag-finetune/p7085/pp_output_train_260331_split_127.h5 \
-  --data.modules.input_samples.init_args.files.val=ftag-finetune/p7085/pp_output_val_260331_split_003.h5 \
-  --data.modules.input_samples.init_args.num.train=1000000 \
-  --data.modules.input_samples.init_args.num.val=200000 \
+  --data.modules.input_samples.init_args.files.train=ftag-finetune/p7085/train_500k.h5 \
+  --data.modules.input_samples.init_args.files.val=ftag-finetune/p7085/val_100k.h5 \
   --trainer.default_root_dir logs/03_add_jet_vars
 ```
 
@@ -827,24 +832,24 @@ salt fit \
 salt test \
   --config <run_dir>/config.yaml \
   --ckpt_path <best val/loss ckpt> \
-  --data.modules.input_samples.init_args.files.test=ftag-finetune/p7085/pp_output_val_260331_split_003.h5
+  --data.modules.input_samples.init_args.files.test=ftag-finetune/p7085/val_100k.h5
 ```
 
 ### Results
 
 | Stage | Epochs used | Early-stop verdict | Best `val/loss` |
 |---|---|---|---|
-| `embed_warmup` | 3 | ran to its 3-epoch cap | 3.49599 |
-| `full_finetune` | 5 | ran to its 5-epoch cap (`max_epochs`, not an early stop) | 3.16471 |
+| `embed_warmup` | 3 | ran to its 3-epoch cap | 3.71710 |
+| `full_finetune` | 5 | ran to its 5-epoch cap (`max_epochs`, not an early stop) | 3.27913 |
 
 Pre → post light-jet and c-jet rejection at the same four working points:
 
 | b-eff WP | light-jet rejection (pre) | light-jet rejection (post) | c-jet rejection (pre) | c-jet rejection (post) |
 |---|---|---|---|---|
-| 60% | 225.8 | 22.43 | 7.319 | 2.992 |
-| 70% | 63.54 | 12.00 | 4.015 | 2.392 |
-| 77% | 27.95 | 8.130 | 2.940 | 2.077 |
-| 85% | 11.56 | 5.339 | 2.179 | 1.766 |
+| 60% | 213.9 | 13.79 | 7.001 | 2.529 |
+| 70% | 59.65 | 7.915 | 3.842 | 2.070 |
+| 77% | 26.59 | 5.801 | 2.873 | 1.843 |
+| 85% | 10.56 | 3.972 | 2.109 | 1.590 |
 
 Widening the `jets` collection is the accounting this page already calls the
 expensive one: 7 modules loaded, 4 new, 4 dropped, because touching `jets`
@@ -852,7 +857,7 @@ rebuilds `norm`, `track_embed`, `flow_embed`, and `electron_embed` from
 scratch. On this budget it shows: the run hit its 8-epoch ceiling without
 early-stopping, and its best epoch was its last (epoch 7 of 8), so it had not
 converged. The result at this stopping point is a large loss of rejection,
-roughly ten-fold at the 60% working point, degraded at all four working
+roughly fifteen-fold at the 60% working point, degraded at all four working
 points and in c-jet rejection as well.
 
 ## Worked example 4 — backbone transfer to boosted Xbb
