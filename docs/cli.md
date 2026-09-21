@@ -41,16 +41,27 @@ field typo fails statically before any data is read, and the configured
 `class_names` are cross-checked, by set and by order, against the file's
 label attrs.
 
-**Where outputs land.** `config.yaml`, `ckpts/` and the fit
-plan/graph artifacts are written into the trainer log dir, which is your
-cwd unless you pass `--trainer.default_root_dir <dir>`. That is why the
-quickstart command above sets it: without it, a fit run from the repo root
-drops around eight files into the checkout. The end-of-fit message prints
-the exact paths, and a leftover `config.yaml` from a previous run in the
-same directory is overwritten rather than left stale. `salt test` and
-`salt inference` artifacts land next to the checkpoint they read, not in
-`default_root_dir`; see [salt test](#salt-test) and [What a run
-writes](#what-a-run-writes) below.
+**Where outputs land.** On `salt fit`, `--trainer.default_root_dir` (or
+`logs/` when you don't pass it — no longer your cwd) is the *parent* of the
+run, not the run directory itself: salt rewrites it to a timestamped
+`<root>/<name>_YYYYMMDD-THHMMSS/` before anything is written, where
+`<name>` comes from the config's `name:` field. `config.yaml` and the fit
+plan/graph artifacts land directly in that run directory, and checkpoints
+go in `<run dir>/ckpts/`. This doc calls that directory `<run_dir>`
+throughout. That is why the quickstart command above sets
+`--trainer.default_root_dir`: the run directory it actually produces is
+`/tmp/v2/run/GN2v2_opendata_<timestamp>/`, not `/tmp/v2/run/` itself.
+Pass `--log_suffix <suffix>` (`-ls`) to use a fixed `<root>/<name>_<suffix>/`
+directory instead of a fresh timestamp on every run — see the flag list
+below. The end-of-fit message prints the resolved run directory, and a
+leftover `config.yaml` from a previous run into the same directory (i.e. a
+repeated `--log_suffix`) is overwritten rather than left stale. Re-passing
+a saved `config.yaml` as `--config` (its `default_root_dir` already ends in
+`<name>_<ts>` or `<name>_<suffix>`) starts a *sibling* run next to it, never
+a run nested one level deeper — the rewrite strips that trailing component
+off `<root>` first. `salt test` and `salt inference` artifacts land next to
+the checkpoint they read, not in the run directory itself; see [salt
+test](#salt-test) and [What a run writes](#what-a-run-writes) below.
 
 ## salt fit
 
@@ -71,13 +82,39 @@ documented once, on [How a config is
 assembled](configuration.md#how-a-config-is-assembled); this section is
 about running `fit`, not about the merge itself.
 
-Two flags worth knowing before your first run:
+A few flags worth knowing before your first run:
 
 - `--trainer.fast_dev_run 2` runs two training and two validation batches
   and exits, with logging and checkpointing suppressed. Reach for it to
   check that a config parses and a fresh module wires up, before spending
   a real epoch on it. Always spell the flag `--trainer.fast_dev_run`
   in full; a bare, unnamespaced spelling is not a recognised flag.
+- `--log_suffix <suffix>` (short `-ls`) names the run directory
+  `<root>/<name>_<suffix>/` in place of a fresh `<name>_<timestamp>/` each
+  time, so repeated runs land in the same directory (overwriting
+  `config.yaml` each time). Useful while iterating on a config, and it is
+  the shape `--auto_resume` looks for when a batch script relaunches after
+  a requeue under a fixed name. See [Where outputs
+  land](#quickstart) above.
+- `--auto_resume` (fit only) continues *this* run from its own
+  furthest-trained checkpoint, if one already exists — the crash/requeue
+  case, distinct from `--ckpt_path`. Salt scans every sibling
+  `<root>/<name>_*/{ckpts,checkpoints}/*.ckpt` directory for the run and
+  resumes from the checkpoint with the highest `(epoch, global_step)`
+  (mtime tie-break; step-only checkpoints count; a name without both
+  `epoch=` and `step=`, such as `last.ckpt`, is ignored) — overriding a
+  supplied `--ckpt_path` if one was also given. With no sibling checkpoint
+  found, the run falls back to `--ckpt_path` if you passed one, else starts
+  fresh. `SALT_AUTO_RESUME` (`1`/`true`/`yes`, case-insensitive) is the
+  environment-variable equivalent, for batch scripts that relaunch after a
+  requeue without editing the command line. Every case prints exactly one
+  `auto-resume: ...` line on stdout naming what happened, and the resolved
+  checkpoint never leaks into the saved `config.yaml`'s `ckpt_path` (which
+  stays `null`). `--init_from` together with a checkpoint auto-resume
+  actually resolves to is a `ConfigError` — drop `--init_from` once a
+  checkpoint exists (a requeued fine-tune that always passes both hits this
+  on its second launch, by design). See
+  [Auto-resume](training.md#auto-resume) for the full precedence rule.
 - `--init_from <ckpt>` warm-starts a fresh run from a checkpoint's weights,
   loaded per module with a strict per-module accounting: retained modules
   must be fully covered by the checkpoint, modules in the config but absent
@@ -172,8 +209,14 @@ lowest `loss=`-named checkpoint under `ckpts/` (salt's own `Checkpoint`
 callback default, `salt/callbacks/checkpoint.py`) or `checkpoints/`
 (Lightning's `ModelCheckpoint` default) next to the single `--config` you
 passed; `base.yaml` names checkpoint files
-`epoch=NNN-loss=<val/loss>.ckpt` so this glob always matches a v2 run's
-own output. This only works with exactly one `--config`: when you stack a
+`epoch=NNN-step=N-loss=<val/loss>.ckpt` so this glob always matches a v2
+run's own output. The glob keys on the `loss=` token only, so it never
+matches a step-only checkpoint (`epoch=NNN-step=N.ckpt`, no `loss=` tag)
+written by the opt-in intra-epoch `StepCheckpoint` callback — best-checkpoint
+selection and `--auto_resume`'s highest-`(epoch, global_step)` rule are
+deliberately different rules over the same directory, see
+[Auto-resume](training.md#auto-resume). This only works with exactly one
+`--config`: when you stack a
 second `--config` on top of the run's saved one, pass `--ckpt_path`
 explicitly, because the glob needs a single config file to anchor its
 search directory on. See [Checkpoints and
@@ -252,7 +295,9 @@ wrote schema for N group(s) to <output>
 
 ```bash
 salt inference --ckpt_path <run_dir>/ckpts/....ckpt \
+  --data.num_test 1000 \
   --data.test_file /tmp/v2/unlabelled.h5
+# --data.num_test N: first N rows only (-1 = every row, the default)
 # config inferred at <ckpt>/../../config.yaml (pass -c to override; -c stacks
 # like fit); output defaults to {ckpt_dir}/{ckpt_stem}__inference_{sample}.h5
 ```
@@ -272,6 +317,11 @@ tolerance. One H5 column is written per ONNX tuple output, named
 seq-classification argmax lands as one int8 `TrackOrigin` column, not one
 column per class); per-token columns are zero-padded to the file length,
 with a `mask` column marking the pad positions.
+
+`--data.num_test N` runs the eager loop over the first N rows of the file
+(`-1`, the default, is every row); it is the same cap `salt test` honours
+and it takes precedence over a `--set data.num_test=` override, so `--set`
+remains the escape hatch for any OTHER config key.
 
 **Label-free.** The dataset demand for this command is derived entirely
 from the export sink's `inputs`: feature ports, pad masks, and
@@ -487,7 +537,29 @@ module's flattened requires/produces with resolved specs; and
 `graph_<stage>.{dot,svg}` plus `graph_<stage>_dataset.{dot,svg}`, the
 rendered graph images.
 
-Fit artifacts go into the trainer log dir (see [Where outputs
+A fit run's directory — `<run_dir>` = `<root>/<name>_<ts>/` or
+`<root>/<name>_<suffix>/` with `--log_suffix`, see [Where outputs
+land](#quickstart) — ends up holding:
+
+```
+<run_dir>/
+├── config.yaml
+├── plan_fit.txt, plan_val.txt
+├── resolved_io.yaml
+├── graph_fit.{dot,svg}, graph_fit_dataset.{dot,svg}
+├── graph_val.{dot,svg}, graph_val_dataset.{dot,svg}
+└── ckpts/
+    ├── epoch=000-step=1000-loss=0.45123.ckpt   # epoch-end (Checkpoint)
+    ├── epoch=000-step=500.ckpt                 # intra-epoch (StepCheckpoint, opt-in)
+    └── ...
+```
+
+The intra-epoch `epoch=<NNN>-step=<N>.ckpt` files only appear when a
+`salt.callbacks.StepCheckpoint` callback is configured (see [Checkpoints
+and resume](training.md#checkpoints-and-resume)); they are not written by
+default.
+
+Fit artifacts go into that run directory (see [Where outputs
 land](#quickstart) above); test artifacts go next to the checkpoint, in
 the same directory as the eval H5. This is default-on via the `artifacts:`
 entry in `base.yaml` (`salt.callbacks.GraphArtifacts`); delete it with

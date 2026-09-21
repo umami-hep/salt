@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import torch
@@ -34,7 +34,9 @@ class Normaliser(SaltModelModule):
     ``materialise()`` is the only file-touching hook (loads the norm dict and
     fills the buffers) — skipped on checkpoint load, where values arrive via
     the state_dict. Produces NEW ``normed.<stream>`` keys; never mutates
-    ``inputs.*``.
+    ``inputs.*``. Norm-dict entries are looked up by the reader's dataset name
+    for each stream (`ResolvedSchema.dataset_of`), falling back to the stream
+    name.
     """
 
     def __init__(
@@ -74,6 +76,7 @@ class Normaliser(SaltModelModule):
         self.streams = tuple(streams)
         self.global_object = global_object
         self._fields: dict[str, tuple[str, ...]] = {}
+        self._datasets: dict[str, str] = {}
         self._bound = False
         # python mirror of the `materialised` buffer, read by forward. Reading
         # the buffer there costs a `.item()`, which is a graph break under
@@ -106,6 +109,7 @@ class Normaliser(SaltModelModule):
             key = f"inputs.{stream}"
             width = schema.width(key)
             self._fields[stream] = schema.fields_of(key)
+            self._datasets[stream] = schema.dataset_of(stream)
             self.register_buffer(f"means_{stream}", torch.zeros(width))
             self.register_buffer(f"stds_{stream}", torch.ones(width))
         self.register_buffer("materialised", torch.tensor(False))
@@ -119,13 +123,24 @@ class Normaliser(SaltModelModule):
         if flag is not None:
             self._materialised_flag = bool(flag)
 
-    def preflight(self) -> None:
+    @staticmethod
+    def _via(stream: str, key: str) -> str:
+        """``" (stream '<stream>')"`` when the dataset key differs from the stream, else ``""``."""
+        return f" (stream {stream!r})" if key != stream else ""
+
+    def preflight(self, datasets: Mapping[str, str] | None = None) -> None:
         """Fail-fast, data-free norm-dict validation.
 
         Reads ONLY the norm-dict YAML: the file must exist, parse, and carry
         every configured stream; when already bound, per-variable mean/std
         entries are checked too. Called by `SaltModule.setup` on fresh fits
         (hard error) and by ``salt graph validate`` (warning).
+
+        Parameters
+        ----------
+        datasets : Mapping[str, str] | None, optional
+            Stream->dataset map for the unbound validate path; bound modules
+            use the map captured at `bind`.
 
         Raises
         ------
@@ -150,25 +165,28 @@ class Normaliser(SaltModelModule):
             ) from err
         if not isinstance(norm_dict, dict):
             raise ConfigError(f"{prefix}: norm dict {path} must be a mapping\n{fix}")
+        lookup = datasets if datasets is not None else self._datasets
         for stream in self.streams:
-            if stream not in norm_dict:
+            key = lookup.get(stream, stream)
+            via = self._via(stream, key)
+            if key not in norm_dict:
                 raise ConfigError(
-                    f"{prefix}: missing input type {stream!r} in {path}. "
+                    f"{prefix}: missing input type {key!r}{via} in {path}. "
                     f"Choose from {sorted(norm_dict)}."
                 )
             if not self._fields:
                 continue  # unbound (the data-free `salt graph validate` path)
             variables = self._fields[stream]
-            if missing := set(variables) - set(norm_dict[stream]):
+            if missing := set(variables) - set(norm_dict[key]):
                 raise ConfigError(
-                    f"{prefix}: missing variables {sorted(missing)} for {stream!r} in {path}. "
-                    f"Choose from {sorted(norm_dict[stream])}.\n"
+                    f"{prefix}: missing variables {sorted(missing)} for {key!r}{via} in {path}. "
+                    f"Choose from {sorted(norm_dict[key])}.\n"
                     f"  fix: add mean/std entries for {sorted(missing)} to {path}, or remove "
                     f"them from the features variable list "
                     f"(config: data.modules.features.init_args.variables.{stream})"
                 )
             for variable in variables:
-                entry = norm_dict[stream][variable]
+                entry = norm_dict[key][variable]
                 try:
                     mean, std = float(entry["mean"]), float(entry["std"])
                 except (KeyError, TypeError, ValueError):
@@ -204,25 +222,27 @@ class Normaliser(SaltModelModule):
         with open(self.norm_dict_path) as fh:
             norm_dict = yaml.safe_load(fh)
         for stream in self.streams:
-            if stream not in norm_dict:
+            key = self._datasets.get(stream, stream)
+            via = self._via(stream, key)
+            if key not in norm_dict:
                 raise ValueError(
-                    f"Missing input type {stream!r} in {self.norm_dict_path}. "
+                    f"Missing input type {key!r}{via} in {self.norm_dict_path}. "
                     f"Choose from {sorted(norm_dict)}."
                 )
             variables = self._fields[stream]
-            if missing := set(variables) - set(norm_dict[stream]):
+            if missing := set(variables) - set(norm_dict[key]):
                 raise ValueError(
-                    f"Missing variables {sorted(missing)} for {stream!r} in "
-                    f"{self.norm_dict_path}. Choose from {sorted(norm_dict[stream])}.\n"
+                    f"Missing variables {sorted(missing)} for {key!r}{via} in "
+                    f"{self.norm_dict_path}. Choose from {sorted(norm_dict[key])}.\n"
                     f"  fix: add mean/std entries for {sorted(missing)} to "
                     f"{self.norm_dict_path}, or remove them from the features variable "
                     f"list (config: data.modules.features.init_args.variables.{stream})"
                 )
             means = torch.as_tensor(
-                [float(norm_dict[stream][v]["mean"]) for v in variables], dtype=torch.float32
+                [float(norm_dict[key][v]["mean"]) for v in variables], dtype=torch.float32
             )
             stds = torch.as_tensor(
-                [float(norm_dict[stream][v]["std"]) for v in variables], dtype=torch.float32
+                [float(norm_dict[key][v]["std"]) for v in variables], dtype=torch.float32
             )
             if not torch.isfinite(means).all() or not torch.isfinite(stds).all():
                 raise ValueError(

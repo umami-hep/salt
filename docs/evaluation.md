@@ -89,8 +89,10 @@ To read the file back into Python (for example to check an ONNX export
 against the scores `salt test` produced), see
 [Check it against salt](deployment/python.md#4-check-it-against-salt).
 
-!!! note "`hdf5plugin` is not optional"
+!!! note "Plain `h5py` reads the file"
 
-    salt writes its eval H5 with a blosc filter. Without `import hdf5plugin`
-    the read fails with an unhelpful `can't open directory (.../plugin)`
-    error rather than anything about compression.
+    salt writes its eval H5 with HDF5's `lzf` filter, which ships inside
+    `h5py` itself — no `hdf5plugin` import and no `HDF5_PLUGIN_PATH` are
+    needed to read it back, in the container, on lxplus, or in a bare venv.
+    (`lzf` is an h5py-provided filter, so a non-h5py HDF5 reader would still
+    need an lzf-capable build.)

@@ -17,7 +17,9 @@ data:
           tracks: {global_object: false, dataset: tracks_ghost}
           flows: {global_object: false}
           electrons: {global_object: false}
-          global: {global_object: true}
+          # 'global' is a second view of the jets dataset (no literal 'global' H5
+          # group; see the ONNX alias under export.onnx_export.inputs)
+          global: {global_object: true, dataset: jets}
     features:
       class_path: salt.data.Features
       init_args:

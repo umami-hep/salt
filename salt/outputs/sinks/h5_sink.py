@@ -527,6 +527,9 @@ class H5OutputSink(RuntimeSink):
             jets_name=next(iter(dtypes)),  # batch-sizing group (v1 jets_name semantics)
             precision="half" if self.half_precision else "full",
             num_jets=total,  # FIXED mode: valid empty file for an empty test set
+            # h5py-native lzf (NOT ftag's default lz4 via hdf5plugin): plain
+            # h5py reads the file back anywhere with zero setup
+            compression="lzf",
         )
         self._rows_written = 0
         self._expected = total

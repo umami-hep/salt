@@ -56,11 +56,12 @@ Two consequences worth internalising:
 {checkpoint_dir}/{checkpoint_stem}__test_{sample}.h5
 ```
 
-For example, evaluating `logs/GN2_20250101/ckpts/epoch=009-val_loss=0.64.ckpt`
+For example, evaluating
+`logs/GN2_20250101-T120000/ckpts/epoch=009-step=40000-loss=0.64.ckpt`
 on `pp_output_test_ttbar.h5` gives:
 
 ```
-logs/GN2_20250101/ckpts/epoch=009-val_loss=0.64__test_ttbar.h5
+logs/GN2_20250101-T120000/ckpts/epoch=009-step=40000-loss=0.64__test_ttbar.h5
 ```
 
 `{sample}` comes from the test file's stem (the fourth `_`-separated field if

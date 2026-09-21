@@ -249,7 +249,7 @@ A dict of named output sinks and writers controlling what `salt test` writes to 
 
 ### `trainer:`
 
-Passed straight through to Lightning's `Trainer`. `base.yaml` sets `accelerator: auto`, `devices: 1`, a `CometLogger`, and `log_every_n_steps: 50`. `trainer.callbacks` is reserved for stock Lightning callbacks; salt's own callbacks belong under `callbacks:` below, not here. `--trainer.default_root_dir` and the run-directory layout it controls are covered at [`salt fit`](cli.md#salt-fit).
+Passed straight through to Lightning's `Trainer`. `base.yaml` sets `accelerator: auto`, `devices: 1`, a `CometLogger`, and `log_every_n_steps: 50`. `trainer.callbacks` is reserved for stock Lightning callbacks; salt's own callbacks belong under `callbacks:` below, not here. `trainer.default_root_dir` is the *parent* of the timestamped run directory salt actually writes into on `fit` (`<default_root_dir>/<name>_<timestamp>/`, or `<name>_<suffix>` with `--log_suffix`) — it is not the run directory itself; see [`salt fit`](cli.md#salt-fit) for the full rewrite rule and the run-directory layout.
 
 ### `callbacks:`
 
@@ -257,7 +257,8 @@ A dict of named callbacks, deep-merged the same way as `data.modules` and `model
 
 | Key | Class | Purpose |
 | --- | --- | --- |
-| `checkpoint` | `salt.callbacks.Checkpoint` | writes `epoch=NNN-loss=<val/loss>.ckpt` under `ckpts/`, monitoring the metric named by its own `monitor_loss` init arg (default `val/loss`) — this is salt's parameter name, not Lightning's `monitor`. Keep the `loss=` filename stem in sync with any `fname_string` override: `salt test` run without `--ckpt_path` resolves the best epoch by globbing `{ckpts,checkpoints}/*.ckpt` and parsing that stem. |
+| `checkpoint` | `salt.callbacks.Checkpoint` | writes `epoch=NNN-step=N-loss=<val/loss>.ckpt` under `ckpts/`, monitoring the metric named by its own `monitor_loss` init arg (default `val/loss`) — this is salt's parameter name, not Lightning's `monitor`. Keep the `loss=` filename stem in sync with any `fname_string` override: `salt test` run without `--ckpt_path` resolves the best epoch by globbing `{ckpts,checkpoints}/*.ckpt` and parsing that stem (a `step_checkpoint` file below is never matched, since it carries no `loss=` tag). |
+| `step_checkpoint` | `salt.callbacks.StepCheckpoint` | opt-in (not in base.yaml): intra-epoch `epoch=NNN-step=N.ckpt` under `ckpts/` every N training steps or every T seconds (exactly one trigger), keeps only the latest by default; picked up by `--auto_resume`, ignored by `salt test` |
 | `progress` | `salt.callbacks.ProgressBar` | training progress bar |
 | `lr_monitor` | `lightning.pytorch.callbacks.LearningRateMonitor` | logs the learning rate; dropped automatically when no logger is attached (it hard-raises on a logger-less trainer), or delete it explicitly with `lr_monitor: null` |
 | `model_summary` | `lightning.pytorch.callbacks.ModelSummary` | prints the module tree at fit start |

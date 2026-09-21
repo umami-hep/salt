@@ -37,6 +37,7 @@ from salt.model.bind import (
     ResolvedSchema,
     bind_all,
     materialise_all,
+    reader_stream_datasets,
     resolve_bind_schema,
 )
 from salt.model.modules.losses import LossGLS, LossSum
@@ -788,14 +789,18 @@ class SaltModule(lightning.LightningModule):
             self.compile_mode(Mode.FIT, self._boundary(dm.train_dset, "train"))
             self.compile_mode(Mode.VAL, self._boundary(dm.val_dset, "val"))
             self._assert_fit_val_identical()
-            check_class_names(self._graph_modules, dm.train_dset.reader)
-            resolve_origin_weighting(self._graph_modules, dm.train_dset.reader)
+            reader = dm.train_dset.reader
+            check_class_names(self._graph_modules, reader)
+            resolve_origin_weighting(self._graph_modules, reader)
         else:
             self.compile_mode(Mode.TEST, self._boundary(dm.test_dset, "test"))
-            check_class_names(self._graph_modules, dm.test_dset.reader)
-            resolve_origin_weighting(self._graph_modules, dm.test_dset.reader)
+            reader = dm.test_dset.reader
+            check_class_names(self._graph_modules, reader)
+            resolve_origin_weighting(self._graph_modules, reader)
             self._validate_writer_specs(dm.test_dset)
-        self._ensure_bound()
+        # the reader's stream->dataset map rides on the schema so norm/class-dict
+        # lookups resolve by dataset name, not the raw config stream name
+        self._ensure_bound(reader_stream_datasets(reader))
         # --init_from: warm start weights AFTER bind (params now carry their
         # resolved shapes) and BEFORE optimizer construction / the first step
         # (both are strictly later in the Lightning fit sequence). Fit-only —
@@ -1044,6 +1049,9 @@ class SaltModule(lightning.LightningModule):
         Called from ``on_fit_start`` on fresh fits only. On an ``--init_from``
         warm start only the to-be-materialised (checkpoint-uncovered) modules
         are passed — a retained module's file need not exist on this machine.
+        The duck-typed contract is ``preflight(datasets=None)``: bound modules
+        resolve dict keys through the map captured at `bind`; ``salt graph
+        validate`` passes the reader map explicitly because it never binds.
         """
         for module in (self._graph_modules if modules is None else modules).values():
             preflight = getattr(module, "preflight", None)
@@ -1089,15 +1097,16 @@ class SaltModule(lightning.LightningModule):
             )
         return dset.boundary_specs()
 
-    def _ensure_bound(self) -> None:
+    def _ensure_bound(self, datasets: Mapping[str, str] | None = None) -> None:
         """Resolve the bind schema from the compiled plans and bind once; raises
-        `ConfigError` if no plan was compiled yet.
+        `ConfigError` if no plan was compiled yet. `datasets` is the reader's
+        stream->dataset map (empty when bound without a reader).
         """
         if self._bound:
             return
         if not self.plans:
             raise ConfigError("bind before any compiled plan — call setup/compile_mode first")
-        self._bind(resolve_bind_schema(self.plans.values()))
+        self._bind(resolve_bind_schema(self.plans.values(), datasets=datasets))
 
     def _bind(self, schema: ResolvedSchema) -> None:
         """Bind all modules to a resolved schema, exactly once; raises
@@ -1412,6 +1421,9 @@ class SaltModule(lightning.LightningModule):
             )
             return
         checkpoint[CKPT_KEY] = {
+            # schema.datasets is intentionally NOT serialised — materialise is
+            # skipped on checkpoint load, so the stream->dataset map is never
+            # needed again once the buffers are restored from the state_dict
             "schema": {
                 "widths": dict(self.schema.widths),
                 "fields": {key: list(val) for key, val in self.schema.fields.items()},

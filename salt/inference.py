@@ -207,6 +207,7 @@ def run_inference(
     output: str | Path | None = None,
     set_overrides: Sequence[str] = (),
     batch_size: int | None = None,
+    num_test: int | None = None,
 ) -> Path:
     """The programmatic core of ``salt inference``.
 
@@ -235,6 +236,11 @@ def run_inference(
         ``KEY=VALUE`` config overrides (the ``--set`` flag), by default ().
     batch_size : int | None, optional
         Read-slab size; default the datamodule's configured ``batch_size``.
+    num_test : int | None, optional
+        Row cap forwarded as ``data.num_test`` — appended AFTER
+        ``set_overrides`` so it wins over a ``--set data.num_test=`` entry;
+        ``-1`` reads every row; ``None`` (default) leaves the config value in
+        force.
 
     Returns
     -------
@@ -251,6 +257,10 @@ def run_inference(
     from salt.model.saltmodule import SaltModule
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
+    if num_test is not None:
+        # appended last: the parser takes entries in order, so this flag beats
+        # any --set data.num_test= entry
+        overrides.append(f"data.num_test={num_test}")
     cli = _run_free_cli(config_paths, overrides)
     export_sink = _static_onnx_export_sink(cli)
     if export_sink is None:
@@ -296,7 +306,8 @@ def run_inference(
     sink = build_inference_sink(cli.model._output_section, output)  # noqa: SLF001 - section home
     # the sink's lifecycle is driven directly — no Lightning test loop runs
     # here, so the context is built from what this driver genuinely knows.
-    # num_test_batches is None: inference always covers the whole dataset.
+    # the eager loop covers all len(dset) rows; the datamodule's num_test cap
+    # (--data.num_test, default every row) does the limiting, never this driver.
     ctx = SinkContext(
         run_name=getattr(model, "name", None) or "salt",
         datamodule=dm,
@@ -351,6 +362,14 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         help="H5 file to run over — labelled or label-free (labels are never demanded)",
     )
     parser.add_argument(
+        "--data.num_test",
+        dest="num_test",
+        type=int,
+        default=None,
+        help="row cap: run over the first N rows of the file (-1 = every row, the "
+        "default); wins over a --set data.num_test= entry",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -369,7 +388,7 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         default=[],
         metavar="KEY=VALUE",
         help="config override applied on the run-free parse (repeatable), e.g. "
-        "--set data.num_test=1000",
+        "--set data.modules.reader.init_args.schema=schema.yaml",
     )
     return parser.parse_args(args)
 
@@ -410,6 +429,7 @@ def main(args: Sequence[str] | None = None) -> int:
             output=parsed.output,
             set_overrides=parsed.set_overrides,
             batch_size=parsed.batch_size,
+            num_test=parsed.num_test,
         )
     except GraphError as err:
         console(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)

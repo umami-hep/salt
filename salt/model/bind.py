@@ -1,5 +1,6 @@
 """Two-phase bind support: `ResolvedSchema` (dotted key -> feature width/fields)
-built statically from compiled `Plan`s and handed to ``module.bind``.
+built statically from compiled `Plan`s and handed to ``module.bind``; also carries
+the reader's stream->dataset map for file-keyed lookups.
 """
 
 from __future__ import annotations
@@ -7,13 +8,21 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
+from typing import Any
 
 from salt.graph.errors import SUGGESTION_CUTOFF, GraphError
 from salt.graph.planner import Plan
 from salt.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
 from salt.model.base import SaltModelModule
 
-__all__ = ["BindError", "ResolvedSchema", "bind_all", "materialise_all", "resolve_bind_schema"]
+__all__ = [
+    "BindError",
+    "ResolvedSchema",
+    "bind_all",
+    "materialise_all",
+    "reader_stream_datasets",
+    "resolve_bind_schema",
+]
 
 
 class BindError(GraphError):
@@ -28,11 +37,14 @@ class ResolvedSchema:
     `fields` maps keys to their declared last-dim column names. Keys whose
     width is not statically resolvable (meta leaves, scalar losses,
     data-dependent shapes) are simply absent — `width` raises a `BindError`
-    naming the nearest known keys.
+    naming the nearest known keys. `datasets` maps a reader stream name to the
+    dataset name it reads from — file-keyed lookups (norm/class dicts) index
+    by dataset name, not stream name; see `dataset_of`.
     """
 
     widths: Mapping[str, int]
     fields: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    datasets: Mapping[str, str] = field(default_factory=dict)
 
     def width(self, key: str) -> int:
         """Return the concrete feature width (last dim) of a bundle key.
@@ -71,8 +83,14 @@ class ResolvedSchema:
                 f"known field-carrying keys: {sorted(self.fields)}"
             ) from None
 
+    def dataset_of(self, stream: str) -> str:
+        """The dataset key for a stream's file-backed dicts; the stream name when unmapped."""
+        return self.datasets.get(stream, stream)
 
-def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
+
+def resolve_bind_schema(
+    plans: Plan | Iterable[Plan], datasets: Mapping[str, str] | None = None
+) -> ResolvedSchema:
     """Build the `ResolvedSchema` from one or more compiled plans.
 
     Collects every spec observed per key across the given plans (sources,
@@ -89,6 +107,9 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
     ----------
     plans : Plan | Iterable[Plan]
         Compiled plans, e.g. the FIT and TEST plans of one model.
+    datasets : Mapping[str, str] | None, optional
+        Reader stream->dataset map (see `reader_stream_datasets`); empty when
+        built without a reader (muP data-free path, unit fixtures).
     """
     if isinstance(plans, Plan):
         plans = (plans,)
@@ -169,7 +190,25 @@ def resolve_bind_schema(plans: Plan | Iterable[Plan]) -> ResolvedSchema:
         _apply_derived_widths(plans, widths)
         if not _back_bind_symbols(observed, widths, dims):
             break
-    return ResolvedSchema(widths=widths, fields=fields)
+    return ResolvedSchema(widths=widths, fields=fields, datasets=dict(datasets or {}))
+
+
+def reader_stream_datasets(reader: Any) -> dict[str, str]:
+    """The reader's ``{stream: dataset}`` map, duck-typed on ``reader.groups[stream].dataset``.
+
+    Readers without a ``groups`` mapping (or whose group configs carry no string
+    ``dataset``) contribute nothing — an empty map means every stream is its own
+    dataset.
+    """
+    groups = getattr(reader, "groups", None)
+    if not isinstance(groups, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for stream, cfg in groups.items():
+        dataset = getattr(cfg, "dataset", None)
+        if isinstance(dataset, str):
+            out[str(stream)] = dataset
+    return out
 
 
 def _back_bind_symbols(

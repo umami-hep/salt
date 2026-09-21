@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import functools
+import operator
 import os
 import re
 import sys
 import time
 import warnings
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -34,7 +36,15 @@ from salt.outputs.sinks.sink import Node
 from salt.parser import DeepMergeParser
 from salt.utils.logging import console, get_logger
 
-__all__ = ["CONFIG_DIR", "SaltCLI", "main"]
+__all__ = [
+    "CONFIG_DIR",
+    "RUN_DIR_TIMESTAMP_FORMAT",
+    "SALT_AUTO_RESUME_ENV",
+    "SaltCLI",
+    "latest_checkpoint",
+    "main",
+    "run_dir_path",
+]
 
 _LOG = get_logger(__name__)
 
@@ -121,7 +131,8 @@ def _best_checkpoint(config_path: Path) -> str:
     """Best-epoch selection: lowest ``loss=`` next to the saved config. Scans
     both ``ckpts/*.ckpt`` and ``checkpoints/*.ckpt`` (Lightning's
     `ModelCheckpoint` default dirname) and picks the smallest embedded
-    ``loss=<value>``. Raises `ConfigError` when none exist.
+    ``loss=<value>``. Raises `ConfigError` when none exist. Step-only
+    checkpoints (no ``loss=`` stem) are ignored by construction.
     """
     ckpt_dirs = [config_path.parent / name for name in ("ckpts", "checkpoints")]
     _LOG.info(
@@ -138,7 +149,7 @@ def _best_checkpoint(config_path: Path) -> str:
         raise ConfigError(
             f"no 'loss='-named checkpoints under {config_path.parent}/{{ckpts,checkpoints}} — "
             "pass --ckpt_path explicitly (v1 best-epoch contract, utils/cli.py:71-78; "
-            "base.yaml names checkpoints 'epoch=NNN-loss=<val/loss>.ckpt' to match)"
+            "base.yaml names checkpoints 'epoch=NNN-step=N-loss=<val/loss>.ckpt' to match)"
         )
     best = min(scored)[1]
     console(f"salt test: using checkpoint {best}")
@@ -155,6 +166,130 @@ Its canonical home is the config top level (peer of ``trainer:``/``data:``/
 ``model:``), NOT ``model.init_args``; `_relocate_training_schedule` injects the
 resolved value into the `SaltModule` constructor arg before instantiation.
 """
+
+_LOG_SUFFIX_ARG = "log_suffix"
+"""Top-level run-suffix flag name (``--log_suffix``)."""
+
+_AUTO_RESUME_ARG = "auto_resume"
+"""Top-level auto-resume flag name (``--auto_resume``)."""
+
+SALT_AUTO_RESUME_ENV = "SALT_AUTO_RESUME"
+"""Env var that enables auto-resume without the CLI flag (see `_AUTO_RESUME_TRUTHY`)."""
+
+RUN_DIR_TIMESTAMP_FORMAT = "%Y%m%d-T%H%M%S"
+"""``strftime``/``strptime`` format for a run directory's timestamp suffix."""
+
+_AUTO_RESUME_TRUTHY = frozenset({"1", "true", "yes"})
+"""Case-insensitive truthy values accepted for `SALT_AUTO_RESUME_ENV`."""
+
+
+def run_root(root: str | os.PathLike[str] | None, name: str, log_suffix: str | None = None) -> Path:
+    """The base root a run's sibling ``<name>_*`` directories live under.
+
+    Strips a trailing ``<name>_<timestamp>`` level (name-agnostic — only the
+    text after the LAST ``_`` must parse as `RUN_DIR_TIMESTAMP_FORMAT`, so run
+    names may themselves contain ``_``) or an exact trailing
+    ``<name>_<log_suffix>`` level off ``root``, so a re-passed saved
+    ``config.yaml`` (whose ``default_root_dir`` already points AT a run dir)
+    resolves to a SIBLING run dir, never a nested one. ``root``
+    unset/empty/``None`` resolves to ``Path("logs")``. Never ``.resolve()``s
+    — the directory may not exist yet.
+    """
+    if not root:
+        return Path("logs")
+    root = Path(root)
+    tail = root.name.rsplit("_", 1)[-1]
+    try:
+        datetime.strptime(tail, RUN_DIR_TIMESTAMP_FORMAT)
+    except ValueError:
+        pass
+    else:
+        return root.parent
+    if log_suffix and root.name == f"{name}_{log_suffix}":
+        return root.parent
+    return root
+
+
+def run_dir_path(
+    root: str | os.PathLike[str] | None, name: str, log_suffix: str | None = None
+) -> Path:
+    """The run directory itself: ``run_root(...) / "<name>_<log_suffix|timestamp>"``.
+
+    Parameters
+    ----------
+    root : str | os.PathLike[str] | None
+        The configured ``trainer.default_root_dir`` (or an existing run dir
+        — see `run_root`, which strips it back to the shared base).
+    name : str
+        The run name (``--name``).
+    log_suffix : str | None, optional
+        When given, the run dir is ``<root>/<name>_<log_suffix>`` and a
+        re-run into it overwrites; otherwise a fresh
+        ``<root>/<name>_<timestamp>`` is minted.
+    """
+    base = run_root(root, name, log_suffix)
+    suffix = log_suffix or datetime.now().strftime(RUN_DIR_TIMESTAMP_FORMAT)
+    return base / f"{name}_{suffix}"
+
+
+_CKPT_EPOCH_RE = re.compile(r"(?:^|[-_])epoch=(\d+)")
+_CKPT_STEP_RE = re.compile(r"(?:^|[-_])step=(\d+)")
+
+
+def latest_checkpoint(root: str | os.PathLike[str], name: str) -> Path | None:
+    """The furthest-trained checkpoint across every sibling ``<root>/<name>_*``
+    run dir — the crash-recovery rule: highest ``(epoch, global_step)``, mtime
+    tie-break, then filename. This is NOT `_best_checkpoint`'s lowest-``loss=``
+    rule (that stays ``salt test``'s contract; step-only checkpoints are
+    ignored there by construction, since its regex keys on ``loss=`` only). A
+    checkpoint name missing EITHER ``epoch=`` or ``step=`` (``last.ckpt``,
+    ``epoch=3.ckpt``, an arbitrary name) is ignored; mid-epoch step-only
+    checkpoints are included and compete on equal footing with epoch-end ones.
+
+    Parameters
+    ----------
+    root : str | os.PathLike[str]
+        The base root under which ``<name>_*`` run dirs are siblings (see
+        `run_root`). A missing root simply yields no candidates.
+    name : str
+        The run name whose sibling run dirs are scanned.
+
+    Returns
+    -------
+    Path | None
+        The winning checkpoint path, or ``None`` when nothing qualifies.
+    """
+    root = Path(root)
+    candidates: list[tuple[int, int, int, str, Path]] = []
+    for subdir in ("ckpts", "checkpoints"):
+        for ckpt in root.glob(f"{name}_*/{subdir}/*.ckpt"):
+            if not ckpt.is_file():
+                continue
+            epoch_m = _CKPT_EPOCH_RE.search(ckpt.name)
+            step_m = _CKPT_STEP_RE.search(ckpt.name)
+            if not epoch_m or not step_m:
+                continue
+            candidates.append((
+                int(epoch_m.group(1)),
+                int(step_m.group(1)),
+                ckpt.stat().st_mtime_ns,
+                ckpt.name,
+                ckpt,
+            ))
+    if not candidates:
+        return None
+    return max(candidates, key=operator.itemgetter(slice(4)))[4]
+
+
+def auto_resume_requested(cfg: Any) -> bool:
+    """Whether ``--auto_resume`` was passed or `SALT_AUTO_RESUME_ENV` is truthy.
+
+    Reads the env var explicitly (NOT via jsonargparse's ``default_env``
+    mapping) so it is honoured regardless of parser configuration.
+    """
+    return bool(cfg.get(_AUTO_RESUME_ARG)) or (
+        os.environ.get(SALT_AUTO_RESUME_ENV, "").strip().lower() in _AUTO_RESUME_TRUTHY
+    )
 
 
 def _entry_get(entry: Any, key: str) -> Any:
@@ -434,6 +569,9 @@ class SaltCLI(LightningCLI):
         # before super().__init__: add_arguments_to_parser runs inside it and
         # needs to know whether this is the run-free parse surface
         self._run_mode = bool(run)
+        # before super().__init__: before_instantiate_classes runs inside it
+        # and may resolve an auto-resume checkpoint onto this
+        self._resume_ckpt_path: str | None = None
         default_config = [str(CONFIG_DIR / "base.yaml")]
         parser_kwargs: dict[str, Any] = {"default_env": True}
         if run:
@@ -443,8 +581,9 @@ class SaltCLI(LightningCLI):
         else:
             parser_kwargs["default_config_files"] = default_config
         # overwrite a stale config.yaml from a previous run: fit writes into
-        # trainer.default_root_dir (cwd by default) and a leftover config.yaml
-        # must not abort the retry loop
+        # the timestamped run dir (see run_dir_path), and a --log_suffix
+        # re-run lands in the SAME dir on purpose — a leftover config.yaml
+        # there must not abort the retry loop
         kwargs.setdefault("save_config_kwargs", {"overwrite": True})
         super().__init__(
             model_class=SaltModule,
@@ -555,6 +694,25 @@ class SaltCLI(LightningCLI):
             "deep CLI overrides apply (--training_schedule.stages.<name>.epochs N). Inert "
             "outside fit — schedule application is fit-only.",
         )
+        parser.add_argument(
+            "-ls",
+            f"--{_LOG_SUFFIX_ARG}",
+            type=str | None,
+            default=None,
+            help="appended to --name as the run directory `<root>/<name>_<log_suffix>` "
+            "instead of a timestamp; a re-run into the same suffix dir overwrites "
+            "config.yaml (fit only).",
+        )
+        parser.add_argument(
+            f"--{_AUTO_RESUME_ARG}",
+            action="store_true",
+            help="fit only: continue THIS run from its furthest-trained checkpoint "
+            "(highest (epoch, global_step) across sibling "
+            "<root>/<name>_*/{ckpts,checkpoints}/*.ckpt, mid-epoch step checkpoints "
+            "included); overrides --ckpt_path when one is found, falls back to "
+            "--ckpt_path (else a fresh start) when none is, always announced on "
+            "stdout; also enabled by SALT_AUTO_RESUME=1|true|yes.",
+        )
         if not self._run_mode:
             # run-free parses must round-trip a saved run config.yaml, which
             # carries the Lightning run-surface key ckpt_path; accept + ignore it.
@@ -571,17 +729,23 @@ class SaltCLI(LightningCLI):
         # composed onto the instantiated model in `instantiate_classes` below.
 
     def fit(self, model: Any, **kwargs: Any) -> None:
-        """Run ``trainer.fit``, honouring ``--compile``.
+        """Run ``trainer.fit``, honouring ``--compile`` and ``--auto_resume``.
 
         Lightning's ``_run_subcommand`` prefers a CLI method over the trainer's,
         so this replaces ``trainer.fit`` for the ``fit`` subcommand. The compile
         request is recorded on the model and applied at the end of
         `SaltModule.setup` (which the trainer calls) — see
-        `SaltModule.enable_compile`.
+        `SaltModule.enable_compile`. A resolved auto-resume checkpoint
+        (`before_instantiate_classes`, stashed on `self._resume_ckpt_path`)
+        overrides the ``ckpt_path`` Lightning hands in via `kwargs` — this is
+        the leak-free injection point: `self.config`/the saved ``config.yaml``
+        never sees it.
         """
         config = self.config[self.subcommand] if self.subcommand else self.config
         if config.get("compile") and hasattr(model, "enable_compile"):
             model.enable_compile()
+        if self._resume_ckpt_path:
+            kwargs["ckpt_path"] = self._resume_ckpt_path
         self.trainer.fit(model, **kwargs)
 
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
@@ -819,14 +983,19 @@ class SaltCLI(LightningCLI):
         trainer.logger = _instantiate_class_config(logger_cfg)
 
     def before_instantiate_classes(self) -> None:
-        """Per-stage config patches. On ``fit``: wires a configured experiment
-        logger (name, offline mode, log dir); a no-op unless the user opts
+        """Per-stage config patches. On ``fit``: rewrites
+        ``trainer.default_root_dir`` to the timestamped/``--log_suffix`` run
+        dir, resolves ``--auto_resume``/``SALT_AUTO_RESUME`` against sibling
+        run dirs (stashing a found checkpoint on `self._resume_ckpt_path` —
+        see `fit`), then wires a configured experiment logger (name, offline
+        mode, log dir); the logger wiring is a no-op unless the user opts
         into a logger. On ``test``: disables the config dump + logger, globs
         the best checkpoint when ``--ckpt_path`` is unset, forces
         single-device eval, and refuses a sink-less config (TEST predictions
-        would never be persisted). Raises `ConfigError` on a sink-less test
-        config, an ambiguous config list without ``--ckpt_path``, or an
-        explicit multi-device list.
+        would never be persisted). Raises `ConfigError` on ``--init_from``
+        combined with ``--ckpt_path`` or a resolved auto-resume checkpoint,
+        a sink-less test config, an ambiguous config list without
+        ``--ckpt_path``, or an explicit multi-device list.
         """
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
@@ -838,6 +1007,44 @@ class SaltCLI(LightningCLI):
                     "while --init_from WARM-STARTS a fresh run from a possibly surgically-"
                     "changed architecture (weights-only, per-module accounting). Pick one."
                 )
+            name = fit_cfg.get("name") or "salt"
+            suffix = fit_cfg.get(_LOG_SUFFIX_ARG)
+            # the BASE root (siblings live under this), resolved from whatever
+            # default_root_dir currently holds — unset, a bare root, or a
+            # previously-resolved run dir (a re-passed saved config.yaml)
+            base = run_root(fit_cfg.trainer.default_root_dir, name, suffix)
+            if auto_resume_requested(fit_cfg):
+                # scan sibling run dirs BEFORE the fresh timestamped dir below
+                # exists, so this run's own not-yet-created directory can never
+                # be mistaken for a checkpoint source
+                found = latest_checkpoint(base, name)
+                ckpt_path = fit_cfg.get("ckpt_path")
+                if found and fit_cfg.get(_INIT_FROM_ARG):
+                    raise ConfigError(
+                        "--init_from and an auto-resume checkpoint are mutually exclusive: "
+                        f"auto-resume found {found} for run {name!r} under {base}, which "
+                        "RESUMES (restores trainer state, strict weight load, plan-hash check "
+                        "enforced) while --init_from WARM-STARTS a fresh run from a possibly "
+                        "surgically-changed architecture (weights-only, per-module accounting); "
+                        "drop --init_from once a checkpoint exists, or run without --auto_resume."
+                    )
+                if found:
+                    self._resume_ckpt_path = str(found)
+                    override = f" (overriding --ckpt_path {ckpt_path})" if ckpt_path else ""
+                    console(f"auto-resume: resuming run {name!r} from {found}{override}")
+                elif ckpt_path:
+                    console(
+                        f"auto-resume: no checkpoint of run {name!r} under {base} — "
+                        f"falling back to --ckpt_path {ckpt_path}"
+                    )
+                else:
+                    console(
+                        f"auto-resume: no checkpoint of run {name!r} under {base} — starting fresh"
+                    )
+            # ALWAYS rewritten (resumed or not): the run-dir layout is restored
+            # regardless of auto-resume, and the resolver above needed the base
+            # root intact to see the sibling run dirs.
+            fit_cfg.trainer.default_root_dir = str(run_dir_path(base, name, suffix))
             self._wire_experiment_logger(fit_cfg)
             return
         if subcommand != "test":
@@ -916,6 +1123,11 @@ class SaltCLI(LightningCLI):
         # offline when no API key or smoke run
         if not os.getenv("COMET_API_KEY") or cfg.trainer.fast_dev_run:
             init_args.online = False
+        # cfg.trainer.default_root_dir is the run dir by this point (rewritten
+        # in before_instantiate_classes, above _wire_experiment_logger in call
+        # order): Lightning's trainer.log_dir resolves to CometLogger.save_dir
+        # = the comet offline_directory, which COMET_OFFLINE_DIRECTORY sets —
+        # so config.yaml/ckpts follow the run dir with the logger attached too.
         log_dir = cfg.trainer.default_root_dir or "logs"
         os.environ["COMET_OFFLINE_DIRECTORY"] = str(log_dir)
         Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -923,19 +1135,19 @@ class SaltCLI(LightningCLI):
     def after_fit(self) -> None:
         """Tell the user where the run artifacts went.
 
-        ``config.yaml`` lands in the trainer log dir (``default_root_dir`` — cwd
-        unless overridden) and checkpoints in the checkpoint callback's dirpath;
-        neither location is otherwise announced.
+        ``config.yaml`` lands in the run dir
+        ``<root>/<name>_<timestamp|log_suffix>`` and checkpoints in the
+        checkpoint callback's dirpath; neither location is otherwise announced.
         """
         log_dir = self.trainer.log_dir or self.trainer.default_root_dir
         ckpt_dir = getattr(self.trainer.checkpoint_callback, "dirpath", None)
+        console(f"salt fit run dir: {self.trainer.default_root_dir}")
         console(f"salt fit artifacts: config.yaml in {log_dir}")
         console(
             f"salt fit artifacts: checkpoints in {ckpt_dir}"
             if ckpt_dir
             else "salt fit artifacts: no checkpoint callback configured"
         )
-        console("(run-directory layout with timestamped names is not yet implemented)")
 
 
 def main(args: Sequence[str] | None = None) -> int:

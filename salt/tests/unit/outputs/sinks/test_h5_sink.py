@@ -15,6 +15,9 @@ config-lifecycle equivalent.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import h5py
@@ -324,6 +327,55 @@ class TestColumnOrderDrivenBySection:
         assert all(not c.startswith(f"{RUN_NAME}_") and c != "mask" for c in before), (
             f"columns before the task columns must be input copies, got {before}"
         )
+
+
+class TestPlainH5pyReadback:
+    """The portability guarantee: native lzf, readable with no hdf5plugin setup."""
+
+    @pytest.mark.parametrize("fixture_name", ["cli_h5", "section_h5"])
+    def test_datasets_use_native_lzf_filter(self, fixture_name, request):
+        """Every dataset uses h5py's built-in lzf filter, never hdf5plugin's LZ4 (32004)."""
+        path = request.getfixturevalue(fixture_name)
+        visited = []
+
+        def _check(_name, obj):
+            if isinstance(obj, h5py.Dataset):
+                visited.append(obj)
+                assert obj.compression == "lzf"
+                plist = obj.id.get_create_plist()
+                ids = [plist.get_filter(i)[0] for i in range(plist.get_nfilters())]
+                assert h5py.h5z.FILTER_LZF in ids
+                assert 32004 not in ids  # hdf5plugin's LZ4 filter id
+
+        with h5py.File(path) as f:
+            f.visititems(_check)
+        assert visited, "expected at least one dataset in the eval H5"
+
+    @pytest.mark.parametrize("fixture_name", ["cli_h5", "section_h5"])
+    def test_fresh_subprocess_reads_with_plain_h5py(self, fixture_name, request):
+        """A fresh subprocess reads the file with plain h5py — no hdf5plugin, no HDF5_PLUGIN_PATH."""
+        path = request.getfixturevalue(fixture_name)
+        script = (
+            "import sys\n"
+            "import h5py\n"
+            'with h5py.File(sys.argv[1], "r") as f:\n'
+            '    n_jets = len(f["jets"][:])\n'
+            '    n_tracks = len(f["tracks"][:])\n'
+            'assert "hdf5plugin" not in sys.modules, "hdf5plugin was imported implicitly"\n'
+            "print(n_jets, n_tracks)\n"
+        )
+        # strip HDF5_PLUGIN_PATH: the claim is the file reads with no hdf5plugin
+        # and no plugin-path setup
+        env = {k: v for k, v in os.environ.items() if k != "HDF5_PLUGIN_PATH"}
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.split() == [str(N_TEST), str(N_TEST)]
 
 
 class TestSectionOverlayConfigContent:

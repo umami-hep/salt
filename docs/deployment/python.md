@@ -160,11 +160,13 @@ A healthy result is a worst-case difference of order `1e-7`; anything up to
 about `1e-5` is still float32 noise. Larger than that is a wiring bug, and the
 three semantics above are where to look — not the export.
 
-!!! note "`hdf5plugin` is not optional"
+!!! note "Plain `h5py` reads the file"
 
-    salt writes its eval H5 with a blosc filter. Without `import hdf5plugin`
-    the read fails with an unhelpful `can't open directory (.../plugin)` error
-    rather than anything about compression.
+    salt writes its eval H5 with HDF5's `lzf` filter, which ships inside
+    `h5py` itself — no `hdf5plugin` import and no `HDF5_PLUGIN_PATH` are
+    needed to read it back, in the container, on lxplus, or in a bare venv.
+    (`lzf` is an h5py-provided filter, so a non-h5py HDF5 reader would still
+    need an lzf-capable build.)
 
 ## Where next
 

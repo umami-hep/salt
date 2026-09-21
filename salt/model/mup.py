@@ -18,7 +18,7 @@ from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
 from salt.graph.planner import compile_plan
 from salt.graph.spec import Mode
-from salt.model.bind import bind_all, materialise_all, resolve_bind_schema
+from salt.model.bind import bind_all, materialise_all, reader_stream_datasets, resolve_bind_schema
 from salt.utils.logging import console
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -159,7 +159,11 @@ def build_model_at_widths(
         # Bind only the model-side modules: the reader's bind DOES touch the
         # file, which this data-free shape/coord path must avoid.
         fit_plan = compile_plan(combined, Mode.FIT, sources={}, sinks=["loss.total"])
-        schema = resolve_bind_schema([fit_plan])
+        # the reader's stream->dataset map so materialise_all below (norm/class-dict
+        # lookups) resolves against a remapped config the same way a real fit would
+        schema = resolve_bind_schema(
+            [fit_plan], datasets=reader_stream_datasets(getattr(cli.datamodule, "reader", None))
+        )
         bind_all(model._graph_modules, schema)  # noqa: SLF001 - same-package tooling
         model.schema = schema
         model._bound = True  # noqa: SLF001 - same-package tooling
