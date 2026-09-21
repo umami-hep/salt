@@ -69,8 +69,8 @@
 #     --config docs/tutorials/configs/finetuning/finetune_gn3large_add_jet_vars.yaml \
 #     --init_from $GN3LARGE/converted.ckpt \
 #     --model.init_args.modules.norm_p7085.init_args.norm_dict=<repo>/docs/tutorials/configs/finetuning/norm_dicts/norm_dict_p7085_jets_extra.yaml \
-#     --data.modules.input_samples.init_args.files.train=<split_127.h5> \
-#     --data.modules.input_samples.init_args.files.val=<split_003.h5>
+#     --data.modules.input_samples.init_args.files.train=<train_500k.h5> \
+#     --data.modules.input_samples.init_args.files.val=<val_100k.h5>
 #
 # NOTE: no `--model.init_args.modules.norm.init_args.norm_dict=...` override
 # here (unlike worked example 1) — `norm` is DELETED below, so passing an

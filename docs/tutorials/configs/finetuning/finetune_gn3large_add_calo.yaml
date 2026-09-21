@@ -20,8 +20,8 @@
 #     --init_from $GN3LARGE/converted.ckpt \
 #     --model.init_args.modules.norm.init_args.norm_dict=$GN3LARGE/norm_dict_v2.yaml \
 #     --model.init_args.modules.norm_calo.init_args.norm_dict=<repo>/docs/tutorials/configs/finetuning/norm_dicts/norm_dict_p7085_calo.yaml \
-#     --data.modules.input_samples.init_args.files.train=<pp_output_train_260331_split_127.h5> \
-#     --data.modules.input_samples.init_args.files.val=<pp_output_val_260331_split_003.h5>
+#     --data.modules.input_samples.init_args.files.train=<train_500k.h5> \
+#     --data.modules.input_samples.init_args.files.val=<val_100k.h5>
 #
 # Both `norm_dict` overrides are needed because both paths are RELATIVE to
 # DIFFERENT roots: the base's to the bundle directory, this overlay's to the
