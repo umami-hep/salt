@@ -1,98 +1,217 @@
-"""The v2 cut vocabulary: one `Cut` predicate (simple comparison or whitelisted
-expression) shared by `GlobalObjectCuts` (sample-axis rows, index-build) and
-`ConstituentCuts` (per-stream constituents, ``on_fail: mask | drop``).
+"""The v2 cut vocabulary: one string-form `Cut` compiled to a restricted `eval`
+predicate, `Aggregation` (its ``sum(...)`` constituent-axis reductions) and
+`GlobalObjectCuts` (sample-axis row eligibility at index-build).
 """
 
 from __future__ import annotations
 
+import ast
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from functools import cache
+from typing import Any, NamedTuple
 
 import numpy as np
 
-from salt.data.processors.multi_target import _OPERATORS
-from salt.data.readers.expressions import Aggregation, parse_expression
 from salt.graph.errors import ConfigError
 
-__all__ = ["ConstituentCuts", "Cut", "GlobalObjectCuts"]
+__all__ = ["Aggregation", "Cut", "GlobalObjectCuts"]
 
 VALID_FIELD = "valid"
 """The per-constituent validity field every jagged stream carries."""
 
+_FUNCTIONS: dict[str, Any] = {"abs": np.abs, "log": np.log}
+"""The only callables a cut expression may invoke besides ``sum``."""
+
+
+@cache
+def _compile(source: str) -> Any:
+    """Compile `source` to a code object, cached per string (never pickled)."""
+    return compile(source, "<cut>", "eval")
+
+
+def _eval(source: str, columns: Mapping[str, Any] | np.ndarray) -> Any:
+    """Evaluate `source` with NO builtins; a `NameError` becomes a `KeyError` naming the field."""
+    names = columns.dtype.names or () if isinstance(columns, np.ndarray) else tuple(columns)
+    scope = {**_FUNCTIONS, **{n: columns[n] for n in names}}
+    try:
+        return eval(_compile(source), {"__builtins__": {}}, scope)
+    except NameError as exc:
+        raise KeyError(
+            f"cut field {exc.name!r} is not available; present: {sorted(names)}. "
+            "Add it to the stream so it is read."
+        ) from exc
+
 
 @dataclass(frozen=True)
-class Cut:
-    """One keep predicate — a scalar comparison or a whitelisted expression.
+class Aggregation:
+    """One ``sum(...)`` reduction of a stream's constituent axis onto the row axis.
 
-    Two equivalent forms:
-
-    - simple: ``field`` / ``op`` / ``value`` — ``Cut("pt", ">=", 20000)``;
-    - expression: ``expr`` — ``Cut(expr="(numberOfPixelSharedHits +
-      numberOfSCTSharedHits / 2) < 1.1")``, parsed by an ``ast``-whitelist
-      evaluator (`salt.data.readers.expressions`) and evaluated vectorised.
-
-    An expression that is a bare ``<field> <op> <number>`` normalises to the
-    simple form (``field``/``op``/``value`` are filled in, ``expr`` is kept as
-    provenance), so ``"d0 < 3.5"`` and ``Cut("d0", "<", 3.5)`` are the same cut.
-    `Cut.parse` accepts a string, a mapping, or a `Cut` — the surface every cut
-    container normalises through, so YAML may write plain strings.
+    An `Aggregation` cannot be evaluated inline: the reader reads `fields` off
+    `stream`, calls `evaluate`, and serves the result back as the synthetic
+    row-axis column `key` — that is what makes ``sum(jets.valid) >= 4``
+    expressible as a row cut at all.
 
     Parameters
     ----------
-    field : str, optional
-        The field to cut on. A bare name (``"pt"``) addresses the stream's
-        structured field; a dotted name (``"jets.pt"``) is accepted and the
-        leading ``<stream>.`` prefix is stripped.
-    op : str, optional
-        One of ``==  !=  >=  <=  >  <``.
-    value : float | int | None, optional
-        The right-hand side of the comparison.
-    expr : str, optional
-        A cut expression, mutually exclusive with ``field``/``op``/``value``.
-    comment : str, optional
-        Free-text provenance note (ignored by the evaluator).
+    source : str
+        The call as written, normalised by ``ast.unparse`` (e.g.
+        ``"sum(jets.valid)"``).
+    stream : str
+        The stream whose constituent axis is reduced.
+    fields : tuple[str, ...]
+        Bare constituent field names read, in first-seen order.
+    inner : str
+        `source`'s argument with every ``<stream>.`` qualifier stripped.
+    """
+
+    source: str
+    stream: str
+    fields: tuple[str, ...]
+    inner: str
+
+    @property
+    def key(self) -> str:
+        """The synthetic row-axis column this reduction's value is served under."""
+        digest = hashlib.sha1(self.source.encode()).hexdigest()[:12]  # noqa: S324 - non-crypto key
+        return f"__agg_{digest}__"
+
+    def evaluate(self, columns: Mapping[str, Any]) -> np.ndarray:
+        """``(n_rows,)`` sums of `inner` over jagged constituent columns (a predicate counts)."""
+        import awkward as ak
+
+        return np.asarray(ak.to_numpy(ak.sum(_eval(self.inner, columns), axis=1)))
+
+
+class _Rewrite(ast.NodeTransformer):
+    """Strip ``<stream>.`` qualifiers; collect fields/streams; sub each ``sum(...)`` for its key."""
+
+    def __init__(self, source: str, *, inner: bool) -> None:
+        self.source = source
+        self.inner = inner
+        self.fields: dict[str, None] = {}
+        self.streams: dict[str, None] = {}
+        self.aggs: dict[str, Aggregation] = {}
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        name = node.func.id if isinstance(node.func, ast.Name) else ast.unparse(node.func)
+        if name in _FUNCTIONS:
+            return self.generic_visit(node)
+        if name != "sum":
+            raise ConfigError(
+                f"cut {self.source!r}: unknown function {name!r} — only abs, log and sum "
+                "may be called"
+            )
+        if self.inner:
+            raise ConfigError(
+                f"cut {self.source!r}: sum() nested inside another reduction — a "
+                "constituent axis is collapsed once"
+            )
+        if len(node.args) != 1 or node.keywords:
+            raise ConfigError(f"cut {self.source!r}: sum() takes exactly one argument")
+        agg = _reduction(self.source, node)
+        self.aggs.setdefault(agg.key, agg)
+        return ast.Name(id=agg.key, ctx=ast.Load())
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
+        if not isinstance(node.value, ast.Name):
+            raise ConfigError(
+                f"cut {self.source!r}: {ast.unparse(node)!r} is not a '<stream>.<field>' qualifier"
+            )
+        self.streams.setdefault(node.value.id)
+        self.fields.setdefault(node.attr)
+        return ast.Name(id=node.attr, ctx=ast.Load())
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if node.id in _FUNCTIONS or node.id == "sum":
+            return node
+        if self.inner:
+            raise ConfigError(
+                f"cut {self.source!r}: {node.id!r} needs a '<stream>.' qualifier inside "
+                "sum() — the reduction has to name the stream it collapses"
+            )
+        self.fields.setdefault(node.id)
+        return node
+
+
+def _reduction(source: str, call: ast.Call) -> Aggregation:
+    """Build the `Aggregation` for one validated ``sum(...)`` call."""
+    text = ast.unparse(call)  # BEFORE the visit: NodeTransformer mutates in place
+    rw = _Rewrite(source, inner=True)
+    inner = ast.unparse(ast.fix_missing_locations(rw.visit(call.args[0])))
+    if not rw.streams:
+        raise ConfigError(
+            f"cut {source!r}: {text!r} references no field — a reduction must name at "
+            "least one '<stream>.<field>'"
+        )
+    if len(rw.streams) > 1:
+        raise ConfigError(
+            f"cut {source!r}: {text!r} mixes streams {sorted(rw.streams)} inside one reduction"
+        )
+    return Aggregation(text, next(iter(rw.streams)), tuple(rw.fields), inner)
+
+
+class _Parsed(NamedTuple):
+    outer: str
+    fields: tuple[str, ...]
+    aggregations: tuple[Aggregation, ...]
+
+
+@cache
+def _parse(source: str) -> _Parsed:
+    """Parse + validate one cut expression string (cached per string)."""
+    if not source:
+        raise ConfigError("cut expression must be a non-empty string")
+    try:
+        tree = ast.parse(source, mode="eval")
+    except SyntaxError as exc:
+        raise ConfigError(f"cut expression {source!r} is not valid syntax: {exc}") from exc
+    if not isinstance(tree.body, ast.Compare):
+        raise ConfigError(
+            f"cut expression {source!r} must be a comparison producing a keep mask, e.g. 'd0 < 3.5'"
+        )
+    rw = _Rewrite(source, inner=False)
+    outer = ast.unparse(ast.fix_missing_locations(rw.visit(tree.body)))
+    if not rw.fields and not rw.aggs:
+        raise ConfigError(
+            f"cut expression {source!r} references no field — a cut must compare at "
+            "least one stream field"
+        )
+    return _Parsed(outer, tuple(rw.fields), tuple(rw.aggs.values()))
+
+
+@dataclass(frozen=True)
+class Cut:
+    """One keep predicate: an expression string with exactly one comparison.
+
+    Field names may carry a ``<stream>.`` prefix (stripped); ``abs``/``log``
+    are elementwise; ``sum(<predicate or value>)`` reduces a
+    ``<stream>.``-qualified constituent axis onto the row (``&`` joins
+    parenthesised predicates inside it). NaN fails every ordering/equality
+    cut (numpy semantics; only ``!=`` is True vs NaN).
+
+    Parameters
+    ----------
+    expr : str
+        The cut expression, e.g. ``"pt >= 20000"`` or ``"sum(jets.valid) >= 4"``.
 
     Raises
     ------
     ConfigError
-        When both forms (or neither) are given, on an empty ``field``, an ``op``
-        outside the supported set, a missing ``value``, or an expression the
-        whitelist rejects.
+        On a syntax error, a non-comparison root, an unknown function, a
+        malformed reduction, or an expression referencing no field.
     """
 
-    field: str = ""
-    op: str = ""
-    value: float | int | None = None
-    expr: str = ""
-    comment: str = ""
+    expr: str
 
     def __post_init__(self) -> None:
-        simple_given = bool(self.field) or bool(self.op) or self.value is not None
-        if self.expr and simple_given:
-            raise ConfigError(f"Cut: give either expr={self.expr!r} or field/op/value, not both")
-        if not self.expr:
-            if not simple_given:
-                raise ConfigError("Cut: give either a field/op/value triple or an expr")
-            if not self.field:
-                raise ConfigError("Cut: 'field' must be a non-empty string")
-            if self.op not in _OPERATORS:
-                raise ConfigError(
-                    f"Cut: unknown op {self.op!r} — expected one of {sorted(_OPERATORS)}"
-                )
-            if self.value is None:
-                raise ConfigError(f"Cut: 'value' must be set for field {self.field!r}")
-            return
-        simple = parse_expression(self.expr).simple
-        if simple is not None:  # normalise a bare comparison onto the simple form
-            fld, op, value = simple
-            object.__setattr__(self, "field", fld)
-            object.__setattr__(self, "op", op)
-            object.__setattr__(self, "value", value)
+        object.__setattr__(self, "expr", self.expr.strip())
+        _parse(self.expr)  # validate eagerly
 
     @classmethod
-    def parse(cls, spec: Cut | str | Mapping[str, Any]) -> Cut:
-        """Normalise a config entry (a `Cut`, an expression string, or a mapping) to a `Cut`.
+    def parse(cls, spec: Cut | str) -> Cut:
+        """Normalise a config entry (a `Cut` or an expression string) to a `Cut`.
 
         Returns
         -------
@@ -102,70 +221,32 @@ class Cut:
         Raises
         ------
         ConfigError
-            When `spec` is none of those three forms, or is an invalid cut.
+            When `spec` is neither a `Cut` nor a string.
         """
         if isinstance(spec, Cut):
             return spec
         if isinstance(spec, str):
             return cls(expr=spec)
-        if isinstance(spec, Mapping):
-            return cls(**dict(spec))
-        raise ConfigError(
-            f"cut entry {spec!r} is not a Cut, an expression string, or a mapping of field/op/value"
-        )
-
-    @property
-    def bare_field(self) -> str:
-        """The simple form's field name with any leading ``<stream>.`` prefix stripped."""
-        return self.field.rsplit(".", 1)[-1]
+        raise ConfigError(f"cut entry {spec!r} is not a cut expression string")
 
     @property
     def fields(self) -> tuple[str, ...]:
-        """The bare ROW-axis field names this cut reads — the read-planner contract."""
-        if self.field:
-            return (self.bare_field,)
-        return parse_expression(self.expr).fields
+        """The bare ROW-axis field names this cut reads (reduced fields excluded)."""
+        return _parse(self.expr).fields
 
     @property
     def aggregations(self) -> tuple[Aggregation, ...]:
-        """The constituent-axis reductions this cut needs precomputed (see `Aggregation`)."""
-        if self.field:
-            return ()
-        return parse_expression(self.expr).aggregations
+        """The constituent-axis reductions this cut needs precomputed."""
+        return _parse(self.expr).aggregations
 
     def mask(self, source: Mapping[str, Any] | np.ndarray) -> Any:
-        """Evaluate this cut to a keep mask (True where the entry PASSES).
-
-        Parameters
-        ----------
-        source : Mapping[str, Any] | np.ndarray
-            A structured array (any shape) or a mapping of column arrays carrying
-            every field this cut references.
-
-        Returns
-        -------
-        Any
-            A bool mask shaped like the source columns. A NaN value FAILS every
-            ordering / equality cut (numpy semantics; only ``!=`` is True vs NaN).
-
-        Raises
-        ------
-        KeyError
-            When a referenced field is absent from `source`.
+        """Evaluate to a keep mask (True = PASSES) over a structured array or column mapping
+        carrying every referenced field (plus, for a reduction, its `Aggregation.key` column).
         """
-        if not self.field:
-            return parse_expression(self.expr).evaluate(source)
-        names = source.dtype.names or () if isinstance(source, np.ndarray) else tuple(source)
-        fname = self.bare_field
-        if fname not in names:
-            raise KeyError(
-                f"Cut field {self.field!r} (-> {fname!r}) is not available; "
-                f"present: {sorted(names)}. Add it to the stream so it is read."
-            )
-        return _OPERATORS[self.op](source[fname], self.value)
+        return _eval(_parse(self.expr).outer, source)
 
 
-def _parse_cuts(specs: Sequence[Any], where: str) -> tuple[Cut, ...]:
+def _parse_cuts(specs: Sequence[Cut | str], where: str) -> tuple[Cut, ...]:
     """Normalise a config cut sequence to `Cut` instances, naming `where` on failure.
 
     Returns
@@ -189,311 +270,57 @@ def _parse_cuts(specs: Sequence[Any], where: str) -> tuple[Cut, ...]:
 
 @dataclass(frozen=True)
 class GlobalObjectCuts:
-    """Global + per-split row eligibility on the sample axis, applied at index-build.
+    """Sample-axis row eligibility (AND of `global_cuts`), applied once at index-build.
 
     The reader-uniform ``cuts:`` surface: cuts here drop whole ROWS (jets for a
     jet reader, events for an event reader) and so change ``__len__``. Per-
-    constituent filtering is `ConstituentCuts`, never this.
+    constituent filtering is `ConstituentSelection`, never this.
 
     Parameters
     ----------
-    global_cuts : Sequence[Cut | str | Mapping], optional
-        Cuts applied to EVERY split (AND-combined). Entries normalise through
-        `Cut.parse`.
-    per_split : Mapping[str, Sequence[Cut | str | Mapping]], optional
-        Per-split extra cuts, keyed by stage (``"train"``/``"val"``/``"test"``).
-        ``for_split(stage)`` returns ``global_cuts + per_split[stage]``.
+    global_cuts : Sequence[Cut | str], optional
+        AND-combined cuts. Entries normalise through `Cut.parse`, so YAML may
+        write plain strings.
 
     Raises
     ------
     ConfigError
-        On an unknown stage key in ``per_split`` or an entry that is not a cut.
+        On an entry that is not a cut.
     """
 
-    global_cuts: tuple[Cut, ...] = ()
-    per_split: Mapping[str, tuple[Cut, ...]] = field(default_factory=dict)
-
-    _STAGE_KEYS = ("train", "val", "test")
+    global_cuts: tuple[str, ...] = ()
+    _cuts: tuple[Cut, ...] = field(default=(), init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "global_cuts",
-            _parse_cuts(tuple(self.global_cuts), "GlobalObjectCuts.global_cuts"),
-        )
-        unknown = set(self.per_split) - set(self._STAGE_KEYS)
-        if unknown:
-            raise ConfigError(
-                f"GlobalObjectCuts.per_split: unknown stage keys {sorted(unknown)} — expected "
-                f"a subset of {list(self._STAGE_KEYS)}"
-            )
-        object.__setattr__(
-            self,
-            "per_split",
-            {
-                stage: _parse_cuts(tuple(cuts), f"GlobalObjectCuts.per_split[{stage!r}]")
-                for stage, cuts in self.per_split.items()
-            },
-        )
+        cuts = _parse_cuts(tuple(self.global_cuts), "GlobalObjectCuts.global_cuts")
+        object.__setattr__(self, "global_cuts", tuple(c.expr for c in cuts))
+        object.__setattr__(self, "_cuts", cuts)
 
-    def for_split(self, split: str | None) -> tuple[Cut, ...]:
-        """The effective cuts for a stage: global + that split's extras.
-
-        Parameters
-        ----------
-        split : str | None
-            The stage (``"train"``/``"val"``/``"test"``); ``None`` applies only the
-            global cuts.
-
-        Returns
-        -------
-        tuple[Cut, ...]
-            The AND-combined cut tuple for this split.
-        """
-        extra = self.per_split.get(split, ()) if split is not None else ()
-        return (*self.global_cuts, *extra)
-
-    def eligible(self, rows: np.ndarray, split: str | None) -> np.ndarray:
-        """Bool mask over rows: True where all effective cuts pass.
-
-        Parameters
-        ----------
-        rows : np.ndarray
-            A structured ``(N_rows,)`` array carrying every cut field.
-        split : str | None
-            The stage selecting per-split cuts.
-
-        Returns
-        -------
-        np.ndarray
-            A ``(N_rows,)`` bool mask of eligible (passing) rows. With no cuts,
-            every row is eligible.
-
-        A `KeyError` propagates from `Cut.mask` for a cut whose field is absent
-        from ``rows``.
+    def eligible(self, rows: np.ndarray) -> np.ndarray:
+        """Bool ``(N_rows,)`` mask: True where every cut passes `rows` (all-True with no cuts);
+        `KeyError` propagates from `Cut.mask` for a field absent from `rows`.
         """
         keep = np.ones(len(rows), dtype=bool)
-        for c in self.for_split(split):
+        for c in self._cuts:
             keep &= c.mask(rows)
         return keep
 
-    def _effective(self, split: str | None) -> tuple[Cut, ...]:
-        """One split's effective cuts, or the union across every split when `split` is None."""
-        if split is not None:
-            return self.for_split(split)
-        return (*self.global_cuts, *(c for cs in self.per_split.values() for c in cs))
-
-    def fields(self, split: str | None = None) -> tuple[str, ...]:
-        """The bare ROW-axis field names referenced by the effective cuts.
-
-        Used by the reader to guarantee the cut variables are read at index-build
-        even when not otherwise demanded. Constituent fields reached through a
-        reduction are NOT here — see `aggregations`.
-
-        Parameters
-        ----------
-        split : str | None, optional
-            Restrict to one split's effective cuts; ``None`` (default) returns the
-            union across global + every per-split.
-
-        Returns
-        -------
-        tuple[str, ...]
-            The deduplicated bare field names, in first-seen order.
+    def fields(self) -> tuple[str, ...]:
+        """Bare ROW-axis field names referenced, deduplicated in first-seen order (the
+        reader's read-at-index-build contract; reduced fields are `aggregations`, not here).
         """
         seen: dict[str, None] = {}
-        for c in self._effective(split):
+        for c in self._cuts:
             for f in c.fields:
                 seen.setdefault(f, None)
         return tuple(seen)
 
-    def aggregations(self, split: str | None = None) -> tuple[Aggregation, ...]:
-        """The constituent-axis reductions the effective cuts need precomputed.
-
-        The reader evaluates each of these over the stream it names and adds the
-        result to the row-scalar record under `Aggregation.key` before applying
-        the cuts — that is what makes ``sum(jets.valid) >= 4`` an expressible
-        row cut at all.
-
-        Parameters
-        ----------
-        split : str | None, optional
-            Restrict to one split's effective cuts; ``None`` (default) returns the
-            union across global + every per-split.
-
-        Returns
-        -------
-        tuple[Aggregation, ...]
-            The reductions, deduplicated by key, in first-seen order.
+    def aggregations(self) -> tuple[Aggregation, ...]:
+        """Constituent-axis reductions the cuts need precomputed, deduplicated by key (the
+        reader evaluates each and adds it to the row record under `Aggregation.key` first).
         """
         seen: dict[str, Aggregation] = {}
-        for c in self._effective(split):
+        for c in self._cuts:
             for agg in c.aggregations:
                 seen.setdefault(agg.key, agg)
         return tuple(seen.values())
-
-
-@dataclass(frozen=True)
-class ConstituentCuts:
-    """Per-stream constituent cuts with explicit failure semantics.
-
-    Constituent cuts never change the reader's length: they act WITHIN a row.
-
-    - ``on_fail: mask`` — a failing constituent keeps its slot and is blanked in
-      place: float fields become NaN, signed-int ``-1``, unsigned-int ``0``, bool
-      ``False`` (so ``valid`` becomes False). Positions and multiplicity are
-      preserved. Constituents already invalid (padding) are left untouched.
-    - ``on_fail: drop`` — a failing constituent is REMOVED and the row re-padded,
-      so a failing constituent never wastes a served slot.
-
-    Parameters
-    ----------
-    cuts : Sequence[Cut | str | Mapping], optional
-        The AND-combined keep predicates; entries normalise through `Cut.parse`,
-        so YAML may write expression strings (``["d0 < 3.5"]``).
-    on_fail : str
-        ``"mask"`` or ``"drop"`` — required, no default: the two modes hand the
-        model different inputs.
-
-    Raises
-    ------
-    ConfigError
-        On an unset/unknown ``on_fail``, an entry that is not a cut, or a cut
-        containing a constituent-axis reduction (``sum``/``count``).
-    """
-
-    cuts: tuple[Cut, ...] = ()
-    on_fail: str = ""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "cuts", _parse_cuts(tuple(self.cuts), "ConstituentCuts.cuts"))
-        if self.on_fail not in {"mask", "drop"}:
-            raise ConfigError(
-                f"ConstituentCuts: on_fail must be set explicitly to one of ['mask', 'drop'], "
-                f"got {self.on_fail!r} — 'mask' blanks a failing constituent in place, 'drop' "
-                "removes it and re-pads"
-            )
-        reduced = [agg.source for c in self.cuts for agg in c.aggregations]
-        if reduced:
-            raise ConfigError(
-                f"ConstituentCuts.cuts: {reduced} reduce the constituent axis, but a "
-                "constituent cut is evaluated ON that axis — it decides one constituent at a "
-                "time and cannot see the row. Put a reduction in the reader's row-level "
-                "cuts: instead"
-            )
-
-    @property
-    def fields(self) -> tuple[str, ...]:
-        """The bare field names referenced, deduplicated in first-seen order."""
-        seen: dict[str, None] = {}
-        for c in self.cuts:
-            for f in c.fields:
-                seen.setdefault(f, None)
-        return tuple(seen)
-
-    def keep(self, source: Mapping[str, Any] | np.ndarray) -> Any:
-        """The AND of every cut's keep mask over a constituent-shaped source.
-
-        Parameters
-        ----------
-        source : Mapping[str, Any] | np.ndarray
-            A structured constituent array or a mapping of column arrays.
-
-        Returns
-        -------
-        Any
-            The combined keep mask (True where the constituent PASSES), or None
-            when no cut is configured.
-        """
-        keep = None
-        for c in self.cuts:
-            this = c.mask(source)
-            keep = this if keep is None else (keep & this)
-        return keep
-
-    def apply(self, batch: np.ndarray) -> np.ndarray:
-        """Apply these cuts to a structured ``(B, T)`` constituent batch.
-
-        Parameters
-        ----------
-        batch : np.ndarray
-            The structured ``(B, T)`` constituent batch, carrying ``valid``.
-
-        Returns
-        -------
-        np.ndarray
-            ``mask`` blanks failing constituents IN PLACE and returns `batch`;
-            ``drop`` returns a compacted, re-padded copy.
-
-        Raises
-        ------
-        KeyError
-            When the stream carries no ``valid`` field.
-        """
-        if not self.cuts:
-            return batch
-        if VALID_FIELD not in (batch.dtype.names or ()):
-            raise KeyError(
-                f"constituent cuts need the {VALID_FIELD!r} field on the stream; "
-                f"present: {sorted(batch.dtype.names or ())}"
-            )
-        return self._mask(batch) if self.on_fail == "mask" else self._drop(batch)
-
-    def _mask(self, batch: np.ndarray) -> np.ndarray:
-        """Blank failing (previously valid) constituents in place, per dtype kind.
-
-        Returns
-        -------
-        np.ndarray
-            The same (mutated) `batch`.
-
-        Raises
-        ------
-        TypeError
-            On a field dtype outside float / signed int / unsigned int / bool.
-        """
-        valid = batch[VALID_FIELD]
-        removed = np.zeros_like(valid, dtype=bool)
-        for c in self.cuts:
-            removed[valid & ~c.mask(batch)] = True
-        for name in batch.dtype.names or ():
-            col = batch[name]
-            kind = col.dtype.kind
-            if kind == "f":
-                col[removed] = np.nan
-            elif kind == "i":
-                col[removed] = -1
-            elif kind == "u":
-                col[removed] = 0
-            elif kind == "b":
-                col[removed] = False
-            else:
-                raise TypeError(
-                    f"constituent cut masking: unsupported dtype {col.dtype} for field {name!r}"
-                )
-        return batch
-
-    def _drop(self, batch: np.ndarray) -> np.ndarray:
-        """Remove failing constituents, compact each row (order preserved) and re-pad.
-
-        Returns
-        -------
-        np.ndarray
-            A compacted, re-padded copy of `batch`.
-        """
-        from salt.data.readers.stream import pad_fill
-
-        valid = batch[VALID_FIELD]
-        keep = self.keep(batch) & valid
-        t_dim = batch.shape[1]
-        order = np.argsort(~keep, axis=1, kind="stable")  # kept first, order preserved
-        out = np.take_along_axis(batch, order, axis=1)
-        new_valid = np.arange(t_dim)[None, :] < keep.sum(axis=1)[:, None]
-        pad = ~new_valid
-        for name in out.dtype.names or ():
-            if name == VALID_FIELD:
-                continue
-            col = out[name]
-            col[pad] = pad_fill(col.dtype)
-        out[VALID_FIELD] = new_valid
-        return out

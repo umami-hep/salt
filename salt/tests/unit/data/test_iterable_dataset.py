@@ -134,7 +134,7 @@ class BlockStubReader(Reader):
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)
         return out
 
-    def with_source(self, filename, num=-1, vds_path=None, stage=None):  # noqa: ANN001
+    def with_source(self, filename, num=-1, stage=None):  # noqa: ANN001
         return self
 
 

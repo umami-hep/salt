@@ -199,7 +199,6 @@ Configures `SaltDataModule`. `data.modules` is a dict of named `SaltDatasetModul
 | `num_train` / `num_val` / `num_test` | row counts per stage; `-1` means all |
 | `test_suff` | suffix appended to the eval-file `{sample}` name by the writer callback |
 | `move_files_temp` | opt-in staging root (for example `/dev/shm/<user>/tmp`); each per-stage reader restages its own file(s) there at `setup` and the root is removed at `teardown`; ignored under `fast_dev_run` |
-| `train_vds_path` / `val_vds_path` / `test_vds_path` | explicit VDS output paths for wildcard files |
 | `pin_memory` | pin host memory for faster GPU transfer, default `true` |
 | `persistent_workers` | keep worker processes and their H5 handles alive between epochs, default `true` |
 | `prefetch_factor` | batches prefetched per worker; unset derives one (`2` for the map-style path, more for `iterable`, see [Dataloading performance](training.md#dataloading-performance)) |
@@ -285,25 +284,18 @@ data:
   train_file: /path/to/somewhere/pp_output_train_split_*.h5
 ```
 
-A wildcard filename triggers Virtual Dataset (VDS) creation, using the VDS support in [`atlas-ftag-tools`](https://github.com/umami-hep/atlas-ftag-tools). The VDS is an HDF5 file of external links into the real member files, so the reader sees one contiguous dataset. It is built once (a `FileLock` plus a `.done` marker keep concurrent workers or DDP ranks from racing the build) and rebuilt automatically if any member file is newer than the existing VDS. By default it lands next to the wildcard, at a sibling directory: the pattern `pp_output_train_split_*.h5` writes to `pp_output_train_split_vds/vds.h5`. Give it an explicit path instead with `train_vds_path`:
+A wildcard filename triggers Virtual Dataset (VDS) creation, using the VDS support in [`atlas-ftag-tools`](https://github.com/umami-hep/atlas-ftag-tools). The VDS is an HDF5 file of external links into the real member files, so the reader sees one contiguous dataset. It is built once (a `FileLock` plus a `.done` marker keep concurrent workers or DDP ranks from racing the build) and rebuilt automatically if any member file is newer than the existing VDS. By default it lands next to the wildcard, at a sibling directory: the pattern `pp_output_train_split_*.h5` writes to `pp_output_train_split_vds/vds.h5`. Give it an explicit path instead with the reader's `vds_path` (one path per reader — set it only when a single stage is a wildcard; with several wildcard stages sharing one reader prototype, leave it unset and each pattern gets its own sibling `_vds/vds.h5`):
 
 ```yaml
 data:
   train_file: /path/to/somewhere/pp_output_train_split_*.h5
-  train_vds_path: /path/to/something/else/my_train_vds.h5
+  modules:
+    reader:
+      init_args:
+        vds_path: /path/to/my_train_vds.h5
 ```
 
-The same applies per stage:
-
-```yaml
-data:
-  train_file: /path/to/somewhere/pp_output_train_split_*.h5
-  train_vds_path: /path/to/something/else/my_train_vds.h5
-  val_file: /path/to/somewhere/pp_output_val_split_*.h5
-  val_vds_path: /path/to/something/else/my_val_vds_file.h5
-  test_file: /path/to/somewhere/pp_output_test_split_*.h5
-  test_vds_path: /path/to/something/else/my_test_vds_file.h5
-```
+(equivalently, from the CLI: `--data.modules.reader.init_args.vds_path=/path/to/my_train_vds.h5`.)
 
 ### Choosing input variables
 

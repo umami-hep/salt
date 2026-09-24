@@ -58,8 +58,8 @@ def _instantiate_reader(config: str):
     This is the gate a reader fragment gets INSTEAD of ``graph validate``: a
     fragment has no model, so there is no plan to compile, but every invariant a
     reader enforces (`unroll` naming a scalar group, link/target pairing,
-    constituent cuts on a jagged stream naming configured branches, ...) is
-    raised from its constructor and is caught here.
+    row-cut reductions parsing, ...) is raised from its constructor and is
+    caught here.
     """
     from jsonargparse import ArgumentParser  # noqa: PLC0415
 

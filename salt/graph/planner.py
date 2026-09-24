@@ -91,7 +91,9 @@ class PlanStep:
     `requires`/`produces` are flattened ``{dotted_key: TensorSpec}`` mappings
     with wildcards narrowed and optional-but-absent requires dropped —
     `produces` is exactly the key set the executor passes to
-    ``Bundle.merge(expected=...)``. `compile_plan` builds them as read-only
+    ``Bundle.merge(expected=...)``. `rewrites` is the subset of `produces`
+    this step overwrites in place — the executor relaxes write-once for
+    exactly these keys. `compile_plan` builds them as read-only
     `MappingProxyType` views, so the frozen plan is genuinely immutable
     (mutation raises TypeError); hashing uses `name` only.
     """
@@ -100,6 +102,7 @@ class PlanStep:
     module: GraphModule = field(compare=False, repr=False)
     requires: Mapping[str, TensorSpec] = field(default_factory=dict, hash=False)
     produces: Mapping[str, TensorSpec] = field(default_factory=dict, hash=False)
+    rewrites: Mapping[str, TensorSpec] = field(default_factory=dict, hash=False)
 
 
 @dataclass(frozen=True)
@@ -206,32 +209,8 @@ def compile_setup_plan(
     Raises `ConfigError`/`ConnectivityError`/`KindError`/`CycleError` per
     the respective validation failure.
     """
-    _check_incompatibilities(modules)
     res = _resolve(modules, Mode.ALL, {}, None, None, None, _setup_face(stage))
     return _assemble_plan(res)
-
-
-def _check_incompatibilities(modules: Mapping[str, GraphModule]) -> None:
-    """Enforce declared mutual-exclusion between configured setup modules.
-
-    For each module declaring class names in ``incompatible_with``, raise
-    `ConfigError` if another configured module has that class name (matched
-    by name, so the target need not exist yet — dormant until both are
-    present).
-    """
-    for name, module in modules.items():
-        forbidden = getattr(module, "incompatible_with", ())
-        for other_name, other in modules.items():
-            if other_name == name:
-                continue
-            if type(other).__name__ in forbidden:
-                raise ConfigError(
-                    f"module {name!r} ({type(module).__name__}) is incompatible with "
-                    f"{other_name!r} ({type(other).__name__}): "
-                    f"{type(module).__name__}.incompatible_with = {tuple(forbidden)!r} "
-                    "(e.g. staging a VDS copies h5py pointers, not data); "
-                    "drop one of them from data.modules"
-                )
 
 
 def _assemble_plan(res: _Resolution) -> Plan:
@@ -248,7 +227,11 @@ def _assemble_plan(res: _Resolution) -> Plan:
             name=name,
             module=res.alive[name].module,
             requires=MappingProxyType(dict(res.alive[name].bound)),
-            produces=MappingProxyType(res.alive[name].all_produces()),
+            produces=MappingProxyType({
+                **res.alive[name].all_produces(),
+                **res.alive[name].rewrites,
+            }),
+            rewrites=MappingProxyType(dict(res.alive[name].rewrites)),
         )
         for name in order
     )
@@ -327,7 +310,7 @@ def deadcode(
     )
     for name, node in res.alive.items():
         used = consumed.get(name, set())
-        for key in node.all_produces():
+        for key in {**node.all_produces(), **node.rewrites}:
             if key in used:
                 continue
             is_preds = key.partition(KEY_SEP)[0] == "preds"
@@ -410,6 +393,7 @@ class _Node:
     patterns: dict[str, TensorSpec]
     narrowed: dict[str, TensorSpec] = field(default_factory=dict)
     bound: dict[str, TensorSpec] = field(default_factory=dict)
+    rewrites: dict[str, TensorSpec] = field(default_factory=dict)
 
     def all_produces(self) -> dict[str, TensorSpec]:
         """Concrete plus narrowed produces, as a fresh flat dict."""
@@ -453,8 +437,18 @@ def _resolve(
     sink_list = _checked_sink_keys(sink_keys)
     demand = _collect_demand(nodes, sink_list or [])
     _narrow_wildcards(nodes, producer_of, demand, schema, mode, sink_origins)
+    rewriter_of = _rewriters(nodes, producer_of, mode)
     edges = _build_edges(
-        nodes, producer_of, src, sink_list or [], mode, modules, sources, sink_origins, face
+        nodes,
+        producer_of,
+        src,
+        sink_list or [],
+        mode,
+        modules,
+        sources,
+        sink_origins,
+        face,
+        rewriter_of,
     )
     _check_wildcard_self_feed(nodes, edges, mode)
     if sink_list is None:
@@ -534,6 +528,7 @@ def _collect_nodes(
         requires: dict[str, Any] = {}
         produces: dict[str, Any] = {}
         patterns: dict[str, Any] = {}
+        rewrites: dict[str, Any] = {}
         for key, spec in face.flatten(io.requires).items():
             if _has_wildcard(key):
                 raise ConfigError(
@@ -555,10 +550,28 @@ def _collect_nodes(
                 patterns[key] = spec
             else:
                 produces[key] = spec
-        if not (requires or produces or patterns):
+        for key, spec in face.flatten(getattr(io, "rewrites", {})).items():
+            if _has_wildcard(key):
+                raise ConfigError(
+                    f"module {name!r} declares wildcard rewrite {key!r} — rewrites are concrete"
+                )
+            if face.gate(spec, mode):
+                rewrites[key] = spec
+        for key in rewrites:
+            if key not in requires:
+                raise ConfigError(
+                    f"module {name!r} rewrites {key!r} but does not require it — a rewriter "
+                    "reads the key it replaces"
+                )
+            if key in produces or key in patterns:
+                raise ConfigError(
+                    f"module {name!r} both produces and rewrites {key!r} — a key is produced "
+                    "OR rewritten, never both"
+                )
+        if not (requires or produces or patterns or rewrites):
             inactive.append(name)
             continue
-        nodes[name] = _Node(name, rank, module, requires, produces, patterns)
+        nodes[name] = _Node(name, rank, module, requires, produces, patterns, rewrites=rewrites)
     return nodes, inactive
 
 
@@ -673,6 +686,35 @@ def _narrow_wildcards(
             producer_of[key] = name
 
 
+def _rewriters(nodes: dict[str, _Node], producer_of: dict[str, str], mode: Mode) -> dict[str, str]:
+    """Map each rewritten key to its single rewriter module name.
+
+    Raises `ConnectivityError` if a rewrite key has no producer to rewrite, or
+    if two modules rewrite the same key.
+    """
+    rewriter_of: dict[str, str] = {}
+    for name, node in nodes.items():
+        for key in node.rewrites:
+            if key not in producer_of:
+                raise ConnectivityError(
+                    f"[mode={mode.name}] module {name!r} rewrites {key!r} but no module or "
+                    "source produces it"
+                )
+            owner = rewriter_of.get(key)
+            if owner is not None:
+                raise ConnectivityError(
+                    f"[mode={mode.name}] key {key!r} has two rewriters: {owner!r} and {name!r} "
+                    "— at most one module may rewrite a key"
+                )
+            rewriter_of[key] = name
+    return rewriter_of
+
+
+def _produced_spec(node: _Node, key: str) -> TensorSpec:
+    """Look up a produced key's spec, preferring a node's own rewrite over its produces."""
+    return node.rewrites[key] if key in node.rewrites else node.all_produces()[key]
+
+
 def _build_edges(
     nodes: dict[str, _Node],
     producer_of: dict[str, str],
@@ -683,6 +725,7 @@ def _build_edges(
     sources: NestedSpec,
     sink_origins: Mapping[str, str] | None = None,
     face: _IOFace | None = None,
+    rewriter_of: dict[str, str] | None = None,
 ) -> list[Edge]:
     """Bind every require/sink to its producer; check kinds and unify shapes.
 
@@ -692,8 +735,15 @@ def _build_edges(
     unification conflicts raise `ShapeError`; kind mismatches raise
     `KindError`. Returns the resolved edges (pre-prune); optional-but-absent
     requires bind no edge, and bound requires are recorded on each node.
+
+    `rewriter_of` (key -> rewriter module name) redirects any consumer OTHER
+    than the rewriter itself to bind the rewriter instead of the original
+    producer — the rewriter's own require edge still binds the original
+    producer (it reads the key it replaces). A rewriter's rewrite spec may
+    narrow but never widen a concrete dim of the producer's spec (`ShapeError`).
     """
     unify = face.unify if face is not None else True
+    rewriter_of = rewriter_of or {}
     dims = _DimTable(mode)
     edges: list[Edge] = []
     for name, node in nodes.items():
@@ -703,9 +753,29 @@ def _build_edges(
                 if spec.optional:
                     continue
                 _raise_missing_producer(name, key, mode, producer_of, modules, sources)
+            rewriter = rewriter_of.get(key)
+            if rewriter is not None and rewriter != name:
+                producer = rewriter
             node.bound[key] = spec
             edges.append(Edge(producer, key, name))
-            pspec = src[key] if producer == SOURCES else nodes[producer].all_produces()[key]
+            pspec = src[key] if producer == SOURCES else _produced_spec(nodes[producer], key)
+            if rewriter == name:  # the rewriter binds the original producer:
+                # a rewrite may narrow, never widen
+                rspec = node.rewrites[key]
+                if (
+                    pspec.shape is not None
+                    and rspec.shape is not None
+                    and len(pspec.shape) == len(rspec.shape)
+                ):
+                    for i, (pdim, rdim) in enumerate(zip(pspec.shape, rspec.shape, strict=True)):
+                        if isinstance(pdim, int) and isinstance(rdim, int) and rdim > pdim:
+                            raise ShapeError(
+                                f"[mode={mode.name}] module {name!r} rewrites {key!r} to "
+                                f"{rspec.shape} but producer {producer!r} serves {pspec.shape} "
+                                "— a rewrite (e.g. a ConstituentSelection pad_max) cannot "
+                                f"exceed the reader's width at dim {i}; raise the reader's "
+                                "pad_max instead"
+                            )
             if pspec.kind != spec.kind:
                 raise KindError(
                     f"[mode={mode.name}] module {name!r} port {key!r} expects "
@@ -718,6 +788,9 @@ def _build_edges(
         producer = producer_of.get(key)
         if producer is None:
             _raise_missing_producer(SINKS, key, mode, producer_of, modules, sources, sink_origins)
+        rewriter = rewriter_of.get(key)
+        if rewriter is not None:
+            producer = rewriter
         edges.append(Edge(producer, key, SINKS))
     return edges
 
@@ -744,16 +817,22 @@ def _drop_unconsumed_narrowed(alive: dict[str, _Node], edges: list[Edge]) -> Non
 def _is_terminal_consumer(module: GraphModule) -> bool:
     """Whether a no-current-produces module is a genuine terminal consumer.
 
-    True only if `module` has no CONCRETE produced port active in ANY
-    primary mode — covers true terminal consumers (writers) and
-    demand-driven wildcard producers (a pattern port narrowing to nothing
-    here). An `expose: [fit, val]` task that's merely inactive in this mode
-    still has a concrete port elsewhere, so it's a prunable producer, not a
-    sink — the opt-out mechanism relies on this.
+    True only if `module` has no CONCRETE produced port AND no rewrite
+    active in ANY primary mode — covers true terminal consumers (writers)
+    and demand-driven wildcard producers (a pattern port narrowing to
+    nothing here). An `expose: [fit, val]` task that's merely inactive in
+    this mode still has a concrete port elsewhere, so it's a prunable
+    producer, not a sink — the opt-out mechanism relies on this. A rewriter
+    is never a terminal consumer: its rewrite key is live iff someone else
+    demands it (see `_demand_closure`).
     """
     for m in PRIMARY_MODES:
-        for key, spec in flatten_spec(module.declare_io(m).produces).items():
+        io = module.declare_io(m)
+        for key, spec in flatten_spec(io.produces).items():
             if not _has_wildcard(key) and spec.active_in(m):
+                return False
+        for spec in flatten_spec(getattr(io, "rewrites", {})).values():
+            if spec.active_in(m):
                 return False
     return True
 
@@ -771,7 +850,7 @@ def _demand_closure(nodes: dict[str, _Node], sink_keys: list[str]) -> set[str]:
     needed_keys = set(sink_keys)
     needed: set[str] = set()
     for name, node in nodes.items():
-        if not node.all_produces() and _is_terminal_consumer(node.module):
+        if not node.all_produces() and not node.rewrites and _is_terminal_consumer(node.module):
             needed.add(name)
             needed_keys |= set(node.bound)
     changed = True
@@ -780,7 +859,7 @@ def _demand_closure(nodes: dict[str, _Node], sink_keys: list[str]) -> set[str]:
         for name, node in nodes.items():
             if name in needed:
                 continue
-            if needed_keys & set(node.all_produces()):
+            if needed_keys & (set(node.all_produces()) | set(node.rewrites)):
                 needed.add(name)
                 needed_keys |= set(node.bound)
                 changed = True
@@ -1233,6 +1312,11 @@ def _plan_hash(
                 "name": step.name,
                 "requires": {k: _spec_payload(v) for k, v in step.requires.items()},
                 "produces": {k: _spec_payload(v) for k, v in step.produces.items()},
+                **(
+                    {"rewrites": {k: _spec_payload(v) for k, v in step.rewrites.items()}}
+                    if step.rewrites
+                    else {}
+                ),
             }
             for step in steps
         ],

@@ -8,7 +8,4 @@ name: GN3_baseline_loose
 
 data:
   modules:
-    reader:
-      class_path: salt.data.H5StructuredReader
-      init_args:
-        constituent_cuts: null # loose tracks: drop GN3_baseline's d0/shared-hit cuts
+    track_selection: null # loose tracks: drop GN3_baseline's d0/shared-hit cuts

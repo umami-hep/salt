@@ -244,7 +244,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
-    # setup-only modules (InputSamples/VDS/ShmStage) are partitioned out of the
+    # setup-only modules (InputSamples/ShmStage) are partitioned out of the
     # tensor compile, so the combined full-pipeline graph here uses `batch_modules`,
     # not the union `dm.modules` (a setup-only module in `compile_plan` trips
     # AllModesDeadError). The setup graph is a distinct topology rendered separately.

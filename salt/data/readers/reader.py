@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import inspect
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from difflib import get_close_matches
 from pathlib import Path
@@ -16,11 +18,12 @@ from typing import TYPE_CHECKING, Any
 
 import h5py
 import numpy as np
+from filelock import FileLock, Timeout
+from ftag.vds import create_virtual_file
 
 from salt.data.base import Reader, WorkerCtx
 from salt.data.dtypes import get_dtype
-from salt.data.readers.stream import StreamConfig
-from salt.data.readers.vds import create_vds, has_wildcard
+from salt.data.readers.stream import LOCK_TIMEOUT_S, StreamConfig
 from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema, load_schema
@@ -29,6 +32,123 @@ if TYPE_CHECKING:
     from salt.data.readers.cuts import GlobalObjectCuts
 
 __all__ = ["GroupConfig", "H5StructuredReader"]
+
+
+def _has_wildcard(path: Path | str) -> bool:
+    """Whether a path's filename contains glob-style wildcard characters (``*?[``)."""
+    name = Path(path).name
+    return any(ch in name for ch in ("*", "?", "["))
+
+
+def _default_vds_path(pattern: Path) -> Path:
+    """Derive the default VDS output path for a wildcard pattern: a sibling
+    ``<name>/vds.h5`` folder next to the matched files.
+
+    Raises
+    ------
+    PermissionError
+        If the VDS folder cannot be created (use the reader's `vds_path`).
+    """
+    vds_name = pattern.name.replace("*", "vds")
+    vds_dir = pattern.parent / vds_name.removesuffix(".h5")
+    try:
+        vds_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError as err:
+        raise PermissionError(
+            f"No permissions to create a VDS folder/file in {vds_dir}. "
+            "Please use the reader's `vds_path`."
+        ) from err
+    return vds_dir / "vds.h5"
+
+
+def _done_marker(vds_out: Path) -> Path:
+    """The ``.done`` completion-marker path for a VDS file."""
+    return vds_out.with_suffix(vds_out.suffix + ".done")
+
+
+def _is_stale(out_fname: Path, members: list[Path]) -> bool:
+    """Whether an existing VDS is missing or older than any member file."""
+    if not out_fname.exists():
+        return True
+    vds_mtime = out_fname.stat().st_mtime
+    return any(member.stat().st_mtime > vds_mtime for member in members)
+
+
+def _create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
+    """Create (or reuse) a VDS file for `pattern` in a multi-process-safe way.
+
+    1. Fast path: ``.done`` marker exists and the VDS is not stale.
+    2. Acquire ``<out>.lock`` (FileLock, `LOCK_TIMEOUT_S`).
+    3. Re-check marker + staleness under the lock.
+    4. Build into a pid-suffixed temp file, atomically rename into place.
+    5. Write the ``.done`` marker (atomic rename too).
+
+    Parameters
+    ----------
+    pattern : Path
+        Glob-style pattern (wildcard in the filename component).
+    out_fname : Path | None, optional
+        Target VDS path; None derives the default next to the data.
+
+    Returns
+    -------
+    Path
+        Path to the final VDS file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the pattern matches no files.
+    RuntimeError
+        If acquiring the lock times out.
+    """
+    pattern = Path(pattern)
+    members = sorted(pattern.parent.glob(pattern.name))
+    if not members:
+        raise FileNotFoundError(f"No files match wildcard: {pattern}")
+
+    out_fname = _default_vds_path(pattern) if out_fname is None else Path(out_fname)
+    out_fname.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_path = out_fname.with_suffix(out_fname.suffix + ".lock")
+    done_path = _done_marker(out_fname)
+
+    # Fast path: already built and up to date
+    if done_path.exists() and not _is_stale(out_fname, members):
+        return out_fname
+
+    lock = FileLock(str(lock_path))
+    try:
+        lock.acquire(timeout=LOCK_TIMEOUT_S)
+    except Timeout as exc:
+        raise RuntimeError(f"Timeout waiting for VDS lock: {lock_path}") from exc
+
+    try:
+        # Re-check after acquiring the lock
+        if done_path.exists():
+            if not _is_stale(out_fname, members):
+                return out_fname
+            done_path.unlink()  # stale: invalidate and rebuild
+
+        tmp_out = out_fname.with_name(out_fname.name + f".tmp.{os.getpid()}")
+        created_path = Path(create_virtual_file(pattern=pattern, out_fname=tmp_out))
+
+        # ensure atomic publish from tmp_out
+        if (
+            created_path.resolve() != tmp_out.resolve()
+            and created_path.exists()
+            and not tmp_out.exists()
+        ):
+            created_path.replace(tmp_out)
+        tmp_out.replace(out_fname)
+
+        marker_tmp = done_path.with_name(done_path.name + f".tmp.{os.getpid()}")
+        marker_tmp.write_text(f"ok pid={os.getpid()} time={time.time()}\n")
+        marker_tmp.replace(done_path)
+        return out_fname
+    finally:
+        with suppress(Exception):
+            lock.release()
 
 
 @dataclass(frozen=True)
@@ -74,12 +194,6 @@ class H5StructuredReader(Reader):
         omitted at construction and supplied via `with_source`.
     num : int, optional
         Number of rows to serve; ``-1`` = all.
-    constituent_cuts : Mapping[str, Any] | None, optional
-        Per-stream `ConstituentCuts` (or the equivalent mapping
-        ``{cuts: [...], on_fail: mask|drop}``), applied to the structured array
-        immediately after the read. Distinct from `cuts` (below): constituent cuts
-        filter constituents WITHIN a row (``mask`` blanks them in place, ``drop``
-        removes and re-pads); `cuts` drop whole rows.
     cuts : GlobalObjectCuts | None, optional
         Sample-axis (per-jet) row eligibility evaluated once in `prepare` over the
         first group's scalar record; only passing rows enter the index (kept-index +
@@ -87,8 +201,8 @@ class H5StructuredReader(Reader):
         ones. ``None`` (default) is the identity path — byte-identical to a no-cut
         contiguous read.
     stage : str | None, optional
-        The bound stage (``"train"``/``"val"``/``"test"``) selecting per-split cuts;
-        threaded by the datamodule via `with_source`.
+        The bound stage (``"train"``/``"val"``/``"test"``); threaded by the
+        datamodule via `with_source`; single-source readers only carry it.
     transforms : Sequence[Callable] | None, optional
         Read-time augmentations with the protocol
         ``transform(struct_array, stream) -> struct_array``, applied FIT-only.
@@ -99,25 +213,18 @@ class H5StructuredReader(Reader):
         ``used_fields`` to input variables unless label augmentation is
         intended.
     vds_path : str | Path | None, optional
-        Explicit VDS output path for wildcard filenames.
+        Explicit VDS output path for a wildcard `filename`. One path per
+        reader (clones share it), so set it only when a single stage is a
+        wildcard; unset, each pattern gets its own sibling ``<name>_vds/vds.h5``.
 
     Raises
     ------
     ConfigError
-        On malformed group configs, unknown constituent-cut/transform streams,
-        constituent cuts on a ``global_object`` stream, or an unset
+        On malformed group configs, unknown transform streams, or an unset
         ``global_object`` flag with no schema to infer from.
     SchemaError
         When the schema artifact contradicts the config (missing groups or
         fields, a non-global_object group without ``valid``).
-    """
-
-    vds_capable: bool = True
-    """H5 reader builds a virtual dataset for wildcard sources.
-
-    Overrides the `Reader` base default (`False`): the `VDS` setup module builds
-    a real VDS (via `create_vds`) for a wildcard source of an `H5StructuredReader`,
-    rather than passing the glob through as an identity edge.
     """
 
     def __init__(
@@ -126,7 +233,6 @@ class H5StructuredReader(Reader):
         schema: Schema | str | Path | None = None,
         filename: str | Path | None = None,
         num: int = -1,
-        constituent_cuts: Mapping[str, Any] | None = None,
         cuts: GlobalObjectCuts | None = None,
         stage: str | None = None,
         transforms: Sequence[Callable] | None = None,
@@ -144,11 +250,7 @@ class H5StructuredReader(Reader):
         self.groups: dict[str, GroupConfig] = {
             stream: self._parse_group(stream, cfg) for stream, cfg in groups.items()
         }
-        self.constituent_cuts = self._parse_constituent_cuts(constituent_cuts, tuple(self.groups))
         self.transforms = list(transforms or [])
-        self._constituent_fields: dict[str, list[str]] = {
-            stream: list(cc.fields) for stream, cc in self.constituent_cuts.items()
-        }
         self._transform_wants_rng = [
             "rng" in inspect.signature(transform).parameters for transform in self.transforms
         ]
@@ -221,16 +323,8 @@ class H5StructuredReader(Reader):
                     "cannot be derived"
                 )
             resolved[stream] = GroupConfig(cfg.dataset, cfg.pad_max, global_object)
-            if global_object and stream in self.constituent_cuts:
-                raise ConfigError(
-                    f"constituent_cuts on stream {stream!r}, which is a global_object "
-                    "(scalar) stream — constituent cuts act within a sequence row; use "
-                    "the reader's row-level cuts: instead"
-                )
             if gschema is not None:
-                config_fields = self._constituent_fields.get(
-                    stream, []
-                ) + self._transform_fields.get(stream, [])
+                config_fields = self._transform_fields.get(stream, [])
                 for field in config_fields:
                     if field not in gschema.fields:
                         near = get_close_matches(
@@ -238,7 +332,7 @@ class H5StructuredReader(Reader):
                         )
                         hint = f"; nearest: {', '.join(near)}" if near else ""
                         raise SchemaError(
-                            f"constituent-cut/transform field {field!r} for stream "
+                            f"transform field {field!r} for stream "
                             f"{stream!r} not present in schema group {cfg.dataset!r}{hint}"
                         )
         self.groups = resolved
@@ -278,11 +372,7 @@ class H5StructuredReader(Reader):
         )
 
     def _stream_config(self, stream: str) -> StreamConfig | None:
-        """The `StreamConfig` for a sequence stream with `pad_max` set, else None.
-
-        Carries no cuts: the structured H5 slab applies `ConstituentCuts` directly in
-        `read` (both ``mask`` and ``drop``), never through the jagged awkward pipeline.
-        """
+        """The StreamConfig for a stream with pad_max set, else None."""
         cfg = self.groups[stream]
         if cfg.pad_max is None:
             return None
@@ -292,23 +382,20 @@ class H5StructuredReader(Reader):
         self,
         filename: str | Path,
         num: int = -1,
-        vds_path: str | Path | None = None,
         stage: str | None = None,
     ) -> H5StructuredReader:
-        """Clone onto another source file (config-only: schema, group configs, constituent
-        cuts, row cuts, and transforms are shared); `stage` selects the clone's per-split
-        row cuts.
+        """Clone onto another source file (config-only: schema, group configs, row
+        cuts, transforms and `vds_path` are shared).
         """
         clone = H5StructuredReader(
             groups=self.groups,
             schema=self.schema,
             filename=filename,
             num=num,
-            constituent_cuts=self.constituent_cuts,
             cuts=self.cuts,
             stage=stage if stage is not None else self.stage,
             transforms=self.transforms,
-            vds_path=vds_path,
+            vds_path=self.vds_path,
         )
         clone.name = self.name
         return clone
@@ -330,7 +417,7 @@ class H5StructuredReader(Reader):
 
     def prepare(self) -> None:
         """Resolve the source file (VDS for wildcards), probe row counts, and build the
-        sample-axis kept-index for the (per-stage) `GlobalObjectCuts` (idempotent).
+        sample-axis kept-index for `GlobalObjectCuts` (idempotent).
 
         With no cuts the kept-index is `None` — the identity sentinel that preserves
         the byte-identical contiguous read path.
@@ -342,8 +429,8 @@ class H5StructuredReader(Reader):
                 f"reader {self.name!r} has no source file — pass filename= or use with_source()"
             )
         path = self.filename
-        if has_wildcard(path):
-            path = create_vds(path, self.vds_path)
+        if _has_wildcard(path):
+            path = _create_vds(path, self.vds_path)
         with h5py.File(path, "r") as f:
             for stream, cfg in self.groups.items():
                 node = f.get(cfg.dataset)
@@ -371,13 +458,13 @@ class H5StructuredReader(Reader):
         self._resolved = path
 
     def _build_kept_index(self, f: h5py.File, first: GroupConfig) -> np.ndarray | None:
-        """Ascending kept file-row indices from the (per-stage) row cuts; None = identity.
+        """Ascending kept file-row indices from the row cuts; None = identity.
 
         Reads the cut fields off the first (sample-axis) group and evaluates the shared
         `_apply_row_cuts` engine. Returns `None` when no cuts engage — the sentinel that
         keeps the contiguous read path byte-identical.
         """
-        if self.cuts is None or not self.cuts.for_split(self.stage):
+        if self.cuts is None or not self.cuts.global_cuts:
             return None
         ds = f[first.dataset]
         if ds.ndim != 1:
@@ -387,7 +474,7 @@ class H5StructuredReader(Reader):
                 "cut fields must be per-row scalars"
             )
         file_fields = ds.dtype.names or ()
-        cut_fields = self.cuts.fields(self.stage)
+        cut_fields = self.cuts.fields()
         missing = [cf for cf in cut_fields if cf not in file_fields]
         if missing:
             raise SchemaError(
@@ -396,7 +483,7 @@ class H5StructuredReader(Reader):
                 "row-axis scalar fields read at index-build"
             )
         rec = ds.fields(list(cut_fields))[:]  # (file_rows,) structured
-        keep = self._apply_row_cuts(rec, self.stage)
+        keep = self._apply_row_cuts(rec)
         return np.flatnonzero(keep).astype(np.int64)
 
     def __len__(self) -> int:
@@ -429,7 +516,7 @@ class H5StructuredReader(Reader):
 
     def bind(self, ctx: WorkerCtx) -> None:
         """Open the handle and allocate demand-narrowed buffers per group (dtype covers
-        demanded + constituent-cut/transform fields via `get_dtype`); raises `SchemaError`
+        demanded + transform fields via `get_dtype`); raises `SchemaError`
         naming the demanding module for a field absent from the live file.
         """
         self.prepare()
@@ -440,8 +527,6 @@ class H5StructuredReader(Reader):
         for stream, cfg in self.groups.items():
             ds = self._h5[cfg.dataset]
             demanded = dict(ctx.read_fields.get(stream, {}))
-            for field in self._constituent_fields.get(stream, []):
-                demanded.setdefault(field, f"{self.name} (constituent cuts)")
             for field in self._transform_fields.get(stream, []):
                 demanded.setdefault(field, f"{self.name} (transforms)")
             file_fields = ds.dtype.names or ()
@@ -467,8 +552,8 @@ class H5StructuredReader(Reader):
 
     def read(self, rows: slice, mode: Mode) -> dict[str, np.ndarray]:
         """Read one batch: contiguous ``read_direct`` slab (no cuts) or a filtered read
-        of the kept file rows (cuts), then apply constituent cuts, truncate, transforms
-        (FIT-only, seeded), and derive ``masks.<stream> = ~valid``.
+        of the kept file rows (cuts), then truncate, transforms (FIT-only, seeded),
+        and derive ``masks.<stream> = ~valid``.
 
         With no cuts (`_kept is None`) the path is byte-identical to a contiguous read
         and ``raw.*`` may alias the reusable buffers; with cuts the served rows map
@@ -487,8 +572,6 @@ class H5StructuredReader(Reader):
                 batch = buf
             else:
                 batch = self._read_kept(ds, buf.dtype, file_rows)
-            if (cc := self.constituent_cuts.get(stream)) is not None:
-                batch = cc.apply(batch)
             # None for scalar/untruncated streams -> no-op
             stream_cfg = self._stream_config(stream)
             if stream_cfg is not None:

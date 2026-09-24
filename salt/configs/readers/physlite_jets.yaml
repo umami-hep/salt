@@ -17,11 +17,14 @@
 #     InDetTrackParticlesAuxDyn.), whose branches are the track fields.
 #   - GhostTrack links are ~88% null (m_persKey==0, thinned tracks) and are
 #     dropped by the reader — served track multiplicity is the non-null count.
+#   - The reader is salt.data.xAODReader because tracks are reached through an
+#     ElementLink, which uproot can read but only xAODReader dereferences (plain
+#     salt.data.UprootReader rejects link_branch/target_prefix).
 
 data:
   modules:
     reader:
-      class_path: salt.data.UprootReader
+      class_path: salt.data.xAODReader
       init_args:
         tree: CollectionTree
         unroll: jets

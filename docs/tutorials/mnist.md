@@ -113,8 +113,8 @@ class IdxReader(Reader):
     def streams(self) -> tuple[str, ...]:
         return ("mnist",)
 
-    def with_source(self, filename, num: int = -1, vds_path=None, stage=None) -> "IdxReader":
-        del vds_path, stage  # single-file reader: nothing to build, nothing stage-specific
+    def with_source(self, filename, num: int = -1, stage=None) -> "IdxReader":
+        del stage  # single-file reader: nothing to build, nothing stage-specific
         clone = IdxReader(filename=filename, num=num)
         clone.name = self.name
         return clone

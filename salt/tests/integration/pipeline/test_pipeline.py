@@ -1378,9 +1378,8 @@ def test_reader_fragment_instantiates(fragment):
 
     A fragment has no model, so there is no plan to compile, but every
     invariant a reader enforces (``unroll`` naming a scalar group,
-    link_branch/target_prefix pairing, constituent cuts on a jagged stream
-    naming configured branches, ...) is raised from its constructor and is
-    caught here.
+    link_branch/target_prefix pairing, row-cut reductions parsing, ...) is
+    raised from its constructor and is caught here.
     """
     _require_extra(fragment)
     from jsonargparse import ArgumentParser

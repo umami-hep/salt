@@ -64,11 +64,16 @@ def plan_table(plan: Plan) -> str:
         # runs as a no-op and reads no fields — say so, or the step looks
         # like live label loading in a plan that provably has none
         noop = "" if step.produces else "  [narrowed to 0 keys — no-op]"
-        lines.append(f"  {i:2d}. {step.name:<20} after {after:<20} (needs {needs}){noop}")
+        rewrites = f"  [rewrites {', '.join(sorted(step.rewrites))}]" if step.rewrites else ""
+        lines.append(f"  {i:2d}. {step.name:<20} after {after:<20} (needs {needs}){noop}{rewrites}")
     narrowed_lines = []
     for step in plan.steps:
-        declared = step.module.declare_io(mode).produces
+        io = step.module.declare_io(mode)
+        declared = io.produces
         concrete = {key for key in flatten_spec(declared) if not _has_wildcard(key)}
+        # a step's own rewrite keys are declared (not narrowed wildcards) — a
+        # rewriter must not be mis-reported as a narrowed wildcard producer
+        concrete |= set(flatten_spec(getattr(io, "rewrites", {})))
         if extra := sorted(set(step.produces) - concrete):
             narrowed_lines.append(f"  {step.name}: {', '.join(extra)}")
     if narrowed_lines:

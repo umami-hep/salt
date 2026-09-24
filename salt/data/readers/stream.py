@@ -1,108 +1,127 @@
-"""Shared `Reader`-base stream-assembly helpers: `StreamConfig`,
-`_cut_sort_truncate_pad` (cut -> sort -> truncate -> pad + valid), and
-`OffsetIndex` (cumulative file offsets for contiguous global slices).
+"""Shared `Reader`-base stream-assembly helpers: `StreamConfig`, `_truncate_pad`
+(truncate -> pad + valid), `OffsetIndex` (cumulative file offsets for contiguous
+global slices), and `stage_file` (the multi-process-safe file-staging primitive).
 """
 
 from __future__ import annotations
 
+import os
+import time
+from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from filelock import FileLock, Timeout
 
 from salt.graph.errors import ConfigError
+from salt.utils import file_utils as fu
 
 if TYPE_CHECKING:
-    from salt.data.readers.cuts import ConstituentCuts
     from salt.schema import GroupSchema
 
-__all__ = ["INT_PAD_SENTINEL", "OffsetIndex", "StreamConfig", "pad_fill"]
+__all__ = [
+    "INT_PAD_SENTINEL",
+    "LOCK_TIMEOUT_S",
+    "OffsetIndex",
+    "StreamConfig",
+    "pad_fill",
+    "stage_file",
+]
 
 INT_PAD_SENTINEL = -1
 """Pad fill for SIGNED-int (label) fields: never a real class, folded to
 ``ignore_index=-1`` downstream. Floats pad to 0.0; unsigned/counts pad to 0; bool
 pads to False; the ``valid`` field is set explicitly, never via these fills."""
 
+LOCK_TIMEOUT_S = 1800
+"""Seconds a `FileLock` waits before giving up (virtual-dataset build, file staging)."""
+
+
+def stage_file(src: Path, dst: Path) -> Path:
+    """Copy `src` to `dst` once, multi-process-safe (FileLock + ``.done`` marker,
+    so a DDP rank / dataloader-worker stampede copies the file exactly once).
+
+    Parameters
+    ----------
+    src : Path
+        Source file to stage.
+    dst : Path
+        Destination path (its parent is created if missing).
+
+    Returns
+    -------
+    Path
+        ``dst`` (the staged copy).
+
+    Raises
+    ------
+    RuntimeError
+        If acquiring the lock times out.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    if src.resolve() == dst.resolve():
+        return dst
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    done_path = dst.with_suffix(dst.suffix + ".done")
+    # Fast path: already staged (marker present and the copy is in place).
+    if done_path.exists() and dst.is_file():
+        return dst
+
+    lock_path = dst.with_suffix(dst.suffix + ".lock")
+    lock = FileLock(str(lock_path))
+    try:
+        lock.acquire(timeout=LOCK_TIMEOUT_S)
+    except Timeout as exc:
+        raise RuntimeError(f"Timeout waiting for staging lock: {lock_path}") from exc
+
+    try:
+        # Re-check under the lock — a contender may have just finished.
+        if done_path.exists() and dst.is_file():
+            return dst
+        fu.copy_file(src, dst)  # no-op if dst already present (file_utils.copy_file)
+        marker_tmp = done_path.with_name(done_path.name + f".tmp.{os.getpid()}")
+        marker_tmp.write_text(f"ok pid={os.getpid()} time={time.time()}\n")
+        marker_tmp.replace(done_path)
+        return dst
+    finally:
+        with suppress(Exception):
+            lock.release()
+
 
 @dataclass(frozen=True)
 class StreamConfig:
-    """Per-stream cut -> sort -> truncate -> pad pipeline description.
+    """Per-stream truncate -> pad spec.
 
-    The shared vocabulary the `Reader` base uses to drive
-    `_cut_sort_truncate_pad`. The reader group configs (`GroupConfig`,
-    `UprootGroupConfig`) map onto it.
+    The shared vocabulary the `Reader` base uses to drive `_truncate_pad`. The
+    reader group configs (`GroupConfig`, `UprootGroupConfig`) map onto it.
 
     Parameters
     ----------
     pad_max : int
-        The served constituent multiplicity ``T`` (the leading N kept after sort +
+        The served constituent multiplicity ``T`` (the leading N kept after
         truncate). Resolved by the reader at index-build (config ``pad_max`` or
         the file-wide max). Must be ``>= 1``.
-    sort : Mapping[str, str] | None, optional
-        Constituent sort spec ``{"var": <field>, "mode": "ascending"|"descending"}``.
-        ``None`` (default) keeps the file order — the parity-preserving path. The
-        permutation is applied to every field of the stream (and any aligned labels)
-        so a sort never desynchronises features from labels.
-    cuts : ConstituentCuts | None, optional
-        Per-constituent keep cuts. ``None`` (default) keeps every constituent —
-        the parity-preserving path. This jagged (awkward) assembly path implements
-        ``on_fail: drop`` only: a failing constituent is removed before padding and
-        never wastes a ``pad_max`` slot. ``on_fail: mask`` is H5-first (see
-        `ConstituentCuts`) and is rejected here.
     jagged : bool, optional
         Whether this is a variable-length sequence stream (padded to ``pad_max``
         with a ``valid`` field + pad mask). ``False`` is a scalar / global-object
-        stream — `_cut_sort_truncate_pad` is not used for those. Default ``True``.
+        stream — `_truncate_pad` is not used for those. Default ``True``.
 
     Raises
     ------
     ConfigError
-        On ``pad_max < 1``, a malformed ``sort`` spec, a ``cuts`` value that is not
-        `ConstituentCuts`, ``on_fail: mask`` (unsupported on this path), or
-        cuts/sort configured on a non-jagged stream.
+        On ``pad_max < 1``.
     """
 
     pad_max: int
-    sort: dict[str, str] | None = None
-    cuts: ConstituentCuts | None = None
     jagged: bool = True
 
     def __post_init__(self) -> None:
-        from salt.data.readers.cuts import (
-            ConstituentCuts,
-        )
-
         if self.pad_max < 1:
             raise ConfigError(f"StreamConfig: pad_max must be >= 1, got {self.pad_max}")
-        if self.sort is not None:
-            var = self.sort.get("var")
-            mode = self.sort.get("mode", "descending")
-            if not var:
-                raise ConfigError("StreamConfig.sort: 'var' must be a non-empty field name")
-            if mode not in {"ascending", "descending"}:
-                raise ConfigError(
-                    f"StreamConfig.sort: unknown mode {mode!r} — "
-                    "expected one of ('ascending', 'descending')"
-                )
-            # normalise (frozen dataclass — set via object.__setattr__)
-            object.__setattr__(self, "sort", {"var": str(var), "mode": str(mode)})
-        if self.cuts is not None:
-            if not isinstance(self.cuts, ConstituentCuts):
-                raise ConfigError(f"StreamConfig.cuts must be a ConstituentCuts, got {self.cuts!r}")
-            if self.cuts.on_fail != "drop":
-                raise ConfigError(
-                    "StreamConfig.cuts: the jagged assembly path implements on_fail: drop "
-                    f"only, got {self.cuts.on_fail!r} — masking in place is H5-first"
-                )
-        if not self.jagged and (self.cuts is not None or self.sort is not None):
-            raise ConfigError(
-                "StreamConfig: cuts/sort are only valid for jagged (sequence) streams"
-            )
-
-    @property
-    def engages_pipeline(self) -> bool:
-        """Whether cut/sort are configured (``True`` engages the drop-then-pad / sort machinery)."""
-        return (self.cuts is not None and bool(self.cuts.cuts)) or self.sort is not None
 
 
 def pad_fill(dt: np.dtype | None, arr: Any = None) -> Any:
@@ -131,38 +150,28 @@ def pad_fill(dt: np.dtype | None, arr: Any = None) -> Any:
     return 0  # unsigned ints / counts / other: 0
 
 
-def _cut_sort_truncate_pad(
+def _truncate_pad(
     cols: dict[str, Any],
     fields: list[str],
     stream_cfg: StreamConfig,
     b: int,
     gschema: GroupSchema | None = None,
-    labels: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Cut -> sort -> truncate -> pad a jagged stream into a structured ``(B, T)`` array.
+    """Truncate -> pad a jagged stream into a structured ``(B, T)`` array.
 
-    1. cut: AND of ``stream_cfg.cuts``, drop-then-pad — failing constituents
-       are REMOVED (never waste a ``pad_max`` slot).
-    2. sort: per-row argsort of the sort field; permutation applied to fields
-       AND labels.
-    3. truncate: keep the leading ``pad_max`` constituents.
-    4. pad: ``valid`` computed from the post-cut/sort/truncate state; each
-       field ``ak.pad_none`` + ``ak.fill_none`` per dtype (`pad_fill`), cast
-       to the schema dtype, with a trailing ``valid`` bool field.
+    1. truncate: keep the leading ``pad_max`` constituents.
+    2. pad: ``valid`` computed from the truncated per-row count; each field
+       ``ak.pad_none`` + fill per dtype (`pad_fill`), cast to the schema dtype,
+       with a trailing ``valid`` bool field.
 
     Returns ``(structured (B, T) array, valid (B, T) bool)``.
     """
     import awkward as ak
 
     t_dim = stream_cfg.pad_max
-    work = dict(cols)
-    aligned = dict(labels) if labels is not None else {}
 
-    if stream_cfg.engages_pipeline:
-        work, aligned = _apply_cut_and_sort(work, aligned, fields, stream_cfg)
-
-    # valid length FIRST: post-cut/sort per-row count, clipped to T (parity path)
-    first = work[fields[0]]
+    # valid length FIRST: per-row count, clipped to T (parity path)
+    first = cols[fields[0]]
     counts = np.asarray(ak.num(first, axis=1)) if b > 0 else np.zeros(0, dtype=np.int64)
     valid = np.arange(t_dim)[None, :] < np.minimum(counts, t_dim)[:, None]  # (B, T) bool
 
@@ -172,7 +181,7 @@ def _cut_sort_truncate_pad(
         # `pad_none(..., clip=True)` already TRUNCATES to `t_dim` as well as
         # padding to it, so slicing to `[:, :t_dim]` first only builds a whole
         # intermediate jagged array for `pad_none` to redo the same cut on.
-        arr = work[f]
+        arr = cols[f]
         padded = ak.pad_none(arr, t_dim, axis=1, clip=True)
         dt = np.dtype(gschema.fields[f]) if gschema is not None else None
         fill = pad_fill(dt, arr)
@@ -195,45 +204,6 @@ def _cut_sort_truncate_pad(
         raw[f] = blocks[f]
     raw["valid"] = valid
     return raw, valid
-
-
-def _apply_cut_and_sort(
-    work: dict[str, Any],
-    aligned: dict[str, Any],
-    fields: list[str],
-    stream_cfg: StreamConfig,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Apply per-constituent drop-then-pad cuts then a per-row sort to jagged columns.
-
-    A maximal-lockstep permutation: the keep mask (cuts) and the argsort (sort) are
-    BOTH applied to every entry of ``work`` and ``aligned`` so features and labels
-    never desynchronise.
-    """
-    import awkward as ak
-
-    all_cols = {**work, **aligned}
-
-    # --- 1. cut: drop-then-pad (a failing constituent is REMOVED) ---
-    if stream_cfg.cuts is not None and stream_cfg.cuts.cuts:
-        keep = stream_cfg.cuts.keep(all_cols)
-        work = {f: work[f][keep] for f in work}
-        aligned = {f: aligned[f][keep] for f in aligned}
-
-    # --- 2. sort: argsort by sort.var, permute ALL fields + labels in lockstep ---
-    if stream_cfg.sort is not None:
-        var = stream_cfg.sort["var"]
-        if var not in {**work, **aligned}:
-            raise KeyError(
-                f"StreamConfig sort field {var!r} is not a constituent field of this stream; "
-                f"available: {sorted({**work, **aligned})}"
-            )
-        key = work[var] if var in work else aligned[var]
-        order = ak.argsort(key, axis=1, ascending=stream_cfg.sort["mode"] == "ascending")
-        work = {f: work[f][order] for f in work}
-        aligned = {f: aligned[f][order] for f in aligned}
-
-    del fields  # field order is preserved by the caller's structured assembly
-    return work, aligned
 
 
 @dataclass

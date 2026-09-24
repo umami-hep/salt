@@ -56,7 +56,7 @@ DEFAULT_DATASET_FUNCTIONS: tuple[str, ...] = (
     "salt.data.dataset.SaltDataset._to_torch",
     "salt.data.readers.reader.H5StructuredReader.read",
     "salt.data.readers.reader.H5StructuredReader._read_kept",
-    "salt.data.readers.cuts.ConstituentCuts.apply",
+    "salt.data.processors.cut._ConstituentCuts.apply",
     "salt.data.processors.features.Features.process",
     "salt.data.processors.labels.Labels.process",
     "salt.graph.bundle.Bundle.merge",

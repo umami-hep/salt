@@ -145,7 +145,7 @@ class InputSamples(SaltDatasetModule):
 
         Writes ``source.<reader>.<stage>.pattern`` and, on the run's num-stage,
         the whole-dict ``artifacts.<reader>.num`` scalar; a wildcard passes
-        through verbatim (InputSamples never globs — the reader or `VDS` resolves it).
+        through verbatim (InputSamples never globs — the reader resolves it).
         """
         if stage not in self._stages:
             return ctx
@@ -166,11 +166,11 @@ class InputSamples(SaltDatasetModule):
 
 # the fixed deepest-key registry for the single-source path chain. Listed
 # shallow->deep so `deepest_source_path` picks the deepest present key.
-SOURCE_REGISTRY: tuple[str, ...] = ("pattern", "vds_path", "staged_path")
+SOURCE_REGISTRY: tuple[str, ...] = ("pattern", "staged_path")
 
 
 def deepest_source_path(ctx: SetupBundle, reader: str, stage: SetupStage) -> str:
-    """Walk the fixed ``pattern -> vds_path -> staged_path`` registry over the resolved
+    """Walk the fixed ``pattern -> staged_path`` registry over the resolved
     ctx and return the deepest present path for ``(reader, stage)`` (raises `KeyError`
     if none of the chain is present).
     """

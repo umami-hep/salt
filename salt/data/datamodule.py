@@ -1,7 +1,7 @@
 """`SaltDataModule` — Lightning wiring for the v2 dataset pipeline.
 
 Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
-(no collate); declared setup graph for VDS resolution and optional staging.
+(no collate); declared setup graph for source resolution and optional staging.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from salt.data.dataset import SaltDataset
 from salt.data.input_samples import InputSamples, deepest_source_path, source_num
 from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableSaltDataset
 from salt.data.manifest import CorpusManifest, apply_schema, ensure_manifest
-from salt.data.readers.vds import VDS
 from salt.data.samplers import RandomBatchSampler
 from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_setup_plan
@@ -123,7 +122,7 @@ _SETUP_STAGES: tuple[str, ...] = ("train", "val", "test")
 def _is_setup_only(module: SaltDatasetModule) -> bool:
     """Whether `module` declares setup IO for some stage but no per-batch IO.
 
-    Such modules (InputSamples/VDS/ShmStage) must be partitioned out before
+    Such modules (InputSamples/ShmStage) must be partitioned out before
     the per-batch dataset deepcopy so the dead-module check and single-Reader
     guard don't miscount them; a dual-face reader stays in the batch set.
     """
@@ -150,7 +149,7 @@ class SaltDataModule(lightning.LightningDataModule):
         (typically unbound; per-stage clones get the stage file) plus the
         processors. ``None`` entries are dropped (config null-deletion).
     train_file : str | Path | None, optional
-        Training file path (wildcards trigger VDS creation).
+        Training file path (a wildcard is resolved by the reader).
     val_file : str | Path | None, optional
         Validation file path.
     test_file : str | Path | None, optional
@@ -170,8 +169,6 @@ class SaltDataModule(lightning.LightningDataModule):
         `Reader` restages its own file(s) there, and ``teardown('fit')`` removes
         the root. ``None`` (default) leaves the read path byte-identical.
         Ignored under ``fast_dev_run``.
-    train_vds_path, val_vds_path, test_vds_path : str | Path | None, optional
-        Explicit VDS output paths for wildcard files.
     sinks : Mapping[Mode, Iterable[str]] | None, optional
         Per-mode model-boundary demand (``inputs.* / masks.* / labels.* /
         meta.rows`` keys). Set here or later via `set_sinks` — the
@@ -243,9 +240,6 @@ class SaltDataModule(lightning.LightningDataModule):
         num_test: int = -1,
         test_suff: str | None = None,
         move_files_temp: str | None = None,
-        train_vds_path: str | Path | None = None,
-        val_vds_path: str | Path | None = None,
-        test_vds_path: str | Path | None = None,
         sinks: Mapping[Mode, Iterable[str]] | None = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
@@ -292,14 +286,6 @@ class SaltDataModule(lightning.LightningDataModule):
         # Must run before the partition below: wires InputSamples._reader so its
         # `declare_setup_io` (probed by `_is_setup_only`) can build keys.
         self._wire_input_samples(modules)
-        # The wildcard->VDS resolution setup module. Auto-injected whenever an
-        # InputSamples is present and no explicit VDS is configured; wires
-        # `_reader` + `_vds_capable` on the VDS. Must also run before the
-        # partition so the (setup-only) VDS lands in `_setup_modules`.
-        self.train_vds_path = train_vds_path
-        self.val_vds_path = val_vds_path
-        self.test_vds_path = test_vds_path
-        self._wire_vds(modules)
         # Partition setup-only modules OUT before the per-batch dataset deepcopy:
         # they never reach SaltDataset, so neither the dead-module check nor
         # SaltDataset's single-Reader guard miscounts them.
@@ -398,48 +384,6 @@ class SaltDataModule(lightning.LightningDataModule):
             samples._reader = self._reader_name  # noqa: SLF001 — assembly poke
         self._input_samples: InputSamples | None = existing[0][1] if existing else None
 
-    def _wire_vds(self, modules: dict[str, SaltDatasetModule]) -> None:
-        """Assemble the wildcard->VDS setup module (mirrors `_wire_input_samples`).
-
-        1. Auto-injection: when an `InputSamples` is present and no explicit
-           `VDS` is configured, synthesise one from the deprecated
-           train_vds_path/val_vds_path/test_vds_path kwargs (only when an
-           `InputSamples` exists — otherwise there is no ``pattern`` to consume).
-        2. Reader wiring: poke the reader's name and `vds_capable` flag onto
-           the VDS, gating its build-vs-identity choice.
-
-        An explicit `VDS` in ``data.modules`` overrides auto-injection.
-        """
-        existing = [(name, m) for name, m in modules.items() if isinstance(m, VDS)]
-        if len(existing) > 1:
-            raise ConfigError(
-                f"SaltDataModule allows at most one VDS, got {len(existing)} "
-                f"({[name for name, _ in existing]}); one VDS owns the single Reader's "
-                "wildcard resolution"
-            )
-        if not existing and self._input_samples is not None:
-            out = {
-                stage: p
-                for stage, p in (
-                    ("train", self.train_vds_path),
-                    ("val", self.val_vds_path),
-                    ("test", self.test_vds_path),
-                )
-                if p is not None
-            }
-            implicit = VDS(out=out or None)
-            implicit.name = "vds"
-            # partition right after picks this up into `_setup_modules`
-            # (a VDS is setup-only).
-            modules["vds"] = implicit
-            existing = [("vds", implicit)]
-        # embed the single Reader's name (for the source.<reader>.* keys) and
-        # its vds_capable flag (gates build-vs-identity) on the VDS.
-        for _, vds in existing:
-            vds._reader = self._reader_name  # noqa: SLF001 — assembly poke
-            vds._vds_capable = self._reader_proto.vds_capable  # noqa: SLF001 — assembly poke
-        self._vds: VDS | None = existing[0][1] if existing else None
-
     @property
     def modules(self) -> dict[str, SaltDatasetModule]:
         """All assembled dataset modules (both graphs) — use `batch_modules` for compiling."""
@@ -452,7 +396,7 @@ class SaltDataModule(lightning.LightningDataModule):
 
     @property
     def setup_modules(self) -> dict[str, SaltDatasetModule]:
-        """The setup-only modules (InputSamples/VDS/ShmStage) — the setup graph."""
+        """The setup-only modules (InputSamples/ShmStage) — the setup graph."""
         return dict(self._setup_modules)
 
     @property
@@ -555,13 +499,8 @@ class SaltDataModule(lightning.LightningDataModule):
         filename, num = self._resolve_source(mode)
         if filename is None:
             return None, num
-        vds = {
-            Mode.FIT: self.train_vds_path,
-            Mode.VAL: self.val_vds_path,
-            Mode.TEST: self.test_vds_path,
-        }[mode]
         reader = self._reader_proto.with_source(
-            filename=filename, num=num, vds_path=vds, stage=_STAGE_OF_MODE[mode]
+            filename=filename, num=num, stage=_STAGE_OF_MODE[mode]
         )
         return reader, num
 
@@ -709,8 +648,8 @@ class SaltDataModule(lightning.LightningDataModule):
     def setup(self, stage: str) -> None:
         """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST.
 
-        Runs the data-sourcing setup pass (source resolution + wildcard->VDS)
-        into one write-once ctx first, then binds each stage's reader from it.
+        Runs the data-sourcing setup pass (source resolution) into one
+        write-once ctx first, then binds each stage's reader from it.
         """
         self._auto_sinks()
         self._stage_root = self._resolve_stage_root(stage)

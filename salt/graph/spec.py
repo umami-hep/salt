@@ -390,15 +390,22 @@ def unflatten_spec(flat: Mapping[str, TensorSpec]) -> NestedSpec:
 
 @dataclass(frozen=True)
 class IO:
-    """A module's declared interface: required and produced nested specs."""
+    """A module's declared interface: required, produced, and rewritten nested specs.
+
+    `rewrites` are keys this module overwrites in place (e.g. ``raw.jets``) —
+    every rewrite key must also appear in `requires` (a rewriter reads the
+    key it replaces); see the planner's rewrite-ordering contract.
+    """
 
     requires: NestedSpec = field(default_factory=dict)
     produces: NestedSpec = field(default_factory=dict)
+    rewrites: NestedSpec = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Validate both trees eagerly (component names + leaf types).
         flatten_spec(self.requires)
         flatten_spec(self.produces)
+        flatten_spec(self.rewrites)
 
 
 UNNAMED = "unnamed"
