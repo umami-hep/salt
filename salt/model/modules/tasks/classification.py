@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -333,8 +334,8 @@ class ClassificationTaskModule(_TaskModuleBase):
         rank-0 scalars). Sequence head: masked softmax, one ``f4`` field per class in H5 modes;
         ONNX instead emits a single int8 argmax field named ``pascal_case(name)``.
         """
-        del run_name
         assert self.net is not None, "get_output before bind()"
+        fields = self.get_output_manifest(mode, run_name)
         logits = b.get(self.pred_key)
         if not self.sequence:
             if isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
@@ -345,57 +346,30 @@ class ClassificationTaskModule(_TaskModuleBase):
             # ONNX sink squeezes [1, C] per-class columns to rank-0 scalars; H5
             # sink packs the full [B] column, so only squeeze in ONNX mode
             squeeze_global = bool(mode & Mode.ONNX)
-            fields = [
-                OutputField(
-                    h5_name=px,
-                    dtype="f4",
-                    axis="global",
-                    final=True,
-                    value=probs[..., c].squeeze() if squeeze_global else probs[..., c],
-                )
-                for c, px in enumerate(self.class_suffixes)
+            values = [
+                probs[..., c].squeeze() if squeeze_global else probs[..., c]
+                for c, _ in enumerate(self.class_suffixes)
             ]
-            if self._emit_targets(mode):
-                fields.append(self._target_field(value=self._consumed_labels(b)))
-            return fields
-        mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-        probs = masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
-        if mode & Mode.ONNX:
-            # zero-row append/strip -> [L] int8 argmax leaf under the pascal-case task name
-            padded = torch.concatenate([probs, torch.zeros((1, 1, probs.shape[-1]))], dim=1)
-            index = torch.argmax(padded, dim=-1)[:, :-1].squeeze(0).char()
-            return [
-                OutputField(
-                    h5_name=None,
-                    onnx_name=pascal_case(self.name),
-                    dtype="int8",
-                    axis="per_token",
-                    final=True,
-                    value=index,
-                )
-            ]
-        # H5-only: the ONNX side of a seq head is the argmax leaf above, not these
-        # per-class probs. Callers MUST select ONNX outputs by calling with
-        # mode=Mode.ONNX (which returns before reaching here), not by scanning
-        # resolved_onnx_name — these fields fall back to a (misleading) per-class
-        # ONNX suffix since onnx_name=None.
-        fields = [
-            OutputField(
-                h5_name=px,
-                onnx_name=None,
-                dtype="f4",
-                axis="per_token",
-                final=True,
-                value=probs[..., c],
-            )
-            for c, px in enumerate(self.class_suffixes)
-        ]
+        else:
+            mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
+            probs = masked_softmax(logits, mask.unsqueeze(-1) if mask is not None else None)
+            if mode & Mode.ONNX:
+                # zero-row append/strip -> [L] int8 argmax leaf under the pascal-case task name
+                padded = torch.concatenate([probs, torch.zeros((1, 1, probs.shape[-1]))], dim=1)
+                index = torch.argmax(padded, dim=-1)[:, :-1].squeeze(0).char()
+                values = [index]
+            else:
+                # H5-only: the ONNX side of a seq head is the argmax leaf above, not the
+                # manifest's per-class fields. Callers MUST select ONNX outputs by calling
+                # with mode=Mode.ONNX, not by scanning resolved_onnx_name — these fields
+                # fall back to a (misleading) per-class ONNX suffix since onnx_name=None.
+                values = [probs[..., c] for c, _ in enumerate(self.class_suffixes)]
         if self._emit_targets(mode):
-            fields.append(self._target_field(value=self._consumed_labels(b)))
-        return fields
+            values.append(self._consumed_labels(b))
+        return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
 
-    def _target_field(self, value: Tensor | None = None) -> OutputField:
-        """The target-label field: the consumed class label as an unprefixed
+    def _target_field(self) -> OutputField:
+        """The value-free target-label descriptor: the consumed class label as an unprefixed
         ``target_{task}`` i4 column (labels are model-independent).
         """
         return OutputField(
@@ -405,7 +379,6 @@ class ClassificationTaskModule(_TaskModuleBase):
             axis="per_token" if self.sequence else "global",
             final=True,
             prefix=False,
-            value=value,
         )
 
     def _consumed_labels(self, b: Bundle) -> Tensor:
@@ -426,7 +399,9 @@ class ClassificationTaskModule(_TaskModuleBase):
         return labels
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
-        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
+        """The static, value-free descriptors for `mode` (``value=None``) — `get_output` derives its
+        fields from this list via ``replace(field, value=...)``.
+        """
         del run_name
         if not self.sequence:
             fields = [

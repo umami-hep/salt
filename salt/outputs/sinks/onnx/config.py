@@ -1,10 +1,10 @@
 """The ``export:`` config block (dataclasses) plus export-input resolution; the
-module body stays torch-free (reduce-registry lookups are deferred imports).
+module body stays torch-free.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -12,15 +12,11 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import split_key
 
 __all__ = [
-    "KNOWN_REDUCES",  # noqa: F822 - PEP 562 module __getattr__ (live registry view)
-    "PER_TOKEN_REDUCES",  # noqa: F822 - PEP 562 module __getattr__ (live registry view)
     "TRACK_SELECTIONS",
     "ExportCombine",
     "ExportConfig",
     "ExportInput",
-    "ExportOutput",
     "default_athena_name",
-    "reject_declared_outputs",
     "resolve_export_config",
     "sanitised_model_name",
     "stream_of_input_port",
@@ -37,36 +33,6 @@ TRACK_SELECTIONS = (
     "dipsLooseUpgrade",
 )
 """Track selections accepted by the Athena-side loader."""
-
-
-def _live_known_reduces() -> tuple[str, ...]:
-    """Registered reduce names, from the live registry (the deferred import keeps this
-    module torch-free).
-    """
-    from salt.outputs.sinks.onnx.reduces import registered_reduces
-
-    return registered_reduces()
-
-
-def _live_per_token_reduces() -> tuple[str, ...]:
-    """Registered per-token reduce names, from the live registry (deferred import)."""
-    from salt.outputs.sinks.onnx.reduces import per_token_reduces
-
-    return per_token_reduces()
-
-
-def __getattr__(name: str) -> tuple[str, ...]:
-    """Resolve the live ``KNOWN_REDUCES``/``PER_TOKEN_REDUCES`` attributes (PEP 562).
-
-    These are live views of the `salt.outputs.sinks.onnx.reduces` registry,
-    resolved on attribute access — accessing them triggers the deferred registry
-    import, never at this module's own import.
-    """
-    if name == "KNOWN_REDUCES":
-        return _live_known_reduces()
-    if name == "PER_TOKEN_REDUCES":
-        return _live_per_token_reduces()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass
@@ -112,40 +78,6 @@ class ExportInput:
 
 
 @dataclass
-class ExportOutput:
-    """One ONNX output group for the custom-reduce binder protocol.
-
-    The parameter object `salt.outputs.sinks.onnx.reduces.bind_reduce` (the public
-    ``register_reduce`` extension surface) consumes; never config-parsed
-    (`resolve_export_config` hard-errors on a config-declared
-    ``export.outputs`` — the live output manifest is the folded
-    `salt.outputs.OnnxExportSink`).
-
-    Parameters
-    ----------
-    port : str
-        The bundle port the reduce consumes (an ONNX-plan sink), e.g.
-        ``preds.jets.jets_classification``. Any bundle key is legal, not only ``preds.*``.
-    name : str | None, optional
-        Single-output suffix; the full ONNX name is ``{model_name}_{name}``.
-        Exclusive with `names`.
-    names : list[str] | None, optional
-        Per-class scalar suffixes (e.g. ``[pb, pc, pu]`` -> ``GN2v2_pb`` ...).
-        Exclusive with `name`.
-    dtype : str | None, optional
-        Output dtype, by default the reduce's declared dtype.
-    reduce : str | None, optional
-        Registry key from `KNOWN_REDUCES` (the live ``register_reduce`` registry).
-    """
-
-    port: str
-    name: str | None = None
-    names: list[str] | None = None
-    dtype: str | None = None
-    reduce: str | None = None
-
-
-@dataclass
 class ExportCombine:
     """One manifest post-processing combine: a NEW output from existing ones.
 
@@ -182,7 +114,7 @@ class ExportConfig:
     ``rename:``/``combine:`` manifest post-processing. Its config home is the
     `salt.outputs.OnnxExportSink` (``OnnxExportSink.export_config`` assembles and
     resolves one). The output manifest itself derives from the sink's collected
-    leaves; DECLARING ``outputs`` in a config is a hard error.
+    leaves.
 
     Parameters
     ----------
@@ -194,9 +126,6 @@ class ExportConfig:
         (`default_athena_name`), by default ``r22default``.
     inputs : list[ExportInput], optional
         ONNX graph inputs, in positional order.
-    outputs : list[ExportOutput], optional
-        RETIRED manifest carrier. Never config-declared: `resolve_export_config`
-        raises on a non-empty parsed value.
     rename : dict[str, str], optional
         Manifest suffix renames ``old -> new``, applied BEFORE `combine`.
     combine : list[ExportCombine], optional
@@ -207,7 +136,6 @@ class ExportConfig:
     model_name: str | None = None
     track_selection: str = "r22default"
     inputs: list[ExportInput] = field(default_factory=list)
-    outputs: list[ExportOutput] = field(default_factory=list)
     rename: dict[str, str] = field(default_factory=dict)
     combine: list[ExportCombine] = field(default_factory=list)
 
@@ -279,41 +207,23 @@ def default_athena_name(stream: str, sequence: bool, track_selection: str) -> st
     return f"{stream}_var"
 
 
-def reject_declared_outputs(outputs: Sequence[ExportOutput]) -> None:
-    """Refuse a config-declared ``export.outputs`` section; raises `ConfigError`
-    pointing at the `salt.outputs.OnnxExportSink` manifest instead.
-    """
-    if not outputs:
-        return
-    raise ConfigError(
-        "export.outputs was REMOVED — the ONNX output manifest is declared by an "
-        "OnnxExportSink naming the conversion outputs.* leaves.\n"
-        "  fix: delete the export.outputs section; declare the conversion nodes + the "
-        "OnnxExportSink instead, post-process with the sink's rename:, and inspect the "
-        "assembled manifest with `salt export --manifest`"
-    )
-
-
 def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
     """Validate the EXPORT-ONLY half of the export contract and fill its defaults.
 
-    `outputs` is NOT handled here — the manifest derives from the folded
-    `OnnxExportSink`; a non-empty parsed value is a hard error. Called
-    only on the export path — fit never validates.
+    The output manifest is not part of this half — it derives from the folded
+    `OnnxExportSink`. Called only on the export path — fit never validates.
 
     Returns
     -------
     ExportConfig
-        A resolved copy of the export-only half (``outputs == []``; the input object
-        is not mutated).
+        A resolved copy of the export-only half (the input object is not mutated).
 
     Raises
     ------
     ConfigError
-        On a declared ``export.outputs`` section, or any malformed entry (messages
-        name the offending entry and the rule it breaks).
+        On any malformed entry (messages name the offending entry and the rule it
+        breaks).
     """
-    reject_declared_outputs(export.outputs)
     model_name = validate_model_name(export.model_name or sanitised_model_name(run_name))
     if export.track_selection not in TRACK_SELECTIONS:
         raise ConfigError(
@@ -348,7 +258,6 @@ def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
         model_name=model_name,
         track_selection=export.track_selection,
         inputs=inputs,
-        outputs=[],
         rename=dict(export.rename),
         combine=[ExportCombine(name=c.name, inputs=dict(c.inputs)) for c in export.combine],
     )

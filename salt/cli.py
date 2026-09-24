@@ -378,36 +378,61 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     )
 
 
+def _run_free_cli_argv(
+    config_paths: Sequence[Path], set_overrides: Sequence[str] | None
+) -> list[str]:
+    """Build the argv for a run-free `SaltCLI` parse of a trainer config stack:
+    one sanitised ``--config`` per path (repeated configs deep-merge
+    left-to-right, as ``salt fit``/``salt export`` do) followed by the
+    ``--set`` overrides as ``--KEY=VALUE``. Shared by `_parse_trainer_cli`
+    and ``salt export``'s ``_run_free_cli``. Raises `ConfigError` on a
+    malformed ``--set`` entry.
+    """
+    from salt.utils.config_utils import disable_logger_in_config
+
+    args: list[str] = []
+    for path in config_paths:
+        # Disable the logger in keyless envs (no COMET_API_KEY) so run-free
+        # parsing (graph tools, tests) doesn't fail at instantiate_classes with
+        # "Comet.ml requires an API key"
+        args.extend(["--config", disable_logger_in_config(str(path))])
+    for entry in set_overrides or []:
+        if "=" not in entry:
+            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
+        args.append(f"--{entry}")
+    return args
+
+
+def _build_run_free_cli(args: Sequence[str]) -> Any:
+    """Construct the run-free `SaltCLI` from a ready argv (`_run_free_cli_argv`
+    output) — the shared core of `_parse_trainer_cli` and ``salt export``'s
+    ``_run_free_cli``, which add their command-specific error translation.
+    The parser's `SystemExit` and jsonargparse's instantiate-time `ValueError`
+    propagate.
+    """
+    from salt.main import SaltCLI
+
+    args = list(args)
+    with warnings.catch_warnings():
+        # programmatic argv triggers Lightning's 'args parameter is
+        # intended...' warning — filtered exactly as salt.main and
+        # the salt export run-free parse do (noise on tooling whose
+        # output users are told to read)
+        warnings.filterwarnings(
+            "ignore", message=r".*args parameter is intended to run from within Python.*"
+        )
+        return SaltCLI(args=args, run=False)
+
+
 def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> Any:
     """Parse a trainer config (stack) through the real salt surface, run-free
     (repeated configs deep-merge left-to-right, as `salt fit`/`salt export`
     do). Returns the constructed `SaltCLI` (nothing executed, no data
     touched); raises `ConfigError` on a parse/instantiate failure.
     """
-    from salt.main import SaltCLI
-    from salt.utils.config_utils import disable_logger_in_config
-
-    args: list[str] = []
-    for path in paths:
-        # Disable the logger in keyless envs (no COMET_API_KEY) so run-free
-        # parsing (graph tools, tests) doesn't fail at instantiate_classes with
-        # "Comet.ml requires an API key"
-        cfg_no_logger = disable_logger_in_config(str(path))
-        args.extend(["--config", cfg_no_logger])
-    for entry in set_overrides or []:
-        if "=" not in entry:
-            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
-        args.append(f"--{entry}")
+    args = _run_free_cli_argv(paths, set_overrides)
     try:
-        with warnings.catch_warnings():
-            # programmatic argv triggers Lightning's 'args parameter is
-            # intended...' warning — filtered exactly as salt.main and
-            # the salt export run-free parse do (noise on tooling whose
-            # output users are told to read)
-            warnings.filterwarnings(
-                "ignore", message=r".*args parameter is intended to run from within Python.*"
-            )
-            return SaltCLI(args=args, run=False)
+        return _build_run_free_cli(args)
     except SystemExit as err:
         raise ConfigError(
             f"trainer config {' '.join(str(p) for p in paths)} failed to parse through the "

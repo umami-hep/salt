@@ -23,13 +23,13 @@ from salt.model.modules.tasks import (
     VertexingTaskModule,
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
-from salt.outputs.sinks.onnx.reduces import mask_fill_flattened
 from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import (
     get_node_assignment,
     get_node_assignment_jit,
+    mask_fill_flattened,
     mask_fill_flattened_eager,
 )
 from salt.utils.union_find import mask_fill_flattened as uf_mask_fill_flattened

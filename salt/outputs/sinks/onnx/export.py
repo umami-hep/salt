@@ -211,7 +211,6 @@ def export_graph(
     variables: Mapping[str, Sequence[str]],
     onnx_path: str | Path,
     *,
-    outputs: Sequence[Any] = (),
     run_name: str = "salt",
     config: Mapping[str, Any] | None = None,
     run_metadata: Mapping[str, Any] | None = None,
@@ -232,15 +231,11 @@ def export_graph(
     modules : dict[str, GraphModule]
         Bound module instances carrying the weights to export.
     export : ExportConfig
-        The parsed (unresolved is fine) export block — export-only half; a
-        config-declared ``outputs`` section raises.
+        The parsed (unresolved is fine) export block — export-only half.
     variables : Mapping[str, Sequence[str]]
         Per-stream `Features` variable lists.
     onnx_path : str | Path
         Output ``.onnx`` path.
-    outputs : Sequence[Any]
-        RETIRED — must be empty (the folded `OnnxExportSink` supplies the
-        output demand); a non-empty value raises.
     run_name : str, optional
         The run ``name:`` — the default `model_name` source, by default
         ``"salt"``.
@@ -259,15 +254,6 @@ def export_graph(
         The adapter (reusable as the checker reference), plan and written
         metadata.
     """
-    # the folded OnnxExportSink supplies the entire output demand; `outputs` is
-    # always empty here — only the export-only half (model_name/inputs) is
-    # resolved below.
-    if outputs:
-        raise ConfigError(
-            "export_graph no longer accepts a reduce-manifest `outputs=` list — the off-graph "
-            "reduce manifest was retired. Wire an OnnxExportSink naming the "
-            "conversion outputs.* leaves instead."
-        )
     resolved = resolve_export_config(export, run_name)
     plan = compile_onnx_plan(modules, resolved, variables)
     feature_fields = {
@@ -418,31 +404,17 @@ def _run_free_cli(config_paths: Sequence[Path], set_overrides: Sequence[str]) ->
     config trained without one. Returns the run-free `SaltCLI`
     (``cli.model``/``cli.datamodule`` constructed, nothing executed, no
     data touched). Raises `ConfigError` when the parse fails (with the
-    ``--set`` hint, mirroring ``salt graph``).
+    ``--set`` hint, mirroring ``salt graph``). The embedded ONNX payload is
+    still read from the ORIGINAL config path in `_export_from_cli`; the
+    sanitised /tmp copy affects parsing only.
     """
-    from salt.main import SaltCLI
-    from salt.utils.config_utils import disable_logger_in_config
+    # local import: cli <-> export are mutually lazy (see the
+    # _static_onnx_export_sink imports below)
+    from salt.cli import _build_run_free_cli, _run_free_cli_argv
 
-    args: list[str] = []
-    for path in config_paths:
-        # a saved run config.yaml carries fit/test-only top-level keys (`ckpt_path`,
-        # lightning 2.6.5+ `weights_only`) the top-level parser rejects, plus a
-        # default-ON CometLogger that fails keyless. Strip both + disable the logger
-        # via a /tmp copy; the embedded ONNX payload is still read from the ORIGINAL
-        # path in _export_from_cli, so this affects parsing only.
-        args.extend(["--config", disable_logger_in_config(str(path))])
-    for entry in set_overrides:
-        if "=" not in entry:
-            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
-        args.append(f"--{entry}")
+    args = _run_free_cli_argv(config_paths, set_overrides)
     try:
-        with warnings.catch_warnings():
-            # programmatic argv triggers Lightning's 'args parameter is intended...'
-            # warning — filtered exactly as the salt fit/test entry point does.
-            warnings.filterwarnings(
-                "ignore", message=r".*args parameter is intended to run from within Python.*"
-            )
-            return SaltCLI(args=args, run=False)
+        return _build_run_free_cli(args)
     except SystemExit as err:
         raise ConfigError(
             f"run config(s) {[str(p) for p in config_paths]} failed to parse through the "
@@ -652,8 +624,8 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
 
     Returns the export result and the eager checker reference. Raises
     `ConfigError` on a missing config / export sink, an incomplete export
-    contract, a config-declared ``export.outputs``, or schema drift;
-    `FileExistsError` on an existing output without ``--overwrite``.
+    contract, or schema drift; `FileExistsError` on an existing output
+    without ``--overwrite``.
     """
     from salt.model.saltmodule import SaltModule
 
@@ -710,10 +682,9 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         config_payload = yaml.safe_load(fh) or {}
     result = export_graph(
         modules,
-        resolved,  # already-resolved export-only half (outputs=[] below)
+        resolved,  # already-resolved export-only half
         variables,
         onnx_path,
-        outputs=[],
         run_name=run_name,
         config=config_payload,
         run_metadata=load_run_metadata(config_path),

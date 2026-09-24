@@ -121,10 +121,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/outputs/sinks/onnx/test_adapter.py",
     ),
     "salt/outputs/sinks/onnx/metadata.py": ("salt/tests/unit/outputs/sinks/onnx/test_export.py",),
-    "salt/outputs/sinks/onnx/reduces.py": (
-        "salt/tests/unit/outputs/test_hard_reduce_nodes.py",
-        "salt/tests/unit/outputs/sinks/onnx/test_adapter.py",
-    ),
+    "salt/outputs/sinks/onnx/reduces.py": ("salt/tests/unit/outputs/test_hard_reduce_nodes.py",),
     "salt/utils/array_utils.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
     "salt/utils/file_utils.py": ("salt/tests/unit/data/readers/test_vds.py",),
     "salt/utils/mask_utils.py": ("salt/tests/unit/outputs/test_maskformer_eval_h5.py",),

@@ -701,29 +701,22 @@ class RegressionTaskModule(_TaskModuleBase):
         H5 modes keep the per-column ``[B]``/``[B, L]`` value; ONNX squeezes the size-1
         batch dim to a rank-0 scalar (global) or ``[L]`` vector (per-token).
         """
-        del run_name
+        fields = self.get_output_manifest(mode, run_name)
         preds = self._descaled_preds(b, mode)
-        axis = "per_token" if self.sequence else "global"
         squeeze = bool(mode & Mode.ONNX)
-        fields = [
-            OutputField(
-                h5_name=suffix,
-                dtype="f4",
-                axis=axis,
-                final=True,
-                value=preds[..., i].squeeze() if squeeze else preds[..., i],
-            )
-            for i, suffix in enumerate(self.output_suffixes)
+        values = [
+            preds[..., i].squeeze() if squeeze else preds[..., i]
+            for i, _ in enumerate(self.output_suffixes)
         ]
         if self._emit_targets(mode):
             mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-            for field, key in zip(self._target_fields(), self.target_label_keys, strict=True):
+            for key in self.target_label_keys:
                 raw = b.get(key).float()
                 if mask is not None:
                     # padded positions NaN, matching the de-scaled prediction columns
                     raw = torch.masked_fill(raw, mask, torch.nan)
-                fields.append(replace(field, value=raw))
-        return fields
+                values.append(raw)
+        return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
 
     def _target_fields(self) -> list[OutputField]:
         """One value-free target-label field per target: the UNSCALED physical target
@@ -744,7 +737,7 @@ class RegressionTaskModule(_TaskModuleBase):
         ]
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
-        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
+        """`get_output` derives its fields from this list via ``replace(field, value=...)``."""
         del run_name
         axis = "per_token" if self.sequence else "global"
         fields = [

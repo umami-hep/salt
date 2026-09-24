@@ -73,10 +73,9 @@ is missing three things.
 
     There is no `export.outputs:` config key. The ONNX output manifest is
     declared by an `OnnxExportSink` naming the conversion `outputs.*` leaves,
-    which is what the three numbered steps below do. A config that still
-    carries an `export.outputs:` block is rejected up front with a
-    `ConfigError` telling you to delete it and declare the conversion nodes
-    plus the sink instead.
+    which is what the three numbered steps below do. An `outputs:` list on
+    the `OnnxExportSink` itself is rejected with a `ConfigError` — producers
+    name their own leaves.
 
 ### 1. A conversion node
 
@@ -233,8 +232,7 @@ replaces an existing file.
 
 **Programmatic surface**, for tests that need to export without a checkpoint:
 `salt.outputs.sinks.onnx.export_graph(modules, export_cfg, variables, path)`
-derives the output set from the folded `OnnxExportSink` in `modules`; passing
-a legacy reduce-manifest `outputs=` list is a hard `ConfigError`. Pair it with
+derives the output set from the folded `OnnxExportSink` in `modules`. Pair it with
 `salt.outputs.sinks.onnx.check_onnx(adapter, path, ...)` to run the same
 eager-vs-onnxruntime comparison the `--check` sweep below runs.
 

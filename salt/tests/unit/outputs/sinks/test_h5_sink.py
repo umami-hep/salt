@@ -590,11 +590,11 @@ class TestSectionOnnxContract:
         bind_all(modules, resolve_bind_schema([plan]))
         modules["norm"].materialise()
         return export_graph(
-            modules, export_cfg, variables, tmp_path / "section.onnx", outputs=[], run_name="GN2_v2"
+            modules, export_cfg, variables, tmp_path / "section.onnx", run_name="GN2_v2"
         )
 
     def test_onnx_contract_names_dtypes_axes_order(self, tmp_path):
-        """The dumb-section ONNX names/dtypes/axes/ORDER == the pinned contract."""
+        """The section ONNX names/dtypes/axes/ORDER == the pinned contract."""
         adapter = self._section_export(tmp_path).adapter
         assert adapter.output_names == SECTION_ONNX_NAMES, (
             f"section ONNX names {adapter.output_names} != pinned {SECTION_ONNX_NAMES}"

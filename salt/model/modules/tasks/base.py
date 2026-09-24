@@ -135,10 +135,12 @@ class _TaskModuleBase(SaltModelModule):
         deps (`output_time_requires`) from `b`, applies the eval conversion
         (softmax / masked-softmax / argmax / descale / union-find) in
         TRACEABLE torch ops so ONNX sees them in-graph, and returns one
-        `OutputField` per serialisation leaf. Each field carries the converted
-        torch ``value`` plus the bare suffix + dtype + axis metadata — it does
-        NOT pack a structured numpy array, prefix the run/model name, or
-        downcast precision (the sink does all three).
+        `OutputField` per serialisation leaf. Implementations derive that list
+        from `get_output_manifest` and attach values with
+        ``dataclasses.replace``. Each field carries the converted torch
+        ``value`` plus the bare suffix + dtype + axis metadata — it does NOT
+        pack a structured numpy array, prefix the run/model name, or downcast
+        precision (the sink does all three).
 
         Target-label emission: in TEST mode, and unless the
         task's ``write_targets`` flag is off, the prediction fields are
