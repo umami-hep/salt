@@ -119,7 +119,7 @@ class StubReader(Reader):
             out["meta.rows"] = np.array([rows.start, rows.stop], dtype=np.int64)
         return out
 
-    def with_source(self, filename, num=-1, vds_path=None, stage=None):  # noqa: ANN001
+    def with_source(self, filename, num=-1, stage=None):  # noqa: ANN001
         # the per-stage source IS a (seed, offset) pair encoded as a tuple/dict here,
         # so the stage-binding test can prove distinct stage sources are honoured.
         spec = filename
@@ -400,32 +400,6 @@ def test_reader_agnostic_roundtrip_against_subreaders() -> None:
     )
 
 
-def test_runs_are_contiguous_local_slices() -> None:
-    # the read(slice)-only contract: sub-readers only ever get contiguous slices
-    sig = StubReader(n=300, seed=1)
-    bkg = StubReader(n=700, seed=2)
-    reader = MultiSampleReader(
-        samples=[
-            SampleConfig(name="signal", label=1, reader=sig),
-            SampleConfig(name="background", label=0, reader=bkg),
-        ]
-    )
-    reader.prepare()
-    runs = reader._runs(slice(0, 250))
-    # every run's local slice is a proper contiguous slice (stop > start, step None)
-    for sid, local_slice, out_lo, out_hi in runs:
-        assert isinstance(local_slice, slice)
-        assert local_slice.step in (None, 1)
-        assert local_slice.stop - local_slice.start == out_hi - out_lo
-        assert local_slice.start >= 0
-        del sid
-    # the runs tile the output window exactly, in order
-    assert runs[0][2] == 0
-    assert runs[-1][3] == 250
-    for k in range(1, len(runs)):
-        assert runs[k][2] == runs[k - 1][3]
-
-
 def _two_sample_reader(n_sig: int = 300, n_bkg: int = 700, **kwargs) -> MultiSampleReader:
     """A prepared two-sample reader over stubs, for the segment/interleave tests."""
     reader = MultiSampleReader(
@@ -461,11 +435,13 @@ def test_segments_cover_the_window_exactly_once() -> None:
 
 
 def test_segments_coalesce_the_row_granular_interleave() -> None:
-    # the whole point: a 1:1 interleave decomposes into ~250 runs but 2 segments
+    # a 1:1 interleave of 250 rows is 2 segments, not ~250 one-row reads
     reader = _two_sample_reader()
     window = slice(0, 250)
-    assert len(reader._runs(window)) > 100
-    assert len(reader._segments(window)) == len(reader.samples)
+    segments = reader._segments(window)
+    assert len(segments) == len(reader.samples)
+    assert sum(positions.size for _sid, _sl, positions in segments) == window.stop - window.start
+    assert any(positions.size > 100 for _sid, _sl, positions in segments)
 
 
 def test_segment_reads_match_run_reads_bit_for_bit() -> None:

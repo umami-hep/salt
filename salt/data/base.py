@@ -6,14 +6,14 @@ transform). Both are `GraphModule`s compiled by the same kernel planner.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from salt.data.readers.stream import OffsetIndex, StreamConfig, _cut_sort_truncate_pad
+from salt.data.readers.stream import OffsetIndex, StreamConfig, _truncate_pad
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.planner import PlanStep
@@ -22,7 +22,7 @@ from salt.graph.spec import IO, KEY_SEP, UNNAMED, Mode
 from salt.schema import GroupSchema, Schema
 
 if TYPE_CHECKING:
-    from salt.data.readers.cuts import ConstituentCuts, GlobalObjectCuts
+    from salt.data.readers.cuts import GlobalObjectCuts
 
 __all__ = [
     "OffsetIndex",
@@ -119,14 +119,6 @@ class SaltDatasetModule(ABC):
     construction time is config I/O.
     """
 
-    incompatible_with: tuple[str, ...] = ()
-    """Class names of setup modules this module must NOT coexist with.
-
-    Strings, not types — the named class need not exist yet. Enforced by the
-    setup-plan compiler (`_check_incompatibilities`). E.g. `VDS` sets
-    ``("ShmStage",)``: staging a VDS would copy h5py pointers, not data.
-    """
-
     def __init__(self) -> None:
         """Initialise the instance name placeholder (assigned from the config key)."""
         self.name: str = UNNAMED
@@ -221,24 +213,9 @@ class Reader(SaltDatasetModule):
     Default `None` (every row eligible).
     """
 
-    constituent_cuts: dict[str, ConstituentCuts]
-    """Per-stream constituent cuts (``on_fail: mask | drop``), when configured.
-
-    The counterpart of `cuts`: these act WITHIN a row and never change `__len__`.
-    Normalised from the reader's config surface by `_parse_constituent_cuts`.
-    """
-
     stage: str | None = None
-    """The bound stage (``"train"``/``"val"``/``"test"``) selecting per-split cuts."""
-
-    vds_capable: bool = False
-    """Whether this reader builds an h5py virtual dataset for wildcard sources.
-
-    The `VDS` setup module gates build-vs-identity on this flag (not an
-    `isinstance` check): for a non-`vds_capable` reader it is an identity edge
-    (never calling `create_vds` on e.g. a ROOT glob, which would crash).
-    `H5StructuredReader` overrides it to `True`.
-    """
+    """The bound stage (``"train"``/``"val"``/``"test"``) — the multi-source readers'
+    per-stage sourcing hook."""
 
     @property
     @abstractmethod
@@ -246,10 +223,8 @@ class Reader(SaltDatasetModule):
         """The stream names this reader serves, in config order."""
 
     def prepare(self) -> None:
-        """Main-process file probing (VDS resolution, row counts); default no-op.
-
-        Idempotent; called lazily by ``__len__`` and eagerly by the
-        datamodule's rank-0 VDS pre-creation.
+        """Main-process file probing (wildcard resolution to a virtual dataset, row
+        counts); idempotent, called lazily by ``__len__``.
         """
 
     @abstractmethod
@@ -296,66 +271,17 @@ class Reader(SaltDatasetModule):
             rec[nm] = row_scalars[nm]
         return rec
 
-    def _apply_row_cuts(self, rows: np.ndarray, split: str | None) -> np.ndarray:
+    def _apply_row_cuts(self, rows: np.ndarray) -> np.ndarray:
         """Sample-axis keep mask over a structured row-scalar record — the shared engine.
 
-        Delegates to `GlobalObjectCuts.eligible`; all-True when no cuts are configured or the
-        split has none. Called at index-build (`prepare`), NEVER per batch: a dropped
+        Delegates to `GlobalObjectCuts.eligible`; all-True when no cuts are configured.
+        Called at index-build (`prepare`), NEVER per batch: a dropped
         row must never be read. SAMPLE-AXIS ONLY — row cuts change `__len__`, so
         constituent filtering must not route through here.
         """
-        if self.cuts is None or not self.cuts.for_split(split):
+        if self.cuts is None or not self.cuts.global_cuts:
             return np.ones(len(rows), dtype=bool)
-        return self.cuts.eligible(rows, split)
-
-    @staticmethod
-    def _parse_constituent_cuts(
-        spec: Mapping[str, Any] | None, streams: Sequence[str]
-    ) -> dict[str, ConstituentCuts]:
-        """Normalise the per-stream constituent-cut config surface to `ConstituentCuts`.
-
-        Accepts a `ConstituentCuts` or a plain mapping (``{cuts: [...], on_fail: ...}``)
-        per stream; validates the stream names against `streams`.
-
-        Returns
-        -------
-        dict[str, ConstituentCuts]
-            The per-stream containers (streams configured ``null`` are dropped).
-
-        Raises
-        ------
-        ConfigError
-            On an unknown stream name or a value that is not a cut container.
-        """
-        from salt.data.readers.cuts import ConstituentCuts
-
-        out: dict[str, ConstituentCuts] = {}
-        for stream, cfg in (spec or {}).items():
-            if stream not in streams:
-                raise ConfigError(
-                    f"constituent_cuts configured for unknown stream {stream!r} — known "
-                    f"streams: {sorted(streams)}"
-                )
-            if cfg is None:
-                continue
-            if isinstance(cfg, ConstituentCuts):
-                out[stream] = cfg
-            elif isinstance(cfg, Mapping):
-                unknown = set(cfg) - {"cuts", "on_fail"}
-                if unknown:
-                    raise ConfigError(
-                        f"constituent_cuts[{stream!r}]: unknown keys {sorted(unknown)} — "
-                        "expected cuts/on_fail"
-                    )
-                out[stream] = ConstituentCuts(
-                    cuts=cfg.get("cuts", ()), on_fail=cfg.get("on_fail", "")
-                )
-            else:
-                raise ConfigError(
-                    f"constituent_cuts[{stream!r}] must be a ConstituentCuts or a mapping "
-                    f"of cuts/on_fail, got {cfg!r}"
-                )
-        return out
+        return self.cuts.eligible(rows)
 
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema for one served stream, when a schema artifact is configured.
@@ -402,7 +328,6 @@ class Reader(SaltDatasetModule):
         self,
         filename: str | Path,
         num: int = -1,
-        vds_path: str | Path | None = None,
         stage: str | None = None,
     ) -> Reader:
         """Clone this reader onto another source file (config-only, no file I/O).
@@ -467,7 +392,7 @@ class Reader(SaltDatasetModule):
             default only knows how to re-point a single-source reader via
             `with_source`).
         """
-        from salt.data.readers.vds import stage_file
+        from salt.data.readers.stream import stage_file
 
         root = Path(root)
         srcs = self.sources()
@@ -489,35 +414,15 @@ class Reader(SaltDatasetModule):
         stream_cfg: StreamConfig,
         b: int,
         gschema: GroupSchema | None = None,
-        labels: dict[str, object] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Cut -> sort -> truncate -> pad jagged columns into a structured ``(B, T)`` array.
+        """Truncate -> pad jagged columns into a structured (B, T) array.
 
-        Delegates to `salt.data.readers.stream._cut_sort_truncate_pad` — the
-        one pad/sentinel implementation for every jagged-stream reader. With no
-        cuts and no sort configured, only truncate+pad+valid run.
-
-        Parameters
-        ----------
-        cols : dict[str, object]
-            ``{field: jagged awkward array}`` of length ``b``.
-        fields : list[str]
-            Served field names in config order (the structured field order).
-        stream_cfg : StreamConfig
-            The cut/sort/pad spec (``pad_max`` resolved).
-        b : int
-            The number of rows.
-        gschema : GroupSchema | None, optional
-            The stream's schema group for per-field dtype casting.
-        labels : dict[str, object] | None, optional
-            Aligned columns permuted/cut in lockstep but not emitted as fields.
-
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            ``(structured (B, T) array, valid (B, T) bool)``.
+        Delegates to `salt.data.readers.stream._truncate_pad` — the one
+        pad/sentinel implementation for every jagged-stream reader. `fields` is
+        in config order (the structured field order); `gschema` drives per-field
+        dtype casting.
         """
-        return _cut_sort_truncate_pad(cols, fields, stream_cfg, b, gschema, labels)
+        return _truncate_pad(cols, fields, stream_cfg, b, gschema)
 
     def aliases(self, array: np.ndarray) -> bool:
         """Check whether `array` shares memory with a reusable reader buffer.

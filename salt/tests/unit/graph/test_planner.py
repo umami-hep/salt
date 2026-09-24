@@ -1,7 +1,9 @@
 """Tests for salt.graph.planner."""
 
+import numpy as np
 import pytest
 
+from salt.graph.bundle import Bundle
 from salt.graph.errors import (
     AllModesDeadError,
     ConfigError,
@@ -10,6 +12,7 @@ from salt.graph.errors import (
     KindError,
     ShapeError,
 )
+from salt.graph.executor import Executor
 from salt.graph.planner import (
     SINKS,
     SOURCES,
@@ -41,6 +44,40 @@ class WildToy(Toy):
     """Framework-shipped wildcard producer."""
 
     allow_wildcards = True
+
+
+class RewriteToy(Toy):
+    """A wired rewriter: requires+rewrites given keys, callable for `Executor`.
+
+    `fn(bundle) -> {key: value}` computes the rewritten values; defaults to
+    echoing back each rewritten key's current value (an identity rewrite).
+    """
+
+    def __init__(self, name, requires=None, produces=None, rewrites=None, fn=None):
+        self.name = name
+        self._io = IO(
+            requires=unflatten_spec(requires or {}),
+            produces=unflatten_spec(produces or {}),
+            rewrites=unflatten_spec(rewrites or {}),
+        )
+        self._rewrite_keys = list((rewrites or {}).keys())
+        self._fn = fn
+
+    def __call__(self, bundle, mode):
+        if self._fn is not None:
+            return self._fn(bundle)
+        return {key: bundle.get(key) for key in self._rewrite_keys}
+
+
+class FnToy(Toy):
+    """A Toy wired with a callable forward, for `Executor` end-to-end tests."""
+
+    def __init__(self, name, requires=None, produces=None, fn=None):
+        super().__init__(name, requires=requires, produces=produces)
+        self._fn = fn
+
+    def __call__(self, bundle, mode):
+        return self._fn(bundle)
 
 
 def ts(**kwargs):
@@ -539,6 +576,121 @@ class TestWildcardNarrowing:
         assert set(plan.step("w").produces) == {"labels.a", "labels.b"}
         assert Edge("w", "labels.b", "t1") in plan.edges
         assert set(plan.step("t1").requires) == {"labels.a", "labels.b"}
+
+
+# rewrite contract (planner/bundle/executor in-place-replacement)
+
+
+class TestRewrites:
+    def test_rewriter_ordered_between_producer_and_consumer(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts()})
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        b = Toy("b", requires={"raw.j": ts()}, produces={"preds.x": ts()})
+        plan = compile_plan(mods(a, b, rw), Mode.FIT, SRC_X)
+        assert plan.module_names == ("a", "rw", "b")
+        assert Edge("a", "raw.j", "rw") in plan.edges
+        assert Edge("rw", "raw.j", "b") in plan.edges
+        assert Edge("a", "raw.j", "b") not in plan.edges
+        assert "raw.j" in plan.step("rw").produces
+        assert set(plan.step("rw").rewrites) == {"raw.j"}
+        assert dict(plan.step("a").rewrites) == {}
+        assert dict(plan.step("b").rewrites) == {}
+
+    def test_sink_key_binds_to_rewriter(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts()})
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        plan = compile_plan(mods(a, rw), Mode.FIT, SRC_X, sinks=["raw.j"])
+        assert Edge("rw", "raw.j", SINKS) in plan.edges
+        assert not any(e == Edge("a", "raw.j", SINKS) for e in plan.edges)
+
+    def test_rewrite_of_unproduced_key_raises_connectivity_error(self):
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        with pytest.raises(ConnectivityError, match="rewrites"):
+            compile_plan(mods(rw), Mode.FIT, {})
+
+    def test_two_rewriters_of_one_key_raises(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts()})
+        rw1 = RewriteToy("rw1", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        rw2 = RewriteToy("rw2", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        with pytest.raises(ConnectivityError, match="two rewriters"):
+            compile_plan(mods(a, rw1, rw2), Mode.FIT, SRC_X)
+
+    def test_rewrite_key_not_in_requires_raises_config_error(self):
+        rw = RewriteToy("rw", rewrites={"raw.j": ts()})
+        with pytest.raises(ConfigError, match="does not require"):
+            compile_plan(mods(rw), Mode.FIT, {})
+
+    def test_rewrite_key_also_produced_raises_config_error(self):
+        rw = RewriteToy(
+            "rw",
+            requires={"raw.j": ts()},
+            produces={"raw.j": ts()},
+            rewrites={"raw.j": ts()},
+        )
+        with pytest.raises(ConfigError, match="produces and rewrites"):
+            compile_plan(mods(rw), Mode.FIT, {})
+
+    def test_rewriter_alive_when_key_demanded_downstream(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts()})
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        b = Toy("b", requires={"raw.j": ts()}, produces={"preds.x": ts()})
+        plan = compile_plan(mods(a, rw, b), Mode.FIT, SRC_X, sinks=["preds.x"])
+        assert "rw" in plan.module_names
+
+    def test_rewriter_pruned_when_key_unconsumed_elsewhere(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts()})
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts()})
+        plan = compile_plan(mods(a, rw), Mode.FIT, SRC_X, sinks=[])
+        assert "rw" not in plan.module_names
+        report = deadcode(mods(a, rw), Mode.FIT, SRC_X, sinks=[])
+        entry = next(d for d in report if d.module == "rw")
+        assert entry.key == "*"
+        assert "pruned" in entry.reason
+
+    def test_rewriter_changes_plan_hash(self):
+        a, b = chain_ab()
+        hash_without = compile_plan(mods(a, b), Mode.FIT, SRC_X).plan_hash
+        a2, b2 = chain_ab()
+        rw = RewriteToy("rw", requires={"embed.x": ts()}, rewrites={"embed.x": ts()})
+        hash_with = compile_plan(mods(a2, rw, b2), Mode.FIT, SRC_X).plan_hash
+        assert hash_with != hash_without
+
+    def test_executor_runs_rewriter_end_to_end(self):
+        a = FnToy(
+            "a",
+            requires={"inputs.x": ts()},
+            produces={"raw.j": ts()},
+            fn=lambda b: {"raw.j": b.get("inputs.x")},
+        )
+        rw = RewriteToy(
+            "rw",
+            requires={"raw.j": ts()},
+            rewrites={"raw.j": ts()},
+            fn=lambda b: {"raw.j": b.get("raw.j") + 1},
+        )
+        b = FnToy(
+            "b",
+            requires={"raw.j": ts()},
+            produces={"preds.x": ts()},
+            fn=lambda b: {"preds.x": b.get("raw.j")},
+        )
+        plan = compile_plan(mods(a, rw, b), Mode.FIT, SRC_X)
+        executor = Executor(plan)
+        bundle = Bundle({"inputs": {"x": np.array([1, 2, 3])}})
+        result = executor.run(bundle)
+        np.testing.assert_array_equal(result.get("preds.x"), np.array([2, 3, 4]))
+
+    def test_rewrite_widening_a_concrete_dim_raises_shape_error(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts(shape=("B", 4))})
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts(shape=("B", 8))})
+        with pytest.raises(ShapeError, match="cannot exceed"):
+            compile_plan(mods(a, rw), Mode.FIT, SRC_X)
+
+    def test_rewrite_narrowing_a_concrete_dim_is_allowed(self):
+        a = Toy("a", requires={"inputs.x": ts()}, produces={"raw.j": ts(shape=("B", 4))})
+        rw = RewriteToy("rw", requires={"raw.j": ts()}, rewrites={"raw.j": ts(shape=("B", 2))})
+        plan = compile_plan(mods(a, rw), Mode.FIT, SRC_X, sinks=["raw.j"])
+        assert "rw" in plan.module_names
 
 
 # determinism and plan hashing

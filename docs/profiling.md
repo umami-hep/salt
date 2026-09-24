@@ -95,7 +95,7 @@ by line rather than by function.
 
 The default function list is `salt.utils.profiling.DEFAULT_DATASET_FUNCTIONS`
 (`SaltDataset.__getitem__` / `_to_torch`, `H5StructuredReader.read` /
-`_read_kept`, `ConstituentCuts.apply`, `Features.process`, `Labels.process`,
+`_read_kept`, `_ConstituentCuts.apply`, `Features.process`, `Labels.process`,
 `Bundle.merge`). Extend or replace it:
 
 ```bash

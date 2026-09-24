@@ -23,13 +23,12 @@ added.
 | kwarg | Meaning |
 |---|---|
 | `modules` | dataset modules by instance name; exactly one `Reader` plus any processors |
-| `train_file` / `val_file` / `test_file` | per-stage source path (wildcards trigger VDS creation) |
+| `train_file` / `val_file` / `test_file` | per-stage source path (a wildcard filename makes `H5StructuredReader` build a VDS in `prepare`) |
 | `batch_size` | rows per contiguous batch slab, default 1000 |
 | `num_workers` | dataloader worker processes, default 0 |
 | `num_train` / `num_val` / `num_test` | row counts per stage; `-1` means all |
 | `test_suff` | suffix appended to the eval-file `{sample}` name by the writer callback |
 | `move_files_temp` | opt-in staging root (e.g. `/dev/shm/<user>/tmp`); when set, `setup('fit')` restages the fit reader's files there and `teardown('fit')` removes the root; `None` leaves the read path byte-identical |
-| `train_vds_path` / `val_vds_path` / `test_vds_path` | explicit VDS output paths for wildcard files |
 | `sinks` | per-mode model-boundary demand (`inputs.*` / `masks.*` / `labels.*` / `meta.rows` keys); usually set later via `set_sinks`, not at construction |
 | `pin_memory` | pin host memory for faster GPU transfer, default `True` |
 | `persistent_workers` | keep worker processes (and their H5 handles) alive between epochs, default `True` |
@@ -255,9 +254,7 @@ def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
 
 **Read as a real example:** `InputSamples`
 (`salt/data/input_samples.py:124`, `:143`) is the shipped source of
-per-stage file patterns; `VDS` (`salt/data/readers/vds.py:289`, `:304`)
-resolves a wildcard pattern into a concrete virtual-dataset path at setup
-time.
+per-stage file patterns.
 
 ## `Reader`
 
@@ -272,8 +269,8 @@ data graph: `declare_io` always returns `requires={}`.
 | `streams` (`:245`) | abstract property | name the streams this reader serves, in config order | always |
 | `__len__` (`:256`) | abstract | return the row count served | always |
 | `read(rows, mode)` (`:260`) | abstract | read one contiguous batch, return produced keys | always |
-| `prepare()` (`:248`) | concrete, default no-op | main-process file probing (VDS resolution, row counts); idempotent, called lazily by `__len__` | only if there is something to probe |
-| `with_source(...)` (`:401`) | concrete, default raises `NotImplementedError` | clone this reader onto another source file, config-only, signature `with_source(self, filename, num=-1, vds_path=None, stage=None) -> Reader` (`salt/data/base.py:401-407`) | required if this reader is used as a `SaltDataModule` prototype |
+| `prepare()` (`:248`) | concrete, default no-op | main-process file probing (wildcard->VDS resolution, row counts); idempotent, called lazily by `__len__` | only if there is something to probe |
+| `with_source(...)` (`:401`) | concrete, default raises `NotImplementedError` | clone this reader onto another source file, config-only, signature `with_source(self, filename, num=-1, stage=None) -> Reader` (`salt/data/base.py:401-407`) | required if this reader is used as a `SaltDataModule` prototype |
 | `sources()` (`:428`) | concrete, default introspects a `filename`/`files` attribute | list the concrete on-disk file(s) this reader will read | only when sources are not one such attribute (`MultiSampleReader`) |
 | `restage(root)` (`:442`) | concrete, default copies each `sources()` file via `with_source` | clone this reader reading staged copies under `root` | only for a reader with more than one source |
 | `row_blocks()` (`:265`) | concrete, default one whole-reader block | the reader's natural sequential read units for streaming | only when storage has a coarser natural grain (`UprootReader` per file) |
@@ -286,22 +283,16 @@ data graph: `declare_io` always returns `requires={}`.
 
 `with_source` is the one method every `SaltDataModule` prototype reader must
 implement. `SaltDataModule` calls it once per stage
-(`salt/data/datamodule.py:563-564`), passing all four arguments:
+(`salt/data/datamodule.py:563-564`), passing all three arguments:
 `filename` is the resolved per-stage source; `num` is the per-stage row cap
 taken from `data.num_train`/`num_val`/`num_test`, so a hand-written clone
-that drops `num` silently disables those settings; `stage` selects the
-per-split cuts, mapped from the Lightning stage via `_STAGE_OF_MODE`
-(`salt/data/datamodule.py:118`); `vds_path` is the resolved virtual-dataset
-path for a wildcard source.
+that drops `num` silently disables those settings; `stage` is the
+multi-source readers' per-stage sourcing hook, mapped from the Lightning
+stage via `_STAGE_OF_MODE` (`salt/data/datamodule.py:118`).
 
 Plus the class attributes `schema` (`Schema | None`, default `None`), `cuts`
-(`GlobalObjectCuts | None`, sample-axis row eligibility, default `None`),
-`constituent_cuts` (`dict[str, ConstituentCuts]`, per-stream, within-row
-selection), `stage` (`str | None`, the bound `"train"`/`"val"`/`"test"`
-split), `vds_capable` (`bool`, default `False`, whether this reader can build
-an h5py virtual dataset) and `incompatible_with` (`tuple[str, ...]`, setup
-modules this reader must not coexist with, checked by name so the named class
-need not exist yet).
+(`GlobalObjectCuts | None`, sample-axis row eligibility, default `None`) and
+`stage` (`str | None`, the bound `"train"`/`"val"`/`"test"` split).
 
 **Arrays returned by `read` may alias reusable buffers.** A reader is free to
 reuse its own scratch memory across batches for throughput; anything that
@@ -360,11 +351,11 @@ class DoubledPt(Processor):
 
 ## Shipped data modules
 
-`salt/data/__init__.py`'s `__all__` holds 34 names. Ten of them are legal
+`salt/data/__init__.py`'s `__all__` holds 35 names. Eleven of them are legal
 `data.modules` entries; everything else is a base class, the datamodule
 itself, a config or runtime dataclass, a constant, a function, or an
 internal runtime object. The [Reference](#reference) table below classifies
-every one. This section catalogues the ten real entries: `class_path`,
+every one. This section catalogues the eleven real entries: `class_path`,
 source line, `init_args`, the bundle keys each requires and produces, and
 which hooks it defines.
 
@@ -416,7 +407,6 @@ data:
 | `schema` | `Schema \| str \| Path \| None` | `None` |
 | `filename` | `str \| Path \| None` | `None` |
 | `num` | `int` | `-1` |
-| `constituent_cuts` | `Mapping[str, Any] \| None` | `None` |
 | `cuts` | `GlobalObjectCuts \| None` | `None` |
 | `stage` | `str \| None` | `None` |
 | `transforms` | `Sequence[Callable] \| None` | `None` |
@@ -506,9 +496,9 @@ and for a stream outside the resolved set (`:132-136`).
 
 | `class_path` | Source | `init_args` | Requires / produces / hooks |
 |---|---|---|---|
-| `salt.data.VDS` | `readers/vds.py:222`, `__init__` `:251` | `out: dict[str, str \| Path] \| None = None` | setup-only: `declare_io` empty (`:272-277`); `declare_setup_io` requires `source.<reader>.<stage>.pattern` and produces `source.<reader>.<stage>.vds_path` (`:289-302`); `setup` builds a real VDS only when the reader is `vds_capable` and the pattern is a wildcard, otherwise passes the pattern through unchanged (`:304-327`) |
 | `salt.data.FtagLabeller` | `processors/ftag_labeller.py:17`, `__init__` `:70-77` | `stream: str = "jets"`; `label: str = "flavour_label"`; `class_names: Sequence[str] \| None = None` (empty or `None` raises `ConfigError`, `:87-91`); `require_labels: bool = True`; `dtype_policy = "int64-for-int"` | produces a **concrete** `labels.<stream>.<label>` (`:102-112`), which beats `Labels`' wildcard; `read_fields` overridden (`:114-122`) |
-| `salt.data.UprootReader` | `readers/uproot_reader.py:200`, `__init__` `:261-271` | `groups` (required); `filename=None`; `tree: str = "CollectionTree"`; `unroll: str \| None = None`; `num: int = -1`; `cuts=None`; `constituent_cuts=None`; `stage=None`; `index_cache: str \| Path \| None = None` | same produced key families as `H5StructuredReader` (`:454-471`); its `with_source` (`:581-593`) accepts `vds_path` for API parity only and discards it, because ROOT has no VDS |
+| `salt.data.UprootReader` | `readers/uproot_reader.py:200`, `__init__` `:261-271` | `groups` (required); `filename=None`; `tree: str = "CollectionTree"`; `unroll: str \| None = None`; `num: int = -1`; `cuts=None`; `stage=None`; `index_cache: str \| Path \| None = None` | same produced key families as `H5StructuredReader` (`:454-471`); its `with_source` (`:581-593`) takes `(filename, num=-1, stage=None)` — no VDS surface, ROOT has none |
+| `salt.data.ConstituentSelection` | `processors/cut.py` | `streams: Mapping[str, {cuts, pad_max, sort}]` | requires `raw.<s>` (fields = cut fields + sort var) and `masks.<s>`, REWRITES both in place — cut (drop + re-pad) → optional sort → truncate to `pad_max` → re-pad; runs between the reader and every other `raw.*` consumer; row/event cuts stay on the reader's `cuts:` |
 | `salt.data.MultiSampleReader` | `readers/multisample_reader.py:82`, `__init__` `:124-131` | `samples: Sequence[SampleConfig \| Mapping]` (required); `label_stream: str = "event"`; `label_field: str = "process"`; `seed: int = 42`; `interleave_block: int = 1` | mirrors its sub-readers' `raw.*`/`masks.*`/`meta.rows`, extending the scalar `label_stream`'s field list with the injected `label_field` (`:198-233`); its `with_source` ignores `filename` and re-sources each sub-reader from its own per-stage `SampleConfig.sources` (`:402-442`) |
 | `salt.data.MultiTarget` | `processors/multi_target.py:26`, `__init__` `:77` | `replacements: Sequence[Mapping[str, Any]]` (required) | requires `labels.<stream>.{sel_label,source}` and produces `labels.<stream>.<output>` float32, all `modes=Mode.TRAINING` (`:138-164`) |
 | `salt.data.MaskFormerTargets` | `processors/maskformer_targets.py:35`, `__init__` `:134-149` | `object_class`, `object_id`, `constituent_id`, `class_map`, `object_stream`, `constituent_stream` (all required); then `regression_targets=None`, `cuts=None`, `sort_by=None`, `sort_descending=True`, `pv_class=0`, `max_objects=None`, `max_lxy_mm=None`, `lxy_field="Lxy"` | produces `labels.objects.object_class` (`[B,M]` int64), `labels.objects.masks` (`[B,M,T]` bool) and `labels.objects.<target>` per regression target (`:299-334`) |
@@ -516,7 +506,7 @@ and for a stream outside the resolved set (`:132-136`).
 ## Reference
 
 Every name below is exported from `salt/data/__init__.py`'s `__all__`
-(34 names). The third column says what kind of thing it is, since a base
+(32 names). The third column says what kind of thing it is, since a base
 class, a config dataclass, a constant, a function and a runtime object all
 sit in the same namespace as the ten real `data.modules` entries, and only
 those ten belong under `data.modules` in a config.
@@ -532,21 +522,20 @@ those ten belong under `data.modules` in a config.
 | `salt.data.H5StructuredReader` | the structured-H5 reader | **yes** |
 | `salt.data.UprootReader` | the ROOT/uproot reader | **yes** |
 | `salt.data.MultiSampleReader` | proportionally stratified multi-sample reader | **yes** |
-| `salt.data.VDS` | resolves a wildcard file pattern into a virtual dataset | **yes** |
 | `salt.data.InputSamples` | the per-stage file-pattern setup module | **yes** |
 | `salt.data.Features` | `raw.*` to `inputs.*` float32 materialisation | **yes** |
 | `salt.data.Labels` | `raw.*` to `labels.**` truth extraction | **yes** |
 | `salt.data.FtagLabeller` | on-the-fly label relabelling | **yes** |
 | `salt.data.MultiTarget` | multiple regression targets from one stream | **yes** |
 | `salt.data.MaskFormerTargets` | MaskFormer object-selection targets | **yes** |
+| `salt.data.ConstituentSelection` | constituent cuts (+sort/truncate/pad) as a post-read processor rewriting raw.<s>/masks.<s> | **yes** |
 | `salt.data.SaltDataset` | the map-style dataset `SaltDataModule` builds internally | no, internal runtime object; see [Shipped data modules](#shipped-data-modules) |
 | `salt.data.IterableSaltDataset` | the streaming counterpart of `SaltDataset` | no, internal runtime object |
 | `salt.data.GroupConfig` | one `H5StructuredReader` stream's group configuration | no, config dataclass (nested inside `groups:`) |
-| `salt.data.StreamConfig` | the shared cut/sort/pad configuration for a jagged stream | no, config dataclass |
+| `salt.data.StreamConfig` | the shared truncate/pad configuration for a jagged stream | no, config dataclass |
 | `salt.data.UprootGroupConfig` | one `UprootReader` stream's group configuration | no, config dataclass (nested inside `groups:`) |
 | `salt.data.SampleConfig` | one `MultiSampleReader` sample's sub-reader configuration | no, config dataclass (nested inside `samples:`) |
-| `salt.data.ConstituentCuts` | a per-stream within-row (constituent) cut | no, config dataclass |
-| `salt.data.Cut` | one named cut expression | no, config dataclass |
+| `salt.data.Cut` | one cut expression string | no, config dataclass |
 | `salt.data.GlobalObjectCuts` | sample-axis row eligibility, evaluated once in `prepare` | no, config dataclass |
 | `salt.data.OffsetIndex` | a reader's cached row-to-file offset index | no, runtime dataclass |
 | `salt.data.ManifestEntry` | one shard entry inside a `CorpusManifest` | no, runtime dataclass |
@@ -554,9 +543,6 @@ those ten belong under `data.modules` in a config.
 | `salt.data.DEFAULT_BLOCK_ROWS` | the default `block_rows` value for streaming | no, constant |
 | `salt.data.MODEL_VISIBLE_NAMESPACES` | the bundle namespaces a model may read | no, constant |
 | `salt.data.build_manifest` | builds a `CorpusManifest` from a set of source files | no, function |
-| `salt.data.create_vds` | builds a concrete h5py virtual dataset file | no, function, called by `VDS.setup` |
-| `salt.data.default_vds_path` | the default output path `VDS` writes to when `out` is unset | no, function |
-| `salt.data.has_wildcard` | whether a path string contains a glob wildcard | no, function |
 
 Verified against `salt/data/__init__.py`'s `__all__`.
 

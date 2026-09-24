@@ -101,9 +101,9 @@ class FileStubReader(BlockStubReader):
         """Stands in for a real reader's cuts/groups config."""
         return dict(self._fingerprint)
 
-    def with_source(self, filename, num=-1, vds_path=None, stage=None):
+    def with_source(self, filename, num=-1, stage=None):
         """Re-source onto the glob's expansion — the per-stage clone."""
-        del num, vds_path, stage
+        del num, stage
         return FileStubReader(
             files=sorted(_glob.glob(str(filename))), fingerprint=self._fingerprint
         )
@@ -286,8 +286,8 @@ def test_a_sourceless_reader_still_streams(tmp_path) -> None:
         def sources(self) -> list[Path]:
             return []
 
-        def with_source(self, filename, num=-1, vds_path=None, stage=None):
-            del num, vds_path, stage
+        def with_source(self, filename, num=-1, stage=None):
+            del num, stage
             return SourcelessReader(files=sorted(_glob.glob(str(filename))))
 
     corpus = _corpus(tmp_path / "corpus", ["a.root", "b.root"])

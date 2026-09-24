@@ -136,15 +136,24 @@ class _PlanRunner:
         self._read_fields: dict[str, dict[str, str]] = self._collect_read_fields()
         self._bound_pid: int | None = None
         self._exec_steps = tuple(
-            (step.name, step.module, isinstance(step.module, Reader), set(step.produces))
+            (
+                step.name,
+                step.module,
+                isinstance(step.module, Reader),
+                set(step.produces),
+                set(step.rewrites),
+            )
             for step in self._plan.steps
         )
-        self._boundary_keys = tuple(
-            (key, tuple(key.split(KEY_SEP)))
-            for step in self._plan.steps
-            for key in step.produces
-            if _is_model_visible(key)
-        )
+        # dedupe by key, keeping the LAST occurrence in plan order — a
+        # rewritten key (e.g. masks.<stream>) converts once, using the
+        # rewriter's (final) value, not the original producer's
+        boundary: dict[str, tuple[str, ...]] = {}
+        for step in self._plan.steps:
+            for key in step.produces:
+                if _is_model_visible(key):
+                    boundary[key] = tuple(key.split(KEY_SEP))
+        self._boundary_keys = tuple(boundary.items())
 
     def _compile(self) -> Plan:
         """Compile the dataset plan, then statically validate its raw-field demands."""
@@ -269,7 +278,7 @@ class _PlanRunner:
         object.
         """
         bundle = Bundle()
-        for name, module, is_reader, expected in self._exec_steps:
+        for name, module, is_reader, expected, rewrites in self._exec_steps:
             if is_reader:
                 produced = (
                     raw if raw is not None else module.read(rows, self._mode)  # type: ignore[attr-defined]
@@ -280,6 +289,7 @@ class _PlanRunner:
                 canonical_produced(produced, expected, name),
                 who=name,
                 expected=expected,
+                overwrite=rewrites,
             )
         return self._to_torch(bundle)
 

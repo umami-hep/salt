@@ -9,7 +9,7 @@ import pytest
 from salt.cli import load_config
 from salt.cli import main as cli_main
 from salt.graph.planner import compile_plan
-from salt.graph.spec import PRIMARY_MODES, Mode, TensorSpec, unflatten_spec
+from salt.graph.spec import IO, PRIMARY_MODES, Mode, TensorSpec, unflatten_spec
 from salt.model.bind import resolve_bind_schema
 from salt.graph.render import _shape_str, dot_source, plan_table  # noqa: PLC2701
 from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
@@ -129,6 +129,40 @@ class TestPlotCli:
         # PNG magic bytes / PDF header confirm dot actually rasterised
         assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
         assert pdf.read_bytes()[:5] == b"%PDF-"
+
+
+class TestPlanTableRewrites:
+    """`plan_table` shows a rewriter's `[rewrites ...]` tag, not a narrowed wildcard."""
+
+    def test_rewrite_tag_shown_and_not_reported_as_narrowed(self):
+        class Toy:
+            """Minimal local GraphModule (not the shared `_fixtures/toys.py` set)."""
+
+            def __init__(self, name, requires=None, produces=None, rewrites=None):
+                self.name = name
+                self._io = IO(
+                    requires=unflatten_spec(requires or {}),
+                    produces=unflatten_spec(produces or {}),
+                    rewrites=unflatten_spec(rewrites or {}),
+                )
+
+            def declare_io(self, mode):
+                return self._io
+
+        a = Toy("a", requires={"inputs.x": TensorSpec()}, produces={"raw.j": TensorSpec()})
+        rw = Toy("rw", requires={"raw.j": TensorSpec()}, rewrites={"raw.j": TensorSpec()})
+        b = Toy("b", requires={"raw.j": TensorSpec()}, produces={"preds.x": TensorSpec()})
+        plan = compile_plan(
+            {"a": a, "rw": rw, "b": b},
+            Mode.FIT,
+            sources=unflatten_spec({"inputs.x": TensorSpec()}),
+            sinks=["preds.x"],
+        )
+        text = plan_table(plan)
+        assert "[rewrites raw.j]" in text
+        # without the render fix, rw's rewrite key (produced with no matching
+        # declared `produces`) would be mis-reported as a narrowed wildcard
+        assert "narrowed wildcards" not in text
 
 
 class TestShapeStrWidthSubstitution:

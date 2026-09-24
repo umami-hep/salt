@@ -195,7 +195,7 @@ class TestSetupPassResolution:
         ctx = Bundle()
         run_setup_plan(compile_setup_plan({"input_samples": inp}, "train"), "train", ctx)
         assert deepest_source_path(ctx, "reader", "train") == str(data["h5"])
-        assert SOURCE_REGISTRY == ("pattern", "vds_path", "staged_path")
+        assert SOURCE_REGISTRY == ("pattern", "staged_path")
 
 
 # datamodule integration — binds the reader from the resolved ctx

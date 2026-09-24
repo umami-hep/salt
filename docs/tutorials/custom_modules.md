@@ -219,8 +219,8 @@ class CsvReader(Reader):
     def streams(self) -> tuple[str, ...]:
         return ("event",)
 
-    def with_source(self, filename, num: int = -1, vds_path=None, stage=None) -> "CsvReader":
-        del num, vds_path, stage  # single-file reader: nothing stage-specific
+    def with_source(self, filename, num: int = -1, stage=None) -> "CsvReader":
+        del num, stage  # single-file reader: nothing stage-specific
         clone = CsvReader(filename=filename)
         clone.name = self.name
         return clone
@@ -273,13 +273,13 @@ column count a real format only reveals on read has to come from an
 `init_arg` instead; see [`modules/data.md`](../modules/data.md) for the
 pattern.
 
-`with_source`'s signature carries four arguments a production reader must
+`with_source`'s signature carries three arguments a production reader must
 actually respect, above all `num`: it is the per-stage row cap from
 `data.num_train`/`data.num_val`/`data.num_test`, and a clone that drops it
-silently disables those settings. `CsvReader` above discards all four
-(`del num, vds_path, stage`) because this reader has nothing stage-specific
-to do with them; a reader over a real, larger corpus should not copy that
-line as-is.
+silently disables those settings. `CsvReader` above discards the two it
+doesn't use (`del num, stage`) because this single-file reader has nothing
+stage-specific to do with them; a reader over a real, larger corpus should
+not copy that line as-is.
 
 ## 4. Your first model module
 

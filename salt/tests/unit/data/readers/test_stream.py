@@ -2,28 +2,42 @@
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from salt.data import ConstituentCuts, Cut, OffsetIndex, StreamConfig
-from salt.data.readers.stream import INT_PAD_SENTINEL, _cut_sort_truncate_pad, pad_fill
+from salt.data import OffsetIndex, StreamConfig
+from salt.data.readers.stream import INT_PAD_SENTINEL, _truncate_pad, pad_fill, stage_file
 from salt.graph.errors import ConfigError
 from salt.schema import GroupSchema
 
+# --------------------------------------------------------------------------- #
+# stage_file — the multi-process-safe file-staging primitive (no awkward needed)
+# --------------------------------------------------------------------------- #
+
+
+def test_stage_file_copies_once_and_marks_done(tmp_path: Path) -> None:
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"hello world")
+    dst = tmp_path / "staged" / "dst.bin"
+    out = stage_file(src, dst)
+    assert out == dst
+    assert dst.read_bytes() == b"hello world"
+    assert dst.with_suffix(".bin.done").exists()
+    mtime = dst.stat().st_mtime_ns
+    stage_file(src, dst)
+    assert dst.stat().st_mtime_ns == mtime  # already staged -> no re-copy
+
+
+def test_stage_file_same_path_is_identity(tmp_path: Path) -> None:
+    p = tmp_path / "same.bin"
+    p.write_bytes(b"x")
+    assert stage_file(p, p) == p
+    assert not p.with_suffix(".bin.done").exists()
+
+
 ak = pytest.importorskip("awkward")
-
-
-def _drop(*cuts: Cut) -> ConstituentCuts:
-    """Drop-then-pad constituent cuts (the jagged assembly path's only mode).
-
-    Returns
-    -------
-    ConstituentCuts
-        The container in ``on_fail: drop`` mode.
-    """
-    return ConstituentCuts(cuts=cuts, on_fail="drop")
 
 
 # --------------------------------------------------------------------------- #
@@ -34,53 +48,6 @@ def _drop(*cuts: Cut) -> ConstituentCuts:
 def test_stream_config_pad_max_must_be_positive() -> None:
     with pytest.raises(ConfigError):
         StreamConfig(pad_max=0)
-
-
-def test_stream_config_sort_normalises_default_mode() -> None:
-    cfg = StreamConfig(pad_max=4, sort={"var": "pt"})
-    assert cfg.sort == {"var": "pt", "mode": "descending"}
-    assert cfg.engages_pipeline
-
-
-def test_stream_config_sort_rejects_unknown_mode() -> None:
-    with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, sort={"var": "pt", "mode": "sideways"})
-
-
-def test_stream_config_sort_rejects_empty_var() -> None:
-    with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, sort={"var": ""})
-
-
-def test_stream_config_cuts_must_be_cut_instances() -> None:
-    bad: Any = ("not a cut",)
-    with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, cuts=ConstituentCuts(cuts=bad, on_fail="drop"))
-
-
-def test_stream_config_cuts_must_be_constituent_cuts() -> None:
-    with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, cuts=(Cut(field="pt", op=">", value=0),))  # type: ignore[arg-type]
-
-
-def test_stream_config_rejects_mask_mode_on_jagged_pipeline() -> None:
-    """on_fail: mask is H5-first — the awkward assembly path implements drop only."""
-    with pytest.raises(ConfigError, match="on_fail: drop"):
-        StreamConfig(
-            pad_max=4,
-            cuts=ConstituentCuts(cuts=(Cut(field="pt", op=">", value=0),), on_fail="mask"),
-        )
-
-
-def test_stream_config_cuts_sort_rejected_on_scalar_stream() -> None:
-    with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, jagged=False, cuts=_drop(Cut(field="pt", op=">", value=0)))
-    with pytest.raises(ConfigError):
-        StreamConfig(pad_max=4, jagged=False, sort={"var": "pt"})
-
-
-def test_stream_config_default_does_not_engage_pipeline() -> None:
-    assert not StreamConfig(pad_max=8).engages_pipeline
 
 
 # --------------------------------------------------------------------------- #
@@ -96,7 +63,7 @@ def test_pad_fill_by_dtype_kind() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 2. _cut_sort_truncate_pad PARITY (no cuts/sort == byte-identical contiguous path)
+# 2. _truncate_pad PARITY (byte-identical to a hand-rolled contiguous build)
 # --------------------------------------------------------------------------- #
 
 
@@ -151,8 +118,8 @@ def test_no_cuts_no_sort_is_byte_identical_to_contiguous_path() -> None:
     cols, fields, gschema = _jagged_cols(counts, seed=42)
     b = len(counts)
     t = 8
-    cfg = StreamConfig(pad_max=t)  # no cuts, no sort
-    raw, valid = _cut_sort_truncate_pad(cols, fields, cfg, b, gschema)
+    cfg = StreamConfig(pad_max=t)
+    raw, valid = _truncate_pad(cols, fields, cfg, b, gschema)
     exp_raw, exp_valid = _manual_contiguous(cols, fields, t, gschema, b)
 
     # byte-for-byte identical (the locked parity invariant)
@@ -170,100 +137,12 @@ def test_no_cuts_no_sort_dtype_sentinels_on_padded_positions() -> None:
     cols, fields, gschema = _jagged_cols(counts, seed=7)
     b, t = len(counts), 6
     cfg = StreamConfig(pad_max=t)
-    raw, _ = _cut_sort_truncate_pad(cols, fields, cfg, b, gschema)
+    raw, _ = _truncate_pad(cols, fields, cfg, b, gschema)
     for row, c in enumerate(counts):
         k = min(c, t)
         # padded FLOAT positions are 0.0; padded INTEGER LABEL positions are -1
         np.testing.assert_array_equal(raw["pt"][row, k:], 0.0)
         assert np.all(raw["label"][row, k:] == -1)
-
-
-# --------------------------------------------------------------------------- #
-# 3. drop-then-pad cuts (a cut constituent is REMOVED, never wastes a pad_max slot)
-# --------------------------------------------------------------------------- #
-
-
-def test_drop_then_pad_removes_failing_constituent() -> None:
-    # one row: pt = [5, 1, 9, 2], cut pt > 3 keeps [5, 9]; pad_max=4 -> [5,9,pad,pad]
-    cols = {
-        "pt": ak.Array([[5.0, 1.0, 9.0, 2.0]]),
-        "label": ak.Array([[10, 11, 12, 13]]),
-    }
-    gschema = GroupSchema(fields={"pt": "float32", "label": "int32", "valid": "bool"})
-    cfg = StreamConfig(pad_max=4, cuts=_drop(Cut(field="pt", op=">", value=3.0)))
-    raw, valid = _cut_sort_truncate_pad(cols, ["pt", "label"], cfg, 1, gschema)
-    # only the 2 passing constituents are kept, padded — NOT masked-in-place
-    np.testing.assert_array_equal(raw["pt"][0], [5.0, 9.0, 0.0, 0.0])
-    # labels carried in lockstep with the kept pts (10 with 5, 12 with 9)
-    np.testing.assert_array_equal(raw["label"][0], [10, 12, -1, -1])
-    # valid reflects the POST-CUT count (2), not the original (4)
-    np.testing.assert_array_equal(valid[0], [True, True, False, False])
-
-
-def test_drop_then_pad_does_not_waste_pad_max_slots() -> None:
-    # pad_max=2, original 4 constituents, cut keeps 3 leading -> truncate to 2 KEPT
-    cols = {"pt": ak.Array([[9.0, 1.0, 8.0, 7.0]])}
-    gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
-    cfg = StreamConfig(pad_max=2, cuts=_drop(Cut(field="pt", op=">", value=3.0)))
-    raw, valid = _cut_sort_truncate_pad(cols, ["pt"], cfg, 1, gschema)
-    # kept = [9, 8, 7]; truncate to leading 2 -> [9, 8]; NO pad slot is a dropped const
-    np.testing.assert_array_equal(raw["pt"][0], [9.0, 8.0])
-    np.testing.assert_array_equal(valid[0], [True, True])
-
-
-# --------------------------------------------------------------------------- #
-# 4. sort (argsort by sort.var, ALL fields permuted in lockstep)
-# --------------------------------------------------------------------------- #
-
-
-def test_sort_descending_permutes_all_fields_in_lockstep() -> None:
-    cols = {
-        "pt": ak.Array([[1.0, 5.0, 3.0]]),
-        "label": ak.Array([[10, 50, 30]]),
-    }
-    gschema = GroupSchema(fields={"pt": "float32", "label": "int32", "valid": "bool"})
-    cfg = StreamConfig(pad_max=3, sort={"var": "pt", "mode": "descending"})
-    raw, _ = _cut_sort_truncate_pad(cols, ["pt", "label"], cfg, 1, gschema)
-    np.testing.assert_array_equal(raw["pt"][0], [5.0, 3.0, 1.0])
-    # labels follow the SAME permutation (50 with 5, 30 with 3, 10 with 1)
-    np.testing.assert_array_equal(raw["label"][0], [50, 30, 10])
-
-
-def test_sort_ascending() -> None:
-    cols = {"pt": ak.Array([[3.0, 1.0, 2.0]])}
-    gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
-    cfg = StreamConfig(pad_max=3, sort={"var": "pt", "mode": "ascending"})
-    raw, _ = _cut_sort_truncate_pad(cols, ["pt"], cfg, 1, gschema)
-    np.testing.assert_array_equal(raw["pt"][0], [1.0, 2.0, 3.0])
-
-
-def test_cut_then_sort_compose() -> None:
-    # cut pt > 1 keeps [5,3,2], then sort descending -> [5,3,2], pad_max=4
-    cols = {"pt": ak.Array([[5.0, 1.0, 3.0, 2.0]])}
-    gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
-    cfg = StreamConfig(
-        pad_max=4, cuts=_drop(Cut(field="pt", op=">", value=1.0)), sort={"var": "pt"}
-    )
-    raw, valid = _cut_sort_truncate_pad(cols, ["pt"], cfg, 1, gschema)
-    np.testing.assert_array_equal(raw["pt"][0], [5.0, 3.0, 2.0, 0.0])
-    np.testing.assert_array_equal(valid[0], [True, True, True, False])
-
-
-def test_missing_cut_or_sort_field_raises() -> None:
-    cols = {"pt": ak.Array([[1.0, 2.0]])}
-    gschema = GroupSchema(fields={"pt": "float32", "valid": "bool"})
-    with pytest.raises(KeyError):
-        _cut_sort_truncate_pad(
-            cols,
-            ["pt"],
-            StreamConfig(pad_max=2, cuts=_drop(Cut(field="nope", op=">", value=0))),
-            1,
-            gschema,
-        )
-    with pytest.raises(KeyError):
-        _cut_sort_truncate_pad(
-            cols, ["pt"], StreamConfig(pad_max=2, sort={"var": "nope"}), 1, gschema
-        )
 
 
 # --------------------------------------------------------------------------- #

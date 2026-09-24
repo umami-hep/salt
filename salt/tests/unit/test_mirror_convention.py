@@ -72,10 +72,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/integration/pipeline/test_pipeline.py",
     ),
     "salt/data/processors/multi_target.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
-    "salt/data/readers/reader.py": (
-        "salt/tests/unit/data/readers/test_uproot_reader.py",
-        "salt/tests/unit/utils/test_profiling.py",
-    ),
     "salt/model/modules/edge_embed.py": ("salt/tests/unit/model/test_compile_regression.py",),
     "salt/model/modules/maskformer_matched_loss.py": (
         "salt/tests/unit/model/test_maskformer_test_bind.py",
@@ -123,7 +119,7 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     "salt/outputs/sinks/onnx/metadata.py": ("salt/tests/unit/outputs/sinks/onnx/test_export.py",),
     "salt/outputs/sinks/onnx/reduces.py": ("salt/tests/unit/outputs/test_hard_reduce_nodes.py",),
     "salt/utils/array_utils.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
-    "salt/utils/file_utils.py": ("salt/tests/unit/data/readers/test_vds.py",),
+    "salt/utils/file_utils.py": ("salt/tests/unit/data/readers/test_stream.py",),
     "salt/utils/mask_utils.py": ("salt/tests/unit/outputs/test_maskformer_eval_h5.py",),
     "salt/utils/scalers.py": ("salt/tests/unit/model/modules/tasks/test_regression.py",),
     "salt/utils/union_find.py": ("salt/tests/unit/model/test_get_output.py",),

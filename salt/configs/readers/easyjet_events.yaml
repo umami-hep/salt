@@ -20,11 +20,12 @@
 #     `eta` and `phi` do not. It is NOT a uniform suffix.
 #   - MultiSampleReader injects a per-event sample label as raw.event.process
 #     (signal=1, background=0). Only branches common to both samples are read.
-#   - No `constituent_cuts:` here, deliberately. The easyjet bbbb ntupler has
-#     already applied its own jet preselection (pt > 20 GeV, |eta| < 4.5, NNJvt,
-#     overlap removal) before writing, and re-applying it would be a second cut
-#     on an already-cut container. The PHYSLITE fragment DOES carry those cuts,
-#     because there the container is uncut — that asymmetry is the point.
+#   - No `jet_selection` processor (constituent cuts) here, deliberately. The
+#     easyjet bbbb ntupler has already applied its own jet preselection
+#     (pt > 20 GeV, |eta| < 4.5, NNJvt, overlap removal) before writing, and
+#     re-applying it would be a second cut on an already-cut container. The
+#     PHYSLITE fragment DOES carry one (`data.modules.jet_selection`), because
+#     there the container is uncut.
 
 data:
   train_file: train  # placeholders: MultiSampleReader sources per sample below

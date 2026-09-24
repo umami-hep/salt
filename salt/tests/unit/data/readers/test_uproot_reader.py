@@ -108,7 +108,7 @@ def test_jet_rows_flattens_events_to_jets(ej_file) -> None:
 
 
 def test_jet_rows_cut_on_pt(ej_file) -> None:
-    from salt.data import Cut, GlobalObjectCuts
+    from salt.data import GlobalObjectCuts
 
     path, arrays = ej_file
     thresh = 100_000.0
@@ -117,7 +117,7 @@ def test_jet_rows_cut_on_pt(ej_file) -> None:
         filename=path,
         tree="AnalysisMiniTree",
         unroll="jets",
-        cuts=GlobalObjectCuts(global_cuts=(Cut("pt", ">", thresh),)),
+        cuts=GlobalObjectCuts(global_cuts=(f"pt > {thresh}",)),
     )
     all_pt = np.concatenate([
         arrays["recojet_antikt4PFlow_pt_NOSYS"][ev] for ev in range(arrays["n_events"])
@@ -186,36 +186,6 @@ def test_unroll_group_must_be_jagged_false() -> None:
         UprootReader(groups={"jets": {"branches": {"pt": "pt"}, "jagged": True}}, unroll="jets")
 
 
-def test_link_without_unroll_raises() -> None:
-    with pytest.raises(ConfigError, match="require unroll"):
-        UprootReader(
-            groups={
-                "tracks": {
-                    "branches": {"d0": "d0"},
-                    "jagged": True,
-                    "link_branch": "GhostTrack",
-                    "target_prefix": "InDetTrackParticlesAuxDyn.",
-                }
-            },
-            unroll=None,
-        )
-
-
-def test_group_link_target_must_be_set_together() -> None:
-    with pytest.raises(ConfigError, match="must be set together"):
-        UprootGroupConfig(branches={"d0": "d0"}, jagged=True, link_branch="GhostTrack")
-
-
-def test_group_link_only_on_jagged() -> None:
-    with pytest.raises(ConfigError, match="only valid for jagged"):
-        UprootGroupConfig(
-            branches={"pt": "pt"},
-            jagged=False,
-            link_branch="GhostTrack",
-            target_prefix="InDetTrackParticlesAuxDyn.",
-        )
-
-
 def test_empty_groups_raises() -> None:
     with pytest.raises(ConfigError, match="at least one group"):
         UprootReader(groups={})
@@ -233,12 +203,8 @@ def test_missing_branch_raises(ej_file) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 5. ElementLink dereference (unroll=jets) — synthetic fake tree
+# 5. base reader config surface: no ElementLink/join vocabulary
 # --------------------------------------------------------------------------- #
-
-_GHOST_IDX = [[[0, 2], [1]], [[0]], [[2, 0, 1], [], [1]]]
-_TRK_D0 = [[10.0, 11.0, 12.0], [20.0], [30.0, 31.0, 32.0]]
-_TRK_Z0 = [[-1.0, -2.0, -3.0], [-4.0], [-5.0, -6.0, -7.0]]
 
 
 class _FakeBranch:
@@ -271,16 +237,15 @@ class _FakeTree:
         }
 
 
-def _linked_reader():
+def _direct_reader():
     return UprootReader(
         groups={
             "jets": {"branches": {"pt": "pt"}, "prefix": "AnalysisJetsAuxDyn.", "jagged": False},
             "tracks": {
                 "branches": {"d0": "d0", "z0": "z0"},
+                "prefix": "InDetTrackParticlesAuxDyn.",
                 "jagged": True,
                 "pad_max": 4,
-                "link_branch": "GhostTrack",
-                "target_prefix": "InDetTrackParticlesAuxDyn.",
             },
         },
         tree="CollectionTree",
@@ -288,60 +253,35 @@ def _linked_reader():
     )
 
 
-def _expected(field_vals):
-    return [
-        [field_vals[ev_idx][i] for i in jet_links]
-        for ev_idx, ev_jets in enumerate(_GHOST_IDX)
-        for jet_links in ev_jets
-    ]
-
-
-def test_linked_deref_plain_index() -> None:
-    import awkward as ak
-
-    reader = _linked_reader()
-    t = _FakeTree({
-        "AnalysisJetsAuxDyn.GhostTrack": ak.Array(_GHOST_IDX),
-        "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
-        "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
-    })
-    block = reader._read_linked_block(t, reader.groups["tracks"], ["d0", "z0"], 0, 3)
-    assert block["d0"].tolist() == _expected(_TRK_D0)
-    assert block["z0"].tolist() == _expected(_TRK_Z0)
-
-
-def test_linked_deref_struct_and_null_links() -> None:
-    import awkward as ak
-
-    idx = [[[0, 2, 0], [1]], [[0]], [[2, 0, 1], [], [1]]]
-    key = [[[0, 490, 0], [490]], [[490]], [[490, 490, 490], [], [490]]]  # 0 == null
-    links = ak.zip({"m_persKey": ak.Array(key), "m_persIndex": ak.Array(idx)}, depth_limit=None)
-    reader = _linked_reader()
-    t = _FakeTree({
-        "AnalysisJetsAuxDyn.GhostTrack": links,
-        "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
-        "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
-    })
-    block = reader._read_linked_block(t, reader.groups["tracks"], ["d0", "z0"], 0, 3)
-    assert block["d0"][0].tolist() == [12.0]  # e0j0: nulls dropped, keep persIndex 2
-    assert block["d0"][3].tolist() == [32.0, 30.0, 31.0]  # e2j0: {2,0,1}
-
-
-def test_linked_deref_multi_container_raises() -> None:
-    import awkward as ak
-
-    key = [[[1, 2], [1]], [[1]], [[1, 1, 1], [], [1]]]  # jet0/ev0 spans keys {1,2}
-    links = ak.zip(
-        {"m_persKey": ak.Array(key), "m_persIndex": ak.Array(_GHOST_IDX)}, depth_limit=None
-    )
-    reader = _linked_reader()
-    t = _FakeTree({
-        "AnalysisJetsAuxDyn.GhostTrack": links,
-        "InDetTrackParticlesAuxDyn.d0": ak.Array(_TRK_D0),
-        "InDetTrackParticlesAuxDyn.z0": ak.Array(_TRK_Z0),
-    })
-    with pytest.raises(SchemaError, match="multiple target containers"):
-        reader._read_linked_block(t, reader.groups["tracks"], ["d0", "z0"], 0, 3)
+def test_base_reader_rejects_elementlink_keys() -> None:
+    """Link/join keys on a plain group redirect the config error to `xAODReader`."""
+    with pytest.raises(ConfigError, match="salt.data.xAODReader"):
+        UprootReader(
+            groups={
+                "tracks": {
+                    "branches": {"d0": "d0"},
+                    "jagged": True,
+                    "link_branch": "GhostTrack",
+                    "target_prefix": "InDetTrackParticlesAuxDyn.",
+                }
+            },
+            unroll=None,
+        )
+    with pytest.raises(ConfigError, match="salt.data.xAODReader"):
+        UprootReader(
+            groups={
+                "jets": {
+                    "branches": {"pt": "pt"},
+                    "jagged": True,
+                    "join_branch": "btaggingLink",
+                    "join_prefix": "BTagging_AntiKt4EMPFlowAuxDyn.",
+                    "join_branches": {"GN2v01_pb": "GN2v01_pb"},
+                }
+            },
+            unroll=None,
+        )
+    with pytest.raises(TypeError):
+        UprootGroupConfig(branches={"d0": "d0"}, link_branch="GhostTrack")
 
 
 # --------------------------------------------------------------------------- #
@@ -364,151 +304,7 @@ def test_no_top_level_uproot_awkward_import() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 7. 1:1 ElementLink JOIN — extra fields merged onto an existing group
-# --------------------------------------------------------------------------- #
-#
-# Distinct from section 5: `link_branch` BUILDS a constituent stream out of a
-# target container (1:many), while a join augments elements the group already
-# serves (1:1) and leaves the group's shape alone. The physical case is the HH4b
-# PHYSLITE p6697, whose jets reach GN2v01 through `AnalysisJetsAuxDyn.btaggingLink`.
-
-_JOIN_GROUP = {
-    "branches": {"pt": "pt"},
-    "prefix": "AnalysisJetsAuxDyn.",
-    "jagged": True,
-    "pad_max": 4,
-    "join_branch": "btaggingLink",
-    "join_prefix": "BTagging_AntiKt4EMPFlowAuxDyn.",
-    "join_branches": {"GN2v01_pb": "GN2v01_pb", "GN2v01_pc": "GN2v01_pc"},
-}
-# 3 entries; jet -> b-tagging object is a permutation within each entry
-_BTAG_IDX = [[2, 0, 1], [0], [1, 0]]
-_BTAG_PB = [[0.1, 0.2, 0.3], [0.4], [0.5, 0.6]]
-_BTAG_PC = [[10.0, 20.0, 30.0], [40.0], [50.0, 60.0]]
-
-
-def _joined_reader(**over):
-    group = {**_JOIN_GROUP, **over}
-    return UprootReader(groups={"jets": group}, tree="CollectionTree", unroll=None)
-
-
-def _join_tree(idx=None, key=None, pb=None, pc=None):
-    import awkward as ak
-
-    idx = _BTAG_IDX if idx is None else idx
-    links = (
-        ak.Array(idx)
-        if key is None
-        else ak.zip({"m_persKey": ak.Array(key), "m_persIndex": ak.Array(idx)}, depth_limit=None)
-    )
-    return _FakeTree({
-        "AnalysisJetsAuxDyn.btaggingLink": links,
-        "BTagging_AntiKt4EMPFlowAuxDyn.GN2v01_pb": ak.Array(_BTAG_PB if pb is None else pb),
-        "BTagging_AntiKt4EMPFlowAuxDyn.GN2v01_pc": ak.Array(_BTAG_PC if pc is None else pc),
-    })
-
-
-def test_join_serves_direct_then_joined_fields_in_order() -> None:
-    cfg = UprootReader._parse_group("jets", dict(_JOIN_GROUP))
-    assert tuple(cfg.served_branches) == ("pt", "GN2v01_pb", "GN2v01_pc")
-    assert cfg.is_joined and not cfg.is_linked
-
-
-def test_join_gathers_by_pers_index() -> None:
-    reader = _joined_reader()
-    block = reader._read_joined_cols(
-        _join_tree(), reader.groups["jets"], ["GN2v01_pb", "GN2v01_pc"], 0, 3
-    )
-    # entry 0 jets point at btagging objects 2,0,1 -> 0.3, 0.1, 0.2
-    assert block["GN2v01_pb"].tolist() == [[0.3, 0.1, 0.2], [0.4], [0.6, 0.5]]
-    assert block["GN2v01_pc"].tolist() == [[30.0, 10.0, 20.0], [40.0], [60.0, 50.0]]
-
-
-def test_join_shape_matches_the_groups_own_branches() -> None:
-    reader = _joined_reader()
-    block = reader._read_joined_cols(_join_tree(), reader.groups["jets"], ["GN2v01_pb"], 0, 3)
-    import awkward as ak
-
-    assert ak.num(block["GN2v01_pb"], axis=1).tolist() == [len(e) for e in _BTAG_IDX]
-
-
-def test_join_honours_a_struct_link_with_a_single_container_key() -> None:
-    key = [[490, 490, 490], [490], [490, 490]]
-    reader = _joined_reader()
-    block = reader._read_joined_cols(
-        _join_tree(key=key), reader.groups["jets"], ["GN2v01_pb"], 0, 3
-    )
-    assert block["GN2v01_pb"].tolist() == [[0.3, 0.1, 0.2], [0.4], [0.6, 0.5]]
-
-
-def test_join_refuses_a_null_link() -> None:
-    key = [[490, 0, 490], [490], [490, 490]]  # one thinned/absent b-tagging object
-    reader = _joined_reader()
-    with pytest.raises(SchemaError, match="null ElementLink"):
-        reader._read_joined_cols(_join_tree(key=key), reader.groups["jets"], ["GN2v01_pb"], 0, 3)
-
-
-def test_join_refuses_multiple_target_containers() -> None:
-    key = [[490, 491, 490], [490], [490, 490]]
-    reader = _joined_reader()
-    with pytest.raises(SchemaError, match="multiple target containers"):
-        reader._read_joined_cols(_join_tree(key=key), reader.groups["jets"], ["GN2v01_pb"], 0, 3)
-
-
-def test_join_refuses_an_index_past_the_target() -> None:
-    reader = _joined_reader()
-    tree = _join_tree(idx=[[2, 0, 3], [0], [1, 0]])  # 3 is past entry 0's 3 objects
-    with pytest.raises(SchemaError, match="out of range"):
-        reader._read_joined_cols(tree, reader.groups["jets"], ["GN2v01_pb"], 0, 3)
-
-
-def test_join_refuses_a_misaligned_target_container() -> None:
-    reader = _joined_reader()
-    tree = _join_tree(pb=[[0.1, 0.2, 0.3], [0.4]])  # 2 entries vs the link's 3
-    with pytest.raises(SchemaError, match="not aligned"):
-        reader._read_joined_cols(tree, reader.groups["jets"], ["GN2v01_pb"], 0, 3)
-
-
-def test_join_config_needs_all_three_keys() -> None:
-    with pytest.raises(ConfigError, match="needs 'join_branch'"):
-        UprootGroupConfig(branches={"pt": "pt"}, join_branch="btaggingLink")
-
-
-def test_join_config_refuses_a_field_declared_twice() -> None:
-    with pytest.raises(ConfigError, match="declared in both"):
-        UprootGroupConfig(
-            branches={"pt": "pt", "GN2v01_pb": "GN2v01_pb"},
-            join_branch="btaggingLink",
-            join_prefix="BTagging_AntiKt4EMPFlowAuxDyn.",
-            join_branches={"GN2v01_pb": "GN2v01_pb"},
-        )
-
-
-def test_join_config_refuses_a_link_and_a_join_on_one_group() -> None:
-    with pytest.raises(ConfigError, match="already sets 'link_branch'"):
-        UprootGroupConfig(
-            branches={"d0": "d0"},
-            link_branch="GhostTrack",
-            target_prefix="InDetTrackParticlesAuxDyn.",
-            join_branch="btaggingLink",
-            join_prefix="BTagging_AntiKt4EMPFlowAuxDyn.",
-            join_branches={"GN2v01_pb": "GN2v01_pb"},
-        )
-
-
-def test_join_on_a_jagged_group_under_unroll_is_refused() -> None:
-    with pytest.raises(ConfigError, match="two levels below the entry axis"):
-        UprootReader(
-            groups={
-                "rows": {"branches": {"pt": "pt"}, "jagged": False},
-                "jets": dict(_JOIN_GROUP),
-            },
-            unroll="rows",
-        )
-
-
-# --------------------------------------------------------------------------- #
-# 8. row cuts that reduce a constituent axis (sum/count)
+# 7. row cuts that reduce a constituent axis (sum/count)
 # --------------------------------------------------------------------------- #
 
 
@@ -547,32 +343,26 @@ def test_sum_valid_counts_what_is_served_not_what_is_on_disk(ej_file) -> None:
     assert len(reader) == int((np.minimum(njets, 2) >= 2).sum())  # 4, not 3
 
 
-def test_count_is_the_multiplicity(ej_file) -> None:
-    path, arrays = ej_file
-    njets = np.array(arrays["njets"])
-    reader = _agg_reader(path, "count(jets.pt) >= 4")
-    assert len(reader) == int((njets >= 4).sum())
-
-
-def test_a_reduction_sees_the_constituent_cuts(ej_file) -> None:
+def test_a_reduction_counts_on_disk_jets_not_post_cut(ej_file) -> None:
+    """No constituent cuts configured: the reduction counts what is on disk, clipped to pad_max."""
     from salt.data import GlobalObjectCuts
 
     path, arrays = ej_file
-    thresh = 100_000.0
     reader = UprootReader(
         groups={"jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8}},
         filename=path,
         tree="AnalysisMiniTree",
         unroll=None,
-        constituent_cuts={"jets": {"on_fail": "drop", "cuts": [f"pt > {thresh}"]}},
-        cuts=GlobalObjectCuts(global_cuts=("sum(jets.valid) >= 2",)),
+        cuts=GlobalObjectCuts(global_cuts=("sum(jets.pt > 100000.0) >= 2",)),
     )
     n_pass = np.array([
-        int((np.asarray(ev) > thresh).sum()) for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
+        int((np.asarray(ev) > 100_000.0).sum()) for ev in arrays["recojet_antikt4PFlow_pt_NOSYS"]
     ])
     assert len(reader) == int((n_pass >= 2).sum())
     served = reader.read(slice(0, len(reader)), Mode.FIT)["raw.jets"]
-    assert np.all(served["valid"].sum(axis=1) >= 2)
+    njets = np.array(arrays["njets"])[n_pass >= 2]
+    # served multiplicity == ON-DISK jet count clipped to pad_max — NOT the post-cut count
+    np.testing.assert_array_equal(served["valid"].sum(axis=1), np.minimum(njets, 8))
 
 
 def test_a_predicate_reduction_counts_passing_constituents(ej_file) -> None:
@@ -584,70 +374,27 @@ def test_a_predicate_reduction_counts_passing_constituents(ej_file) -> None:
     assert len(reader) == int((n_pass >= 2).sum())
 
 
-@pytest.mark.parametrize(
-    ("cut", "match"),
-    [
-        ("sum(tracks.valid) >= 4", "not a configured group"),
-        ("sum(event.eventNumber) >= 4", "declared jagged=False"),
-        ("sum(jets.nope) >= 4", "not configured branches"),
-    ],
-)
-def test_reduction_config_errors(cut: str, match: str) -> None:
+def test_reduction_over_unknown_stream_fails_at_prepare(ej_file) -> None:
+    """A row-cut reduction over an unconfigured stream constructs fine and fails at prepare()."""
     from salt.data import GlobalObjectCuts
 
-    with pytest.raises(ConfigError, match=match):
-        UprootReader(
-            groups={
-                "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
-                "event": {"branches": dict(_EVENT), "jagged": False},
-            },
-            tree="AnalysisMiniTree",
-            unroll=None,
-            cuts=GlobalObjectCuts(global_cuts=(cut,)),
-        )
-
-
-def test_join_reads_uproot_qualified_link_members() -> None:
-    """A real POOL file names the members after the whole branch path, not bare.
-
-    ``t['AnalysisJetsAuxDyn.btaggingLink'].array()`` comes back with fields
-    ``AnalysisJetsAuxDyn.btaggingLink.m_persKey`` / ``...m_persIndex``. Matching
-    only the bare name silently falls through to the "plain integer index"
-    fixture path and hands the gather a record array.
-    """
-    import awkward as ak
-
-    pre = "AnalysisJetsAuxDyn.btaggingLink"
-    links = ak.zip(
-        {
-            f"{pre}.m_persKey": ak.Array([[490, 490, 490], [490], [490, 490]]),
-            f"{pre}.m_persIndex": ak.Array(_BTAG_IDX),
+    path, _ = ej_file
+    reader = UprootReader(
+        groups={
+            "jets": {"branches": dict(_JET), "jagged": True, "pad_max": 8},
+            "event": {"branches": dict(_EVENT), "jagged": False},
         },
-        depth_limit=1,  # record at the OUTER level, as uproot delivers it
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll=None,
+        cuts=GlobalObjectCuts(global_cuts=("sum(tracks.valid) >= 4",)),
     )
-    reader = _joined_reader()
-    tree = _FakeTree({
-        pre: links,
-        "BTagging_AntiKt4EMPFlowAuxDyn.GN2v01_pb": ak.Array(_BTAG_PB),
-    })
-    block = reader._read_joined_cols(tree, reader.groups["jets"], ["GN2v01_pb"], 0, 3)
-    assert block["GN2v01_pb"].tolist() == [[0.3, 0.1, 0.2], [0.4], [0.6, 0.5]]
-
-
-def test_link_member_lookup_is_unambiguous() -> None:
-    import awkward as ak
-
-    from salt.data.readers.uproot_reader import _link_member
-
-    links = ak.zip(
-        {"a.m_persIndex": ak.Array([[0]]), "b.m_persIndex": ak.Array([[1]])}, depth_limit=1
-    )
-    with pytest.raises(SchemaError, match="cannot tell which one"):
-        _link_member(links, "m_persIndex")
+    with pytest.raises((KeyError, SchemaError)):
+        reader.prepare()
 
 
 # --------------------------------------------------------------------------- #
-# 6. the hot read path opens each file ONCE per process
+# 8. the hot read path opens each file ONCE per process
 # --------------------------------------------------------------------------- #
 
 
@@ -721,7 +468,7 @@ def test_open_trees_are_dropped_on_pickle(ej_file) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 7. prepare() probes the schema from metadata, once, on the first file
+# 9. prepare() probes the schema from metadata, once, on the first file
 # --------------------------------------------------------------------------- #
 
 _TREE = "AnalysisMiniTree"
@@ -837,20 +584,6 @@ def test_prepare_probes_the_schema_only_on_the_first_file(tmp_path, monkeypatch)
     assert {c["branch"] for c in calls} == set(_JET.values()) | set(_EVENT.values())
 
 
-def test_prepare_rejects_a_later_file_missing_a_configured_branch(tmp_path) -> None:
-    short = build_fixture_arrays(seed=7)
-    del short["recojet_antikt4PFlow_eta"]
-    with pytest.raises(SchemaError, match="present in the first file but not"):
-        _probe_reader(_two_files(tmp_path, second=short)).prepare()
-
-
-def test_prepare_rejects_a_later_file_with_a_retyped_branch(tmp_path) -> None:
-    retyped = build_fixture_arrays(seed=7)
-    retyped["eventNumber"] = retyped["eventNumber"].astype(np.float64)
-    with pytest.raises(SchemaError, match="in the first file"):
-        _probe_reader(_two_files(tmp_path, second=retyped)).prepare()
-
-
 def test_prepare_schema_dtypes_match_a_full_read_oracle(ej_file) -> None:
     """The probed dtypes are exactly what a whole-branch read would have reported."""
     import awkward as ak
@@ -873,17 +606,17 @@ def test_metadata_and_bounded_probe_agree_field_by_field(ej_file, monkeypatch) -
     names = list(_JET.values()) + list(_EVENT.values())
     with uproot.open(f"{path}:{_TREE}") as tree:
         n = int(tree.num_entries)
-        via_meta = {b: reader._field_type(tree, b, n) for b in names}
+        via_meta = {b: reader._branch_dtype(tree, b, n) for b in names}
         monkeypatch.setattr(
             "salt.data.readers.uproot_reader._interpretation_type", lambda _interp: None
         )
-        via_read = {b: reader._field_type(tree, b, n) for b in names}
+        via_read = {b: reader._branch_dtype(tree, b, n) for b in names}
     assert via_meta == via_read
 
 
 def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
     """Row index, per-file kept counts and resolved multiplicity survive the probe change."""
-    from salt.data import Cut, GlobalObjectCuts
+    from salt.data import GlobalObjectCuts
 
     directory = _two_files(tmp_path)
     reader = UprootReader(
@@ -891,7 +624,7 @@ def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
         filename=directory,
         tree=_TREE,
         unroll="jets",
-        cuts=GlobalObjectCuts(global_cuts=(Cut("pt", ">", 100_000.0),)),
+        cuts=GlobalObjectCuts(global_cuts=("pt > 100000.0",)),
     )
     reader.prepare()
     total = 0
@@ -901,11 +634,14 @@ def test_prepare_bookkeeping_is_unchanged_across_files(tmp_path) -> None:
         expected_kept = np.flatnonzero(np.concatenate(pt) > 100_000.0)
         np.testing.assert_array_equal(entry.kept, expected_kept)
         np.testing.assert_array_equal(entry.orig_counts, [len(v) for v in pt])
-        np.testing.assert_array_equal(
-            entry.per_row_kept, [int((v > 100_000.0).sum()) for v in pt]
-        )
+        np.testing.assert_array_equal(entry.per_row_kept, [int((v > 100_000.0).sum()) for v in pt])
         total += int(expected_kept.size)
     assert len(reader) == total
+
+
+# --------------------------------------------------------------------------- #
+# 10. grouped-read primitive (_read_branches): one shared request per file
+# --------------------------------------------------------------------------- #
 
 
 class _CountingTree(_FakeTree):
@@ -933,37 +669,22 @@ def _grouped_read_tree():
 
 def test_grouped_read_returns_every_requested_branch():
     """One grouped call serves the same values a per-branch read would."""
-    reader = _linked_reader()
+    reader = _direct_reader()
     tree = _grouped_read_tree()
     names = [f"AnalysisJetsAuxDyn.f{i}" for i in range(5)]
 
     got = reader._read_branches(tree, names, 0, 2)
 
     assert sorted(got) == sorted(names)
-    assert len(tree.calls) == 1  # 5 branches, default cap 64 -> a single read
+    assert len(tree.calls) == 1  # 5 branches -> one grouped call
     for name in names:
         expected = tree[name].array(entry_start=0, entry_stop=2)
         assert got[name].to_list() == expected.to_list()
 
 
-def test_grouped_read_is_chunked_by_max_branches(monkeypatch):
-    """The group size is bounded: 5 branches at a cap of 2 is three calls, not one."""
-    from salt.data.readers import uproot_reader as ur
-
-    monkeypatch.setattr(ur, "MAX_BRANCHES_PER_READ", 2)
-    reader = _linked_reader()
-    tree = _grouped_read_tree()
-    names = [f"AnalysisJetsAuxDyn.f{i}" for i in range(5)]
-
-    got = reader._read_branches(tree, names, 0, 2)
-
-    assert [len(c) for c in tree.calls] == [2, 2, 1]
-    assert sorted(got) == sorted(names)
-
-
 def test_grouped_read_deduplicates_repeated_branches():
     """A branch named twice is read once, and still served under its name."""
-    reader = _linked_reader()
+    reader = _direct_reader()
     tree = _grouped_read_tree()
     name = "AnalysisJetsAuxDyn.f0"
 
@@ -990,7 +711,7 @@ def test_grouped_read_raises_when_a_branch_is_not_returned():
 
     import awkward as ak
 
-    reader = _linked_reader()
+    reader = _direct_reader()
     tree = _DroppingTree({
         f"AnalysisJetsAuxDyn.f{i}": ak.Array([[1.0, 2.0], [3.0]]) for i in range(3)
     })
@@ -999,112 +720,53 @@ def test_grouped_read_raises_when_a_branch_is_not_returned():
         reader._read_branches(tree, [f"AnalysisJetsAuxDyn.f{i}" for i in range(3)], 0, 2)
 
 
-# --------------------------------------------------------------------------- #
-# index_cache — persist the built index instead of rebuilding it every run
-# --------------------------------------------------------------------------- #
-
-
-def _cached_reader(path, cache_dir, branches=None):
-    return UprootReader(
-        groups={"jets": {"branches": dict(branches or _JET), "jagged": False}},
-        filename=path,
-        tree="AnalysisMiniTree",
-        unroll="jets",
-        index_cache=cache_dir,
-    )
-
-
-def test_index_cache_round_trips_the_index(ej_file, tmp_path) -> None:
-    """A cached prepare serves exactly what the built one did."""
+def test_read_issues_one_grouped_request_per_file_for_all_direct_streams(
+    ej_file, monkeypatch
+) -> None:
+    """One `read()` over N non-linked streams in one file issues ONE `arrays()` call."""
     path, _ = ej_file
-    cache = tmp_path / "idxcache"
-
-    cold = _cached_reader(path, cache)
-    cold.prepare()
-    n_cold = len(cold)
-    served_cold = cold.read(slice(0, n_cold), Mode.FIT)["raw.jets"]
-
-    # The EXACT path prepare is going to look for on the next run. A glob would
-    # have accepted `uproot_index_<key>.npz.tmp.npz`, which is what np.savez
-    # produced when handed a non-".npz" temp path — an artifact written where
-    # nothing would ever read it, so every "warm" run silently rebuilt.
-    key = cold._index_cache_key(cold._resolve_files())
-    expected = cache / f"uproot_index_{key}.npz"
-    assert expected.is_file(), sorted(p.name for p in cache.iterdir())
-    assert not list(cache.glob("*.tmp*")), "temp artifact left behind"
-
-    warm = _cached_reader(path, cache)
-    assert warm._index_cache_key(warm._resolve_files()) == key  # same inputs -> same key
-    assert warm._load_index_cache(warm._resolve_files(), key), "artifact did not load"
-    warm._table = None  # re-run the real entry point now the load is proven
-    warm.prepare()
-    assert len(warm) == n_cold
-    assert warm._mult == cold._mult
-    assert warm.schema.groups["jets"].fields == cold.schema.groups["jets"].fields
-    served_warm = warm.read(slice(0, len(warm)), Mode.FIT)["raw.jets"]
-    np.testing.assert_array_equal(served_warm["pt"], served_cold["pt"])
-    for entry_c, entry_w in zip(cold._table, warm._table, strict=True):
-        np.testing.assert_array_equal(entry_w.kept, entry_c.kept)
-        np.testing.assert_array_equal(entry_w.per_row_kept, entry_c.per_row_kept)
-        np.testing.assert_array_equal(entry_w.orig_counts, entry_c.orig_counts)
-
-
-def test_index_cache_misses_on_a_different_config(ej_file, tmp_path) -> None:
-    """A different reader config is a different key, not a stale hit."""
-    path, _ = ej_file
-    cache = tmp_path / "idxcache"
-
-    _cached_reader(path, cache).prepare()
-    (first_artifact,) = [p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]
-
-    other = _cached_reader(path, cache, branches={"pt": _JET["pt"]})
-    other.prepare()
-    artifacts = sorted(p.name for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name)
-    assert len(artifacts) == 2, artifacts
-    assert first_artifact.name in artifacts
-    assert other.schema.groups["jets"].fields.keys() == {"pt"}
-
-
-def test_index_cache_misses_when_the_file_changes(ej_file, tmp_path) -> None:
-    """Size/mtime are in the key, so a re-derived file at the same path is a miss."""
-    path, arrays = ej_file
-    cache = tmp_path / "idxcache"
-    _cached_reader(path, cache).prepare()
-
-    import os
-
-    st = path.stat()
-    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
-
-    _cached_reader(path, cache).prepare()
-    assert len([p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]) == 2
-
-
-def test_index_cache_survives_a_corrupt_artifact(ej_file, tmp_path) -> None:
-    """A cache is never the reason a run fails: garbage is a miss, not an exception."""
-    path, _ = ej_file
-    cache = tmp_path / "idxcache"
-    built = _cached_reader(path, cache)
-    built.prepare()
-    (artifact,) = [p for p in cache.glob("uproot_index_*.npz") if ".tmp" not in p.name]
-    artifact.write_bytes(b"not an npz at all")
-
-    recovered = _cached_reader(path, cache)
-    recovered.prepare()
-    assert len(recovered) == len(built)
-
-
-def test_index_cache_off_by_default_writes_nothing(ej_file, tmp_path) -> None:
-    """Without index_cache the reader behaves exactly as before."""
-    path, _ = ej_file
-    cache = tmp_path / "idxcache"
-    cache.mkdir()
-    reader = UprootReader(
-        groups={"jets": {"branches": dict(_JET), "jagged": False}},
-        filename=path,
-        tree="AnalysisMiniTree",
-        unroll="jets",
-    )
+    reader = _cache_reader(path)
+    reference = _cache_reader(path)
     reader.prepare()
-    assert reader.index_cache is None
-    assert not list(cache.iterdir())
+
+    real_tree = reader._tree
+    calls: list[list[str]] = []
+
+    class _CountingRealTree:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __getattr__(self, attr):
+            return getattr(self._wrapped, attr)
+
+        def __getitem__(self, name):
+            return self._wrapped[name]
+
+        def arrays(self, expressions, *args, **kwargs):
+            calls.append(list(expressions))
+            return self._wrapped.arrays(expressions, *args, **kwargs)
+
+    monkeypatch.setattr(reader, "_tree", lambda p: _CountingRealTree(real_tree(p)))
+
+    out = reader.read(slice(0, 5), Mode.FIT)
+
+    assert len(calls) == 1
+    expected = set(_JET.values()) | set(_EVENT.values())
+    assert set(calls[0]) == expected
+
+    ref_out = reference.read(slice(0, 5), Mode.FIT)
+    for key in ("raw.jets", "raw.event"):
+        for field in out[key].dtype.names:
+            np.testing.assert_array_equal(out[key][field], ref_out[key][field])
+
+
+# --------------------------------------------------------------------------- #
+# clone/restage preserve the reader subclass
+# --------------------------------------------------------------------------- #
+
+
+def test_clone_keeps_the_base_class(tmp_path, ej_file) -> None:
+    """`with_source`/`restage` must build `type(self)`, not a hardcoded `UprootReader`."""
+    path, _ = ej_file
+    assert _cache_reader(path).with_source(path, num=3, stage="val").__class__ is UprootReader
+    assert _cache_reader(path).restage(tmp_path).__class__ is UprootReader

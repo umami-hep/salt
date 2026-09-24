@@ -14,9 +14,11 @@ data:
         groups:
           jets: {global_object: true}
           tracks: {global_object: false, dataset: tracks_ghost}
-        constituent_cuts:
+    track_selection:
+      class_path: salt.data.ConstituentSelection
+      init_args:
+        streams:
           tracks:
-            on_fail: mask # blank a failing track in place (slot + multiplicity kept)
             cuts:
               - d0 < 3.5
               # the FTAG shared-module count, previously the derived 'NSHARED'

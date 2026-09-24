@@ -187,6 +187,7 @@ class Executor:
                 canonical_produced(produced, expected, step.name),
                 who=step.name,
                 expected=expected,
+                overwrite=set(step.rewrites),
             )
         return bundle
 

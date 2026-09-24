@@ -341,3 +341,52 @@ class TestMerge:
         b = Bundle()
         b.set("a.b", 1)
         assert "a.b" in repr(b)
+
+
+# rewrite (write-once relaxed for declared overwrite keys)
+
+
+class TestRewriteMerge:
+    def test_overwrite_replaces_existing_leaf_once(self):
+        b = Bundle()
+        b.merge({"raw": {"j": torch.zeros(1)}}, who="reader", expected={"raw.j"})
+        new = torch.ones(1)
+        b.merge(
+            {"raw": {"j": new}}, who="rewriter", expected={"raw.j"}, overwrite={"raw.j"}
+        )
+        assert b.get("raw.j") is new
+        assert b.keys() == ["raw.j"]
+
+    def test_overwrite_of_absent_key_raises(self):
+        b = Bundle()
+        with pytest.raises(DeclarationError, match="not present in the bundle"):
+            b.merge(
+                {"raw": {"j": torch.zeros(1)}},
+                who="rewriter",
+                expected={"raw.j"},
+                overwrite={"raw.j"},
+            )
+
+    def test_overwrite_key_outside_expected_raises(self):
+        b = Bundle()
+        b.merge({"raw": {"j": torch.zeros(1)}}, who="reader", expected={"raw.j"})
+        with pytest.raises(DeclarationError, match="not in its expected produces"):
+            b.merge(
+                {"raw": {"j": torch.ones(1)}},
+                who="rewriter",
+                expected={"raw.k"},
+                overwrite={"raw.j"},
+            )
+
+    def test_non_overwrite_key_still_collides(self):
+        b = Bundle()
+        b.merge({"raw": {"j": torch.zeros(1)}}, who="reader", expected={"raw.j"})
+        with pytest.raises(KeyCollisionError, match="already exists"):
+            b.merge(
+                {"raw": {"j": torch.ones(1), "k": torch.zeros(1)}},
+                who="other",
+                expected={"raw.j", "raw.k"},
+                overwrite={"raw.k"},
+            )
+        # atomic: the non-overwrite collision leaves raw.k unwritten too
+        assert "raw.k" not in b

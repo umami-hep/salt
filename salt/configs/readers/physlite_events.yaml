@@ -21,7 +21,7 @@
 #     `AntiKt4EMPFlowJetsAux.`, from which uproot can read no jet pt/eta/phi/m at
 #     all.
 #   - `EventInfoAuxDyn.` carries the per-event scalars. MultiSampleReader needs a
-#     non-jagged stream to hang its injected `process` label on, and UprootReader
+#     non-jagged stream to hang its injected `process` label on, and xAODReader
 #     needs every group to name at least one real branch, so the `event` group is
 #     load-bearing even though the model consumes no field from it.
 #
@@ -40,6 +40,10 @@
 #   fields of the `jets` stream in the same order. One model, one field contract,
 #   two on-disk layouts — resolved in config, with no branch in the model.
 #
+#   `join_*` and `link_branch`/`target_prefix` are salt.data.xAODReader group
+#   keys — salt.data.UprootReader (used by `readers/easyjet_events.yaml`) has no
+#   ElementLink vocabulary and rejects them.
+#
 #   (`join_*` is NOT `link_branch`/`target_prefix`. That pair is the 1:many case:
 #   it BUILDS a constituent stream by dereferencing a link vector — PHYSLITE
 #   `GhostTrack` -> `InDetTrackParticles`, see `readers/physlite_jets.yaml` — and
@@ -53,32 +57,45 @@
 #   pt > 20 GeV, |eta| < 4.5 and NNJvt. PHYSLITE is uncut, so the two legs would
 #   otherwise see different event samples.
 #
-#   The per-jet half of that selection is `constituent_cuts` with on_fail: drop —
-#   a failing jet is removed and the row re-padded, which is what "the container
-#   was pre-selected" means. The two EVENT-level multiplicity requirements are
-#   the reader's row-level `cuts:`, written as reductions of the jets stream's
-#   constituent axis:
+#   The per-jet half of that selection is now the `jet_selection`
+#   `salt.data.ConstituentSelection` processor below (`data.modules.jet_selection`),
+#   applied AFTER the read — a failing jet is removed and the row
+#   re-padded, which is what "the container was pre-selected" means.
 #
-#       sum(jets.valid) >= 4                          # >= 4 jets, post-jet-cuts
-#       sum((log(...) > -0.385) & (abs(eta) < 2.5)) >= 2   # >= 2 at FixedCutBEff_85
+#   The two EVENT-level multiplicity requirements stay the reader's row-level
+#   `cuts:`, evaluated at index-build — before any processor runs — so they can
+#   no longer read a post-cut `valid`. Instead the reductions count jets ON DISK,
+#   truncated to the reader's `pad_max: 20`, and spell the per-jet preselection
+#   themselves as explicit predicate reductions:
 #
-#   `sum()` reduces AFTER the constituent cuts and AFTER truncation to
-#   `pad_max: 20`, so it counts the jets the model is actually handed. `log` and
-#   `abs` are whitelisted, so the b-tag discriminant is spelled the way ATLAS
-#   defines it, D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385, rather than as the
-#   equivalent ratio > exp(-0.385); `&` joins that to the |eta| < 2.5 b-tagging
-#   ACCEPTANCE, which is tighter than the |eta| < 4.5 jet cut because GN2 needs
-#   tracks. (The per-jet |eta| < 4.5 above is still two cuts: a constituent cut
-#   has to stay a single comparison, and `&` is only legal where a comparison is
-#   — inside a reduction.)
+#       sum((jets.pt > 20000) & (jets.eta < 4.5) & (jets.eta > -4.5)
+#            & (jets.NNJvtPass > 0.5)) >= 4                 # >= 4 preselected jets
+#       sum((log(...) > -0.385) & (abs(eta) < 2.5)
+#            & (pt > 20000) & (NNJvtPass > 0.5)) >= 2       # >= 2 at FixedCutBEff_85
+#
+#   `log` and `abs` are the two functions a cut may call, so the b-tag discriminant is spelled the
+#   way ATLAS defines it, D = ln(pb / (0.2*pc + 0.8*pu)) > -0.385, rather than as
+#   the equivalent ratio > exp(-0.385); `&` joins that to the |eta| < 2.5
+#   b-tagging ACCEPTANCE (already implies |eta| < 4.5, restated below for
+#   clarity) plus the same pt/NNJvt preselection, since a row-cut reduction can
+#   no longer assume a constituent-cut pass ran first.
+#
+#   Byte-parity condition: this reduction is identical to the former
+#   reader-fused cuts (cut -> truncate at pad_max: 20 -> count) whenever the
+#   reader's pad_max (20) >= the event's pre-cut jet multiplicity. An event with
+#   more than 20 on-disk jets before the cut may differ (truncate-before-cut
+#   order); raise the reader's `pad_max` to lift this.
 #
 #   Measured closure (experiment 58, ttbar 601237, the same 10,000 events easyjet
-#   read; reproduced from these very cuts in experiment 63): 9,842 events pass
-#   ">= 4 jets" and 5,258 pass "+ >= 2 b-tags", against the 5,003 easyjet wrote —
-#   +5.1%. The residual is overlap removal (needs the lepton collections and the
-#   CP OR tool) plus easyjet's own b-jet-energy and muon-in-jet re-calibration,
-#   which shifts jet pt and hence both counts. It is a real property of the two
-#   formats, not a missing cut, and must not be chased by joining on event number.
+#   read; reproduced from these very cuts in experiment 63) — measured under the
+#   reader-fused cuts (experiments 58/63): 9,842 events pass ">= 4 jets" and
+#   5,258 pass "+ >= 2 b-tags", against the 5,003 easyjet wrote — +5.1%. The
+#   residual is overlap removal (needs the lepton collections and the CP OR
+#   tool) plus easyjet's own b-jet-energy and muon-in-jet re-calibration, which
+#   shifts jet pt and hence both counts. It is a real property of the two
+#   formats, not a missing cut, and must not be chased by joining on event
+#   number. Re-verification of this closure under the predicate reductions
+#   above is a follow-up.
 
 data:
   train_file: train  # placeholders: MultiSampleReader sources per sample below
@@ -94,29 +111,25 @@ data:
           - name: signal
             label: 1
             reader:
-              class_path: salt.data.UprootReader
+              class_path: salt.data.xAODReader
               init_args:
                 tree: CollectionTree
                 unroll: null
-                # the reproducible per-jet half of easyjet's preselection
-                constituent_cuts: &physlite_jet_preselection
-                  jets:
-                    on_fail: drop
-                    cuts:
-                      - pt > 20000 # 20 GeV, PHYSLITE stores MeV
-                      - eta < 4.5 # |eta| < 4.5: a cut is one comparison,
-                      - eta > -4.5 #   so it is two cuts
-                      - NNJvtPass > 0.5 # stored as int8 0/1
-                # its two event-level halves, over the jets that survive above
+                # the row-level (event) half of easyjet's preselection, spelled as
+                # explicit predicate reductions over the on-disk (pre-processor) jets
                 cuts: &physlite_event_preselection
                   global_cuts:
-                    - expr: sum(jets.valid) >= 4
-                      comment: easyjet AT_LEAST_FOUR_JETS
-                    - expr: >-
-                        sum((log(jets.GN2v01_pb / (0.2 * jets.GN2v01_pc
-                        + 0.8 * jets.GN2v01_pu)) > -0.385)
-                        & (abs(jets.eta) < 2.5)) >= 2
-                      comment: easyjet AT_LEAST_TWO_BJETS, GN2v01 FixedCutBEff_85
+                    # easyjet AT_LEAST_FOUR_JETS, over the preselected jets
+                    - >-
+                      sum((jets.pt > 20000) & (jets.eta < 4.5)
+                      & (jets.eta > -4.5) & (jets.NNJvtPass > 0.5)) >= 4
+                    # easyjet AT_LEAST_TWO_BJETS, GN2v01 FixedCutBEff_85;
+                    # |eta| < 2.5 already implies |eta| < 4.5
+                    - >-
+                      sum((log(jets.GN2v01_pb / (0.2 * jets.GN2v01_pc
+                      + 0.8 * jets.GN2v01_pu)) > -0.385)
+                      & (abs(jets.eta) < 2.5) & (jets.pt > 20000)
+                      & (jets.NNJvtPass > 0.5)) >= 2
                 groups:
                   jets:
                     prefix: AnalysisJetsAuxDyn.
@@ -145,11 +158,10 @@ data:
           - name: background
             label: 0
             reader:
-              class_path: salt.data.UprootReader
+              class_path: salt.data.xAODReader
               init_args:
                 tree: CollectionTree
                 unroll: null
-                constituent_cuts: *physlite_jet_preselection
                 cuts: *physlite_event_preselection
                 groups:
                   jets:
@@ -169,3 +181,16 @@ data:
                       GN2v01_pu: GN2v01_pu
                   event: *physlite_event_group
             # sources: {train: [...], val: [...], test: [...]}  # ttbar files
+    # the reproducible per-jet half of easyjet's preselection — applied AFTER the
+    # read, on the padded (B, T) jets slab, one engine for every reader
+    jet_selection:
+      class_path: salt.data.ConstituentSelection
+      init_args:
+        streams:
+          jets:
+            pad_max: 20 # the served width, matches readers/easyjet_events.yaml
+            cuts:
+              - pt > 20000 # 20 GeV, PHYSLITE stores MeV
+              - eta < 4.5 # |eta| < 4.5: a cut is one comparison, so it is two cuts
+              - eta > -4.5
+              - NNJvtPass > 0.5 # stored as int8 0/1

@@ -11,7 +11,7 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.data import Cut, GlobalObjectCuts, H5StructuredReader
+from salt.data import GlobalObjectCuts, H5StructuredReader
 from salt.data.base import WorkerCtx
 from salt.graph.spec import Mode
 from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
@@ -57,31 +57,16 @@ def _jets(path: Path) -> tuple[np.ndarray, np.ndarray]:
 def test_engine_no_cuts_keeps_all() -> None:
     r = H5StructuredReader(groups={"jets": {"global_object": True}})
     rec = r._row_record({"pt": np.array([0.1, 0.6, 0.9])}, 3)
-    np.testing.assert_array_equal(r._apply_row_cuts(rec, None), [True, True, True])
+    np.testing.assert_array_equal(r._apply_row_cuts(rec), [True, True, True])
 
 
 def test_engine_applies_global_cut() -> None:
     r = H5StructuredReader(
         groups={"jets": {"global_object": True}},
-        cuts=GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),)),
+        cuts=GlobalObjectCuts(global_cuts=("pt > 0.5",)),
     )
     rec = r._row_record({"pt": np.array([0.1, 0.6, 0.9])}, 3)
-    np.testing.assert_array_equal(r._apply_row_cuts(rec, None), [False, True, True])
-
-
-def test_engine_per_split_adds_to_global() -> None:
-    r = H5StructuredReader(
-        groups={"jets": {"global_object": True}},
-        cuts=GlobalObjectCuts(
-            global_cuts=(Cut("pt", ">", 0.5),),
-            per_split={"train": (Cut("label", "==", 5),)},
-        ),
-    )
-    rec = r._row_record(
-        {"pt": np.array([0.6, 0.6, 0.1]), "label": np.array([5, 4, 5])}, 3
-    )
-    np.testing.assert_array_equal(r._apply_row_cuts(rec, "train"), [True, False, False])
-    np.testing.assert_array_equal(r._apply_row_cuts(rec, "val"), [True, True, False])
+    np.testing.assert_array_equal(r._apply_row_cuts(rec), [False, True, True])
 
 
 # --------------------------------------------------------------------------- #
@@ -110,26 +95,23 @@ def test_identity_read_matches_contiguous_oracle(dummy, sl) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _oracle_kept(path: Path, thr: float, stage: str | None) -> np.ndarray:
-    pt, labels = _jets(path)
-    keep = pt > thr
-    if stage == "train":
-        keep &= labels == 2  # the per-split extra cut (label 2 exists in the dummy file)
-    return np.flatnonzero(keep)
+def _oracle_kept(path: Path, thr: float) -> np.ndarray:
+    pt, _labels = _jets(path)
+    return np.flatnonzero(pt > thr)
 
 
 def test_cut_len_is_filtered(dummy) -> None:
-    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=("pt > 0.5",))
     r = _reader(dummy, cuts=spec)
-    kept = _oracle_kept(dummy, 0.5, None)
+    kept = _oracle_kept(dummy, 0.5)
     assert len(r) == len(kept)
     np.testing.assert_array_equal(r._kept, kept)  # ascending kept file rows
 
 
 def test_cut_full_read_matches_oracle(dummy) -> None:
-    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=("pt > 0.5",))
     r = _reader(dummy, cuts=spec)
-    kept = _oracle_kept(dummy, 0.5, None)
+    kept = _oracle_kept(dummy, 0.5)
     pt, _ = _jets(dummy)
     out = r.read(slice(0, len(r)), Mode.FIT)
     np.testing.assert_array_equal(out["raw.jets"]["pt"], pt[kept])
@@ -138,9 +120,9 @@ def test_cut_full_read_matches_oracle(dummy) -> None:
 
 @pytest.mark.parametrize("frac", [(0, 1), (0.5, 0.5), (-1, -1)])  # first / middle / last
 def test_cut_endpoint_reads_map_through_kept(dummy, frac) -> None:
-    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=("pt > 0.5",))
     r = _reader(dummy, cuts=spec)
-    kept = _oracle_kept(dummy, 0.5, None)
+    kept = _oracle_kept(dummy, 0.5)
     pt, _ = _jets(dummy)
     n = len(r)
     a, b = frac
@@ -152,9 +134,9 @@ def test_cut_endpoint_reads_map_through_kept(dummy, frac) -> None:
 
 
 def test_cut_non_contiguous_and_batch_boundary(dummy) -> None:
-    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
+    spec = GlobalObjectCuts(global_cuts=("pt > 0.5",))
     r = _reader(dummy, cuts=spec)
-    kept = _oracle_kept(dummy, 0.5, None)
+    kept = _oracle_kept(dummy, 0.5)
     # non-contiguous: kept file rows are scattered (not a contiguous run)
     assert np.any(np.diff(kept) > 1)
     pt, _ = _jets(dummy)
@@ -171,23 +153,12 @@ def test_cut_non_contiguous_and_batch_boundary(dummy) -> None:
     np.testing.assert_array_equal(out["masks.tracks"], ~valid[kept])
 
 
-def test_cut_stage_binding_train_val_test(dummy) -> None:
-    spec = GlobalObjectCuts(
-        global_cuts=(Cut("pt", ">", 0.5),),
-        per_split={"train": (Cut("flavour_label", "==", 2),)},
-    )
-    pt, _ = _jets(dummy)
-    n_train = len(_reader(dummy, cuts=spec, stage="train"))
-    n_val = len(_reader(dummy, cuts=spec, stage="val"))
-    n_test = len(_reader(dummy, cuts=spec, stage="test"))
-    assert n_train == len(_oracle_kept(dummy, 0.5, "train"))
-    assert n_val == n_test == len(_oracle_kept(dummy, 0.5, None))
-    assert n_train < n_val  # train has the extra label==5 cut
-    # train read really only serves label==5, pt>0.5 jets
-    r = _reader(dummy, cuts=spec, stage="train")
-    kept = _oracle_kept(dummy, 0.5, "train")
-    out = r.read(slice(0, len(r)), Mode.FIT)
-    np.testing.assert_array_equal(out["raw.jets"]["pt"], pt[kept])
+def test_cut_is_stage_independent(dummy) -> None:
+    """The engine no longer carries per-split cuts — every stage reads identically."""
+    spec = GlobalObjectCuts(global_cuts=("pt > 0.5",))
+    kept = _oracle_kept(dummy, 0.5)
+    for stage in ("train", "val", "test"):
+        assert len(_reader(dummy, cuts=spec, stage=stage)) == len(kept)
 
 
 def test_cut_missing_field_raises(dummy) -> None:
@@ -196,15 +167,15 @@ def test_cut_missing_field_raises(dummy) -> None:
     r = H5StructuredReader(
         groups={"jets": {"global_object": True}, "tracks": {"global_object": False}},
         filename=dummy,
-        cuts=GlobalObjectCuts(global_cuts=(Cut("not_a_field", ">", 0),)),
+        cuts=GlobalObjectCuts(global_cuts=("not_a_field > 0",)),
     )
     with pytest.raises(SchemaError, match="not_a_field"):
         r.prepare()
 
 
 def test_cut_num_caps_served_rows(dummy) -> None:
-    spec = GlobalObjectCuts(global_cuts=(Cut("pt", ">", 0.5),))
-    kept = _oracle_kept(dummy, 0.5, None)
+    spec = GlobalObjectCuts(global_cuts=("pt > 0.5",))
+    kept = _oracle_kept(dummy, 0.5)
     r = _reader(dummy, cuts=spec, num=10)
     assert len(r) == 10
     pt, _ = _jets(dummy)

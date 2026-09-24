@@ -37,8 +37,8 @@ SETUP_STAGES: tuple[SetupStage, ...] = get_args(SetupStage)
 SourceKind: TypeAlias = Literal["path", "scalar"]
 """SETUP-time port kinds, parallel to (and disjoint from) the tensor `Kind`.
 
-PATH = a filesystem path string (a raw sample file, a VDS path, a ``/dev/shm``
-staged path). SCALAR = a resolved CONFIG artifact: a dict of str/float, a
+PATH = a filesystem path string (a raw sample file, a ``/dev/shm`` staged
+path). SCALAR = a resolved CONFIG artifact: a dict of str/float, a
 float, or an opaque resolved object (e.g. a ``num`` row-cap dict). A consumer
 port may only bind a producer leaf of the same kind.
 """

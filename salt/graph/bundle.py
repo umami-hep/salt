@@ -111,17 +111,33 @@ class Bundle:
         self._check_writable(key, who=None)
         self._insert(parts, key, value)
 
-    def merge(self, produced: dict[str, Any], who: str, expected: AbstractSet[str]) -> None:
+    def merge(
+        self,
+        produced: dict[str, Any],
+        who: str,
+        expected: AbstractSet[str],
+        overwrite: AbstractSet[str] = frozenset(),
+    ) -> None:
         """Merge a module's produced nested dict into the bundle (executor-only).
 
-        Write-once enforced; the produced key set is checked against
-        `expected` (the executor passes the declared key set, keeping
-        Bundle decoupled from planner types) on EVERY merge. Check-then-
-        insert makes the merge atomic: on error, nothing has been written.
-        Raises `KeyCollisionError` on a colliding key, `DeclarationError`
-        if the produced set doesn't equal `expected`.
+        Write-once enforced for every key except `overwrite` (a subset of
+        `expected`): those keys must already exist as a leaf and are
+        replaced in place instead of collision-checked. The produced key set
+        is checked against `expected` (the executor passes the declared key
+        set, keeping Bundle decoupled from planner types) on EVERY merge.
+        Check-then-insert makes the merge atomic: on error, nothing has been
+        written. Raises `KeyCollisionError` on a colliding key,
+        `DeclarationError` if the produced set doesn't equal `expected`, if
+        `overwrite` is not a subset of `expected`, or if an `overwrite` key
+        is not already present in the bundle.
         """
         expected_set = set(expected)
+        overwrite_set = set(overwrite)
+        if not overwrite_set <= expected_set:
+            raise DeclarationError(
+                f"module {who!r} declares overwrite keys not in its expected produces: "
+                f"{sorted(overwrite_set - expected_set)}"
+            )
         flat = _flatten_produced(produced, expected_set, prefix="")
         got = set(flat)
         if got != expected_set:
@@ -135,7 +151,13 @@ class Bundle:
         # bundle untouched. Keys within one merge cannot collide with each
         # other (they come from a single nested dict).
         for key in flat:
-            self._check_writable(key, who=who)
+            if key in overwrite_set:
+                if key not in self._leaves:
+                    raise DeclarationError(
+                        f"module {who!r} rewrites {key!r} but it is not present in the bundle"
+                    )
+            else:
+                self._check_writable(key, who=who)
         for key, value in flat.items():
             self._insert(tuple(key.split(KEY_SEP)), key, value)
 
