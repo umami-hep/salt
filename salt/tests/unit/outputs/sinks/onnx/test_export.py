@@ -71,7 +71,6 @@ def exported(tmp_path_factory):
         gn2_export_cfg(),
         VARIABLES,
         tmp / "network.onnx",
-        outputs=[],
         run_name="GN2_v2",
     )
     return SimpleNamespace(modules=modules, result=result, tmp=tmp)
@@ -190,7 +189,6 @@ class TestExportedModel:
             gn2_export_cfg(),
             VARIABLES,
             exported.result.onnx_path,
-            outputs=[],
             run_name="GN2_v2",
         )
         assert again.plan.plan_hash == exported.result.plan.plan_hash
@@ -302,7 +300,7 @@ def two_stream(tmp_path_factory):
     bind_all(modules, resolve_bind_schema([plan]))
     modules["norm"].materialise()
     result = export_graph(
-        modules, export_cfg, variables, tmp / "two.onnx", outputs=[], run_name="two_stream"
+        modules, export_cfg, variables, tmp / "two.onnx", run_name="two_stream"
     )
     return SimpleNamespace(result=result, variables=variables)
 
@@ -458,9 +456,6 @@ class TestSaltSurface:
         assert [entry.port for entry in export_cfg.inputs] == ["inputs.jets", "inputs.tracks"]
         assert export_cfg.inputs[1].sequence is True
         assert export_cfg.inputs[1].dyn_axis == "n_tracks"
-        # the shipped configs carry NO export.outputs — the manifest
-        # derives from the writers (rename/combine empty by default)
-        assert export_cfg.outputs == []
         assert export_cfg.rename == {}
         assert export_cfg.combine == []
 

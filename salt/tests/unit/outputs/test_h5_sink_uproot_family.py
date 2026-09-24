@@ -100,7 +100,7 @@ class _DataModule:
 
 def _seed_global_column(sink: H5OutputSink) -> None:
     """Seed one global prob column on the 'event' stream (bypass section binding)."""
-    sink._columns = (  # noqa: SLF001 - the explicit table is retired as a config surface
+    sink._columns = (  # noqa: SLF001 - OutputColumn is the sink's internal value object; seeded directly for this white-box test
         OutputColumn(key="outputs.event.cls", suffixes=["p0", "p1"]),
     )
     sink._columns_resolved = True  # noqa: SLF001

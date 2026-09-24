@@ -108,7 +108,7 @@ def _folded_gn2_export(tmp_path):
     bind_all(modules, resolve_bind_schema([plan]))
     modules["norm"].materialise()
     result = export_graph(
-        modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", outputs=[], run_name="GN2_v2"
+        modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", run_name="GN2_v2"
     )
     return result, modules
 
@@ -141,7 +141,7 @@ def folded(tmp_path_factory):
     bind_all(modules, resolve_bind_schema([plan]))
     modules["norm"].materialise()
     result = export_graph(
-        modules, _export_cfg(), VARIABLES, tmp / "folded.onnx", outputs=[], run_name="GN2_v2"
+        modules, _export_cfg(), VARIABLES, tmp / "folded.onnx", run_name="GN2_v2"
     )
     return SimpleNamespace(result=result, modules=modules)
 
@@ -286,7 +286,7 @@ def _build_maskformer_folded(tmp_path):
     torch.manual_seed(42)
     return export_graph(
         modules, _mf_export_cfg(), VARIABLES, tmp_path / "folded_mf.onnx",
-        outputs=[], run_name="MaskFormer",
+        run_name="MaskFormer",
     )
 
 
@@ -372,7 +372,6 @@ def _build_two_node_mf(tmp_path):
         _mf_export_cfg(),
         VARIABLES,
         tmp_path / "two_node_mf.onnx",
-        outputs=[],
         run_name="MaskFormer",
     )
 

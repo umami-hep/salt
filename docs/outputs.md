@@ -573,8 +573,9 @@ you never name `H5OutputSink` or `OnnxExportSink` in a config.
 | `salt test` | `H5OutputSink`, if any section writer runs in `test` |
 | `salt graph` / `salt schema` / `salt export` | `H5OutputSink` and `OnnxExportSink`, so the static tooling sees what a real run would |
 
-Wiring `H5OutputSink` yourself with an explicit `OutputColumn` table is a hard
-error — that surface is retired, and the section replaced it.
+`H5OutputSink` takes no column table of its own: its columns are always
+derived from the section (and from model-graph producers that declare
+`manifest_fields`), so there is nothing to wire by hand.
 
 Declare a sink explicitly only when it carries a manifest the command cannot
 guess (`salt/configs/MaskFormer.yaml` is the shipped example), or when it is

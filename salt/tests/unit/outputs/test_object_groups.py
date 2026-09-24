@@ -61,7 +61,7 @@ def _particle_groups() -> list[ObjectGroup]:
 
 
 def _seeded(sink: H5OutputSink) -> H5OutputSink:
-    """Seed one task column directly (the explicit-``outputs`` surface was retired)."""
+    """Seed one task column directly (OutputColumn is the sink's internal value object)."""
     sink._columns = (OutputColumn(key="outputs.jets.cls", suffixes=["pb"]),)  # noqa: SLF001
     sink._columns_resolved = True  # noqa: SLF001
     return sink

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -424,47 +425,25 @@ class VertexingTaskModule(_TaskModuleBase):
         """ONNX: union-find -> flatten -> int8 ``[L]`` field under `VERTEX_INDEX`. H5 modes:
         the int-cast union-find value, ``onnx_name=None``, prefix follows `prefix_vertex_column`.
         """
-        del run_name
         assert self.net is not None, "get_output before bind()"
+        fields = self.get_output_manifest(mode, run_name)
         edge_scores = b.get(self.pred_key)
         mask = b.get(f"masks.{self.stream}")
         if mode & Mode.ONNX:
             vertex_indices = get_node_assignment_jit(edge_scores, mask)
             vertex_list = mask_fill_flattened(vertex_indices, mask)
-            return [
-                OutputField(
-                    h5_name=None,
-                    onnx_name=VERTEX_INDEX,
-                    dtype="int8",
-                    axis="per_token",
-                    final=True,
-                    value=vertex_list.reshape(-1).char(),
-                )
-            ]
-        # H5 (TEST): union-find then cast to int (-inf padding -> int32 -2147483648)
-        preds = self.run_inference(edge_scores, mask).int()
-        fields = [
-            OutputField(
-                h5_name=VERTEX_INDEX,
-                onnx_name=None,
-                dtype="i8",
-                axis="per_token",
-                final=True,
-                prefix=self.prefix_vertex_column,
-                value=preds,
-            )
-        ]
-        if self._emit_targets(mode):
-            # the per-token vertex-index label the pairwise matching loss targets
-            # (raw indices, negative = no vertex); padded positions read -1
-            labels = torch.masked_fill(b.get(self.label_key), mask, -1)
-            fields.append(self._target_field(value=labels))
-        return fields
+            values = [vertex_list.reshape(-1).char()]
+        else:
+            # H5 (TEST): union-find then cast to int (-inf padding -> int32 -2147483648)
+            values = [self.run_inference(edge_scores, mask).int()]
+            if self._emit_targets(mode):
+                # the per-token vertex-index label the pairwise matching loss targets
+                # (raw indices, negative = no vertex); padded positions read -1
+                values.append(torch.masked_fill(b.get(self.label_key), mask, -1))
+        return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
 
-    def _target_field(self, value: Tensor | None = None) -> OutputField:
-        """The target-label field: the per-token vertex-index label as an
-        unprefixed ``target_{task}`` i4 column (labels are model-independent).
-        """
+    def _target_field(self) -> OutputField:
+        """The vertex-index target label: unprefixed because labels are model-independent."""
         return OutputField(
             h5_name=f"target_{self.name}",
             onnx_name=None,
@@ -472,11 +451,10 @@ class VertexingTaskModule(_TaskModuleBase):
             axis="per_token",
             final=True,
             prefix=False,
-            value=value,
         )
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
-        """The value-free field metadata mirroring `get_output` for `mode` (``value=None``)."""
+        """`get_output` derives its fields from this list via ``replace(field, value=...)``."""
         del run_name
         if mode & Mode.ONNX:
             return [

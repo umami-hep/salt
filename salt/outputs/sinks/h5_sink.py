@@ -20,7 +20,6 @@ from salt.graph.spec import (
     Mode,
     TensorSpec,
     flatten_spec,
-    sym_dim,
     unflatten_spec,
 )
 from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
@@ -72,10 +71,6 @@ class H5OutputSink(RuntimeSink):
 
     Parameters
     ----------
-    outputs : None
-        RETIRED as a config surface — the sink is implicit and derives its
-        column schema from the bound ``outputs:`` section. Only ``None``/``[]``
-        is accepted; any truthy value raises `ConfigError`.
     copy_inputs : Mapping[str, Sequence[str]] | None, optional
         Per-stream source-file variables to copy into the eval H5, in column
         order, by default None.
@@ -108,9 +103,9 @@ class H5OutputSink(RuntimeSink):
     Raises
     ------
     ConfigError
-        For any truthy ``outputs`` value (the retired explicit-table surface),
-        or (at run setup) a column-name collision / unknown stream / missing
-        source variable.
+        (At run setup) a column-name collision / unknown stream / missing
+        source variable, or no bound producer minting a column for the
+        selection.
     """
 
     name = "h5_output"
@@ -118,7 +113,6 @@ class H5OutputSink(RuntimeSink):
 
     def __init__(
         self,
-        outputs: Sequence[OutputColumn | Mapping[str, Any]] | None = None,
         copy_inputs: Mapping[str, Sequence[str]] | None = None,
         write_pad_mask: bool | Sequence[str] = False,
         output: str = DEFAULT_OUTPUT,
@@ -128,23 +122,6 @@ class H5OutputSink(RuntimeSink):
         consumes: Sequence[str] | None = None,
     ) -> None:
         super().__init__(modes=modes, consumes=consumes)
-        # The explicit OutputColumn table is RETIRED as a config
-        # surface — the H5 sink is now implicit (the command wires it) and derives
-        # its column schema from the bound outputs: section (RunTaskOutput +
-        # InputCopyWriter + PadMaskWriter). An explicit `outputs:` table is a hard
-        # error pointing at the section mechanism. `outputs=None`/`[]` is the only
-        # accepted value (the injected/dumb-section path).
-        if outputs:
-            raise ConfigError(
-                "H5OutputSink no longer accepts an explicit `outputs:` OutputColumn table "
-                "— the H5 sink is implicit (the `salt test` command wires it) and "
-                "derives its columns from the top-level `outputs:` section "
-                "(RunTaskOutput + InputCopyWriter + PadMaskWriter). Declare the section, per "
-                "`gn2v2-opendata.yaml`; use each RunTaskOutput's `modes:` list to control "
-                "test-vs-export participation. Do NOT wire H5OutputSink in `callbacks:` at all."
-            )
-        # no explicit columns — resolved lazily from the bound outputs: section.
-        self._explicit_columns: tuple[OutputColumn, ...] = ()
         self._columns: tuple[OutputColumn, ...] = ()
         self._columns_resolved = False
         self.copy_inputs = {s: list(v) for s, v in (copy_inputs or {}).items()}
@@ -155,16 +132,14 @@ class H5OutputSink(RuntimeSink):
         self._object_groups: tuple[ObjectGroup, ...] = tuple(
             ObjectGroup.coerce(g) for g in (object_groups or ())
         )
-        # dumb-section mode: with a bound outputs: section the sink derives its
-        # column schema + copy spec + mask streams from the SECTION manifest in
-        # declaration order; ctor args are the no-section override. One of the
-        # two MUST resolve at run setup.
+        # the sink derives its column schema + copy spec + mask streams from the
+        # bound outputs: section manifest in declaration order; the copy/mask ctor
+        # knobs are the pre-bind defaults the section overrides.
         self._output_section: Mapping[str, Any] | None = None
         # Mode.TEST = eval schema (default); Mode.ONNX = strictly the export
         # output set (`use_export_selection`, salt inference).
         self._section_mode: Mode = Mode.TEST
-        self._section_columns: tuple[tuple[str, OutputColumn], ...] | None = None
-        # dumb-section copy resolution: None until a section binds; True means
+        # section copy resolution: False until a section binds; True means
         # "copy every stream with a configured task" (v1 default, resolved at
         # open_schema against the reader).
         self._copy_all_tasked_streams: bool = False
@@ -198,11 +173,11 @@ class H5OutputSink(RuntimeSink):
 
     def is_test_sink(self) -> bool:
         """Always True (unlike the base probe): always demands ``meta.rows``, so this
-        is resolution-free even before a dumb-section binds its columns.
+        is resolution-free even before the section binds its columns.
         """
         return True
 
-    # -- dumb-section binding -------------------------------------
+    # -- section binding -------------------------------------
 
     def use_export_selection(self) -> None:
         """Switch the section-derived selection to the EXPORT (``Mode.ONNX``) set.
@@ -217,31 +192,25 @@ class H5OutputSink(RuntimeSink):
         self._columns_resolved = False
 
     def _invalidate_manifest(self) -> None:
-        """Drop the DERIVED column table after a manifest source rebinds.
-
-        A table that did not come from a manifest source (`_explicit_columns`)
-        survives: there is nothing to re-derive it from, so dropping it would
-        leave the sink with no columns at all.
-        """
-        if not self._explicit_columns:
-            self._columns_resolved = False
+        """Drop the DERIVED column table after a manifest source rebinds."""
+        self._columns_resolved = False
 
     def bind_output_section(self, section: Mapping[str, Any]) -> None:
-        """Capture the ``outputs:`` section so the dumb sink dumps its leaves.
+        """Capture the ``outputs:`` section the sink derives its columns from.
 
         The section is the ORDERED dict of section writers (`RunTaskOutput`,
-        `InputCopyWriter`, `PadMaskWriter`). When bound, the sink switches to
-        the DUMB path: it dumps ALL active ``outputs.*`` leaves and derives
-        its column schema + input-copy spec + pad-mask streams from the
-        SECTION manifest in SECTION DECLARATION ORDER (the H5 column-order
-        authority) — the constructor knobs are ignored. A copy/mask writer
-        whose ``modes:`` exclude this sink's selection mode contributes nothing.
+        `InputCopyWriter`, `PadMaskWriter`): the sink derives its column
+        schema + input-copy spec + pad-mask streams from the SECTION manifest
+        in SECTION DECLARATION ORDER (the H5 column-order authority); the
+        section's copy/mask writers override the constructor knobs. A
+        copy/mask writer whose ``modes:`` exclude this sink's selection mode
+        contributes nothing.
         """
         self._output_section = section
         self._invalidate_manifest()
         # the section drives copy_inputs + write_pad_mask too (override the ctor
-        # knobs in dumb mode): collect from the InputCopyWriter / PadMaskWriter
-        # that RUN in this sink's selection mode.
+        # knobs): collect from the InputCopyWriter / PadMaskWriter that RUN in
+        # this sink's selection mode.
         copy_inputs: dict[str, list[str]] = {}
         mask_streams: list[str] = []
         for writer in section.values():
@@ -268,26 +237,11 @@ class H5OutputSink(RuntimeSink):
             self.copy_inputs = copy_inputs
         self.write_pad_mask = tuple(dict.fromkeys(mask_streams)) if mask_streams else False
 
-    def _is_dumb_section(self) -> bool:
-        """Whether an ``outputs:`` section is bound (the dumb-section path is active)."""
-        return bool(self._output_section)
-
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
-        """Resolve the H5 column table — explicit, or from the bound ``outputs:`` section.
-
-        Explicit mode returns the configured columns unchanged; a bound dumb
-        section derives them from ``RunTaskOutput.manifest_fields`` in section
-        declaration order; neither is a `ConfigError`.
-        """
+        """Resolve the H5 column table from the bound manifest sources (cached)."""
         if self._columns_resolved:
             return self._columns
-        if self._is_dumb_section():
-            return self._resolve_section_columns(run_name)
-        raise ConfigError(
-            "H5OutputSink has no columns to write — give it an explicit `outputs:` "
-            "OutputColumn table, or compose a top-level `outputs:` section "
-            "(RunTaskOutput + InputCopyWriter + PadMaskWriter) that binds to it"
-        )
+        return self._resolve_section_columns(run_name)
 
     def _column_suffix(self, field: Any) -> str | None:
         """The field's column suffix under this sink's selection mode, or None.
@@ -327,7 +281,7 @@ class H5OutputSink(RuntimeSink):
             by_key[output_key].append((suffix, field))
         if not key_order:
             raise ConfigError(
-                "H5OutputSink (dumb-section) found no RunTaskOutput task with a final "
+                "H5OutputSink found no RunTaskOutput task with a final "
                 f"{'export-selection' if self._section_mode is Mode.ONNX else 'H5'} column — "
                 "wire a RunTaskOutput([tasks]) in the outputs: section (for "
                 "salt inference the RunTaskOutput's modes: list must include 'export')"
@@ -344,7 +298,7 @@ class H5OutputSink(RuntimeSink):
             for column_name in col.column_names(run_name):
                 if (other := seen_cols.get((stream, column_name))) is not None:
                     raise ConfigError(
-                        f"H5OutputSink (dumb-section): flat column {column_name!r} in stream "
+                        f"H5OutputSink: flat column {column_name!r} in stream "
                         f"{stream!r} is minted by BOTH {other} AND {output_key!r}"
                     )
                 seen_cols[stream, column_name] = output_key
@@ -368,8 +322,8 @@ class H5OutputSink(RuntimeSink):
 
     def declare_io(self, mode: Mode) -> IO:
         """TEST requires the demanded ``outputs.*`` leaves, ``meta.rows``, and each
-        pad-mask stream's ``masks.<stream>``; produces nothing (terminal node,
-        planner keeps it). FIT/VAL/ONNX: empty requires/produces (pruned).
+        pad-mask stream's ``outputs.<stream>.mask``; produces nothing (terminal
+        node, planner keeps it). FIT/VAL/ONNX: empty requires/produces (pruned).
         """
         if not (mode & Mode.TEST):
             return IO(requires={}, produces={})
@@ -383,16 +337,11 @@ class H5OutputSink(RuntimeSink):
         }
         req["meta.rows"] = TensorSpec(shape=None, dtype="int64", kind="meta")
         for stream in self._pad_mask_streams():
-            if self._is_dumb_section():
-                # in dumb-section mode the PadMaskWriter section node produces
-                # outputs.<stream>.mask; the sink DEMANDS that leaf (keeping
-                # PadMaskWriter alive in the plan) and reads the bool mask from
-                # it — the section feeds the sink through the graph.
-                req[f"outputs.{stream}.mask"] = TensorSpec(shape=None, dtype=None, kind="data")
-            else:
-                req[f"masks.{stream}"] = TensorSpec(
-                    shape=("B", sym_dim("T", stream)), dtype="bool", kind="pad_mask"
-                )
+            # the PadMaskWriter section node produces outputs.<stream>.mask; the
+            # sink demands that leaf (keeping PadMaskWriter alive in the plan) and
+            # reads the bool mask from it — the section feeds the sink through
+            # the graph.
+            req[f"outputs.{stream}.mask"] = TensorSpec(shape=None, dtype=None, kind="data")
         # demand each object-group field's source leaf so its producer stays
         # alive in the TEST plan; empty for non-object-group sinks.
         for key, spec in self._object_group_requires().items():
@@ -647,11 +596,8 @@ class H5OutputSink(RuntimeSink):
         """
         out: dict[str, np.ndarray] = {}
         for stream in self._mask_streams:
-            # in dumb-section mode read the PadMaskWriter's outputs.<stream>.mask
-            # leaf (fed through the graph); otherwise the bundle's masks.<stream>
-            # directly (the producer path).
-            mask_key = f"outputs.{stream}.mask" if self._is_dumb_section() else f"masks.{stream}"
-            mask = bundle.get(mask_key).detach().cpu().numpy()
+            # read the PadMaskWriter's outputs.<stream>.mask leaf (fed through the graph)
+            mask = bundle.get(f"outputs.{stream}.mask").detach().cpu().numpy()
             arr = u2s(np.expand_dims(mask, -1), dtype=np.dtype([("mask", "?")]))
             out[stream] = _pad_to(arr, self._seq_lengths[stream])
         return out
@@ -718,7 +664,7 @@ class H5OutputSink(RuntimeSink):
         raises `ConfigError` for an unknown copy stream or a missing copy variable.
         """
         self._close_copies()
-        # dumb-section: InputCopyWriter(streams=None) means "every reader stream"
+        # InputCopyWriter(streams=None) means "every reader stream"
         # (the v1 default); resolve it now that the reader streams are known.
         if self._copy_all_tasked_streams:
             self.copy_inputs = {s: list(self._copy_variables.get(s, [])) for s in streams}

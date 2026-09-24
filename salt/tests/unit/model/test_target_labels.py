@@ -9,6 +9,10 @@ names a label.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
+from typing import Any
+
 import pytest
 import torch
 
@@ -273,6 +277,124 @@ def test_export_mode_manifest_and_requires_are_label_free(build):
     assert all(not d.startswith("labels.") for d in module.output_time_requires(Mode.ONNX)), (
         "ONNX output_time_requires demanded a label — export/inference must be label-free"
     )
+
+
+# -- get_output == get_output_manifest + values, for EVERY shipped shape x mode --------
+
+
+def _cls_bce():
+    module = ClassificationTaskModule(
+        stream="jets",
+        label="flavour_label",
+        class_names=["sig"],
+        input="pooled.global",
+        sequence=False,
+        loss={"class_path": "torch.nn.BCEWithLogitsLoss"},
+        write_targets=True,
+    )
+    module.name = "jets_bce"
+    module.bind(ResolvedSchema(widths={module.input_key: 8}))
+    return module
+
+
+_SHAPES: list[tuple[str, Callable[[], Any]]] = [
+    ("cls-global", _cls),
+    ("cls-global-bce", _cls_bce),
+    ("cls-seq", lambda: _cls(stream="tracks", sequence=True)),
+    ("reg-global", lambda: _reg(targets=("mHH", "dR"))),
+    ("reg-seq", lambda: _reg(targets=("dEta",), sequence=True)),
+    ("reg-gaussian", lambda: _reg(targets=("pt",), gaussian=True)),
+    ("reg-ratio", lambda: _reg(targets=("m_over_mHH",), denoms=("mHH",))),
+    ("vtx", _vtx),
+]
+
+
+def _probe_bundle(module, mode) -> Bundle:
+    """A minimal bundle carrying everything `get_output` reads for `module` in `mode`.
+    """
+    onnx = bool(mode & Mode.ONNX)
+    B = 1 if onnx else 3
+    L = 4
+    mask = (
+        torch.tensor([[False, False, False, True]])
+        if onnx
+        else torch.zeros(B, L, dtype=torch.bool)
+    )
+    if not onnx:
+        mask[0, 3] = True
+
+    if isinstance(module, VertexingTaskModule):
+        n_valid = 3
+        data: dict = {
+            "preds": {"tracks": {module.name: torch.rand(n_valid * (n_valid - 1), 1)}},
+            "masks": {"tracks": torch.tensor([[False, False, False, True]])},
+        }
+        if not onnx:
+            data["labels"] = {"tracks": {"ftagTruthVertexIndex": torch.tensor([[0, 0, 1, 5]])}}
+        return Bundle(data)
+
+    if isinstance(module, ClassificationTaskModule) and module.sequence:
+        data = {
+            "preds": {"tracks": {module.name: torch.randn(B, L, 3)}},
+            "masks": {"tracks": mask},
+        }
+        if not onnx:
+            data["labels"] = {
+                "tracks": {
+                    "ftagTruthOriginLabel": torch.tensor([
+                        [1, -2, 2, 7],
+                        [0, 1, 1, 2],
+                        [2, 2, 0, 1],
+                    ])
+                }
+            }
+        return Bundle(data)
+
+    if isinstance(module, ClassificationTaskModule):
+        C = len(module.class_names)
+        data = {"preds": {"jets": {module.name: torch.randn(B, C)}}}
+        if not onnx:
+            labels = torch.tensor([1, 0, 1]) if C == 1 else torch.tensor([0, 2, 1])
+            data["labels"] = {"jets": {"flavour_label": labels}}
+        return Bundle(data)
+
+    # RegressionTaskModule
+    R = len(module.targets)
+    width = 2 * R if module.gaussian else R
+    stream = module.stream
+    if module.sequence:
+        data = {
+            "preds": {stream: {module.name: torch.randn(B, L, width)}},
+            "masks": {stream: mask},
+        }
+        if not onnx:
+            data["labels"] = {stream: {t: torch.randn(B, L) for t in module.targets}}
+        return Bundle(data)
+
+    data = {"preds": {stream: {module.name: torch.randn(B, width)}}}
+    if module.target_denominators:
+        if onnx:
+            data["inputs"] = {stream: torch.rand(B, 1) + 1}
+        else:
+            data["labels"] = {
+                stream: {
+                    **{d: torch.rand(B) + 1 for d in module.target_denominators},
+                    **{t: torch.rand(B) for t in module.targets},
+                }
+            }
+    elif not onnx:
+        data["labels"] = {stream: {t: torch.rand(B) + 1 for t in module.targets}}
+    return Bundle(data)
+
+
+@pytest.mark.parametrize("mode", [Mode.TEST, Mode.ONNX], ids=["TEST", "ONNX"])
+@pytest.mark.parametrize(("shape", "build"), _SHAPES, ids=[s for s, _ in _SHAPES])
+def test_get_output_fields_equal_manifest(shape, build, mode):
+    """`get_output` == `get_output_manifest` + values: same length, order and every attribute."""
+    module = build()
+    fields = module.get_output(_probe_bundle(module, mode), mode, _RUN)
+    assert all(f.value is not None for f in fields), shape
+    assert [replace(f, value=None) for f in fields] == module.get_output_manifest(mode, _RUN)
 
 
 # -- disable flag --------------------------------------------------------------

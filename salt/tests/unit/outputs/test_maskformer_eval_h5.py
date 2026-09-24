@@ -93,8 +93,8 @@ def _batch_bundle(batch_size=6, n_tracks=_N_TRACKS):
 
 def _sink(*, run_name=RUN_NAME, n_tracks=_N_TRACKS, half=False) -> H5OutputSink:
     sink = H5OutputSink(object_groups=_object_groups(), half_precision=half)
-    # seed one reader-stream task column (the explicit-outputs surface was
-    # retired; in production the columns come from the outputs: section).
+    # seed one reader-stream task column (OutputColumn is the sink's internal
+    # value object; in production the columns come from the outputs: section).
     sink._columns = (OutputColumn(key="outputs.jets.cls", suffixes=["pb"]),)  # noqa: SLF001
     sink._columns_resolved = True  # noqa: SLF001
     sink._run_name = run_name  # noqa: SLF001

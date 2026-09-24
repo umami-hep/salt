@@ -75,7 +75,7 @@ def _source_file(path: Path) -> None:
 
 def _seed_columns(sink: H5OutputSink) -> None:
     """One float prob column (jets) + one bare int column (tracks)."""
-    sink._columns = (  # noqa: SLF001 - the explicit table is retired as a config surface
+    sink._columns = (  # noqa: SLF001 - OutputColumn is the sink's internal value object; seeded directly for this white-box test
         OutputColumn(key="outputs.jets.cls", suffixes=["pb", "pc"]),
         OutputColumn(key="outputs.tracks.vtx", suffixes=["VertexIndex"], dtype="i8", prefix=False),
     )
@@ -111,7 +111,8 @@ def _run_sink(tmp_path: Path, *, half_precision: bool) -> Path:
             # the vertexing leaf reaches the sink as the int-cast union-find
             # value (int32; -inf padding -> int32 min)
             "tracks": {
-                "vtx": torch.full((_N, _T), -(2**31), dtype=torch.int32).masked_fill(~mask, 4)
+                "vtx": torch.full((_N, _T), -(2**31), dtype=torch.int32).masked_fill(~mask, 4),
+                "mask": mask,
             },
         },
         "masks": {"tracks": mask},

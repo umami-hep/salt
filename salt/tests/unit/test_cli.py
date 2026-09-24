@@ -9,8 +9,11 @@ import h5py
 import numpy as np
 import pytest
 
-from salt.cli import main
+import salt.cli
+from salt.cli import _parse_trainer_cli, main
+from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.outputs.sinks.onnx.export import _run_free_cli
 from salt.schema import load_schema
 from salt.tests._fixtures.gn2v2_test_config import small_config
 
@@ -458,3 +461,38 @@ class TestSchemaDump:
         capsys.readouterr()
         text = GOOD_CFG + "schema: schema.yaml\n"
         assert main(["graph", "validate", "-c", cfg(text), "--strict"]) == 0
+
+
+_BUILDERS = [("cli", _parse_trainer_cli), ("export", _run_free_cli)]
+
+
+class TestRunFreeCliBuilders:
+    """Both run-free builders share one core; each keeps its own error text."""
+
+    @pytest.mark.parametrize(("name", "build"), _BUILDERS, ids=[n for n, _ in _BUILDERS])
+    def test_bad_set_entry_rejected_before_parsing(self, name, build):
+        with pytest.raises(ConfigError, match=r"--set entries must be KEY=VALUE, got 'novalue'"):
+            build([small_config()], ["model.modules.norm.init_args.norm_dict=unused.yaml", "novalue"])
+
+    @pytest.mark.parametrize(("name", "build"), _BUILDERS, ids=[n for n, _ in _BUILDERS])
+    def test_parser_exit_translates_to_config_error(self, name, build, monkeypatch):
+        def boom(*_a, **_k):
+            raise SystemExit(2)
+
+        monkeypatch.setattr(salt.cli, "_build_run_free_cli", boom)
+        expected = {
+            "cli": r"trainer config .* failed to parse through the salt surface \(parser exit 2;.*Required init_args left as overrides",
+            "export": r"run config\(s\) .* failed to parse through the salt surface \(parser exit 2;.*Supply required init_args data-free via --set if needed",
+        }[name]
+        with pytest.raises(ConfigError, match=expected):
+            build([small_config()], [])
+
+    def test_value_error_translation_is_asymmetric(self, monkeypatch):
+        def boom(*_a, **_k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(salt.cli, "_build_run_free_cli", boom)
+        with pytest.raises(ConfigError, match=r"failed to instantiate through the salt surface:\nboom"):
+            _parse_trainer_cli([small_config()], [])
+        with pytest.raises(ValueError, match="boom"):
+            _run_free_cli([small_config()], [])

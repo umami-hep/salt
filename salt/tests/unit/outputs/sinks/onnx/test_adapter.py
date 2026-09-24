@@ -1,8 +1,6 @@
-"""Unit tests for the export surface: config resolution, reduces, adapter."""
+"""Unit tests for the export surface: config resolution and the adapter."""
 
 from __future__ import annotations
-
-from dataclasses import replace
 
 import pytest
 import torch
@@ -30,16 +28,7 @@ from salt.outputs.sinks.onnx import (
     sanitised_model_name,
     validate_model_name,
 )
-from salt.outputs.sinks.onnx.config import ExportOutput, default_athena_name
-from salt.outputs.sinks.onnx.reduces import (
-    BoundReduce,
-    ReduceCtx,
-    bind_reduce,
-    reduce_dtype,
-    reduce_spec,
-    register_reduce,
-    registered_reduces,
-)
+from salt.outputs.sinks.onnx.config import default_athena_name
 from salt.outputs import (
     ClassProbs,
     OnnxExportLeaf,
@@ -281,20 +270,7 @@ class TestExportSinkOutputs:
             sink.output_names()
 
 
-# no shipped reduce is registered — the conversion math lives on the
-# conversion nodes (proven bitwise in test_onnx_fold_classification.py /
-# test_onnx_fold_objects.py) and on VertexingTaskModule.get_output.
-
-
 class TestRetiredReduces:
-    def test_no_shipped_reduces_registered(self):
-        # registered_reduces() carries no shipped name — the conversion
-        # nodes own the math
-        from salt.outputs.sinks.onnx.reduces import registered_reduces  # noqa: PLC0415
-
-        shipped = {"split_scalars", "argmax", "vertex_union_find", "leading_object", "object_index"}
-        assert shipped.isdisjoint(set(registered_reduces()))
-
     def test_split_named_split_helper_is_the_sink(self):
         # the split_scalars NAMING split now lives on the OnnxExportSink (v1
         # task.py:301 torch.split+squeeze) — pinned here on a hand-made bundle
@@ -309,103 +285,6 @@ class TestRetiredReduces:
         assert torch.allclose(
             torch.stack([named["M_pb"], named["M_pc"], named["M_pu"]]), probs.squeeze(0)
         )
-
-
-# the LIVE register_reduce surface
-
-
-def _bind_passthrough_int8(out_cfg, ctx):
-    """A toy single-output reduce: flatten the port to int8 (registration target)."""
-    name = f"{ctx.model_name}_{out_cfg.name}"
-
-    def fn(b):
-        return (b.get(out_cfg.port).reshape(-1).char(),)
-
-    return BoundReduce(
-        port=out_cfg.port, output_names=(name,), dtypes=("int8",), dynamic_axes={}, fn=fn
-    )
-
-
-@pytest.fixture
-def fresh_reduce_name():
-    """Yield a never-registered reduce name and unregister it on teardown."""
-    import salt.outputs.sinks.onnx.reduces as reduces_mod  # noqa: PLC0415 - registry mutation guard
-
-    name = "test_passthrough_int8"
-    assert name not in reduces_mod._REGISTRY, "fixture name already registered (leak)"  # noqa: SLF001
-    yield name
-    reduces_mod._REGISTRY.pop(name, None)  # noqa: SLF001
-
-
-class TestRegisterReduce:
-    """The public `register_reduce` live-registry surface."""
-
-    def test_no_shipped_reduces_registered_at_import(self):
-        # the registry starts EMPTY of the retired shipped reduces
-        assert {
-            "split_scalars",
-            "argmax",
-            "vertex_union_find",
-            "leading_object",
-            "object_index",
-        }.isdisjoint(set(registered_reduces()))
-
-    def test_config_known_reduces_is_a_live_registry_view(self, fresh_reduce_name):
-        # the config-level public names stay a LIVE view of the registry (PEP 562
-        # __getattr__); a freshly-registered probe reduce shows up in the view
-        from salt.outputs.sinks.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
-
-        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
-        assert set(cfg.KNOWN_REDUCES) == set(registered_reduces())
-        assert fresh_reduce_name in cfg.KNOWN_REDUCES
-
-    def test_register_and_use_a_new_reduce(self, fresh_reduce_name):
-        # the registry spec is the dtype/arity authority
-        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8", per_token=False)
-        # live everywhere: registry, config view, dtype lookup
-        assert fresh_reduce_name in registered_reduces()
-        assert reduce_dtype(fresh_reduce_name) == "int8"
-        from salt.outputs.sinks.onnx import config as cfg  # noqa: PLC0415 - live-attr access under test
-
-        assert fresh_reduce_name in cfg.KNOWN_REDUCES
-        # the registered spec carries the declared field knowledge
-        spec = reduce_spec(fresh_reduce_name)
-        assert spec.dtype == "int8"
-        assert spec.per_token is False
-        assert spec.expects_names is False
-        # and bind_reduce dispatches to the registered binder
-        out = ExportOutput(port="preds.objects.x", name="Lead", reduce=fresh_reduce_name)
-        ctx = ReduceCtx(model_name="M", seq_dyn_axis={}, produced_specs={})
-        bound = bind_reduce(replace(out, dtype="int8"), ctx)
-        assert bound.output_names == ("M_Lead",)
-        b = Bundle()
-        b.set("preds.objects.x", torch.tensor([[1.0, 2.0]]))
-        (got,) = bound.fn(b)
-        assert got.dtype == torch.int8
-
-    def test_duplicate_registration_rejected(self, fresh_reduce_name):
-        # re-registering an already-registered name is a hard error (no silent
-        # override — would mask a real collision otherwise)
-        register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
-        with pytest.raises(ConfigError, match="already registered"):
-            register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="int8")
-
-    def test_bad_declared_dtype_rejected(self, fresh_reduce_name):
-        with pytest.raises(ConfigError, match=r"float32.*int8|int8.*float32"):
-            register_reduce(fresh_reduce_name, _bind_passthrough_int8, dtype="float16")
-
-    def test_empty_name_rejected(self):
-        with pytest.raises(ConfigError, match="non-empty string"):
-            register_reduce("", _bind_passthrough_int8, dtype="int8")
-
-    def test_unregistered_reduce_rejected_at_bind(self):
-        # a name that is NOT registered is rejected at bind (spec lookup)
-        out = ExportOutput(port="preds.objects.x", name="Lead", reduce="never_registered_reduce")
-        with pytest.raises(ConfigError, match="unknown reduce"):
-            reduce_spec("never_registered_reduce")
-        ctx = ReduceCtx(model_name="M", seq_dyn_axis={}, produced_specs={})
-        with pytest.raises(ConfigError, match="unknown reduce"):
-            bind_reduce(out, ctx)
 
 
 # the ONNX plan: purity + sources

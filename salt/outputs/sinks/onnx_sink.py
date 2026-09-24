@@ -390,7 +390,7 @@ class OnnxExportSink(Node):
         Returns
         -------
         ExportConfig
-            The resolved export-only half (``outputs == []``).
+            The resolved export-only half.
         """
         return resolve_export_config(
             ExportConfig(
