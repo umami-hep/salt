@@ -379,14 +379,14 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
 
 def _run_free_cli_argv(
-    config_paths: Sequence[Path], set_overrides: Sequence[str] | None
+    config_paths: Sequence[str | Path], set_overrides: Sequence[str] | None
 ) -> list[str]:
     """Build the argv for a run-free `SaltCLI` parse of a trainer config stack:
     one sanitised ``--config`` per path (repeated configs deep-merge
     left-to-right, as ``salt fit``/``salt export`` do) followed by the
-    ``--set`` overrides as ``--KEY=VALUE``. Shared by `_parse_trainer_cli`
-    and ``salt export``'s ``_run_free_cli``. Raises `ConfigError` on a
-    malformed ``--set`` entry.
+    ``--set`` overrides as ``--KEY=VALUE``. Shared by `_parse_trainer_cli`,
+    ``salt export``'s ``_run_free_cli`` and `salt.model.mup._parse_cli`.
+    Raises `ConfigError` on a malformed ``--set`` entry.
     """
     from salt.utils.config_utils import disable_logger_in_config
 
@@ -405,10 +405,10 @@ def _run_free_cli_argv(
 
 def _build_run_free_cli(args: Sequence[str]) -> Any:
     """Construct the run-free `SaltCLI` from a ready argv (`_run_free_cli_argv`
-    output) — the shared core of `_parse_trainer_cli` and ``salt export``'s
-    ``_run_free_cli``, which add their command-specific error translation.
-    The parser's `SystemExit` and jsonargparse's instantiate-time `ValueError`
-    propagate.
+    output) — the shared core of `_parse_trainer_cli`, ``salt export``'s
+    ``_run_free_cli`` and `salt.model.mup._parse_cli`, which add their
+    command-specific error translation. The parser's `SystemExit` and
+    jsonargparse's instantiate-time `ValueError` propagate.
     """
     from salt.main import SaltCLI
 

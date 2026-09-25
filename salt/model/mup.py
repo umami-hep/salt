@@ -43,27 +43,12 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
     returning the constructed (un-setup) `SaltCLI` (``cli.model`` +
     ``cli.datamodule``). Raises `ConfigError` on a parse failure.
     """
-    import warnings
+    # local import: salt.cli imports this module lazily (_add_mup_parsers)
+    from salt.cli import _build_run_free_cli, _run_free_cli_argv
 
-    from salt.main import SaltCLI
-    from salt.utils.config_utils import disable_logger_in_config
-
-    args: list[str] = []
-    for cfg in configs:
-        # disable the logger in keyless envs (no COMET_API_KEY) so run-free
-        # parsing doesn't fail at instantiate_classes
-        cfg_no_logger = disable_logger_in_config(str(cfg))
-        args.extend(["--config", cfg_no_logger])
-    for entry in set_overrides:
-        if "=" not in entry:
-            raise ConfigError(f"--set entries must be KEY=VALUE, got {entry!r}")
-        args.append(f"--{entry}")
+    args = _run_free_cli_argv(configs, set_overrides)
     try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", message=r".*args parameter is intended to run from within Python.*"
-            )
-            cli = SaltCLI(args=args, run=False)
+        return _build_run_free_cli(args)
     except SystemExit as err:
         raise ConfigError(
             f"trainer config {' '.join(str(c) for c in configs)} failed to parse through the "
@@ -71,7 +56,6 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
             "YAML can be supplied data-free via --set, e.g. "
             "--set model.modules.norm.init_args.norm_dict=unused.yaml"
         ) from err
-    return cli
 
 
 def _parse_model(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> Any:
