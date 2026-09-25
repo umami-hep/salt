@@ -14,7 +14,8 @@ from salt.graph.planner import compile_plan
 from salt.graph.spec import IO, Mode, SinkModule, TensorSpec, unflatten_spec
 from salt.main import SaltCLI
 from salt.model.base import SaltModelModule
-from salt.model.saltmodule import SaltModule, _is_section_sink
+from salt.model.saltmodule import SaltModule
+from salt.model.sink_prep import is_section_sink
 from salt.outputs import (
     H5OutputSink,
     InputCopyWriter,
@@ -120,8 +121,8 @@ def test_section_writers_match_the_sink_protocol_but_are_not_sinks():
     writer = PadMaskWriter(streams=["tracks"])
     assert isinstance(writer, SinkModule)  # structural match — attribute present
     assert writer.is_sink() is False  # but the answer is False
-    assert _is_section_sink(writer) is False
-    assert _is_section_sink(H5OutputSink()) is True
+    assert is_section_sink(writer) is False
+    assert is_section_sink(H5OutputSink()) is True
 
 
 def test_duck_typed_sink_is_partitioned_without_subclassing_node():
@@ -137,7 +138,7 @@ def test_duck_typed_sink_is_partitioned_without_subclassing_node():
             del mode
             return IO(requires={}, produces={})
 
-    assert _is_section_sink(_DuckSink()) is True
+    assert is_section_sink(_DuckSink()) is True
 
 
 # ---------------------------------------------------------------------------

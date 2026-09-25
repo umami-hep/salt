@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import re
 import warnings
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 from torch import nn
-from torch.optim import Optimizer
+from torch.optim import AdamW, Optimizer
+
+from salt.graph.errors import ConfigError
+from salt.schedule import LRSchedulerConfig, TrainingSchedule
 
 
 @dataclass(frozen=True)
@@ -489,6 +492,14 @@ class Lion(Optimizer):
         return loss
 
 
+try:
+    from lion_pytorch import Lion as ReferenceLion
+
+    _lion_available = True
+except ImportError:
+    _lion_available = False
+
+
 def _looks_like_named_params(items: Sequence[Any]) -> bool:
     """Heuristically determine whether an iterable looks like named parameters."""
     first = items[0]
@@ -496,3 +507,178 @@ def _looks_like_named_params(items: Sequence[Any]) -> bool:
         return False
     name, param = first
     return isinstance(name, str) and isinstance(param, nn.Parameter)
+
+
+# ---------------------------------------------------------------------------
+# optimizer / LR-scheduler factories (used by SaltModule.configure_optimizers)
+# ---------------------------------------------------------------------------
+
+
+def safe_pct_start(pct_start: float, total_steps: int) -> float:
+    """`pct_start` clamped so neither OneCycleLR phase is empty on a short run.
+
+    OneCycleLR divides by each phase's length, so a small ``pct_start`` on a
+    short run (smoke test, ``limit_train_batches``, ``salt profile model``)
+    raises ``ZeroDivisionError`` in its constructor (e.g. ``pct_start: 0.01``
+    at 100 steps). The clamp keeps the phase boundary strictly inside
+    ``(0, total_steps - 1)`` and is a no-op for any run long enough for the
+    configured warm-up to span two steps.
+    """
+    low = 2.0 / total_steps if total_steps > 0 else 1.0
+    high = 1.0 - 1.0 / total_steps if total_steps > 0 else 0.0
+    if low > high:  # fewer than 3 steps: no schedule is meaningful, just be legal
+        return 0.75
+    return min(max(pct_start, low), high)
+
+
+def resolve_lr_scheduler_class(class_path: str) -> type:
+    """Import a stage `lr_scheduler.class_path` to its class. Reuses the
+    CLI's class-path resolver (local import avoids a load-time cycle).
+
+    Raises
+    ------
+    ConfigError
+        The dotted path is not importable / not a class.
+    """
+    from salt.main import _resolve_class_path
+
+    try:
+        cls = _resolve_class_path(class_path)
+    except (ImportError, AttributeError, ValueError) as exc:
+        raise ConfigError(
+            f"training_schedule lr_scheduler.class_path {class_path!r} is not importable: {exc}"
+        ) from exc
+    if not isinstance(cls, type):
+        raise ConfigError(
+            f"training_schedule lr_scheduler.class_path {class_path!r} does not name a class."
+        )
+    return cls
+
+
+def is_metric_driven_scheduler(cls: type) -> bool:
+    """Whether `cls` is a metric-driven LR scheduler — i.e. a `ReduceLROnPlateau`
+    (sub)class whose ``step(metrics)`` needs a monitored value. This is
+    the deterministic detection rule for the `monitor`-required check.
+    """
+    return issubclass(cls, torch.optim.lr_scheduler.ReduceLROnPlateau)
+
+
+def resolve_optimizer_class(name: str, mup_cfg: Mapping[str, Any] | None = None) -> type[Optimizer]:
+    """Resolve the optimizer class, with the muP ``MuAdamW`` swap: when `mup_cfg`
+    is configured the optimizer is always ``mup.optim.MuAdamW`` (coupled to
+    the base shapes set at bind via `apply_mup_shapes`). Raises `ImportError`
+    for lion-pytorch without lion-pytorch installed, `ConfigError` for an
+    unsupported name.
+    """
+    if mup_cfg is not None:
+        from mup.optim import MuAdamW
+
+        return MuAdamW
+    if name == "lion":
+        return Lion
+    if name == "lion-pytorch":
+        if not _lion_available:
+            raise ImportError(
+                "optimizer: lion-pytorch requested but lion-pytorch is not installed. "
+                "Use optimizer: lion for salt's own (bitwise-identical, foreach) Lion."
+            )
+        return ReferenceLion
+    if name == "AdamW":
+        return AdamW
+    if name == "HybridMuonAdamW":
+        return HybridMuonAdamW
+    raise ConfigError(f"Optimizer '{name}' is not supported.")
+
+
+def build_optimizer(
+    optimizer_class: type[Optimizer],
+    named_trainable: list[tuple[str, Any]],
+    lrs: Mapping[str, float],
+) -> Optimizer:
+    """Construct `optimizer_class` over `named_trainable` params using `lrs`.
+
+    `HybridMuonAdamW` receives the named pairs (it partitions Muon vs AdamW
+    by name internally); every other optimizer receives the bare parameter
+    list.
+    """
+    optimizer_kwargs = {
+        "lr": lrs["initial"],
+        "weight_decay": lrs.get("weight_decay", 1e-5),
+    }
+    if optimizer_class is HybridMuonAdamW:
+        params: Any = named_trainable
+    else:
+        params = [p for _, p in named_trainable]
+    return optimizer_class(params, **optimizer_kwargs)
+
+
+def build_onecycle_scheduler(
+    opt: Optimizer, lrs: Mapping[str, float], total_steps: int
+) -> dict[str, Any]:
+    """Build the default step-interval OneCycleLR scheduler config for `opt`.
+
+    `type(opt) is not HybridMuonAdamW` is value-identical to the old
+    `optimizer_class is not HybridMuonAdamW` check: `opt` is always
+    constructed by `build_optimizer` from a class `resolve_optimizer_class`
+    returned (never a subclass), so the runtime type of `opt` and the class
+    used to build it always agree.
+    """
+    # clamped against THIS STAGE's step budget, not the whole-run estimate: a
+    # sub-stage gets a fraction of the run's steps, so it hits the degenerate
+    # warm-up boundary on runs far longer than a single-stage fit would.
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        opt,
+        max_lr=lrs["max"],
+        total_steps=total_steps,
+        div_factor=lrs["max"] / lrs["initial"],
+        final_div_factor=lrs["initial"] / lrs["end"],
+        pct_start=safe_pct_start(float(lrs["pct_start"]), total_steps),
+        last_epoch=int(lrs.get("last_epoch", -1)),
+        cycle_momentum=type(opt) is not HybridMuonAdamW,
+    )
+    return {"scheduler": scheduler, "interval": "step"}
+
+
+def build_stage_lr_scheduler(opt: Optimizer, cfg: LRSchedulerConfig) -> dict[str, Any]:
+    """Instantiate the stage's chosen LR-scheduler class over the freshly-rebuilt
+    `opt` and wrap it in the Lightning scheduler-config dict. The
+    optimizer is injected as the first positional argument; a user-supplied
+    `init_args.optimizer` was already rejected at parse. A metric-driven scheduler
+    (`ReduceLROnPlateau`) is wired through Lightning's monitor mechanics
+    (`reduce_on_plateau`/`monitor`); its rank-consistency rides on the synced
+    monitor.
+    """
+    cls = resolve_lr_scheduler_class(cfg.class_path)
+    scheduler = cls(opt, **(dict(cfg.init_args) if cfg.init_args else {}))
+    entry: dict[str, Any] = {
+        "scheduler": scheduler,
+        "interval": cfg.interval,
+        "frequency": cfg.frequency,
+    }
+    if is_metric_driven_scheduler(cls):
+        entry["reduce_on_plateau"] = True
+        entry["monitor"] = cfg.monitor
+    elif cfg.monitor is not None:
+        entry["monitor"] = cfg.monitor
+    return entry
+
+
+def preflight_lr_schedulers(schedule: TrainingSchedule) -> None:
+    """Fail fast at fit setup for every stage's `lr_scheduler`:
+    import its `class_path` (unimportable → ConfigError) and enforce the
+    metric-driven-⇒-`monitor` rule (a `ReduceLROnPlateau`-family scheduler needs
+    a monitored metric). Inert unless the schedule declares an `lr_scheduler`.
+    """
+    if not schedule.has_lr_scheduler:
+        return
+    for stage in schedule.stages:
+        cfg = stage.lr_scheduler
+        if cfg is None:
+            continue
+        cls = resolve_lr_scheduler_class(cfg.class_path)
+        if is_metric_driven_scheduler(cls) and not cfg.monitor:
+            raise ConfigError(
+                f"training_schedule stage {stage.name!r} lr_scheduler {cfg.class_path} is "
+                "metric-driven (a ReduceLROnPlateau subclass) and requires a 'monitor' "
+                "(a trainer.callback_metrics key, e.g. 'val/loss')."
+            )

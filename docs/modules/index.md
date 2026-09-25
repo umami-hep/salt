@@ -534,9 +534,9 @@ Fix: dump the schema so the origin label's class names are available, or
 switch `origin_weighting` to integer origin ids.
 
 **16. The check that does *not* fire.** `check_class_names`
-(`salt/model/saltmodule.py:1972-1999`) returns `0` immediately when the
-reader has no callable `schema_group` (`:1982-1984`). Without a schema
-artifact, a wrong-length or reordered `class_names` list raises **no error
+(`salt/model/validation.py`) returns `0` immediately when the
+reader has no callable `schema_group`. Without a schema artifact, a
+wrong-length or reordered `class_names` list raises **no error
 at all** at config-validation time; it either crashes on the first training
 batch (wrong length) or silently mislabels the head (right length, wrong
 order). See the `class_names` rule on [`configuration.md`](../configuration.md)

@@ -302,7 +302,7 @@ Every edit here is either a clean add or a full restatement of a list:
 ### The accounting
 
 `--init_from` reports one line per module, in the exact format
-`SaltModule._warm_start_summary` writes it. This is the **expected** shape:
+`salt.model.checkpoint.warm_start_summary` writes it. This is the **expected** shape:
 the verbatim log lines are filled in from the real run:
 
 ```text
@@ -1064,7 +1064,7 @@ outputs:
 ### The accounting
 
 `--init_from` reports one line per module, in the exact format
-`SaltModule._warm_start_summary` writes it:
+`salt.model.checkpoint.warm_start_summary` writes it:
 
 ```text
   loaded   encoder

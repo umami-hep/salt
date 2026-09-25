@@ -139,7 +139,7 @@ Deferral note: callback-declared `requires` are NOT yet FIT/VAL plan sinks.
 alive via their losses (its VAL labels are demanded by the task itself). A
 callback demanding a key no task keeps alive would currently find its
 producer demand-pruned; the sink wiring mirrors the TEST writer-demand
-mechanism (see `SaltModule._model_sinks`).
+mechanism (see `salt.model.sink_prep.model_sinks`).
 
 ## ONNX export
 

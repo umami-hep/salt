@@ -122,8 +122,7 @@ class TestOriginWeightingConfig:
         assert torch.equal(ref_weights, v2_weights)
 
     def test_resolve_origin_weighting_module_helper(self):
-        # the saltmodule helper resolves over a module dict, counting resolutions
-        from salt.model.saltmodule import resolve_origin_weighting
+        from salt.model.validation import resolve_origin_weighting
 
         task = self._name_based()
         # an int-id sibling must NOT count (already resolved)

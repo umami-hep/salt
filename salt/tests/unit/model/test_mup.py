@@ -6,26 +6,28 @@ import math
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
+from torch import nn
 
 from salt.graph import ConfigError, Mode
 from salt.graph.planner import compile_plan
 from salt.model.mup import (
     _combined_graph,
     _parse_cli,
+    apply_mup_shapes,
     build_model_at_widths,
     coord_check,
     generate_shapes,
-    plot_coord_data,
-    setup_mup,
-)
-from salt.model.bind import resolve_bind_schema
-from salt.model.saltmodule import (
-    SaltModule,
     module_mup_enabled,
     module_supports_mup,
+    plot_coord_data,
+    setup_mup,
     validate_mup_routing,
 )
+from salt.model.bind import resolve_bind_schema
+from salt.model.saltmodule import SaltModule
+from salt.optim import resolve_optimizer_class
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
 
@@ -174,13 +176,13 @@ class TestMuAdamWSwap:
         m = SaltModule(
             modules=_muP_modules(norm_dict), lrs=LRS, mup={"apply_to": ["track_embed", "encoder"]}
         )
-        assert m._get_optimizer_class() is MuAdamW  # noqa: SLF001
+        assert resolve_optimizer_class(m.optimizer, m.mup_cfg) is MuAdamW
 
     def test_adamw_when_no_mup(self, norm_dict):
         from torch.optim import AdamW
 
         m = SaltModule(modules=_muP_modules(norm_dict), lrs=LRS)
-        assert m._get_optimizer_class() is AdamW  # noqa: SLF001
+        assert resolve_optimizer_class(m.optimizer, m.mup_cfg) is AdamW
         assert m.mup_cfg is None
 
     def test_mup_overrides_named_optimizer(self, norm_dict):
@@ -193,7 +195,7 @@ class TestMuAdamWSwap:
             optimizer="lion",
             mup={"apply_to": ["track_embed", "encoder"]},
         )
-        assert m._get_optimizer_class() is MuAdamW  # noqa: SLF001
+        assert resolve_optimizer_class(m.optimizer, m.mup_cfg) is MuAdamW
 
 
 class TestShapeGeneration:
@@ -307,3 +309,28 @@ class TestBuildModelAtWidths:
         # the apply_to modules took the swept width
         assert m32.net["track_embed"].out_dim == 32
         assert m32.net["encoder"].dim == 32
+
+
+class TestApplyMupShapes:
+    """`apply_mup_shapes` — inert without a routed shape file, hard error when it's missing."""
+
+    def test_none_cfg_is_a_no_op(self) -> None:
+        net = nn.ModuleDict({"x": nn.Linear(2, 2)})
+        before = {k: v.clone() for k, v in net.state_dict().items()}
+        assert apply_mup_shapes(net, None) is None
+        after = net.state_dict()
+        assert set(after) == set(before)
+        assert all(torch.equal(before[k], after[k]) for k in before)
+
+    def test_no_shape_path_is_a_no_op(self) -> None:
+        net = nn.ModuleDict({"x": nn.Linear(2, 2)})
+        before = {k: v.clone() for k, v in net.state_dict().items()}
+        assert apply_mup_shapes(net, {"apply_to": ["x"], "shape_path": None}) is None
+        after = net.state_dict()
+        assert set(after) == set(before)
+        assert all(torch.equal(before[k], after[k]) for k in before)
+
+    def test_missing_shape_file_raises(self, tmp_path) -> None:
+        net = nn.ModuleDict({"x": nn.Linear(2, 2)})
+        with pytest.raises(ConfigError, match="does not exist"):
+            apply_mup_shapes(net, {"apply_to": ["x"], "shape_path": str(tmp_path / "missing.bsh")})

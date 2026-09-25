@@ -181,7 +181,7 @@ that with the standalone toy `modules:` format instead, see
 The related failure runs later, at TEST compile time, not at parse time: a
 task present in `model.init_args.modules` but missing from every
 `RunTaskOutput`'s `tasks:` list hard-fails TEST compilation
-(`salt/model/saltmodule.py:1749-1793`), because a computed prediction that
+(`salt/model/sink_prep.py`, `assert_no_dead_preds`), because a computed prediction that
 reaches no writer is dead. And because YAML lists **replace** rather than
 merge on a config overlay, an overlay that touches `tasks:` must restate the
 full list, not just the entries it wants to add.

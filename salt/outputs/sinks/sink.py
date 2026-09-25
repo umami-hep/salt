@@ -167,7 +167,7 @@ class SinkContext:
 def is_test_persistence_sink(sink: Any) -> bool:
     """Whether a ``writer_demand``-exposing sink is THE TEST persistence sink.
 
-    The one selector both the runtime (`SaltModule._attached_writer`) and the
+    The one selector both the runtime (`salt.model.sink_prep.select_test_sink`) and the
     static graph tooling (`salt.cli`) use, so a config resolves the same sink
     either way. True for a primary sink like `H5OutputSink`; False for an
     ONNX-only sink (`OnnxExportSink`, empty TEST requires) and for an
@@ -232,7 +232,7 @@ class Node:
       planner renders it as a sink card.
     - `is_test_sink` marks the node as *the* TEST persistence sink. Exactly
       one registered sink holds that role: it anchors the TEST boundary
-      demand (`SaltModule._attached_writer` picks the first one). The base
+      demand (`salt.model.sink_prep.select_test_sink` picks the first one). The base
       implementation answers True whenever ``declare_io(Mode.TEST).requires``
       is non-empty, which is right for a primary sink and for an ONNX-only
       node (empty TEST requires -> False). An AUXILIARY sink that rides

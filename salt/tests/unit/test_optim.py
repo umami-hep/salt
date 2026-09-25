@@ -8,9 +8,25 @@ from typing import Any
 import pytest
 import torch
 from torch import nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau, StepLR
 
-from salt.model.saltmodule import SaltModule, safe_pct_start
-from salt.optim import HybridMuonAdamW, Lion, MuonParamPolicy
+from salt.graph.errors import ConfigError
+from salt.model.saltmodule import SaltModule
+from salt.optim import (
+    HybridMuonAdamW,
+    Lion,
+    MuonParamPolicy,
+    build_onecycle_scheduler,
+    build_optimizer,
+    build_stage_lr_scheduler,
+    is_metric_driven_scheduler,
+    preflight_lr_schedulers,
+    resolve_lr_scheduler_class,
+    resolve_optimizer_class,
+    safe_pct_start,
+)
+from salt.schedule import TrainingSchedule
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
 
 
@@ -554,8 +570,8 @@ class TestSafePctStartGuardsThePerStageAllocation:
         model._trainer = SimpleNamespace(  # noqa: SLF001 - stub: the two fields read below
             max_epochs=self.MAX_EPOCHS, estimated_stepping_batches=self.WHOLE_RUN
         )
-        model._current_stage_index = stage_index  # noqa: SLF001
-        return int(model._stage_total_steps())  # noqa: SLF001
+        model.training_controller.current_stage_index = stage_index
+        return int(model.training_controller.stage_total_steps(model.trainer))
 
     def test_the_warmup_stage_gets_a_small_slice_of_the_run(self, _norm_dict: Any) -> None:
         """The stage allocation, not the whole-run estimate, is what reaches OneCycle."""
@@ -599,7 +615,7 @@ class TestSafePctStartGuardsThePerStageAllocation:
 class TestLionResolvesThroughThePerStageRebuild:
     """`optimizer: lion` must reach `salt.optim.Lion` on the per-stage path.
 
-    The rebuild resolves the optimizer from `_active_optim_config()` — the
+    The rebuild resolves the optimizer from `training_controller.active_optim_config()` — the
     ACTIVE stage's `optimizer` falling back to the top-level one — so the
     resolution has to key off that value, not off `self.optimizer`.
     """
@@ -607,9 +623,9 @@ class TestLionResolvesThroughThePerStageRebuild:
     @staticmethod
     def _resolve(model: Any, stage_index: int) -> type:
         """Exactly what `configure_optimizers` does to pick the optimizer class."""
-        model._current_stage_index = stage_index  # noqa: SLF001
-        _lrs, optimizer_name = model._active_optim_config()  # noqa: SLF001
-        return model._get_optimizer_class(optimizer_name)  # noqa: SLF001
+        model.training_controller.current_stage_index = stage_index
+        _lrs, optimizer_name = model.training_controller.active_optim_config()
+        return resolve_optimizer_class(optimizer_name, model.mup_cfg)
 
     def test_a_stage_overriding_the_optimizer_to_lion_resolves(self, _norm_dict: Any) -> None:
         """A per-stage `optimizer: lion` over an AdamW top level resolves to Lion."""
@@ -648,3 +664,178 @@ class TestLionResolvesThroughThePerStageRebuild:
         )
         assert self._resolve(model, 0) is Lion
         assert Lion.__module__ == "salt.optim"
+
+
+# --------------------------------------------------------------------------- #
+# resolve_optimizer_class / build_optimizer / scheduler factories — the
+# `salt.optim` public surface `SaltModule.configure_optimizers` delegates to.
+# --------------------------------------------------------------------------- #
+
+_STEP_PATH = "torch.optim.lr_scheduler.StepLR"
+_PLATEAU_PATH = "torch.optim.lr_scheduler.ReduceLROnPlateau"
+
+
+class TestResolveOptimizerClass:
+    """`resolve_optimizer_class` — name (+ optional muP config) -> optimizer class."""
+
+    def test_adamw(self) -> None:
+        assert resolve_optimizer_class("AdamW") is AdamW
+
+    def test_lion(self) -> None:
+        assert resolve_optimizer_class("lion") is Lion
+
+    def test_hybrid_muon_adamw(self) -> None:
+        assert resolve_optimizer_class("HybridMuonAdamW") is HybridMuonAdamW
+
+    def test_unsupported_name_raises(self) -> None:
+        with pytest.raises(ConfigError, match="not supported"):
+            resolve_optimizer_class("bogus")
+
+    def test_mup_cfg_forces_muadamw_regardless_of_name(self) -> None:
+        pytest.importorskip("mup", reason="muP tests need `pip install 'salt[muP]'`")
+        from mup.optim import MuAdamW  # noqa: PLC0415 - test-local, mup is optional
+
+        assert resolve_optimizer_class("lion", {"apply_to": ["x"]}) is MuAdamW
+
+
+class TestIsMetricDrivenScheduler:
+    """`is_metric_driven_scheduler` — ReduceLROnPlateau subclasses only."""
+
+    def test_reduce_on_plateau_is_metric_driven(self) -> None:
+        assert is_metric_driven_scheduler(ReduceLROnPlateau) is True
+
+    def test_step_lr_is_not_metric_driven(self) -> None:
+        assert is_metric_driven_scheduler(StepLR) is False
+
+
+class TestResolveLrSchedulerClass:
+    """`resolve_lr_scheduler_class` — dotted class_path -> scheduler class."""
+
+    def test_resolves_a_real_class(self) -> None:
+        assert resolve_lr_scheduler_class(_STEP_PATH) is StepLR
+
+    def test_unimportable_path_raises(self) -> None:
+        with pytest.raises(ConfigError, match="not importable"):
+            resolve_lr_scheduler_class("no.such.module.Cls")
+
+    def test_a_module_path_is_not_a_class(self) -> None:
+        with pytest.raises(ConfigError, match="does not name a class"):
+            resolve_lr_scheduler_class("torch.optim.lr_scheduler")
+
+
+class TestBuildOptimizer:
+    """`build_optimizer` — resolved class + named trainable params + lrs -> Optimizer."""
+
+    def test_default_weight_decay(self) -> None:
+        net = LionNet()
+        opt = build_optimizer(AdamW, list(net.named_parameters()), {"initial": 1e-4})
+        assert isinstance(opt, AdamW)
+        assert opt.param_groups[0]["lr"] == pytest.approx(1e-4)
+        assert opt.param_groups[0]["weight_decay"] == pytest.approx(1e-5)
+
+    def test_honours_an_explicit_weight_decay(self) -> None:
+        net = LionNet()
+        opt = build_optimizer(
+            AdamW, list(net.named_parameters()), {"initial": 1e-4, "weight_decay": 0.02}
+        )
+        assert opt.param_groups[0]["weight_decay"] == pytest.approx(0.02)
+
+    def test_hybrid_muon_adamw_receives_the_named_pairs(self) -> None:
+        net = LionNet()
+        named = list(net.named_parameters())
+        opt = build_optimizer(HybridMuonAdamW, named, {"initial": 1e-4})
+        assert isinstance(opt, HybridMuonAdamW)
+
+
+class TestBuildOnecycleScheduler:
+    """`build_onecycle_scheduler` — cycle_momentum keys off the optimizer TYPE."""
+
+    LRS: dict[str, float] = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}
+
+    def test_shape_and_interval(self) -> None:
+        net = LionNet()
+        opt = AdamW(net.parameters(), lr=self.LRS["initial"])
+        result = build_onecycle_scheduler(opt, self.LRS, 100)
+        assert result["interval"] == "step"
+        assert isinstance(result["scheduler"], OneCycleLR)
+
+    def test_adamw_keeps_cycle_momentum(self) -> None:
+        net = LionNet()
+        opt = AdamW(net.parameters(), lr=self.LRS["initial"])
+        result = build_onecycle_scheduler(opt, self.LRS, 100)
+        assert result["scheduler"].cycle_momentum is True
+
+    def test_hybrid_muon_adamw_disables_cycle_momentum(self) -> None:
+        net = LionNet()
+        opt = HybridMuonAdamW(net.named_parameters(), lr=self.LRS["initial"], weight_decay=1e-5)
+        result = build_onecycle_scheduler(opt, self.LRS, 100)
+        assert result["scheduler"].cycle_momentum is False
+
+
+class TestBuildStageLrScheduler:
+    """`build_stage_lr_scheduler` — a stage's `LRSchedulerConfig` -> the Lightning dict."""
+
+    @staticmethod
+    def _cfg(spec: dict[str, Any]) -> Any:
+        """Build a stage's `LRSchedulerConfig` the way a real config parses it."""
+        schedule = TrainingSchedule.from_config(
+            {"stages": {"fit": {"lr_scheduler": spec}}}, ("a",)
+        )
+        return schedule.stages[0].lr_scheduler
+
+    def test_plain_scheduler_has_no_monitor_keys(self) -> None:
+        net = LionNet()
+        opt = AdamW(net.parameters(), lr=1e-4)
+        cfg = self._cfg({"class_path": _STEP_PATH, "init_args": {"step_size": 1}})
+        result = build_stage_lr_scheduler(opt, cfg)
+        assert set(result) == {"scheduler", "interval", "frequency"}
+        assert result["interval"] == "epoch"
+        assert result["frequency"] == 1
+
+    def test_reduce_on_plateau_adds_monitor_and_flag(self) -> None:
+        net = LionNet()
+        opt = AdamW(net.parameters(), lr=1e-4)
+        cfg = self._cfg({
+            "class_path": _PLATEAU_PATH,
+            "init_args": {"mode": "min"},
+            "monitor": "val/loss",
+        })
+        result = build_stage_lr_scheduler(opt, cfg)
+        assert result["reduce_on_plateau"] is True
+        assert result["monitor"] == "val/loss"
+
+
+class TestPreflightLrSchedulers:
+    """`preflight_lr_schedulers` — the fail-loud check for a `monitor`-less metric scheduler."""
+
+    def test_inert_without_any_lr_scheduler(self) -> None:
+        schedule = TrainingSchedule.desugar_legacy(("a",))
+        assert preflight_lr_schedulers(schedule) is None
+
+    def test_raises_for_reduce_on_plateau_without_monitor(self) -> None:
+        schedule = TrainingSchedule.from_config(
+            {"stages": {"fit": {"lr_scheduler": {
+                "class_path": _PLATEAU_PATH, "init_args": {"mode": "min"},
+            }}}},
+            ("a",),
+        )
+        with pytest.raises(ConfigError, match="requires a 'monitor'"):
+            preflight_lr_schedulers(schedule)
+
+    def test_passes_for_reduce_on_plateau_with_monitor(self) -> None:
+        schedule = TrainingSchedule.from_config(
+            {"stages": {"fit": {"lr_scheduler": {
+                "class_path": _PLATEAU_PATH, "init_args": {"mode": "min"}, "monitor": "val/loss",
+            }}}},
+            ("a",),
+        )
+        assert preflight_lr_schedulers(schedule) is None
+
+    def test_passes_for_a_non_metric_scheduler(self) -> None:
+        schedule = TrainingSchedule.from_config(
+            {"stages": {"fit": {"lr_scheduler": {
+                "class_path": _STEP_PATH, "init_args": {"step_size": 1},
+            }}}},
+            ("a",),
+        )
+        assert preflight_lr_schedulers(schedule) is None

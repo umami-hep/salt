@@ -7,11 +7,13 @@ Provides :func:`generate_shapes` (``salt mup-shapes``), :func:`coord_check`
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+import warnings
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
+from torch import nn
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
@@ -25,12 +27,122 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas as pd
 
 __all__ = [
+    "apply_mup_shapes",
     "build_model_at_widths",
     "coord_check",
     "generate_shapes",
+    "module_mup_enabled",
+    "module_supports_mup",
     "plot_coord_data",
     "setup_mup",
+    "validate_mup_routing",
 ]
+
+_MUP_KEYS = frozenset({"apply_to", "shape_path"})
+
+
+# ---------------------------------------------------------------------------
+# routing + base shapes (used by `SaltModule`)
+# ---------------------------------------------------------------------------
+
+
+def module_supports_mup(module: Any) -> bool:
+    """Whether `module` accepts a ``mup`` init_arg (the ``apply_to`` target test).
+
+    Eligible iff the module carries a ``mup`` attribute (init_arg landed) —
+    duck-typed so user modules participate too.
+    """
+    return hasattr(module, "mup")
+
+
+def module_mup_enabled(module: Any) -> bool:
+    """Whether `module`'s ``mup`` flag is truthy (the validator's mup-on test)."""
+    return bool(getattr(module, "mup", False))
+
+
+def validate_mup_routing(
+    mup: Mapping[str, Any] | None, modules: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Validate the muP routing config against the module dict.
+
+    The single validator behind both `SaltModule.__init__` and
+    ``salt graph validate``. ``apply_to`` is an explicit instance-name list.
+    Hard `ConfigError`: naming a missing module, naming one without a ``mup``
+    init_arg, unknown keys, or a non-list/missing ``apply_to``. Warning only:
+    a mup-on module left out of ``apply_to`` (base shapes / MuAdamW grouping
+    would be silently inconsistent). Returns the normalised config, or None
+    when `mup` is None.
+    """
+    if mup is None:
+        return None
+    if not isinstance(mup, Mapping):
+        raise ConfigError(
+            f"model.init_args.mup must be a mapping with 'apply_to' (and optional 'shape_path'), "
+            f"got {type(mup).__name__}"
+        )
+    if unknown := set(mup) - _MUP_KEYS:
+        raise ConfigError(
+            f"model.init_args.mup has unknown key(s) {sorted(unknown)} — expected "
+            f"{sorted(_MUP_KEYS)}"
+        )
+    apply_to = mup.get("apply_to")
+    if not isinstance(apply_to, (list, tuple)) or not apply_to:
+        raise ConfigError(
+            "model.init_args.mup needs a non-empty 'apply_to' list of module instance names "
+            "(EXPLICIT names, NOT a regex — the v2 design break from v1's apply_to/parameter_name "
+            "zip, configuration_muP.py:98)"
+        )
+    for raw in apply_to:
+        if not isinstance(raw, str):
+            raise ConfigError(
+                f"model.init_args.mup.apply_to entries must be module instance names (str), "
+                f"got {raw!r}"
+            )
+        if raw not in modules:
+            raise ConfigError(
+                f"model.init_args.mup.apply_to names {raw!r}, which is not a configured module — "
+                f"known modules: {sorted(modules)} (apply_to is an explicit "
+                "instance-name list)"
+            )
+        if not module_supports_mup(modules[raw]):
+            raise ConfigError(
+                f"model.init_args.mup.apply_to names {raw!r} "
+                f"({type(modules[raw]).__name__}), which has no 'mup' init_arg — only modules "
+                "that accept mup (StreamEmbed, TransformerEncoder) can be muP-routed"
+            )
+    applied = set(apply_to)
+    for name, module in modules.items():
+        if name not in applied and module_mup_enabled(module):
+            warnings.warn(
+                f"module {name!r} has mup: true but is NOT in model.init_args.mup.apply_to — its "
+                "base shapes / MuAdamW grouping are skipped by the routing stage, so its training "
+                "dynamics silently diverge from the muP intent. Add it to apply_to or "
+                "set its mup: false.",
+                stacklevel=2,
+            )
+    return {"apply_to": list(apply_to), "shape_path": mup.get("shape_path")}
+
+
+def apply_mup_shapes(net: nn.Module, mup_cfg: Mapping[str, Any] | None) -> None:
+    """Apply the muP base shapes from ``mup_cfg["shape_path"]`` over the whole
+    `net` (after `bind_all`) so `MuReadout.width_mult()`/`MuAdamW` resolve
+    against real base widths; ``rescale_params=False`` since params already
+    carry their muP init. No-op with no muP / no ``shape_path``; raises
+    `ConfigError` if the shape file is missing.
+    """
+    if mup_cfg is None or not mup_cfg.get("shape_path"):
+        return
+    from mup import set_base_shapes
+
+    shape_path = Path(mup_cfg["shape_path"])
+    if not shape_path.is_file():
+        raise ConfigError(
+            f"model.init_args.mup.shape_path {str(shape_path)!r} does not exist — generate it "
+            "with `salt mup-shapes` (setup_mup) before fit"
+        )
+    # infshapes cover the whole net, so apply ONCE over net: the apply_to
+    # MuReadout/linears get base/delta shapes, the rest have fixed dims.
+    set_base_shapes(net, str(shape_path), rescale_params=False)
 
 
 # ---------------------------------------------------------------------------

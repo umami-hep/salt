@@ -805,6 +805,43 @@ class TestGraphFitConfigAdapter:
         assert "info:" in out
         assert "metric callback" in out
 
+    def test_test_only_h5_column_error_surfaces_only_for_test(self, data, tmp_path, capsys):
+        # a section-declared TEST H5 sink whose `consumes:` matches no leaf is
+        # broken ONLY at declare_io(TEST) — `--mode fit` must not see it, and
+        # `mode_errors[TEST]` must stay unpopulated, exactly as at the pin
+        from salt.cli import load_config
+        from salt.graph.spec import Mode
+
+        config = yaml.safe_load(DUMMY_CFG.read_text())
+        config["outputs"]["h5_output"] = {
+            "class_path": "salt.outputs.H5OutputSink",
+            "init_args": {"consumes": ["outputs.jets.no_such_leaf"]},
+        }
+        bad = tmp_path / "test_only_broken.yaml"
+        bad.write_text(yaml.dump(config, sort_keys=False))
+        flags = self.set_flags(data)
+
+        cfg = load_config(
+            [bad],
+            set_overrides=[
+                f"data.train_file={data['h5']}",
+                f"data.val_file={data['h5']}",
+                f"data.modules.reader.init_args.schema={data['schema']}",
+                f"model.modules.norm.init_args.norm_dict={data['nd']}",
+            ],
+        )
+        assert cfg.mode_errors.get(Mode.TEST) is None
+        assert cfg.sinks[Mode.TEST] == ()
+
+        assert main(["graph", "plan", "-c", str(bad), "--mode", "fit", *flags]) == 0
+        capsys.readouterr()
+
+        assert main(["graph", "plan", "-c", str(bad), "--mode", "test", *flags]) == 1
+        assert "matches none of the declared output leaves" in capsys.readouterr().err
+
+        assert main(["graph", "validate", "-c", str(bad), *flags]) == 1
+        assert "matches none of the declared output leaves" in capsys.readouterr().err
+
 
 # --class_dict fan-out (SaltCLI._fan_out_artifacts). Helpers are
 # fanout_*-prefixed. norm_dict is NOT a fan-out flag — it is the Normaliser
@@ -1064,7 +1101,7 @@ class TestTopLevelTrainingSchedule:
         # 2-stage schedule on the instantiated SaltModule.
         override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         cli = make_cli(data, extra=["--config", override])
-        sched = cli.model._schedule  # noqa: SLF001
+        sched = cli.model.training_controller.schedule
         assert sched.is_multi_stage
         assert [s.name for s in sched.stages] == ["head_warmup", "full_finetune"]
         assert sched.stages[0].epochs == 5
@@ -1089,7 +1126,7 @@ class TestTopLevelTrainingSchedule:
             data,
             extra=["--config", override, "--training_schedule.stages.head_warmup.epochs=3"],
         )
-        sched = cli.model._schedule  # noqa: SLF001
+        sched = cli.model.training_controller.schedule
         head = next(s for s in sched.stages if s.name == "head_warmup")
         assert head.epochs == 3  # CLI override won
         assert head.trainable == ("jets_classification",)  # sibling field survived
@@ -1101,7 +1138,7 @@ class TestTopLevelTrainingSchedule:
         base = write_yaml(tmp_path, "base_sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         over = write_yaml(tmp_path, "over_sched.yaml", SCHEDULE_OVERRIDE_YAML)
         cli = make_cli(data, extra=["--config", base, "--config", over])
-        sched = cli.model._schedule  # noqa: SLF001
+        sched = cli.model.training_controller.schedule
         assert [s.name for s in sched.stages] == ["head_warmup", "full_finetune"]
         head = next(s for s in sched.stages if s.name == "head_warmup")
         assert head.epochs == 2  # override won
@@ -1113,7 +1150,7 @@ class TestTopLevelTrainingSchedule:
         base = write_yaml(tmp_path, "base_sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         over = write_yaml(tmp_path, "del_sched.yaml", DELETE_STAGE_YAML)
         cli = make_cli(data, extra=["--config", base, "--config", over])
-        sched = cli.model._schedule  # noqa: SLF001
+        sched = cli.model.training_controller.schedule
         assert [s.name for s in sched.stages] == ["head_warmup"]
 
     def test_top_level_schedule_round_trips_through_print_config(self, data, tmp_path, capsys):
@@ -1129,7 +1166,7 @@ class TestTopLevelTrainingSchedule:
         printed = capsys.readouterr().out
         printed_path = write_yaml(tmp_path, "printed.yaml", printed)
         cli_again = SaltCLI(args=["--config", printed_path], run=False)
-        sched = cli_again.model._schedule  # noqa: SLF001
+        sched = cli_again.model.training_controller.schedule
         assert [s.name for s in sched.stages] == ["head_warmup", "full_finetune"]
         assert sched.stages[0].epochs == 5
 
@@ -1137,7 +1174,7 @@ class TestTopLevelTrainingSchedule:
         # no top-level schedule (and no nested) => the desugared single `fit` stage
         # (legacy parity path); nothing injected, no reject.
         cli = make_cli(data)
-        sched = cli.model._schedule  # noqa: SLF001
+        sched = cli.model.training_controller.schedule
         assert not sched.is_multi_stage
         assert sched.initial_stage.name == "fit"
         assert getattr(cli.config.model.init_args, "training_schedule", None) is None
@@ -1194,7 +1231,7 @@ class TestStageCallbacksCLI:
         text = STAGE_CALLBACK_YAML.format(out=tmp_path / "lr.json")
         override = write_yaml(tmp_path, "sched_cb.yaml", text)
         cli = make_cli(data, extra=["--config", override])
-        stage = cli.model._schedule.stages[0]  # noqa: SLF001
+        stage = cli.model.training_controller.schedule.stages[0]
         assert stage.callbacks is not None
         spec = stage.callbacks[0]
         assert isinstance(spec, Mapping)  # raw spec, not a StageCallbackProbe instance
@@ -1286,8 +1323,8 @@ class TestLRSchedulerCLI:
 
         override = write_yaml(tmp_path, "sched_lr.yaml", LR_SCHEDULER_YAML)
         cli = make_cli(data, extra=["--config", override])
-        stages = cli.model._schedule.stages  # noqa: SLF001
-        assert cli.model._schedule.has_lr_scheduler  # noqa: SLF001
+        stages = cli.model.training_controller.schedule.stages
+        assert cli.model.training_controller.schedule.has_lr_scheduler
         # each stage carries a parsed LRSchedulerConfig — jsonargparse did NOT
         # eager-instantiate the nested scheduler class (which would be impossible
         # without an optimizer). The class_path survives as a string.
