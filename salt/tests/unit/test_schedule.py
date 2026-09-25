@@ -270,22 +270,22 @@ class TestSaltModuleInstantiation:
         # plan D2: a plain config (no training_schedule) desugars to one `fit`
         # stage that overrides neither lrs nor optimizer nor freezes anything.
         model = SaltModule(build_gn2v2_modules(norm_dict), lrs=LRS)
-        sched = model._schedule  # noqa: SLF001
+        sched = model.training_controller.schedule
         assert sched is not None
         assert not sched.is_multi_stage
         assert sched.initial_stage.name == "fit"
         assert not sched.has_freezing
         assert sched.frozen_names(sched.initial_stage) == set()
-        assert model._frozen_module_names == set()  # noqa: SLF001
-        assert model._current_stage_index == 0  # noqa: SLF001
+        assert model.training_controller.frozen_module_names == set()
+        assert model.training_controller.current_stage_index == 0
 
     def test_valid_single_stage_stored(self, norm_dict):
         model = SaltModule(
             build_gn2v2_modules(norm_dict), lrs=LRS,
             training_schedule={"stages": {"fit": {"frozen": ["encoder"]}}},
         )
-        assert model._schedule is not None  # noqa: SLF001
-        assert not model._schedule.is_multi_stage  # noqa: SLF001
+        assert model.training_controller.schedule is not None
+        assert not model.training_controller.schedule.is_multi_stage
 
     def test_multi_stage_accepted_at_init(self, norm_dict):
         # multi-stage passes instantiation validation (rejection is at fit)
@@ -295,7 +295,7 @@ class TestSaltModuleInstantiation:
                 "stages": {"warmup": {"epochs": 2, "frozen": ["encoder"]}, "full": {}}
             },
         )
-        assert model._schedule.is_multi_stage  # noqa: SLF001
+        assert model.training_controller.schedule.is_multi_stage
 
     def test_schedule_names_validate_against_model_modules_only(self, norm_dict):
         # 'loss'/'concat'/'split' ARE model.modules keys and so are valid targets
@@ -303,9 +303,8 @@ class TestSaltModuleInstantiation:
             build_gn2v2_modules(norm_dict), lrs=LRS,
             training_schedule={"stages": {"fit": {"frozen": ["concat", "split"]}}},
         )
-        assert model._schedule.frozen_names(model._schedule.initial_stage) == {  # noqa: SLF001
-            "concat", "split"
-        }
+        sched = model.training_controller.schedule
+        assert sched.frozen_names(sched.initial_stage) == {"concat", "split"}
 
 
 def test_stageconfig_is_frozen_dataclass():

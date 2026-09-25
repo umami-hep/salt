@@ -216,7 +216,7 @@ class _TwoStageRecorder(Callback):
         sched = trainer.lr_scheduler_configs[0].scheduler
         self.trace.append({
             "global_step": trainer.global_step,
-            "stage": module._current_stage_index,  # noqa: SLF001
+            "stage": module.training_controller.current_stage_index,
             "lr": opt.param_groups[0]["lr"],
             "opt_id": id(opt),
             "total_steps": sched.total_steps,
@@ -319,7 +319,7 @@ class TestPerStageOptimizer:
 
         class Cap(Callback):
             def on_train_batch_end(self, trainer, module, *_a) -> None:
-                stage_opt_types[module._current_stage_index] = type(  # noqa: SLF001
+                stage_opt_types[module.training_controller.current_stage_index] = type(
                     trainer.optimizers[0]
                 ).__name__
 
@@ -347,7 +347,7 @@ class TestPerStageOptimizer:
 
         class Cap(Callback):
             def on_train_batch_end(self, trainer, module, *_a) -> None:
-                idx = module._current_stage_index  # noqa: SLF001
+                idx = module.training_controller.current_stage_index
                 captured[f"stage{idx}"] = trainer.optimizers[0]
 
         make_trainer(
@@ -463,7 +463,7 @@ class TestNoScheduleNoChange:
 
         all_ids = _param_ids(model.parameters())
         assert _optimizer_param_ids(opt) == all_ids
-        assert model._frozen_module_names == set()  # noqa: SLF001
+        assert model.training_controller.frozen_module_names == set()
         assert all(p.requires_grad for p in model.parameters())
 
 
@@ -479,10 +479,10 @@ class TestMultiStageBindsAtFit:
                 "stages": {"warmup": {"epochs": 1, "frozen": ["encoder"]}, "full": {}}
             },
         )
-        assert model._schedule.is_multi_stage  # noqa: SLF001
+        assert model.training_controller.schedule.is_multi_stage
         offline_bind(model, build_datamodule(data))  # no rejection
-        assert model._current_stage_index == 0  # noqa: SLF001
-        assert model._frozen_module_names == {"encoder"}  # noqa: SLF001 - stage-0 mask
+        assert model.training_controller.current_stage_index == 0
+        assert model.training_controller.frozen_module_names == {"encoder"}
         assert not any(p.requires_grad for p in model.net["encoder"].parameters())
 
 
@@ -578,7 +578,7 @@ class _SchedRecorder(Callback):
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx) -> None:
         sched = trainer.lr_scheduler_configs[0].scheduler
         self.trace.append({
-            "stage": module._current_stage_index,  # noqa: SLF001
+            "stage": module.training_controller.current_stage_index,
             "sched": type(sched).__name__,
             "lr": trainer.optimizers[0].param_groups[0]["lr"],
         })
@@ -638,7 +638,7 @@ class TestTwoStageSchedulers:
 
     def test_stage1_optimizer_owns_trainable_set(self, data):
         model, _ = self._run(data)
-        assert model._current_stage_index == 1  # noqa: SLF001
+        assert model.training_controller.current_stage_index == 1
         opt_ids = {
             id(p) for group in model.trainer.optimizers[0].param_groups for p in group["params"]
         }
@@ -683,7 +683,7 @@ class TestPlateauWithEarlyStop:
         # a boundary record exists (early_stop or epoch cap advanced the stage) OR
         # the fit ended in stage 0 via early_stop — either way both mechanisms ran
         # without error. Assert the schedule progressed past stage 0 OR early-stopped.
-        assert model._current_stage_index in (0, 1)  # noqa: SLF001 - ran cleanly
+        assert model.training_controller.current_stage_index in (0, 1)
 
 
 # --- resume restores scheduler state ------------------------------------
@@ -750,17 +750,21 @@ class HookProbe(Callback):
         self.epoch_starts = 0
 
     def setup(self, trainer, pl_module, stage) -> None:  # noqa: D102
-        HOOK_LOG.append((self.tag, "setup", pl_module._current_stage_index))  # noqa: SLF001
+        idx = pl_module.training_controller.current_stage_index
+        HOOK_LOG.append((self.tag, "setup", idx))
 
     def teardown(self, trainer, pl_module, stage) -> None:  # noqa: D102
-        HOOK_LOG.append((self.tag, "teardown", pl_module._current_stage_index))  # noqa: SLF001
+        idx = pl_module.training_controller.current_stage_index
+        HOOK_LOG.append((self.tag, "teardown", idx))
 
     def on_train_epoch_start(self, trainer, pl_module) -> None:  # noqa: D102
         self.epoch_starts += 1
-        HOOK_LOG.append((self.tag, "epoch_start", pl_module._current_stage_index))  # noqa: SLF001
+        idx = pl_module.training_controller.current_stage_index
+        HOOK_LOG.append((self.tag, "epoch_start", idx))
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:  # noqa: D102
-        HOOK_LOG.append((self.tag, "batch_end", pl_module._current_stage_index))  # noqa: SLF001
+        idx = pl_module.training_controller.current_stage_index
+        HOOK_LOG.append((self.tag, "batch_end", idx))
 
 
 _PROBE = "salt.tests.integration.multistage_training.test_training_schedule.HookProbe"

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from salt.graph.spec import Mode
 from salt.model.saltmodule import SaltModule
+from salt.model.sink_prep import callback_demand, model_sinks, select_fitval_callbacks
 from salt.tests.unit.callbacks.conftest import LRS, make_matched_bundle
 
 
@@ -43,7 +44,15 @@ class TestMaskformerMetrics:
             callbacks=[MaskformerMetrics()], datamodule=SimpleNamespace(reader=None)
         )
         for mode in (Mode.FIT, Mode.VAL):
-            sinks = model._model_sinks(mode)  # noqa: SLF001
+            sinks = model_sinks(
+                model._graph_modules,  # noqa: SLF001
+                mode,
+                callback_keys=callback_demand(
+                    model._graph_modules,  # noqa: SLF001
+                    mode,
+                    select_fitval_callbacks(model._trainer.callbacks),  # noqa: SLF001
+                ),
+            )
             assert "matched.objects.class_logits" in sinks
             assert "matched.objects.object_class" in sinks
         # the matched loss survives pruning to a FIT plan with those sinks: the

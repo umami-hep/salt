@@ -179,9 +179,9 @@ class _RebuildCounter(TrainingScheduleCallback):
         self.rebuild_epochs: list[int] = []
 
     def on_train_epoch_start(self, trainer, pl_module) -> None:
-        before = pl_module._current_stage_index  # noqa: SLF001
+        before = pl_module.training_controller.current_stage_index
         super().on_train_epoch_start(trainer, pl_module)
-        if pl_module._current_stage_index != before:  # noqa: SLF001
+        if pl_module.training_controller.current_stage_index != before:
             self.rebuild_epochs.append(trainer.current_epoch)
 
 
@@ -357,7 +357,9 @@ class _ProbeModule(SaltModule):
         super().on_load_checkpoint(checkpoint)
 
     def configure_optimizers(self):
-        _ProbeModule.EVENTS.append(("configure_optimizers", self._current_stage_index))
+        _ProbeModule.EVENTS.append((
+            "configure_optimizers", self.training_controller.current_stage_index
+        ))
         return super().configure_optimizers()
 
 
@@ -469,7 +471,7 @@ class TestResumeAtBoundary:
         )
         opt_ids = {id(p) for group in m2.trainer.optimizers[0].param_groups for p in group["params"]}
         trainable = {id(p) for p in m2.parameters() if p.requires_grad}
-        assert m2._current_stage_index == 1  # noqa: SLF001 - reached stage 1
+        assert m2.training_controller.current_stage_index == 1
         assert opt_ids == trainable  # optimizer owns exactly the trainable set
         assert _module_param_ids(m2, FROZEN) <= opt_ids  # incl. the unfrozen encoder
 
@@ -574,7 +576,7 @@ class StageRecorder(Callback):
         self.trace.append({
             "global_step": trainer.global_step,
             "epoch": trainer.current_epoch,
-            "stage": module._current_stage_index,  # noqa: SLF001
+            "stage": module.training_controller.current_stage_index,
             "lr": trainer.optimizers[0].param_groups[0]["lr"],
             "total_steps": sched.total_steps,
             "should_stop": trainer.should_stop,
@@ -590,7 +592,7 @@ class TrackerCapture(Callback):
         self.state: dict | None = None
 
     def on_train_start(self, trainer, module) -> None:
-        tracker = module._early_stop_tracker  # noqa: SLF001
+        tracker = module.training_controller.early_stop_tracker
         self.state = tracker.state_dict() if tracker is not None else None
 
 
@@ -677,7 +679,7 @@ class TestStageZeroEarlyStop:
 
     def test_boundary_record_reason_is_early_stop(self, data):
         model, _ = self._run(data)
-        records = model._boundary_records  # noqa: SLF001
+        records = model.training_controller.boundary_records
         assert len(records) == 1
         assert records[0]["reason"] == "early_stop"
         assert records[0]["stage_index"] == 1
@@ -694,7 +696,7 @@ class TestStageZeroEarlyStop:
 
     def test_stage1_optimizer_owns_unfrozen_encoder(self, data):
         model, _ = self._run(data)
-        assert model._current_stage_index == 1  # noqa: SLF001
+        assert model.training_controller.current_stage_index == 1
         opt_ids = {
             id(p) for group in model.trainer.optimizers[0].param_groups for p in group["params"]
         }
@@ -813,7 +815,7 @@ class TestEarlyStopResume:
         make_trainer(max_epochs=8, callbacks=[TrainingScheduleCallback()]).fit(
             m2, build_dm(data), ckpt_path=str(ckpt)
         )
-        assert m2._current_stage_index == 1  # noqa: SLF001 - resumed into stage 1
+        assert m2.training_controller.current_stage_index == 1
         # the stage-1 optimizer owns the unfrozen encoder
         opt_ids = {
             id(p) for group in m2.trainer.optimizers[0].param_groups for p in group["params"]

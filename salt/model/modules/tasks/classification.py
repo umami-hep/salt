@@ -32,7 +32,7 @@ class ClassificationTaskModule(_TaskModuleBase):
 
     ``class_names`` is REQUIRED and explicit. When the dataset schema names the
     label's classes, the configured list is cross-checked (set and order) by
-    `salt.model.saltmodule.check_class_names`. The head width is
+    `salt.model.validation.check_class_names`. The head width is
     ``len(class_names)``; input/context widths are inferred at `bind`.
 
     Declarative class weights: ``weight_source: {from_class_dict: <path>}``

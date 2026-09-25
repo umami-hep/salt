@@ -17,10 +17,9 @@ from salt.outputs import (
     H5OutputSink,
     OnnxExportSink,
 )
-from salt.model.saltmodule import (
-    SaltModule,
-    _is_test_persistence_sink,
-)
+from salt.model.saltmodule import SaltModule
+from salt.model.sink_prep import select_test_sink
+from salt.outputs.sinks.sink import is_test_persistence_sink
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -54,49 +53,28 @@ def test_h5_sink_is_a_test_sink_onnx_sink_is_not():
 
 
 def test_is_test_persistence_sink_helper_defaults_true_for_duck_typed():
-    """`_is_test_persistence_sink` treats a sink WITHOUT ``is_test_sink`` as a test sink."""
-    assert _is_test_persistence_sink(_h5_sink()) is True
-    assert _is_test_persistence_sink(_onnx_sink()) is False
+    """`is_test_persistence_sink` treats a sink WITHOUT ``is_test_sink`` as a test sink."""
+    assert is_test_persistence_sink(_h5_sink()) is True
+    assert is_test_persistence_sink(_onnx_sink()) is False
     # a duck-typed object with writer_demand but no is_test_sink -> treated as a sink
     duck = SimpleNamespace(writer_demand=lambda *_a, **_k: {})
-    assert _is_test_persistence_sink(duck) is True
+    assert is_test_persistence_sink(duck) is True
 
 
-# _attached_writer / _attached_sink_node selection — ORDER-INDEPENDENT
-
-
-class _StubSalt:
-    """A stand-in ``self`` carrying only ``_trainer`` for the REAL selection methods."""
-
-    def __init__(self, callbacks, reader=None):
-        self._trainer = SimpleNamespace(
-            callbacks=callbacks,
-            datamodule=SimpleNamespace(reader=reader if reader is not None else object()),
-        )
-        # bind the real methods so `_attached_sink_node`'s self._attached_writer()
-        # call resolves (the production code, not a copy)
-        self._attached_writer = SaltModule._attached_writer.__get__(self)  # noqa: SLF001
-        self._attached_sink_node = SaltModule._attached_sink_node.__get__(self)  # noqa: SLF001
+# select_test_sink — ORDER-INDEPENDENT
 
 
 @pytest.mark.parametrize("onnx_first", [True, False], ids=["onnx_first", "h5_first"])
 def test_attached_writer_picks_h5_sink_regardless_of_order(onnx_first):
-    """`_attached_writer` selects the H5 sink for TEST in BOTH callback orders."""
+    """`select_test_sink` selects the H5 sink for TEST in BOTH callback orders."""
     h5, onnx = _h5_sink(), _onnx_sink()
     callbacks = [onnx, h5] if onnx_first else [h5, onnx]
-    stub = _StubSalt(callbacks)
-    cb, reader = stub._attached_writer()  # noqa: SLF001 - white-box selection assertion
-    assert cb is h5
-    assert reader is not None
-    # the sibling sink-node discovery must also land on the H5 sink (a real node)
-    assert stub._attached_sink_node() is h5  # noqa: SLF001
+    assert select_test_sink(callbacks) is h5
 
 
 def test_attached_writer_none_when_only_onnx_sink_present():
-    """An ONNX-only sink alone is NOT selected as the TEST writer (no TEST persistence)."""
-    stub = _StubSalt([_onnx_sink()])
-    assert stub._attached_writer() == (None, None)  # noqa: SLF001
-    assert stub._attached_sink_node() is None  # noqa: SLF001
+    """An ONNX-only sink alone is NOT selected by `select_test_sink` (no TEST persistence)."""
+    assert select_test_sink([_onnx_sink()]) is None
 
 
 # the real runtime compile_mode(Mode.TEST) path — no dead-preds crash, both orders
@@ -174,11 +152,10 @@ def test_setup_test_does_not_crash_regardless_of_order(cutover_data, onnx_first)
     callbacks = [onnx, h5] if onnx_first else [h5, onnx]
     model = _cutover_model(d.nd)
     # attach a trainer carrying the callbacks (selection source) + the real
-    # datamodule (boundary source) — the surface ``setup('test')`` reads. The
-    # callbacks must be in place BEFORE sink_demand (it routes through the same
-    # _attached_writer selection hardened here).
+    # the trainer supplies the callbacks (selection source) and the real datamodule
+    # (boundary source) that ``setup('test')`` reads; the callbacks must be in place
+    # BEFORE sink_demand — it routes through the same select_test_sink selection.
     model._trainer = SimpleNamespace(callbacks=callbacks, datamodule=dm)  # noqa: SLF001
-    model._bind_output_section_to_sink()  # noqa: SLF001 - bind the section before the demand resolves (setup() repeats it)
     dm.set_sinks(model.sink_demand())  # the model boundary demand (TEST sinks)
     dm.setup("test")  # build the test dataset (the boundary source compile_mode reads)
 

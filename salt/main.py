@@ -782,7 +782,8 @@ class SaltCLI(LightningCLI):
 
         if getattr(self.config, "subcommand", None) != "fit":
             return assembled
-        schedule = getattr(getattr(self, "model", None), "_schedule", None)
+        controller = getattr(getattr(self, "model", None), "training_controller", None)
+        schedule = controller.schedule if controller is not None else None
         if schedule is None:
             return assembled
         result = list(assembled)

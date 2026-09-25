@@ -21,7 +21,7 @@ from salt.graph.spec import (
 )
 from salt.outputs import H5OutputSink
 from salt.graph.render import dot_source
-from salt.model.saltmodule import SaltModule
+from salt.model.sink_prep import assert_no_dead_preds
 from salt.tests._fixtures.gn2v2_test_config import small_config
 
 # this file is at salt/tests/unit/outputs/ — the configs live at salt/configs/
@@ -231,13 +231,6 @@ class _Stub:
         return IO(unflatten_spec(self._req), unflatten_spec(self._prod))
 
 
-class _StubSalt:
-    """A stand-in `self` carrying only ``_graph_modules`` for the unbound gate call."""
-
-    def __init__(self, graph_modules):
-        self._graph_modules = graph_modules
-
-
 def _folded_test_plan(*, include_dead):
     """Compile a TEST plan: a converted track pred (+ optionally a DEAD jet pred)."""
     from salt.outputs import TaskOutput  # noqa: PLC0415 - test-local
@@ -280,12 +273,12 @@ def test_folded_sink_dead_preds_gate_passes_when_all_consumed():
     """No dead pred when every produced ``preds.*`` feeds a demanded output."""
     graph_modules, plan = _folded_test_plan(include_dead=False)
     # the production gate is a no-op on a fully-consumed folded plan
-    SaltModule._assert_no_dead_preds(_StubSalt(graph_modules), plan)  # noqa: SLF001 - white-box gate
+    assert_no_dead_preds(graph_modules, plan)
 
 
 def test_folded_sink_dead_preds_gate_fires_on_unconsumed_pred():
     """A computed-but-never-persisted ``preds.*`` is a hard error on the folded-sink path."""
     graph_modules, plan = _folded_test_plan(include_dead=True)
     with pytest.raises(ConfigError) as excinfo:
-        SaltModule._assert_no_dead_preds(_StubSalt(graph_modules), plan)  # noqa: SLF001 - white-box gate
+        assert_no_dead_preds(graph_modules, plan)
     assert "preds.jets.jets_classification" in str(excinfo.value)

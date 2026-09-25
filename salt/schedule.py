@@ -727,9 +727,9 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 
 
 class EarlyStopTracker:
-    """Live early-stop counters for the ACTIVE stage. Mutable runtime
-    state, checkpointed for exact mid-stage resume and reset at each stage entry.
-    Held on the `SaltModule`; the callback drives it but stays stateless.
+    """Live early-stop counters for the ACTIVE stage: checkpointed for exact
+    mid-stage resume, reset at each stage entry. Held on the `TrainingController`
+    (`salt.model.multistage_training`); the callback drives it but stays stateless.
     """
 
     def __init__(
@@ -778,9 +778,8 @@ class EarlyStopTracker:
         return value > self.best_score + self.config.min_delta
 
     def state_dict(self) -> dict[str, Any]:
-        """The checkpoint payload for mid-stage resume: the counters plus the
-        criterion fingerprint (which `_restore_schedule_stage` matches against the
-        current config to reject a changed `early_stop`).
+        """The checkpoint payload for mid-stage resume. The fingerprint lets
+        `TrainingController.restore_schedule_stage` reject a changed `early_stop`.
 
         Returns
         -------

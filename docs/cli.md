@@ -375,7 +375,7 @@ salt graph deadcode -c <cfg>
 ```
 
 With no `--mode` given, `validate` compiles all four primary modes: FIT, VAL,
-TEST and ONNX (`salt/cli.py:608-613`, the mode loop at `:705` and `:758`).
+TEST and ONNX (`_cmd_validate`'s `PRIMARY_MODES` loop in `salt/cli.py`).
 TEST and ONNX both anchor on a `preds.*` key, so a config with no task head
 fails those two modes with
 
@@ -383,7 +383,7 @@ fails those two modes with
 no module produces a 'preds.*' key in mode {MODE} — evaluation plans anchor on predictions
 ```
 
-and the command exits 1 (`cli.py:1283-1286`, `_fail` at `:617-619`). Check
+and the command exits 1 (`main` and `_fail` in `salt/cli.py`). Check
 only the data half, before a task head or an `outputs:` section exists, with
 `--mode fit`:
 

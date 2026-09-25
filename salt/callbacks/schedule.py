@@ -27,11 +27,8 @@ __all__ = ["StageScopedCallbacks", "TrainingScheduleCallback"]
 
 
 class TrainingScheduleCallback(Callback):
-    """Applies stage-boundary freeze flips + optimizer/scheduler rebuilds for a
-    multi-stage `training_schedule`, and drives per-stage early stopping when
-    declared. Stateless — all schedule state lives on the `SaltModule`
-    (`_schedule`, `_current_stage_index`, `_frozen_module_names`, and the
-    early-stop counters).
+    """Stateless — all schedule state (stage index, freeze set, early-stop
+    counters) lives on `pl_module.training_controller`, a `TrainingController`.
     """
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
@@ -44,7 +41,8 @@ class TrainingScheduleCallback(Callback):
         """
         if stage != "fit":
             return
-        schedule = getattr(pl_module, "_schedule", None)
+        controller = getattr(pl_module, "training_controller", None)
+        schedule = controller.schedule if controller is not None else None
         strategy = trainer.strategy
         # Same predicate that puts SaltModule into reducer-safe freeze mode: a
         # DDP-family strategy + a freeze set that changes across stages. The
@@ -73,28 +71,29 @@ class TrainingScheduleCallback(Callback):
         one on a pending early-stop trigger or the active stage's epoch cap).
 
         This is also the resume boundary handler: after a checkpoint restore,
-        `pl_module._current_stage_index` holds the *saved* stage (set by
-        `SaltModule.on_load_checkpoint` before the optimizer was rebuilt). If the
-        resume epoch's implied stage is later (resume exactly at a boundary), this
+        `pl_module.training_controller.current_stage_index` holds the *saved* stage
+        (set by `SaltModule.on_load_checkpoint` before the optimizer was rebuilt). If
+        the resume epoch's implied stage is later (resume exactly at a boundary), this
         fires exactly once to rebuild fresh into that stage — identical to the
         uninterrupted run's boundary. A mid-stage resume sees the same stage and
         does not rebuild, so the restored optimizer moments are kept.
         """
-        schedule = pl_module._schedule  # noqa: SLF001 - same-package schedule state
+        controller = pl_module.training_controller
+        schedule = controller.schedule
         if trainer.current_epoch == 0:
             return
         if schedule.has_early_stop:
-            reason = "early_stop" if pl_module.pending_early_advance else "epochs"
-            new_index = pl_module.next_stage_index_early_stop(trainer.current_epoch)
+            reason = "early_stop" if controller.pending_early_advance else "epochs"
+            new_index = controller.next_stage_index_early_stop(trainer.current_epoch)
         else:
             new_index = schedule.stage_index_for_epoch(trainer.current_epoch, trainer.max_epochs)
             reason = "epochs"
-        if new_index == pl_module._current_stage_index:  # noqa: SLF001
+        if new_index == controller.current_stage_index:
             return
         # advance_to_stage applies the freeze mask (delta) BEFORE the rebuild so
         # configure_optimizers sees the new trainable set, and (under early_stop)
         # records the boundary + resets the entered stage's counters.
-        pl_module.advance_to_stage(new_index, trainer.global_step, trainer.current_epoch, reason)
+        controller.advance_to_stage(new_index, trainer.global_step, trainer.current_epoch, reason)
         # rebuild: re-invokes configure_optimizers and refreshes every
         # trainer/strategy optimizer + scheduler reference.
         trainer.strategy.setup_optimizers(trainer)
@@ -109,22 +108,25 @@ class TrainingScheduleCallback(Callback):
         `on_train_epoch_start`); on the final stage it sets ``trainer.should_stop``.
         No-op unless the active stage declares `early_stop`.
         """
-        schedule = getattr(pl_module, "_schedule", None)
+        controller = getattr(pl_module, "training_controller", None)
+        if controller is None:
+            return
+        schedule = controller.schedule
         if schedule is None or not schedule.has_early_stop or trainer.sanity_checking:
             return
-        stage = schedule.stages[pl_module._current_stage_index]  # noqa: SLF001
+        stage = schedule.stages[controller.current_stage_index]
         if stage.early_stop is None:
             return
         monitored = _read_monitor(trainer, stage.early_stop.monitor)
-        local_should_stop = pl_module.evaluate_early_stop(monitored)
+        local_should_stop = controller.evaluate_early_stop(monitored)
         should_stop = trainer.strategy.reduce_boolean_decision(local_should_stop, all=False)
         if not should_stop:
             return
-        is_final = pl_module._current_stage_index == len(schedule.stages) - 1  # noqa: SLF001
+        is_final = controller.current_stage_index == len(schedule.stages) - 1
         if is_final:
             trainer.should_stop = True
         else:
-            pl_module.mark_pending_early_advance()
+            controller.mark_pending_early_advance()
 
 
 def _read_monitor(trainer: Trainer, monitor: str) -> float | None:
@@ -190,7 +192,8 @@ class StageScopedCallbacks(Callback):
         del trainer  # validation only reads the model's schedule
         if stage != "fit":
             return
-        schedule = getattr(pl_module, "_schedule", None)
+        controller = getattr(pl_module, "training_controller", None)
+        schedule = controller.schedule if controller is not None else None
         if schedule is None or not schedule.has_stage_callbacks:
             return
         for stage_cfg in schedule.stages:
@@ -212,10 +215,13 @@ class StageScopedCallbacks(Callback):
         stage's fresh, and call their `setup` (Lightning already ran its own setup
         phase before this stage existed). Cheap no-op while the stage is unchanged.
         """
-        schedule = getattr(pl_module, "_schedule", None)
+        controller = getattr(pl_module, "training_controller", None)
+        if controller is None:
+            return
+        schedule = controller.schedule
         if schedule is None:
             return
-        index = pl_module._current_stage_index  # noqa: SLF001 - same-package schedule state
+        index = controller.current_stage_index
         if index == self._active_stage_index:
             return
         for delegate in self._active_delegates:

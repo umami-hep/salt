@@ -160,8 +160,8 @@ under `training_schedule` or an unknown per-stage key, both `frozen` and
 `epochs`, an over-allocated epoch budget across stages, and a multi-stage
 schedule under a non-finite `trainer.max_epochs`. All three come from
 `TrainingSchedule.validate_epochs` (`salt/schedule.py:246`), called from
-`SaltModule._apply_training_schedule` once the trainer is attached
-(`salt/model/saltmodule.py:831`), because the check needs the trainer's
+`TrainingController.preflight` (`salt/model/multistage_training.py`), called from
+`SaltModule.setup` once the trainer is attached, because the check needs the trainer's
 `max_epochs` and that value does not exist before then. `salt merge-config`
 and `--print_config` only merge and print the config; neither attaches a
 trainer, so neither one catches these three.

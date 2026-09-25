@@ -408,12 +408,12 @@ model:
 sets the head width, because `output_size = len(class_names)`
 (`salt/model/modules/tasks/classification.py:170`). A wrong-length list is
 not caught by `salt graph validate`: `check_class_names`
-(`salt/model/saltmodule.py:1972`) runs only when the reader carries a
-`schema:` artifact, and returns immediately when it does not
-(`:1982-1983`). Without one, a short list fails on the first training batch
-with a `CrossEntropyLoss` index error, and a right-length but reordered list
-silently mislabels the head with no error at all. Check the list against the
-label column before you fit.
+(`salt/model/validation.py`) runs only when the reader carries a
+`schema:` artifact, and returns immediately when it does not. Without one,
+a short list fails on the first training batch with a `CrossEntropyLoss`
+index error, and a right-length but reordered list silently mislabels the
+head with no error at all. Check the list against the label column before
+you fit.
 
 ### Task modules
 

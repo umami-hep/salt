@@ -70,9 +70,7 @@ class GraphConfig:
     contract unchecked); ``validate`` reports them (promotable with
     ``--strict``). `sink_origins` enriches missing-sink planner errors with
     the demanding config address (e.g. ``export.outputs``), per mode.
-    `writers` is always ``None`` (the ``writers:`` block and `WriterCallback`
-    were removed; the ``outputs:``/``callbacks:`` sink path drives TEST sinks
-    instead). `model_modules` is the model-side subdict kept separate from
+    `model_modules` is the model-side subdict kept separate from
     the combined `modules` exactly as the runtime path passes
     `SaltModule._graph_modules`.
     """
@@ -85,7 +83,6 @@ class GraphConfig:
     mode_errors: dict[Mode, str] = field(default_factory=dict)
     mode_warnings: dict[Mode, str] = field(default_factory=dict)
     sink_origins: dict[Mode, dict[str, str]] = field(default_factory=dict)
-    writers: Any | None = None
     model_modules: dict[str, GraphModule] | None = None
     mup_cfg: dict[str, Any] | None = None
 
@@ -229,151 +226,68 @@ def load_config(
 
 
 def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> GraphConfig:
-    """Adapt a trainer config (stack) into one full-pipeline `GraphConfig`:
-    parses through `SaltCLI` run-free, combines ``data.modules`` +
-    ``model.modules`` into one module dict (the reader is the source node,
-    so ``sources`` is empty), and derives per-mode sinks from the model's
-    declared anchors plus the callbacks-level sink path (TEST H5/ONNX export
-    sinks, FIT/VAL metrics callbacks) — errors go to `GraphConfig.mode_errors`
-    rather than raising. Raises `ConfigError` on a trainer-parse failure or a
-    module-name collision between ``data.modules`` and ``model.modules``.
+    """Adapt a trainer config (stack) into one full-pipeline `GraphConfig`: parse
+    through `SaltCLI` run-free, combine ``data.modules`` + ``model.modules`` (the
+    reader is the source node, so ``sources`` is empty) and derive per-mode sinks
+    through the shared `salt.model.sink_prep.prepare_sinks` — the SAME preparation
+    the runtime `SaltModule` runs, with errors collected into
+    `GraphConfig.mode_errors` instead of raised. Raises `ConfigError` on a
+    trainer-parse failure or a module-name collision.
     """
     # local import: the trainer surface (lightning/jsonargparse) is heavy
     # and circular with this module (salt.main dispatches to cli.main)
     from salt.data.processors.labels import Labels
+    from salt.model.sink_prep import prepare_sinks
+    from salt.outputs.sinks.registry import iter_sinks
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
     # setup-only modules (InputSamples/ShmStage) are partitioned out of the
-    # tensor compile, so the combined full-pipeline graph here uses `batch_modules`,
-    # not the union `dm.modules` (a setup-only module in `compile_plan` trips
-    # AllModesDeadError). The setup graph is a distinct topology rendered separately.
+    # tensor compile — `batch_modules`, not `dm.modules` (see compile_setup_plan)
     data_modules = dm.batch_modules
     reader = dm.reader
     for module in data_modules.values():
         if isinstance(module, Labels):
             module.bind_streams(reader.streams)
-    if overlap := sorted(set(data_modules) & set(model._graph_modules)):  # noqa: SLF001 - same-package adapter
+    model_modules: dict[str, GraphModule] = dict(model._graph_modules)  # noqa: SLF001 - same-package adapter
+    if overlap := sorted(set(data_modules) & set(model_modules)):
         raise ConfigError(
             f"config {' + '.join(str(p) for p in paths)}: module name(s) {overlap} appear "
             "in BOTH data.modules and model.modules — instance names must be unique "
             "across the pipeline graph"
         )
-    modules: dict[str, GraphModule] = {**data_modules, **model._graph_modules}  # noqa: SLF001 - same-package adapter
-    writer_sink_cb = _static_writer_sink_callback(cli)
-    run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - same-package adapter
-    # fold renderable sink NODES into the planning dict so each renders its own
-    # card and anchors demand via declared requires. In modes where a sink's
-    # declare_io is empty the planner collects it as inactive (no plan_hash
-    # perturbation).
-    sink_node = _as_sink_node(writer_sink_cb)
-    onnx_sink_node = _static_onnx_export_sink(cli)
-    # the export contract lives on the sink (model_name/inputs init_args); the
-    # static render and `salt export` both read it straight off the sink.
-    onnx_has_contract = False
-    if onnx_sink_node is not None:
-        onnx_has_contract = bool(onnx_sink_node.inputs) or onnx_sink_node.model_name is not None
-        if onnx_sink_node.model_name is None:
-            # the static render needs a model_name to derive the Athena output
-            # names; default it from the sanitised run name exactly as
-            # `salt export` does
-            onnx_sink_node.model_name = _static_export_model_name(onnx_sink_node, run_name)
-    for node in (sink_node, onnx_sink_node):
-        if node is None:
-            continue
-        if node.name in modules:
+    prep = prepare_sinks(
+        model_modules,
+        iter_sinks(cli.trainer),
+        output_section=model._output_section,  # noqa: SLF001 - same-package adapter
+        reader=reader,
+        callbacks=cli.trainer.callbacks,
+        run_name=cli._get(cli.config_init, "name") or "salt",  # noqa: SLF001 - same-package adapter
+        modes=PRIMARY_MODES,
+        collect_errors=True,
+        anchor_meta_rows=True,
+        writer_demand=False,
+    )
+    for name in set(prep.modules) - set(model_modules):  # the folded sink nodes
+        if name in data_modules:
             raise ConfigError(
-                f"sink node name {node.name!r} collides with a pipeline module — instance "
+                f"sink node name {name!r} collides with a pipeline module — instance "
                 "names must be unique across the graph; rename the callback key"
             )
-        modules[node.name] = node
-    fitval_callbacks = _static_fitval_callbacks(cli)
-    sinks: dict[Mode, tuple[str, ...]] = {}
-    mode_errors: dict[Mode, str] = {}
-    mode_warnings: dict[Mode, str] = {}
-    sink_origins: dict[Mode, dict[str, str]] = {}
-    for mode in PRIMARY_MODES:
-        if mode is Mode.TEST and writer_sink_cb is not None:
-            try:
-                # a renderable sink NODE (folded into `modules` above) anchors all
-                # its demand via declared requires — no flat sinks; without one,
-                # fall back to the base TEST anchor.
-                keys = (
-                    [] if sink_node is not None else list(model._model_sinks(mode))  # noqa: SLF001 - base TEST anchor
-                )
-                if writer_sink_cb is not None and sink_node is None:
-                    # non-node persistence sink: fold its writer_demand into the
-                    # flat sinks exactly as SaltModule._boundary_demand does, so
-                    # conversion producers stay alive in the render.
-                    sink_demand = writer_sink_cb.writer_demand(
-                        model._graph_modules,  # noqa: SLF001 - same-package adapter
-                        reader,
-                    )
-                    keys.extend(key for key in sink_demand if key not in keys)
-            except ConfigError as err:
-                mode_errors[mode] = str(err)
-                keys = list(model._model_sinks(mode))  # noqa: SLF001 - all-preds render fallback
-        elif mode is Mode.ONNX and onnx_sink_node is not None:
-            # the folded OnnxExportSink anchors all conversion-leaf demand via its
-            # declared requires; the export-only half (model_name/inputs) is
-            # validated below whenever the config declares any of it.
-            keys = []
-            if onnx_has_contract:
-                try:
-                    onnx_sink_node.export_config(run_name)
-                except ConfigError as err:
-                    mode_errors[mode] = str(err)
-            else:
-                mode_warnings[mode] = (
-                    "the config declares no export contract — the OnnxExportSink names the "
-                    "outputs, but its inputs:/model_name: were NOT checked; declare the "
-                    "export-only half on the sink so `salt graph validate --mode onnx` gates "
-                    "everything `salt export` will trace"
-                )
-        elif mode & Mode.TRAINING and fitval_callbacks:
-            # the static half of the FIT/VAL-sink contract: configured metrics
-            # callbacks declare plan sinks the same way writers do for TEST, so
-            # `salt graph validate --mode fit` sees the same sinks (and the same
-            # boundary demand) a real `salt fit` does. Mirror of the TEST branch.
-            try:
-                keys = list(
-                    model._model_sinks(mode, callbacks=fitval_callbacks)  # noqa: SLF001 - same-package adapter
-                )
-                demand = model._callback_demand(mode, fitval_callbacks)  # noqa: SLF001 - same-package adapter
-                # callback-demanded dataset-namespace keys (labels/masks/meta)
-                # are FIT/VAL sinks too — their producers stay alive
-                keys.extend(key for key in demand if key not in keys)
-                sink_origins[mode] = dict(demand)
-            except ConfigError as err:
-                mode_errors[mode] = str(err)
-                keys = list(model._model_sinks(mode))  # noqa: SLF001 - loss-only render fallback
-        else:
-            if mode is Mode.ONNX:
-                mode_warnings[mode] = (
-                    "the config declares no OnnxExportSink — the ONNX contract was NOT checked "
-                    "(sinks fall back to every preds.* key); the ONNX output manifest is "
-                    "declared by an OnnxExportSink (callbacks.onnx_export) naming "
-                    "the conversion outputs.* leaves, so `salt graph validate --mode onnx` "
-                    "gates what `salt export` will trace"
-                )
-            keys = list(model._model_sinks(mode))  # noqa: SLF001 - same-package adapter
-        # writer row alignment: a flat meta.rows sink — unless a sink NODE was
-        # folded, which demands meta.rows itself via a named edge (a flat sink
-        # would re-introduce the <sinks> sentinel card).
-        if mode is Mode.TEST and sink_node is None and "meta.rows" not in keys:
-            keys.append("meta.rows")
-        sinks[mode] = tuple(keys)
     return GraphConfig(
-        modules=modules,
+        modules={**data_modules, **prep.modules},
         sources={},
-        sinks=sinks,
+        sinks={mode: tuple(ms.anchors) for mode, ms in prep.by_mode.items()},
         schema=reader.label_universe(),
         reader=reader,
-        mode_errors=mode_errors,
-        mode_warnings=mode_warnings,
-        sink_origins=sink_origins,
-        writers=None,  # WriterCallback removed
-        model_modules=dict(model._graph_modules),  # noqa: SLF001 - same-package adapter
+        mode_errors={mode: ms.error for mode, ms in prep.by_mode.items() if ms.error},
+        mode_warnings={mode: ms.warning for mode, ms in prep.by_mode.items() if ms.warning},
+        sink_origins={
+            mode: ms.anchor_origins
+            for mode, ms in prep.by_mode.items()
+            if ms.anchor_origins is not None
+        },
+        model_modules=model_modules,
         mup_cfg=getattr(model, "mup_cfg", None),
     )
 
@@ -453,27 +367,6 @@ def _parse_trainer_cli(paths: Sequence[Path], set_overrides: Sequence[str] | Non
         ) from err
 
 
-def _static_writer_sink_callback(cli: Any) -> Any | None:
-    """The configured TEST persistence sink (duck-typed on ``writer_demand``,
-    e.g. `H5OutputSink`), or None — the static mirror of
-    `SaltModule._attached_writer` so ``salt graph`` resolves the same TEST
-    sinks.
-    """
-    from salt.outputs import is_test_persistence_sink, iter_sinks
-
-    # the SAME registry and selector the runtime uses, so static render and
-    # real run resolve the same sink; ONNX-only and opted-out auxiliary sinks
-    # are skipped.
-    return next(
-        (
-            sink
-            for sink in iter_sinks(getattr(cli, "trainer", None))
-            if callable(getattr(sink, "writer_demand", None)) and is_test_persistence_sink(sink)
-        ),
-        None,
-    )
-
-
 def _static_onnx_export_sink(cli: Any) -> Any | None:
     """The configured `OnnxExportSink`, or None — the ONNX counterpart to
     `_static_writer_sink_callback`, folded into the planning module dict so
@@ -484,42 +377,6 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
 
     sinks = iter_sinks(getattr(cli, "trainer", None))
     return next((sink for sink in sinks if isinstance(sink, OnnxExportSink)), None)
-
-
-def _static_export_model_name(export_sink: Any, run_name: str) -> str:
-    """The Athena output prefix for the static folded ONNX render: the sink's
-    ``model_name`` if set, else the sanitised run name — matching `salt export`'s
-    own default.
-    """
-    from salt.outputs.sinks.onnx.config import sanitised_model_name
-
-    name = getattr(export_sink, "model_name", None) if export_sink is not None else None
-    return name or sanitised_model_name(run_name)
-
-
-def _as_sink_node(callback: Any) -> Any | None:
-    """`callback` as a renderable sink NODE (a `GraphModule` with
-    ``is_sink() -> True``, e.g. `H5OutputSink`), or None for a non-node
-    persistence sink (duck-typed ``writer_demand`` only), which keeps the
-    legacy flat-``<sinks>`` folding.
-    """
-    if callback is None:
-        return None
-    is_sink = getattr(callback, "is_sink", None)
-    has_io = callable(getattr(callback, "declare_io", None))
-    if has_io and callable(is_sink) and bool(is_sink()):
-        return callback
-    return None
-
-
-def _static_fitval_callbacks(cli: Any) -> list[Any]:
-    """The configured FIT/VAL-sink callbacks (duck-typed on ``fit_val_demand``,
-    e.g. `ConfusionMatrix`) from the run-free CLI — the static-tooling mirror
-    of the runtime FIT/VAL-sink contract; config-only, never ``setup``.
-    """
-    trainer = getattr(cli, "trainer", None)
-    callbacks = getattr(trainer, "callbacks", None) if trainer is not None else None
-    return [cb for cb in callbacks or [] if callable(getattr(cb, "fit_val_demand", None))]
 
 
 def _parse_mode(name: str) -> Mode:
@@ -678,7 +535,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if cfg.reader is not None:
         # default-on class-names <-> schema-attrs cross-check (set AND order);
         # raises ConfigError -> formatted by main()
-        from salt.model.saltmodule import check_class_names
+        from salt.model.validation import check_class_names
 
         checked = check_class_names(cfg.modules, cfg.reader)
         if checked:
@@ -687,7 +544,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # same `validate_mup_routing` as SaltModule construction, surfaced as
         # validate findings (warnings promotable under --strict); hard errors
         # would already abort the parse above.
-        from salt.model.saltmodule import validate_mup_routing
+        from salt.model.mup import validate_mup_routing
 
         with stdlib_warnings.catch_warnings(record=True) as caught:
             stdlib_warnings.simplefilter("always")
@@ -704,7 +561,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             )
         # same `validate_edge_port` as SaltModule construction, surfaced here for
         # the validate report (hard errors would already abort the parse above).
-        from salt.model.saltmodule import validate_edge_port
+        from salt.model.validation import validate_edge_port
 
         try:
             n_edge = validate_edge_port(cfg.model_modules)
@@ -755,8 +612,6 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
             bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
             bucket.append(line)
-        # cfg.writers is always None (no WriterCallback), so there is no
-        # writer-spec cross-check to run here.
     for info in infos:
         console(f"info: {info}")
     for warning in warnings:

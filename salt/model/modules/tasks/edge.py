@@ -145,7 +145,7 @@ class VertexingTaskModule(_TaskModuleBase):
         No-op for integer-id weighting. For name-based weighting, the origin
         label's class-name attr (``schema_group(stream).attrs[origin_label]``)
         maps each name to its index. Must be called (via
-        `salt.model.saltmodule.resolve_origin_weighting`) before `bind`.
+        `salt.model.validation.resolve_origin_weighting`) before `bind`.
 
         Parameters
         ----------

@@ -366,7 +366,7 @@ class H5OutputSink(RuntimeSink):
 
     def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
         """The sink's TEST ``declare_io`` requires, each mapped to a demander
-        description; discovered by `SaltModule._attached_writer` via
+        description; discovered by `salt.model.sink_prep.select_test_sink` via
         ``callable(getattr(cb, "writer_demand", None))``.
         """
         del model_modules, reader

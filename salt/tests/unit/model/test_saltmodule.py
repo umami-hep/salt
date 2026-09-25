@@ -17,6 +17,7 @@ from salt.model.base import SaltModelModule
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.outputs import RunTaskOutput
 from salt.model.saltmodule import CKPT_KEY, SaltModule
+from salt.model.sink_prep import boundary_demand, callback_demand, select_fitval_callbacks
 from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -558,20 +559,20 @@ class TestCallbackSinks:
         # the unchanged baseline: with no FIT/VAL-sink callback, sinks stay
         # ['loss.total'] (the previous behaviour) in BOTH training modes
         model = self._model_with_aux(data)
-        assert model._model_sinks(Mode.FIT) == ["loss.total"]  # noqa: SLF001
-        assert model._model_sinks(Mode.VAL) == ["loss.total"]  # noqa: SLF001
+        assert model._sink_prep().by_mode[Mode.FIT].anchors == ["loss.total"]  # noqa: SLF001
+        assert model._sink_prep().by_mode[Mode.VAL].anchors == ["loss.total"]  # noqa: SLF001
 
     def test_callback_declaring_nothing_is_a_noop(self, data):
         # a callback whose fit_val_demand returns no keys must not alter sinks
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics())
-        assert model._model_sinks(Mode.FIT) == ["loss.total"]  # noqa: SLF001
+        assert model._sink_prep().by_mode[Mode.FIT].anchors == ["loss.total"]  # noqa: SLF001
 
     def test_declared_preds_becomes_fit_val_sink(self, data):
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics("preds.jets.aux_probe"))
         for mode in (Mode.FIT, Mode.VAL):
-            sinks = model._model_sinks(mode)  # noqa: SLF001
+            sinks = model._sink_prep().by_mode[mode].anchors  # noqa: SLF001
             assert sinks[0] == "loss.total"  # loss anchor stays first
             assert "preds.jets.aux_probe" in sinks
 
@@ -580,8 +581,9 @@ class TestCallbackSinks:
         # (those sinks are the writer manifest, not callback requires)
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics("preds.jets.aux_probe"))
-        assert model._callback_demand(Mode.TEST) == {}  # noqa: SLF001
-        assert model._callback_demand(Mode.ONNX) == {}  # noqa: SLF001
+        fitval_callbacks = select_fitval_callbacks(model._trainer.callbacks)  # noqa: SLF001
+        assert callback_demand(model._graph_modules, Mode.TEST, fitval_callbacks) == {}  # noqa: SLF001
+        assert callback_demand(model._graph_modules, Mode.ONNX, fitval_callbacks) == {}  # noqa: SLF001
 
     def test_pruned_producer_kept_alive_by_callback_sink(self, data):
         # THE behaviour the deferral note describes: a preds.* key no task keeps
@@ -595,7 +597,7 @@ class TestCallbackSinks:
             model._graph_modules,  # noqa: SLF001
             Mode.FIT,
             sources=src,
-            sinks=model._model_sinks(Mode.FIT),  # noqa: SLF001
+            sinks=model._sink_prep().by_mode[Mode.FIT].anchors,  # noqa: SLF001
         )
         assert "aux" not in pruned.module_names  # negative control: pruned
 
@@ -604,7 +606,7 @@ class TestCallbackSinks:
             model._graph_modules,  # noqa: SLF001
             Mode.FIT,
             sources=src,
-            sinks=model._model_sinks(Mode.FIT),  # noqa: SLF001
+            sinks=model._sink_prep().by_mode[Mode.FIT].anchors,  # noqa: SLF001
         )
         assert "aux" in kept.module_names  # callback sink keeps the producer alive
 
@@ -615,7 +617,9 @@ class TestCallbackSinks:
         model["loss"] = LossSum()
         model = SaltModule(model, lrs=LRS)
         self._attach(model, _ProbeMetrics("labels.jets.extra_truth"))
-        demand, origins = model._boundary_demand()[Mode.FIT]  # noqa: SLF001
+        demand, origins = boundary_demand(model._graph_modules, model._sink_prep())[  # noqa: SLF001
+            Mode.FIT
+        ]
         assert "labels.jets.extra_truth" in demand
         assert "callback" in origins["labels.jets.extra_truth"]
         assert "_ProbeMetrics" in origins["labels.jets.extra_truth"]
@@ -625,7 +629,9 @@ class TestCallbackSinks:
         # boundary demand list (no duplicate, no error)
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics("labels.jets.flavour_label"))
-        demand, _ = model._boundary_demand()[Mode.FIT]  # noqa: SLF001
+        demand, _ = boundary_demand(model._graph_modules, model._sink_prep())[  # noqa: SLF001
+            Mode.FIT
+        ]
         assert demand.count("labels.jets.flavour_label") == 1
 
     def test_undecidable_callback_key_raises_quality_error(self, data):
@@ -635,7 +641,7 @@ class TestCallbackSinks:
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics("bogus.namespace.key"))
         with pytest.raises(ConfigError, match="bogus.namespace.key") as excinfo:
-            model._boundary_demand()  # noqa: SLF001
+            boundary_demand(model._graph_modules, model._sink_prep())  # noqa: SLF001
         message = str(excinfo.value)
         assert "callback" in message
         assert "_ProbeMetrics" in message
@@ -645,7 +651,49 @@ class TestCallbackSinks:
         model = self._model_with_aux(data)
         self._attach(model, _ProbeMetrics("labels.jets.*"))
         with pytest.raises(ConfigError, match="wildcard"):
-            model._boundary_demand()  # noqa: SLF001
+            boundary_demand(model._graph_modules, model._sink_prep())  # noqa: SLF001
+
+
+class TestLazyModeAnchors:
+    """`_sink_prep`/`compile_mode` only derive anchors for the modes actually asked for."""
+
+    def test_fit_val_only_tasks_prepare_and_compile_fit_without_test_anchors(self, data):
+        from types import SimpleNamespace
+
+        from salt.model.modules.tasks import _parse_expose  # noqa: PLC0415, PLC2701 - test-local
+
+        modules = build_gn2v2_modules(data["nd"])
+        for name in TASKS:
+            modules[name].expose_modes = _parse_expose(["fit", "val"], type(modules[name]).__name__)
+        modules["loss"] = LossSum()
+        model = SaltModule(modules, lrs=LRS)
+        dm = build_datamodule(data)
+        model._trainer = SimpleNamespace(callbacks=[], datamodule=dm)  # noqa: SLF001
+        dm.set_sinks(model.sink_demand())
+        model.sink_origins()
+        dm.setup("fit")
+        model.compile_mode(Mode.FIT, model._boundary(dm.train_dset, "train"))  # noqa: SLF001
+        model.compile_mode(Mode.VAL, model._boundary(dm.val_dset, "val"))  # noqa: SLF001
+        with pytest.raises(ConfigError, match="anchor on predictions"):
+            model._sink_prep((Mode.TEST,))  # noqa: SLF001
+
+    def test_no_loss_module_prepares_and_compiles_test_without_fit_anchors(self, data):
+        from types import SimpleNamespace
+
+        modules = build_gn2v2_modules(data["nd"])
+        del modules["loss"]
+        model = SaltModule(modules, lrs=LRS)
+        dm = build_datamodule(data)
+        model._trainer = SimpleNamespace(callbacks=[], datamodule=dm)  # noqa: SLF001
+        dm.set_sinks(model.sink_demand())
+        dm.setup("test")
+        model.compile_mode(Mode.TEST, model._boundary(dm.test_dset, "test"))  # noqa: SLF001
+        with pytest.raises(ConfigError, match="no module produces 'loss.total'"):
+            model._sink_prep((Mode.FIT,))  # noqa: SLF001
+
+    def test_compile_mode_onnx_still_rejected(self, data):
+        with pytest.raises(ConfigError, match="compile_mode prepares FIT/VAL/TEST"):
+            build_model(data).compile_mode(Mode.ONNX, {})
 
 
 class TestClassNamesCheck:
@@ -655,7 +703,7 @@ class TestClassNamesCheck:
         return H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"])
 
     def test_matching_lists_pass_and_are_counted(self, data):
-        from salt.model.saltmodule import check_class_names
+        from salt.model.validation import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         # the dummy file carries jets.attrs['flavour_label'] = [bjets, cjets,
@@ -663,7 +711,7 @@ class TestClassNamesCheck:
         assert check_class_names(modules, self.make_reader(data)) == 1
 
     def test_reordered_class_names_fail_set_and_order(self, data):
-        from salt.model.saltmodule import check_class_names
+        from salt.model.validation import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "ujets", "cjets")
@@ -675,7 +723,7 @@ class TestClassNamesCheck:
         assert "['bjets', 'cjets', 'ujets']" in message  # schema
 
     def test_wrong_class_set_fails(self, data):
-        from salt.model.saltmodule import check_class_names
+        from salt.model.validation import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "cjets", "ujets", "taujets")
@@ -683,7 +731,7 @@ class TestClassNamesCheck:
             check_class_names(modules, self.make_reader(data))
 
     def test_no_schema_artifact_is_noop(self, data):
-        from salt.model.saltmodule import check_class_names
+        from salt.model.validation import check_class_names
 
         modules = build_gn2v2_modules(data["nd"])
         modules["jets_classification"].class_names = ("bjets", "ujets", "cjets")
