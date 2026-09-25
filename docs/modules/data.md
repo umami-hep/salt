@@ -94,8 +94,8 @@ data file is opened, exactly like the model-side method of the same name.
 and writes in `mode`, as a pure function of config. A `Reader` requires
 nothing (`requires={}`) and produces `raw.<stream>`, `masks.<stream>` and
 `meta.rows` only; it never produces `inputs.*`
-(`salt/data/readers/reader.py:316-329`,
-`salt/data/readers/uproot_reader.py:454-471`). `salt.data.Features` is the
+(`salt/data/readers/reader.py:403-416`,
+`salt/data/readers/uproot_reader.py:224-235`). `salt.data.Features` is the
 only shipped producer of `inputs.<stream>`
 (`salt/data/processors/features.py:79-91`); a normaliser or embed requiring
 `inputs.*` with no `Features` in `data.modules` fails with
@@ -115,7 +115,7 @@ def declare_io(self, mode: Mode) -> IO:
 ```
 
 **Read as a real example:** `H5StructuredReader.declare_io`
-(`salt/data/readers/reader.py:316`) is a source node (`requires={}`);
+(`salt/data/readers/reader.py:403`) is a source node (`requires={}`);
 `Features.declare_io` (`salt/data/processors/features.py:79`) and
 `Labels.declare_io` (`salt/data/processors/labels.py:107`) both require and
 produce.
@@ -183,7 +183,7 @@ def bind(self, ctx: WorkerCtx) -> None:
 ```
 
 **Read as a real example:** `H5StructuredReader.bind`
-(`salt/data/readers/reader.py:430`) opens the file handle and allocates
+(`salt/data/readers/reader.py:517`) opens the file handle and allocates
 demand-narrowed per-group buffers; `Labels.bind`
 (`salt/data/processors/labels.py:140`) uses `ctx.step` to learn which
 `labels.<stream>.<field>` keys it was narrowed to, with no file I/O at all.
@@ -303,7 +303,8 @@ crosses into a tensor directly.
 
 **Read as a real example:** `H5StructuredReader`
 (`salt/data/readers/reader.py`), `UprootReader`
-(`salt/data/readers/uproot_reader.py`), `MultiSampleReader`
+(`salt/data/readers/uproot_reader.py`), `xAODReader`
+(`salt/data/readers/xaod_reader.py`), `MultiSampleReader`
 (`salt/data/readers/multisample_reader.py`), and the tutorial reader built
 from scratch in [`tutorials/mnist.md`](../tutorials/mnist.md).
 
@@ -351,7 +352,7 @@ class DoubledPt(Processor):
 
 ## Shipped data modules
 
-`salt/data/__init__.py`'s `__all__` holds 35 names. Eleven of them are legal
+`salt/data/__init__.py`'s `__all__` holds 32 names. Eleven of them are legal
 `data.modules` entries; everything else is a base class, the datamodule
 itself, a config or runtime dataclass, a constant, a function, or an
 internal runtime object. The [Reference](#reference) table below classifies
@@ -399,7 +400,7 @@ data:
 
 ### `salt.data.H5StructuredReader`
 
-`salt/data/readers/reader.py:56`, `__init__` `:123-134`
+`salt/data/readers/reader.py:176`, `__init__` `:230-240`
 
 | `init_arg` | Type | Default |
 |---|---|---|
@@ -415,10 +416,10 @@ data:
 Requires nothing (`requires={}`, it is the source node). Produces
 `raw.<stream>` (`("B",)` for a `global_object` group, else `("B", T)`),
 `masks.<stream>` (bool, non-global groups only), and `meta.rows` (int64,
-`modes=Mode.TEST`) (`:316-329`). **Never `inputs.*`.**
+`modes=Mode.TEST`) (`:403-416`). **Never `inputs.*`.**
 
-Defines `bind(ctx)` (`:430`), `prepare()` (`:331`) and `with_source(...)`
-(`:291-314`).
+Defines `bind(ctx)` (`:517`), `prepare()` (`:418`) and `with_source(...)`
+(`:381-401`).
 
 Each entry in `groups` is a `GroupConfig` (`dataset`, `pad_max`,
 `global_object`, all optional): `dataset` maps to a differently-named H5
@@ -497,19 +498,114 @@ and for a stream outside the resolved set (`:132-136`).
 | `class_path` | Source | `init_args` | Requires / produces / hooks |
 |---|---|---|---|
 | `salt.data.FtagLabeller` | `processors/ftag_labeller.py:17`, `__init__` `:70-77` | `stream: str = "jets"`; `label: str = "flavour_label"`; `class_names: Sequence[str] \| None = None` (empty or `None` raises `ConfigError`, `:87-91`); `require_labels: bool = True`; `dtype_policy = "int64-for-int"` | produces a **concrete** `labels.<stream>.<label>` (`:102-112`), which beats `Labels`' wildcard; `read_fields` overridden (`:114-122`) |
-| `salt.data.UprootReader` | `readers/uproot_reader.py:200`, `__init__` `:261-271` | `groups` (required); `filename=None`; `tree: str = "CollectionTree"`; `unroll: str \| None = None`; `num: int = -1`; `cuts=None`; `stage=None`; `index_cache: str \| Path \| None = None` | same produced key families as `H5StructuredReader` (`:454-471`); its `with_source` (`:581-593`) takes `(filename, num=-1, stage=None)` — no VDS surface, ROOT has none |
+| `salt.data.UprootReader` | `readers/uproot_reader.py:101`, `__init__` `:138-147` | `groups` (required); `filename=None`; `tree: str = "CollectionTree"`; `unroll: str \| None = None`; `num: int = -1`; `cuts=None`; `stage=None` | same produced key families as `H5StructuredReader` (`:224-235`); its `with_source` (`:305-309`) takes `(filename, num=-1, stage=None)` — no VDS surface, ROOT has none; ElementLink/PHYSLITE `link`/`join` groups need `salt.data.xAODReader` instead (see the section below) |
 | `salt.data.ConstituentSelection` | `processors/cut.py` | `streams: Mapping[str, {cuts, pad_max, sort}]` | requires `raw.<s>` (fields = cut fields + sort var) and `masks.<s>`, REWRITES both in place — cut (drop + re-pad) → optional sort → truncate to `pad_max` → re-pad; runs between the reader and every other `raw.*` consumer; row/event cuts stay on the reader's `cuts:` |
-| `salt.data.MultiSampleReader` | `readers/multisample_reader.py:82`, `__init__` `:124-131` | `samples: Sequence[SampleConfig \| Mapping]` (required); `label_stream: str = "event"`; `label_field: str = "process"`; `seed: int = 42`; `interleave_block: int = 1` | mirrors its sub-readers' `raw.*`/`masks.*`/`meta.rows`, extending the scalar `label_stream`'s field list with the injected `label_field` (`:198-233`); its `with_source` ignores `filename` and re-sources each sub-reader from its own per-stage `SampleConfig.sources` (`:402-442`) |
+| `salt.data.MultiSampleReader` | `readers/multisample_reader.py:64`, `__init__` `:91-97` | `samples: Sequence[SampleConfig \| Mapping]` (required); `label_stream: str = "event"`; `label_field: str = "process"`; `interleave_block: int = 1` | mirrors its sub-readers' `raw.*`/`masks.*`/`meta.rows`, extending the scalar `label_stream`'s field list with the injected `label_field` (`:140-155`); its `with_source` ignores `filename` and re-sources each sub-reader from its own per-stage `SampleConfig.sources` (`:263-278`) |
 | `salt.data.MultiTarget` | `processors/multi_target.py:26`, `__init__` `:77` | `replacements: Sequence[Mapping[str, Any]]` (required) | requires `labels.<stream>.{sel_label,source}` and produces `labels.<stream>.<output>` float32, all `modes=Mode.TRAINING` (`:138-164`) |
 | `salt.data.MaskFormerTargets` | `processors/maskformer_targets.py:35`, `__init__` `:134-149` | `object_class`, `object_id`, `constituent_id`, `class_map`, `object_stream`, `constituent_stream` (all required); then `regression_targets=None`, `cuts=None`, `sort_by=None`, `sort_descending=True`, `pv_class=0`, `max_objects=None`, `max_lxy_mm=None`, `lxy_field="Lxy"` | produces `labels.objects.object_class` (`[B,M]` int64), `labels.objects.masks` (`[B,M,T]` bool) and `labels.objects.<target>` per regression target (`:299-334`) |
+
+### `salt.data.xAODReader`
+
+`salt/data/readers/xaod_reader.py:122`
+
+**What it is.** The `UprootReader` for xAOD POOL / DAOD_PHYSLITE files: it
+dereferences the ElementLinks uproot can read but never follow (`:1-3`,
+module docstring). A linked stream also serves a `valid` field (`:236`). It
+has the **same constructor as `UprootReader`** (`:125`, class docstring; no
+`__init__` of its own), so its `init_args` are exactly
+`salt/data/readers/uproot_reader.py:138-147` (`groups`, `filename`, `tree`,
+`unroll`, `num`, `cuts`, `stage`) — it produces the same `raw.<stream>` /
+`masks.<stream>` / `meta.rows` key families as `UprootReader`.
+
+**When to use it instead of `UprootReader`.** Use `xAODReader` when any
+group in a config sets one of the 5 link/join keys below. Plain
+`salt.data.UprootReader` refuses them — `XAOD_GROUP_KEYS`
+(`salt/data/readers/uproot_reader.py:27-33`) — and raises `ConfigError`
+naming `class_path: salt.data.xAODReader`, whether the keys arrive in raw
+config (`salt/data/readers/uproot_reader.py:194-200`) or as an
+already-built `xAODGroupConfig` passed to a plain `UprootReader`
+(`salt/data/readers/uproot_reader.py:189-192`).
+Flat ntuples and direct branches — easyjet `AnalysisMiniTree`, FTAG1LITE,
+the event_classifier tutorial — stay on `UprootReader`; none of them set a
+link/join key. The two shipped fragments that DO use `xAODReader` are
+`salt/configs/readers/physlite_jets.yaml` (1:many link, jet axis) and
+`salt/configs/readers/physlite_events.yaml` (1:1 join, event axis).
+
+**The 5 keys** (`xAODGroupConfig`, `salt/data/readers/xaod_reader.py:27`),
+added on top of `UprootGroupConfig`'s `branches`/`prefix`/`jagged`/`pad_max`:
+
+- `link_branch` + `target_prefix` — the **1:many** pair that *builds* a
+  constituent stream out of an ElementLink target container. Both must be
+  set together (`:66-70`), only on a `jagged` group (`:71-75`), and only
+  when the reader's `unroll` names a group (`:169-173`) — ElementLink
+  dereference is per-row-object, with no meaning on the entry axis. The
+  on-disk link vector is `<unroll-group prefix><link_branch>` (`:192-195`);
+  target fields are read from `<target_prefix><bare>` (`:198-200`).
+
+  ```yaml
+  # from salt/configs/readers/physlite_jets.yaml:30-48 (condensed)
+  unroll: jets
+  groups:
+    jets:
+      prefix: AnalysisJetsAuxDyn.
+      jagged: false
+      branches: {pt: pt, eta: eta, phi: phi, mass: m}
+    tracks:
+      jagged: true
+      pad_max: 40
+      link_branch: GhostTrack               # -> AnalysisJetsAuxDyn.GhostTrack
+      target_prefix: InDetTrackParticlesAuxDyn.
+      branches: {d0: d0, z0SinTheta: z0}
+  ```
+
+- `join_branch` + `join_prefix` + `join_branches` — the **1:1 join** that
+  appends fields onto a group's own existing elements (one link per
+  element, so the group's shape is unchanged). All three must be set
+  together (`:85-90`), cannot combine with `link_branch` (`:93-98`), and no
+  field may appear in both `branches` and `join_branches` (`:99-104`). A
+  joined jagged group cannot sit under an `unroll` (`:177-188`) — the 1:1
+  by-index gather has no per-entry offset for a third nesting level. The
+  join link is resolved with the group's own `prefix` (`:263`); served
+  fields follow `branches` -> `join_branches` -> `valid`, in that order
+  (`:117`, `:239-245`).
+
+  ```yaml
+  # from salt/configs/readers/physlite_events.yaml:133-150
+  groups:
+    jets:
+      prefix: AnalysisJetsAuxDyn.
+      jagged: true
+      pad_max: 20
+      branches: {pt: pt, eta: eta, phi: phi, m: m}
+      join_branch: btaggingLink        # -> AnalysisJetsAuxDyn.btaggingLink
+      join_prefix: BTagging_AntiKt4EMPFlowAuxDyn.
+      join_branches: {GN2v01_pb: GN2v01_pb, GN2v01_pc: GN2v01_pc, GN2v01_pu: GN2v01_pu}
+  ```
+
+**Null links.** `m_persKey == 0` is the null-link sentinel (a thinned
+target container).
+
+- **1:many:** null links are silently dropped (`:408-411`), so the served
+  multiplicity is the non-null count (`:280-297`, off the `pkey != 0` mask
+  at `:292-293`).
+- **1:1 join:** any null link **raises** `SchemaError` naming the count and
+  the entry range (`:349-357`) — dropping or padding it would silently
+  desynchronise the joined fields from the group's own. Also loud on
+  joins: an out-of-range `m_persIndex` (`:372-380`) and a target whose
+  entry count differs from the link's (`:366-371`) both raise; more than
+  one distinct non-zero `m_persKey` in a link branch raises too
+  (`_check_single_pers_key`, `:464-483`). Plain-integer links (synthetic
+  fixtures, with no `m_persKey`) skip these key checks (`_pers_key`,
+  `:457-461`). (`physlite_jets.yaml:18-19` notes that in practice about 88%
+  of PHYSLITE `GhostTrack` links are null.)
 
 ## Reference
 
 Every name below is exported from `salt/data/__init__.py`'s `__all__`
 (32 names). The third column says what kind of thing it is, since a base
 class, a config dataclass, a constant, a function and a runtime object all
-sit in the same namespace as the ten real `data.modules` entries, and only
-those ten belong under `data.modules` in a config.
+sit in the same namespace as the eleven real `data.modules` entries, and
+only those eleven belong under `data.modules` in a config.
 
 | Class | Role | Legal `data.modules` entry? |
 |---|---|---|
@@ -521,6 +617,7 @@ those ten belong under `data.modules` in a config.
 | `salt.data.RowBlock` | one contiguous sequential read unit, for streaming | no, runtime dataclass |
 | `salt.data.H5StructuredReader` | the structured-H5 reader | **yes** |
 | `salt.data.UprootReader` | the ROOT/uproot reader | **yes** |
+| `salt.data.xAODReader` | ElementLink-dereferencing `UprootReader` for xAOD POOL / DAOD_PHYSLITE | **yes** |
 | `salt.data.MultiSampleReader` | proportionally stratified multi-sample reader | **yes** |
 | `salt.data.InputSamples` | the per-stage file-pattern setup module | **yes** |
 | `salt.data.Features` | `raw.*` to `inputs.*` float32 materialisation | **yes** |
@@ -534,6 +631,7 @@ those ten belong under `data.modules` in a config.
 | `salt.data.GroupConfig` | one `H5StructuredReader` stream's group configuration | no, config dataclass (nested inside `groups:`) |
 | `salt.data.StreamConfig` | the shared truncate/pad configuration for a jagged stream | no, config dataclass |
 | `salt.data.UprootGroupConfig` | one `UprootReader` stream's group configuration | no, config dataclass (nested inside `groups:`) |
+| `salt.data.xAODGroupConfig` | one `xAODReader` stream's group configuration, adding the 5 link/join keys | no, config dataclass (nested inside `groups:`) |
 | `salt.data.SampleConfig` | one `MultiSampleReader` sample's sub-reader configuration | no, config dataclass (nested inside `samples:`) |
 | `salt.data.Cut` | one cut expression string | no, config dataclass |
 | `salt.data.GlobalObjectCuts` | sample-axis row eligibility, evaluated once in `prepare` | no, config dataclass |
