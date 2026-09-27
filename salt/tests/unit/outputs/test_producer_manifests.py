@@ -178,14 +178,26 @@ def test_maskformer_unbound_modules_is_a_named_error():
 
 
 def test_lead_vertex_decorator_names_its_jet_level_scalars():
-    """Each configured jet-level output is one global float ONNX field."""
+    """One global float field per configured output in BOTH TEST and ONNX; FIT/VAL declare
+    nothing; every field is ``nan_ok`` (NaN is a declared semantic, not an error)."""
     node = MFLeadVertexDecorator(
         source="outputs.objects.vertices_class_probs",
         outputs={"lead_vertex_pt": 0, "lead_vertex_mass": 2},
         pt_index=0,
         pv_class_index=0,
     )
-    fields = node.manifest_fields(Mode.ONNX)
-    assert [key for key, _ in fields] == list(node.output_keys)
-    assert [f.resolved_onnx_name for _, f in fields] == ["lead_vertex_pt", "lead_vertex_mass"]
-    assert node.manifest_fields(Mode.TEST) == []
+    onnx_fields = node.manifest_fields(Mode.ONNX)
+    assert [key for key, _ in onnx_fields] == list(node.output_keys)
+    assert [f.resolved_onnx_name for _, f in onnx_fields] == ["lead_vertex_pt", "lead_vertex_mass"]
+    assert all(f.nan_ok for _, f in onnx_fields)
+
+    test_fields = node.manifest_fields(Mode.TEST)
+    assert [key for key, _ in test_fields] == list(node.output_keys)
+    assert [f.h5_name for _, f in test_fields] == ["lead_vertex_pt", "lead_vertex_mass"]
+    assert all(f.onnx_name is None for _, f in test_fields)
+    assert all(f.axis == "global" for _, f in test_fields)
+    assert all(f.final is True for _, f in test_fields)
+    assert all(f.nan_ok is True for _, f in test_fields)
+
+    assert node.manifest_fields(Mode.FIT) == []
+    assert node.manifest_fields(Mode.VAL) == []

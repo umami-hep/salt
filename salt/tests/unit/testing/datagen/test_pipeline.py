@@ -7,6 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
+import yaml
 
 import salt.testing.datagen
 from salt.testing.datagen import RecipeError
@@ -210,7 +211,7 @@ def test_run_is_deterministic():
     "recipe_name",
     [
         "flavour_tagger",
-        "maskformer_truth_hadron",
+        "maskformer_truth_vertex",
         "truth_hadron_regression",
         "flavour_tagger_charged_neutral",
         "lepton_tagger",
@@ -243,26 +244,81 @@ def test_load_pipeline_modules_are_an_ordered_list():
 
 
 def test_maskformer_link_corruption_free(tmp_path):
-    """Every valid track's ftagTruthParentBarcode is in the SAME jet's valid
-    hadron barcodes (or -1), with zero cross-jet leakage.
+    """Every valid tracks_ghost.ftagTrackDecayVertexID is in the SAME jet's
+    valid truth_any.ftagTPDecayVertexID set (or -1), with zero cross-jet
+    leakage.
     """
-    pipe = load_pipeline(str(_RECIPES_DIR / "maskformer_truth_hadron.yaml"))
+    pipe = load_pipeline(str(_RECIPES_DIR / "maskformer_truth_vertex.yaml"))
     pipe.set_output_dir(tmp_path)
     data = pipe.run()
-    had = data["truth_hadrons"]
-    trk = data["tracks"]
-    assert "ftagTruthParentBarcode" in trk.dtype.names
-    assert np.dtype(trk.dtype["ftagTruthParentBarcode"]).kind == "i"  # i4, not f4
+    had = data["truth_any"]
+    trk = data["tracks_ghost"]
+    assert "ftagTrackDecayVertexID" in trk.dtype.names
+    assert np.dtype(trk.dtype["ftagTrackDecayVertexID"]).kind == "i"  # i4, not f4
     n = had.shape[0]
     for i in range(n):
-        valid_bc = had["barcode"][i][had["valid"][i]]
-        valid_bc_set = set(valid_bc.tolist())
-        # no valid hadron carries the -1 fill sentinel as its id
-        assert -1 not in valid_bc_set, f"jet {i}: valid hadron with id -1"
+        valid_id = had["ftagTPDecayVertexID"][i][had["valid"][i]]
+        valid_id_set = set(valid_id.tolist())
+        assert -1 not in valid_id_set, f"jet {i}: valid vertex with id -1"
         tvalid = trk["valid"][i]
-        for pb in trk["ftagTruthParentBarcode"][i][tvalid].tolist():
-            assert pb in valid_bc_set or pb == -1, (
-                f"jet {i}: link {pb} not a same-jet valid hadron barcode nor -1"
+        for pb in trk["ftagTrackDecayVertexID"][i][tvalid].tolist():
+            assert pb in valid_id_set or pb == -1, (
+                f"jet {i}: link {pb} not a same-jet valid vertex id nor -1"
             )
         # invalid track slots are the -1 fill
-        assert np.all(trk["ftagTruthParentBarcode"][i][~tvalid] == -1)
+        assert np.all(trk["ftagTrackDecayVertexID"][i][~tvalid] == -1)
+
+
+def test_vertex_recipe_declares_every_class_map_raw():
+    """The recipe's ftagTPDecayVertexType schema covers every raw value the
+    shipped MaskFormer.yaml class_map merges, and the recipe's inserter
+    max_items matches the config's max_objects (both = 15 slots).
+    """
+    config_path = Path(__file__).parents[4] / "configs" / "MaskFormer.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    mf_targets = config["data"]["modules"]["mf_targets"]["init_args"]
+    class_map = mf_targets["class_map"]
+    # the null key may load as the string "null" or as a Python None; either
+    # way its entry's `raw` (a list here) is picked up by the same loop below.
+    raws: set[int] = set()
+    for entry in class_map.values():
+        raw = entry["raw"]
+        if isinstance(raw, list):
+            raws.update(raw)
+        else:
+            raws.add(raw)
+
+    vertex_fields = yaml.safe_load(
+        (_RECIPES_DIR / "feature_lists" / "vertex_features.yaml").read_text()
+    )
+    type_field = next(f for f in vertex_fields if f["name"] == "ftagTPDecayVertexType")
+    classes = set(type_field["classes"])
+    sample_classes = set(type_field["sample_classes"])
+    assert raws <= classes, f"raws not covered by classes: {raws - classes}"
+    assert raws - {-1} <= sample_classes, (
+        f"raws (excl. -1) not covered by sample_classes: {raws - {-1} - sample_classes}"
+    )
+
+    recipe = yaml.safe_load((_RECIPES_DIR / "maskformer_truth_vertex.yaml").read_text())
+    inserter_init_args = next(
+        m["init_args"]
+        for m in recipe["modules"]
+        if m["class_path"].endswith("TruthHadronInserter")
+    )
+    assert inserter_init_args["max_items"] == mf_targets["max_objects"] == 15
+
+
+def test_vertex_recipe_writes_expected_groups(tmp_path):
+    """The vertex recipe's H5 output carries the jets/tracks_ghost/flows/truth_any
+    groups with the shapes and link/class fields the vertexing config needs.
+    """
+    pipe = load_pipeline(str(_RECIPES_DIR / "maskformer_truth_vertex.yaml"))
+    pipe.set_output_dir(tmp_path)
+    pipe.run()
+    h5 = tmp_path / "maskformer_truth_vertex.h5"
+    with h5py.File(h5, "r") as f:
+        for g in ("jets", "tracks_ghost", "flows", "truth_any"):
+            assert g in f, f"group {g} missing from H5"
+        assert f["truth_any"].shape[1] == 15
+        assert "ftagTrackDecayVertexID" in f["tracks_ghost"].dtype.names
+        assert "ftagTPDecayVertexType" in f["truth_any"].dtype.names

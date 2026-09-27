@@ -1,6 +1,10 @@
-# MaskFormer vertexing tagger: a single `tracks` stream is embedded, encoded,
-# and decoded by a `MaskDecoder` (5 learnable object queries -> b/c/null class
-# + per-track mask), matched against truth hadrons via MaskFormerMatchedLoss.
+# MaskFormer vertexing tagger: 15 learnable object queries -> 14 vertex
+# classes (pv..null) + per-track mask, matched against `truth_any` truth
+# vertices via MaskFormerMatchedLoss. Two constituent streams (tracks +
+# flows) feed the encoder; the decoder attends to the track slice only. A
+# lead-vertex decorator (MFLeadVertexDecorator) picks, per jet, the highest-pT
+# vertex that is neither the PV nor null and exposes its pt/mass to both the
+# eval H5 and the ONNX tuple.
 
 name: MaskFormer
 
@@ -13,10 +17,11 @@ data:
       init_args:
         groups:
           jets: {global_object: true}
-          tracks: {global_object: false}
-          # truth-hadron object group read by MaskFormerTargets to build
-          # object_class + masks
-          truth_hadrons: {global_object: false}
+          tracks: {global_object: false, dataset: tracks_ghost}
+          flows: {global_object: false}
+          # truth-vertex group read by MaskFormerTargets (object_class + masks);
+          # left untruncated so mf_targets' selection owns truncation (no double-truncate).
+          truth_any: {global_object: false}
     features:
       class_path: salt.data.Features
       init_args:
@@ -29,8 +34,8 @@ data:
               dphi,
               deta,
               qOverP,
-              IP3D_signed_d0_significance,
-              IP3D_signed_z0_significance,
+              lifetimeSignedD0Significance,
+              lifetimeSignedZ0SinThetaSignificance,
               phiUncertainty,
               thetaUncertainty,
               qOverPUncertainty,
@@ -44,30 +49,40 @@ data:
               numberOfPixelSplitHits,
               numberOfSCTSharedHits,
             ]
+          flows: [pt, energy, deta, dphi, isCharged]
     labels:
       class_path: salt.data.Labels
       init_args: {dtype_policy: int64-for-int}
     mf_targets:
       class_path: salt.data.MaskFormerTargets
       init_args:
-        object_stream: truth_hadrons
-        object_class: flavour
-        object_id: barcode
+        object_stream: truth_any
+        object_class: ftagTPDecayVertexType
+        object_id: ftagTPDecayVertexID
         constituent_stream: tracks
-        constituent_id: ftagTruthParentBarcode
-        # opts in to object selection (PV-pin + truncate-to-5); the
-        # truth_hadrons reader group is left untruncated above so this
-        # selection owns the truncation, avoiding a double-truncate.
-        # Also == the decoder query bank (declared label M dim).
-        max_objects: 5
-        pv_class: 0 # b-class mapped index (the PV pin)
+        constituent_id: ftagTrackDecayVertexID
+        # opts in to object selection (PV-pin + truncate-to-15, the sole truncation);
+        # also == the decoder query bank (declared label M dim).
+        max_objects: 15
+        pv_class: 0 # PV class mapped index (the PV pin)
         # null class key is quoted "null" — an unquoted `null:` would parse
         # to a Python None key; MaskFormerTargets accepts both but this is
         # explicit. null must be LAST.
         class_map:
-          b: {raw: 5, mapped: 0}
-          c: {raw: 4, mapped: 1}
-          "null": {raw: -1, mapped: 2}
+          pv: {raw: 0, mapped: 0}
+          b: {raw: 1, mapped: 1}
+          c: {raw: 2, mapped: 2}
+          cfromb: {raw: 3, mapped: 3}
+          tau: {raw: 4, mapped: 4}
+          taufromb: {raw: 5, mapped: 5}
+          strange: {raw: 6, mapped: 6}
+          displacedstrange: {raw: [7, 8, 9, 10, 11], mapped: 7}
+          pion: {raw: 12, mapped: 8}
+          matint: {raw: [13, 14], mapped: 9}
+          strangeosc: {raw: 15, mapped: 10}
+          emint: {raw: [17, 18, 19, 20, 21], mapped: 11}
+          other: {raw: [16, 22], mapped: 12}
+          "null": {raw: [-1, 25], mapped: 13}
         regression_targets: [pt, Lxy, deta, dphi, mass]
 
 model:
@@ -80,7 +95,7 @@ model:
         class_path: salt.model.modules.Normaliser
         init_args:
           # norm_dict must be supplied via CLI/override at fit time.
-          streams: [jets, tracks]
+          streams: [jets, tracks, flows]
           global_object: jets
       track_embed:
         class_path: salt.model.modules.StreamEmbed
@@ -89,9 +104,16 @@ model:
           context: [normed.jets]
           out_dim: &embed_dim 256
           dense: {hidden_layers: [256], activation: ReLU}
+      flows_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: flows
+          context: [normed.jets]
+          out_dim: *embed_dim
+          dense: {hidden_layers: [256], activation: ReLU}
       concat:
         class_path: salt.model.modules.Concat
-        init_args: {streams: [tracks]}
+        init_args: {streams: [tracks, flows]}
       encoder:
         class_path: salt.model.modules.TransformerEncoder
         init_args:
@@ -102,20 +124,27 @@ model:
           dense: {activation: ReLU, gated: false}
           num_registers: 1
           drop_registers: true # registers visible to attention, stripped from encoded.seq
+      # the decoder attends to the TRACK slice only — the object masks and
+      # VertexIndex are per-track; flows feed the encoder/pool only.
+      split:
+        class_path: salt.model.modules.Split
+        init_args: {streams: [tracks]}
       mask_decoder:
         class_path: salt.model.modules.MaskDecoder
         init_args:
-          input: encoded.seq # register-free encoder output
+          input: encoded.tracks # track-only slice (Split); reads masks.tracks
           embed_dim: *embed_dim
           # single-sourced via YAML anchor, aliased below on mf_matched_loss —
           # decoder query count and matched-loss dim are one concept and must
           # always agree. Anchors resolve per-document at YAML-load time, so
           # this only holds within this one file; it would not survive being
           # split across stacked configs.
-          num_queries: &num_queries 5
+          num_queries: &num_queries 15
           num_layers: 3
           md: {n_heads: 8, mask_attention: true, bidirectional_ca: true}
-          class_net: {output_size: 3} # b, c, null — null LAST
+          # pv, b, c, cfromb, tau, taufromb, strange, displacedstrange, pion,
+          # matint, strangeosc, emint, other, null — null LAST
+          class_net: {output_size: 14}
           mask_net: {}
       # instance name `regression` so its port is `preds.objects.regression` —
       # the key the matched loss + object writer read.
@@ -136,42 +165,49 @@ model:
           loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
           # scaled targets published in FIT|VAL as a matcher cost term
           publish_targets: true
-          # exposed for the matched loss (FIT|VAL) and the ONNX leading_object
-          # reduce, but NOT TEST — no v2 writer emits per-object regression in
-          # TEST yet, so exposing it there would be an unconsumed dead-pred.
-          expose: [fit, val, onnx]
+          # consumers: matched loss (FIT|VAL), ONNX leading_object reduce, and TEST
+          # (MaskFormerObjects' reordered vertices leaves feed MFLeadVertexDecorator).
+          expose: [fit, val, test, onnx]
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       mf_matched_loss:
         class_path: salt.model.modules.MaskFormerMatchedLoss # FIT|VAL only
         init_args:
-          num_classes: 2 # non-null classes (b, c)
+          num_classes: 13 # non-null classes (14 - 1)
           num_queries: *num_queries # == the decoder query bank M, single-sourced from mask_decoder
-          null_class_weight: 0.5
           # mask_ce (binary cross-entropy) is deliberately used, not mask_focal
-          loss_weights: {object_class_ce: 2.0, mask_ce: 10.0, mask_dice: 2.0, regression: 2.0}
-      # the SINGLE MaskFormer object reconstruction node, serving BOTH modes:
-      # ONNX mints the export leaves outputs.objects.leading_object
-      # (leading-object regression scalars) + outputs.tracks.HadronIndex
-      # (reordered per-constituent index); TEST mints outputs.tracks.HadronIndex
-      # from the RAW masks (the eval-H5 HadronIndex, indices_from_mask + pad->-1).
-      # `index_name: HadronIndex` is the SINGLE source of the index name — the
-      # h5_output object group derives its column from the leaf's terminal
-      # segment and the node's own ONNX manifest names the export output (no
-      # sink-side respelling).
-      # Demand-gated: FIT/VAL prune it; the h5_output object group / OnnxExportSink
-      # pull it into TEST / ONNX respectively. (Instance name kept for ONNX
-      # plan-hash stability — it now serves TEST too.)
-      maskformer_objects_onnx:
+          loss_weights: {object_class_ce: 5.0, mask_ce: 25.0, mask_dice: 10.0, regression: 2.0}
+          # length == num_classes + 1, used as-is (includes the null weight,
+          # last entry); order matches class_map's mapped indices 0..13
+          class_weights:
+            [21.0, 75.0, 115.0, 65.0, 484.0, 1600.0, 43.0, 200.0, 267.0, 100.0, 10000.0, 56.0, 400.0, 2.5]
+      # the single MaskFormer object reconstruction node for both modes. TEST:
+      # outputs.tracks.VertexIndex from the RAW masks (eval-H5 semantics) plus the
+      # reordered vertices_class_probs / vertices_regression leaves mf_lead_vertex
+      # reads. ONNX: leading_object regression scalars + reordered VertexIndex
+      # (same reorder helper). index_name is the sole source of the H5 column and
+      # the ONNX output name. Keep declared BEFORE mf_lead_vertex: ONNX tuple order
+      # follows model.modules declaration order.
+      maskformer_objects:
         class_path: salt.outputs.MaskFormerObjects
         init_args:
           n_reg: 5 # == len(regression.targets)
           regression_task: regression
           stream: objects
           constituent_stream: tracks
-          index_name: HadronIndex # single-source: eval-H5 column + ONNX suffix derive from this
-      split:
-        class_path: salt.model.modules.Split
-        init_args: {streams: [tracks]}
+          index_name: VertexIndex # single-source: eval-H5 column + ONNX suffix derive from this
+      # lead vertex = highest-pT vertex with argmax != PV, argmax != null and
+      # pnull < threshold; NaN when none qualifies (all-null, all-PV, or M == 0).
+      # `outputs` indices are into [pt, Lxy, deta, dphi, mass]. Reaches both the
+      # eval H5 (TEST) and the ONNX tuple.
+      mf_lead_vertex:
+        class_path: salt.outputs.MFLeadVertexDecorator
+        init_args:
+          source: outputs.objects.vertices_class_probs
+          outputs: {lead_vertex_pt: 0, lead_vertex_mass: 4}
+          pt_index: 0
+          pv_class_index: 0
+          pnull_threshold: 0.5
+          jet_stream: jets
       pool:
         class_path: salt.model.modules.GlobalAttentionPooling
         init_args: {input: encoded.seq, out: pooled.global}
@@ -181,16 +217,8 @@ model:
           stream: jets
           input: pooled.global
           label: flavour_label
-          class_names: [bjets, cjets, ujets]
-          dense: {hidden_layers: [128, 64, 32], activation: ReLU}
-      track_origin:
-        class_path: salt.model.modules.tasks.ClassificationTaskModule
-        init_args:
-          stream: tracks
-          context: pooled.global
-          label: ftagTruthOriginLabel
-          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
-          weight: 0.5
+          class_names: [b, c, s, ud, g, tau]
+          weight: 0.1
           dense: {hidden_layers: [128, 64, 32], activation: ReLU}
       loss:
         class_path: salt.model.modules.LossSum
@@ -202,7 +230,7 @@ outputs:
   run_tasks:
     class_path: salt.outputs.RunTaskOutput
     init_args:
-      tasks: [jets_classification, track_origin]
+      tasks: [jets_classification]
   pad_mask:
     class_path: salt.outputs.PadMaskWriter
     init_args: {streams: [tracks]}
@@ -216,32 +244,33 @@ outputs:
   h5_output:
     class_path: salt.outputs.H5OutputSink
     init_args:
-      # the MaskFormer object eval-H5 groups, declared as generic structured
-      # object groups fed from bundle leaves (the sink has no MaskFormer
-      # knowledge): objects [B, M] (raw class probs + truth class_label),
-      # object_masks [B, M, T] (truth mask + raw mask logits), and the tracks
-      # HadronIndex column (from the MaskFormerObjects TEST reconstruction leaf).
+      # MaskFormer eval-H5 object groups, declared as generic structured groups
+      # fed from bundle leaves (the sink has no MaskFormer knowledge).
       object_groups:
         - name: objects
-          shape: [5] # == num_queries M (the decoder query bank)
+          shape: [15] # == num_queries M (the decoder query bank)
           fields:
-            - {leaf: objects.class_probs, suffixes: [pb, pc, pnull], dtype: f4}
+            - {leaf: objects.class_probs,
+               suffixes: [ppv, pb, pc, pcfromb, ptau, ptaufromb, pstrange,
+                          pdisplacedstrange, ppion, pmatint, pstrangeosc, pemint,
+                          pother, pnull],
+               dtype: f4}
             - {leaf: labels.objects.object_class, suffixes: [class_label], dtype: i8,
                prefix: false, kind: label}
         - name: object_masks
-          shape: [5, tracks] # M, then the file constituent (tracks) width
+          shape: [15, tracks] # M, then the file constituent (tracks) width
           fields:
             - {leaf: labels.objects.masks, suffixes: [truth_mask], dtype: i8,
                prefix: false, kind: label}
             - {leaf: objects.masks, suffixes: [mask_logits], dtype: f4, prefix: false}
-        - name: tracks # the reader stream the per-token HadronIndex column rides
-          # single-source: the column suffix defaults to the leaf terminal (HadronIndex)
+        - name: tracks # the reader stream the per-token VertexIndex column rides
+          # column suffix defaults to the leaf terminal (VertexIndex); it lands in the
+          # physical `tracks_ghost` group via the reader's `dataset:` rename.
           fields:
-            - {leaf: outputs.tracks.HadronIndex, dtype: i8}
-  # the ONNX tuple is collected from the producers: run_tasks' tasks name the
-  # jet probabilities + the per-token TrackOrigin index, and
-  # maskformer_objects_onnx names the leading_objects_<target> scalars (one per
-  # `regression.targets` entry) and the int8 per-token HadronIndex.
+            - {leaf: outputs.tracks.VertexIndex, dtype: i8}
+  # ONNX tuple producers: run_tasks -> jet probs; maskformer_objects ->
+  # leading_objects_<target> scalars + int8 per-token VertexIndex;
+  # mf_lead_vertex -> lead_vertex_pt/mass.
   onnx_export:
     class_path: salt.outputs.OnnxExportSink
     init_args:
@@ -252,6 +281,7 @@ outputs:
       inputs:
         - {port: inputs.jets, name: jet_features}
         - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+        - {port: inputs.flows, name: flow_features, sequence: true, dyn_axis: n_flows}
 
 callbacks:
   # consumes matched.objects.* -> keeps the matched loss alive under pruning

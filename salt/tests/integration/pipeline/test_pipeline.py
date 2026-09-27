@@ -406,7 +406,7 @@ FEEDS: dict[str, Feed] = {
     "GN3EPCLV01": ("recipe", "flavour_tagger_global"),
     "GN3X": ("recipe", "flavour_tagger"),
     "hitz": ("recipe", "hits_regression"),
-    "MaskFormer": ("recipe", "maskformer_truth_hadron"),
+    "MaskFormer": ("recipe", "maskformer_truth_vertex"),
     "ttbar_vs_hh4b_event_tagger": ("root", "readers/easyjet_events"),
     "readers/easyjet_flavour": ("root", None),
     "regression/regression": ("dummy", "regression"),
@@ -465,26 +465,24 @@ def _require_extra(config: str) -> None:
     pytest.importorskip(module, reason=f"{config} needs `pip install '{extra}'`")
 
 
-# config_relpath -> the ``class_names`` this row's own flavour_label task
-# ACTUALLY declares, when it differs from the SHARED recipe's default
-# schema attr (pipeline #15651154, item 5: gn2v2-opendata declares
-# [bjets, cjets, ujets, taujets] (open-data label order, taujets INCLUDED),
-# but the "flavour_tagger" recipe's default flags: {} (no inc_taus) produces
-# a 3-class flavour_label attr with no taujets — check_class_names
-# (salt/model/saltmodule.py) then raises ConfigError at fit/eval time
-# (schema-bound legs only; compile+plot passes no schema, so it never saw
-# this). A per-config table, not a blanket recipe/flag change: GN3X ALSO
-# feeds off "flavour_tagger" (see FEEDS) and ALSO declares a class set the
-# recipe's default doesn't produce (9 classes) — GN3X's fit is an EXISTING
-# fixture-declared strict xfail, so fixing this generically for every
-# recipe-fed row risks silently fixing GN3X's root cause too and flipping
-# it to an unexpected PASS (a strict-xfail failure). Metadata-only: the
-# underlying H5 flavour_label INT column is untouched by the override below
-# — the appended class(es) are simply undrawn (count 0), exactly like
-# taujets already is in the write_dummy_file convention this recipe mirrors
-# (jet_features.yaml's own class_names vs. sample_classes split).
+# config_relpath -> the flavour_label ``class_names`` this row ACTUALLY declares,
+# where it differs from its shared recipe's default schema attr; otherwise
+# check_class_names (salt/model/saltmodule.py) raises ConfigError on the
+# schema-bound fit/eval legs (compile+plot passes no schema, so never saw it).
+# E.g. gn2v2-opendata declares [bjets, cjets, ujets, taujets], but
+# "flavour_tagger"'s default flags give 3 classes, no taujets (pipeline
+# #15651154, item 5). Per-config, not a recipe/flag change: GN3X also feeds off
+# "flavour_tagger" with a mismatched 9-class set, and its fit is a strict xfail
+# that a generic fix could flip to an unexpected PASS. Metadata-only: the H5
+# flavour_label INT column is untouched; appended classes are simply undrawn,
+# as taujets already is (jet_features.yaml's class_names vs. sample_classes).
+#
+# MaskFormer (plan 08): declares [b, c, s, ud, g, tau], but its recipe
+# (maskformer_truth_vertex, is_gn3) names the attr's classes ghostsplitbjets, ...
+# (metadata only: the head reads just the class COUNT via check_class_names).
 RECIPE_CLASS_NAMES_OVERRIDE: dict[str, list[str]] = {
     "gn2v2-opendata": ["bjets", "cjets", "ujets", "taujets"],
+    "MaskFormer": ["b", "c", "s", "ud", "g", "tau"],
 }
 
 

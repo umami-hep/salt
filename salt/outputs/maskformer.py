@@ -26,9 +26,7 @@ class MaskFormerObjects(SaltModelModule):
     """MaskFormer object reconstruction node — the single reconstruction path for both modes.
 
     In **ONNX** it runs `get_maskformer_outputs` once inside ``forward`` (the
-    null-suppression + pT reorder + index math) and exposes its products so a
-    downstream `MFLeadVertexDecorator` can read the reordered per-vertex
-    outputs without redoing any of the heavy lifting. Produces:
+    null-suppression + pT reorder + index math). Produces:
 
     - **object_index** (``outputs.<constituent_stream>.<index_name>``, int8
       per-token): the per-constituent owning-object index.
@@ -39,21 +37,27 @@ class MaskFormerObjects(SaltModelModule):
       the reordered (null-suppressed + pT-ordered) per-vertex tensors,
       exposed as intermediate leaves for `MFLeadVertexDecorator`.
 
-    `get_maskformer_outputs` is reused verbatim from ``reduces.py`` (one
-    source of truth). The node declares all three cross-node reads it needs
+    In **TEST** it publishes the ``object_index`` leaf computed from the RAW
+    decoder masks (``indices_from_mask(masks.sigmoid() > 0.5)``, padded
+    constituents set to -1) — the eval-H5 ``HadronIndex`` semantics, byte-
+    unchanged from before — AND the same reordered **vertices_class_probs** /
+    **vertices_regression** leaves ONNX exposes, computed by the SAME
+    `get_maskformer_outputs` call, so `MFLeadVertexDecorator` reads identical
+    per-vertex tensors in either mode (``leading_object`` stays ONNX-only —
+    TEST has no per-jet "leading object" H5 column). `get_maskformer_outputs`
+    is reused verbatim from ``reduces.py`` (one source of truth) in both
+    branches via the private `_reordered` helper, which clones the three
+    object leaves first (the function mutates ``masks``/``regression`` in
+    place), so the write-once bundle is never mutated.
+
+    The node declares all three cross-node reads it needs
     (``objects.class_probs`` / ``objects.masks`` /
     ``preds.<stream>.<reg_task>``) so the demand-closure keeps the upstream
-    decoder + regression task alive in the ONNX plan; all three tensors are
-    cloned before `get_maskformer_outputs` (which mutates ``masks``/
-    ``regression`` in place for null-suppression + pT reorder), so the
-    write-once bundle is never mutated.
+    decoder + regression task alive in both the ONNX and TEST plans.
 
-    In **TEST** it publishes the same ``object_index`` leaf, computed from the
-    RAW decoder masks (``indices_from_mask(masks.sigmoid() > 0.5)``, padded
-    constituents set to -1) — the eval-H5 ``HadronIndex`` semantics. The node is
-    the ONE reconstruction path for both modes: the sink is a dumb terminal
-    that only packs the leaf. Demand-gated (a TEST plan pulls it in only when
-    an object-group field sources ``outputs.<constituent>.<index_name>``); FIT
+    The node is the ONE reconstruction path for both modes: sinks are dumb
+    terminals that only pack the leaves it exposes. Demand-gated (a TEST plan
+    pulls it in only when something reads one of its produced leaves); FIT
     and VAL declare nothing, so the node never enters those plans.
 
     Parameters
@@ -80,10 +84,9 @@ class MaskFormerObjects(SaltModelModule):
         The per-constituent object-index leaf name, by default
         ``"object_index"``.
     n_reg : int
-        The object-regression target count R (the leading-regression output
-        width). The leading leaf is sliced to ``leading_reg[:, :n_reg]`` to
-        reproduce the legacy reduce exactly, including the no-objects/
-        empty-track dummy path. Must match the configured leading-object
+        The object-regression target count R — the manifest/width contract
+        for the leading leaf (genuinely ``[B, R]``, no slicing) and for
+        ``vertices_regression``. Must match the configured leading-object
         ``names`` count.
     constituent_stream : str, optional
         The constituent stream the per-token index leaf is written under and
@@ -167,6 +170,7 @@ class MaskFormerObjects(SaltModelModule):
                     dtype="f4",
                     axis="global",
                     final=True,
+                    nan_ok=True,
                 ),
             )
             for target in self._resolved_targets()
@@ -227,7 +231,8 @@ class MaskFormerObjects(SaltModelModule):
         return targets
 
     def declare_io(self, mode: Mode) -> IO:
-        """Mode-branched: TEST -> raw-mask ``object_index``; ONNX -> the reorder leaves; else empty.
+        """Mode-branched: TEST -> raw-mask index + reordered vertex leaves; ONNX -> the reorder
+        leaves; else empty.
 
         FIT/VAL declare nothing (the node never enters those plans, so their
         plan hashes are unaffected); the ONNX ports are byte-unchanged.
@@ -239,13 +244,26 @@ class MaskFormerObjects(SaltModelModule):
         return IO(requires={}, produces={})
 
     def _test_io(self) -> IO:
-        """TEST: require the RAW masks + constituent pad mask; produce ``object_index`` [B, T]."""
+        """TEST: require the RAW masks + constituent pad mask + the object class_probs/regression
+        (for the shared reorder helper); produce ``object_index`` [B, T] plus the reordered
+        ``vertices_class_probs`` / ``vertices_regression`` leaves.
+        """
         requires = {
             self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
             self.pad_key: TensorSpec(shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST),
+            self.class_probs_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.TEST
+            ),
+            self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
         }
         produces = {
             self.index_key: TensorSpec(shape=None, dtype="int64", kind="data", modes=Mode.TEST),
+            self.vertices_class_probs_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.TEST
+            ),
+            self.vertices_regression_key: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=Mode.TEST
+            ),
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
@@ -287,33 +305,31 @@ class MaskFormerObjects(SaltModelModule):
             self.vertices_regression_key: self.n_reg,
         }
 
-    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """TEST -> raw-mask ``object_index``; ONNX -> ``get_maskformer_outputs`` reorder leaves."""
-        if mode & Mode.TEST:
-            return self._forward_test(b)
+    def _reordered(self, b: Bundle) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Clone the three object leaves and run the shared reorder math.
+
+        `get_maskformer_outputs` mutates ``masks``/``regression`` in place, so
+        the leaves are cloned first — the write-once bundle is never mutated.
+        Both TEST and ONNX call this ONE helper, so they see identical
+        reordered per-vertex tensors.
+        """
         objects = {
             "class_probs": b.get(self.class_probs_key).clone(),
             "masks": b.get(self.masks_key).clone(),
             "regression": b.get(self.reg_key).clone(),
         }
-        leading_reg, indices, vertices_class_probs, vertices_regression = get_maskformer_outputs(
-            objects, apply_reorder=True
-        )
-        # get_maskformer_outputs returns indices=None at L == 0 (n_tracks == 0).
-        # This never happens on the export path (torch.onnx.export always traces
-        # at a fixed L > 0), so this guard folds to a constant-False branch that
-        # emits no ops; it only removes a latent AttributeError for a future
-        # eager TEST-mode wiring of this node.
-        if indices is None:
-            empty_index = torch.zeros(0, dtype=torch.int8)
-        else:
-            empty_index = indices.reshape(-1).char()
-        # leading_reg is [B, R] normally but [1, n_obj] in the no-objects/
-        # empty-track dummy path; slice to [:, :n_reg] to reproduce both paths
-        # exactly (matches the legacy reduce's leading_reg[0, i] for i in range(R)).
+        return get_maskformer_outputs(objects, apply_reorder=True)
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """TEST -> raw-mask ``object_index`` + the reordered vertex leaves; ONNX -> the reorder
+        leaves + the leading-object scalars.
+        """
+        if mode & Mode.TEST:
+            return self._forward_test(b)
+        leading_reg, indices, vertices_class_probs, vertices_regression = self._reordered(b)
         return {
-            self.leading_key: leading_reg[:, : self.n_reg],
-            self.index_key: empty_index,
+            self.leading_key: leading_reg,
+            self.index_key: indices.reshape(-1).char(),
             # the reordered (null-suppressed + pT-ordered) per-vertex outputs — passed
             # through verbatim as get_maskformer_outputs returns them (the decorator
             # does the lead-vertex selection; all heavy lifting is here, cloned above)
@@ -322,19 +338,28 @@ class MaskFormerObjects(SaltModelModule):
         }
 
     def _forward_test(self, b: Bundle) -> dict[str, Tensor]:
-        """The eval-H5 ``HadronIndex`` reconstruction.
+        """The eval-H5 ``HadronIndex`` reconstruction, plus the reordered vertex leaves.
 
-        Per-constituent owning-object index from the RAW decoder masks
-        (``indices_from_mask(sigmoid > 0.5)`` -> -2 where no object claims a
-        constituent), with padded constituents forced to -1. No reordering /
-        null-suppression (that is the ONNX path) — the eval-H5 index is a
-        function of the raw masks.
+        The per-constituent owning-object index comes from the RAW decoder
+        masks (``indices_from_mask(sigmoid > 0.5)`` -> -2 where no object
+        claims a constituent), with padded constituents forced to -1 — no
+        reordering / null-suppression, byte-unchanged from before this node
+        also fed the decorator. The two ``vertices_*`` leaves come from the
+        SAME `_reordered` helper the ONNX path uses, so
+        `MFLeadVertexDecorator` sees identical per-vertex tensors in either
+        mode (``leading_object`` stays ONNX-only: TEST has no per-jet
+        "leading object" H5 column).
         """
         masks = b.get(self.masks_key)  # [B, M, T] raw logits
         pad = b.get(self.pad_key)  # [B, T] bool, True = padded
         idx = indices_from_mask(masks.sigmoid() > 0.5)  # [B, T] int64, -2 = no object
         idx = torch.where(pad, torch.full_like(idx, -1), idx)  # padded constituents -> -1
-        return {self.index_key: idx}
+        _, _, vertices_class_probs, vertices_regression = self._reordered(b)
+        return {
+            self.index_key: idx,
+            self.vertices_class_probs_key: vertices_class_probs,
+            self.vertices_regression_key: vertices_regression,
+        }
 
 
 class MFLeadVertexDecorator(SaltModelModule):
@@ -367,11 +392,11 @@ class MFLeadVertexDecorator(SaltModelModule):
     masked-argmax over an all-``-inf`` pT column, so the trace stays valid
     for every batch shape (no data-dependent control flow).
 
-    Note also: when `MaskFormerObjects`'s ``get_maskformer_outputs`` hits its
-    "no object exceeds the null threshold" dummy path, it returns an all-NaN
-    ``vertices_regression`` while ``vertices_class_probs`` flows through
-    real — so the decorator's qualify mask can pass vertices whose
-    regression is undefined, and the jet-level scalars end up NaN.
+    The node serves both **TEST** (eval-H5 jet-level columns
+    ``{run_name}_{name}``) and **ONNX** (``{model_name}_{name}``) from the
+    same per-vertex leaves `MaskFormerObjects` exposes in either mode — one
+    selection, two sinks. NaN is the declared fill for "no vertex qualifies":
+    an all-null jet, an all-PV jet, or an empty object axis (``M == 0``).
 
     Parameters
     ----------
@@ -474,34 +499,64 @@ class MFLeadVertexDecorator(SaltModelModule):
         return index
 
     def declare_io(self, mode: Mode) -> IO:
-        """Requires the two `MaskFormerObjects` per-vertex leaves; produces jet-level scalars."""
-        del mode
+        """Empty unless TEST or ONNX; else requires the two `MaskFormerObjects` per-vertex
+        leaves and produces the jet-level scalars, gated to ``Mode.TEST | Mode.ONNX`` so a
+        FIT/VAL plan never demands them.
+        """
+        if not (mode & (Mode.TEST | Mode.ONNX)):
+            return IO(requires={}, produces={})
+        gated = Mode.TEST | Mode.ONNX
         requires = {
-            self.source: TensorSpec(shape=None, dtype="float32", kind="data"),
-            self.regression_source: TensorSpec(shape=None, dtype="float32", kind="data"),
+            self.source: TensorSpec(shape=None, dtype="float32", kind="data", modes=gated),
+            self.regression_source: TensorSpec(
+                shape=None, dtype="float32", kind="data", modes=gated
+            ),
         }
         produces = {
-            key: TensorSpec(shape=None, dtype="float32", kind="data") for key in self.output_keys
+            key: TensorSpec(shape=None, dtype="float32", kind="data", modes=gated)
+            for key in self.output_keys
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def manifest_fields(self, mode: Mode) -> list[tuple[str, OutputField]]:
-        """The jet-level scalars' ONNX field manifest — one global float per configured output.
+        """The jet-level scalars' field manifest — one global float per configured output.
 
-        ONNX-ONLY: the lead-vertex decoration is an export capability with no
-        eval-H5 counterpart, so it declares nothing in any other mode. Each
-        field is named after the configured output name (the node names its own
-        leaf once).
+        TEST: ``h5_name`` = the configured output name (the eval-H5 column).
+        ONNX: ``onnx_name`` = the same name. Any other mode: ``[]`` (FIT/VAL
+        never demand these leaves). NaN is a declared semantic for both
+        (null/all-PV/no-object), so every field carries ``nan_ok=True``.
         """
-        if not (mode & Mode.ONNX):
-            return []
-        return [
-            (
-                key,
-                OutputField(h5_name=None, onnx_name=name, dtype="f4", axis="global", final=True),
-            )
-            for key, (name, _index) in zip(self.output_keys, self.outputs_map, strict=True)
-        ]
+        if mode & Mode.TEST:
+            return [
+                (
+                    key,
+                    OutputField(
+                        h5_name=name,
+                        onnx_name=None,
+                        dtype="f4",
+                        axis="global",
+                        final=True,
+                        nan_ok=True,
+                    ),
+                )
+                for key, (name, _index) in zip(self.output_keys, self.outputs_map, strict=True)
+            ]
+        if mode & Mode.ONNX:
+            return [
+                (
+                    key,
+                    OutputField(
+                        h5_name=None,
+                        onnx_name=name,
+                        dtype="f4",
+                        axis="global",
+                        final=True,
+                        nan_ok=True,
+                    ),
+                )
+                for key, (name, _index) in zip(self.output_keys, self.outputs_map, strict=True)
+            ]
+        return []
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Every jet-level output is a single scalar column (width 1)."""

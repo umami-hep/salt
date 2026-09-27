@@ -4,7 +4,7 @@ identical random inputs, swept over every sequence length.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import Collection, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,6 +78,7 @@ def compare_once(
     float_atol: float = 1e-4,
     forbid_zeros: bool = True,
     int8_distinct: MutableMapping[str, set[int]] | None = None,
+    nan_ok: Collection[str] = (),
 ) -> dict[str, float]:
     """Compare eager-adapter vs ONNX outputs for one random case, BY NAME.
 
@@ -102,13 +103,22 @@ def compare_once(
         When given, the distinct values of each int8 ONNX output are
         accumulated into it (per output name) BEFORE the exactness assert,
         by default None.
+    nan_ok : Collection[str], optional
+        Float output names whose NaN is a declared semantic (e.g. a
+        MaskFormer leading-object/lead-vertex scalar for a jet with no
+        qualifying object), by default ``()``. For these the NaN asserts are
+        skipped, `forbid_zeros` is evaluated over the finite entries only,
+        and the comparison is ``equal_nan=True``. Every other float output
+        stays strict (``equal_nan=False``, explicit).
 
     Returns
     -------
     dict[str, float]
-        Max abs diff per float output name. Any mismatch, NaN, or
-        exact-zero float output raises `AssertionError` (from the
-        comparison asserts), naming the output and the failing lengths.
+        Max abs diff per float output name (NaN entries of a `nan_ok`
+        output excluded from the max). Any mismatch, a NaN in a
+        non-`nan_ok` output, or an exact zero (outside a `nan_ok` output's
+        NaN entries) raises `AssertionError` (from the comparison asserts),
+        naming the output and the failing lengths.
     """
     inputs = _draw_inputs(adapter, lengths, gen)
     with torch.no_grad():
@@ -135,22 +145,33 @@ def compare_once(
                 f"onnx={got.tolist()}"
             )
             continue
-        assert not np.isnan(ref_np).any(), f"{name!r}: NaN in torch output at {where}"
-        assert not np.isnan(got).any(), f"{name!r}: NaN in ONNX output at {where}"
+        declared_nan_ok = name in nan_ok
+        if not declared_nan_ok:
+            assert not np.isnan(ref_np).any(), f"{name!r}: NaN in torch output at {where}"
+            assert not np.isnan(got).any(), f"{name!r}: NaN in ONNX output at {where}"
         if forbid_zeros:
-            assert not (ref_np == 0).any(), f"{name!r}: exact zero in torch output at {where}"
-            assert not (got == 0).any(), f"{name!r}: exact zero in ONNX output at {where}"
+            # nan_ok: NaN is the declared semantic, so check zeros on finite entries only.
+            zero_check_ref = ref_np[np.isfinite(ref_np)] if declared_nan_ok else ref_np
+            zero_check_got = got[np.isfinite(got)] if declared_nan_ok else got
+            assert not (zero_check_ref == 0).any(), (
+                f"{name!r}: exact zero in torch output at {where}"
+            )
+            assert not (zero_check_got == 0).any(), (
+                f"{name!r}: exact zero in ONNX output at {where}"
+            )
         np.testing.assert_allclose(
             ref_np,
             got,
             rtol=float_rtol,
             atol=float_atol,
+            equal_nan=declared_nan_ok,
             err_msg=f"torch vs ONNX mismatch for output {name!r} at {where}",
         )
-        # a per-token float output is EMPTY at the L=0 sweep sample (zero-token jet);
-        # np.max over a zero-size array raises, so this is guarded (the diff IS 0.0
-        # when there are no elements to differ).
+        # empty diff (per-token output at the L=0 sweep sample) -> 0.0, since np.max
+        # raises on zero-size; nan_ok NaNs (asserted equal above) are excluded.
         diff = np.abs(ref_np.astype(np.float64) - got.astype(np.float64))
+        if declared_nan_ok:
+            diff = diff[~np.isnan(diff)]
         worst[name] = 0.0 if diff.size == 0 else float(np.max(diff))
     return worst
 
@@ -173,7 +194,11 @@ def check_onnx(
     By default every sequence stream is swept TOGETHER over
     ``L = 0..max_length-1`` (including the zero-token edge case) with
     `trials` random draws each. `lengths_grid` overrides the sweep with
-    explicit per-stream length combinations.
+    explicit per-stream length combinations. The adapter's own
+    `OnnxAdapter.nan_ok_outputs` (empty when the adapter declares none) is
+    threaded into every `compare_once` call, so declared-NaN outputs (e.g.
+    MaskFormer leading-object/lead-vertex scalars) are compared
+    ``equal_nan`` instead of failing the NaN canary.
 
     Returns
     -------
@@ -201,6 +226,7 @@ def check_onnx(
     gen = torch.Generator().manual_seed(seed)
     result = CheckResult(passed=True, n_cases=0)
     distinct: dict[str, set[int]] = {}
+    nan_ok = frozenset(getattr(adapter, "nan_ok_outputs", ()))
     for lengths in cases:
         for _ in range(trials):
             result.n_cases += 1
@@ -214,6 +240,7 @@ def check_onnx(
                     float_atol=float_atol,
                     forbid_zeros=forbid_zeros,
                     int8_distinct=distinct,
+                    nan_ok=nan_ok,
                 )
             except AssertionError as err:
                 if fail_fast:

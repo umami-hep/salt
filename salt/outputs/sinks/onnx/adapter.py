@@ -116,6 +116,7 @@ class OnnxAdapter(nn.Module):
                 strict=True,
             )
         ]
+        self._nan_ok_outputs: frozenset[str] = frozenset(self._export_sink.nan_ok_outputs())
         # every module recursively receives set_export_mode() — e.g. the encoder's
         # attention switch to torch-math — required for Athena agreement
         self.set_export_mode()
@@ -139,6 +140,11 @@ class OnnxAdapter(nn.Module):
     def output_dtypes(self) -> list[str]:
         """Per-output dtypes, aligned with `output_names`."""
         return [dtype for _, dtype, _ in self._ordered]
+
+    @property
+    def nan_ok_outputs(self) -> frozenset[str]:
+        """The output names whose NaN is a declared semantic, compared equal_nan by the checker."""
+        return self._nan_ok_outputs
 
     @property
     def dynamic_axes(self) -> dict[str, dict[int, str]]:

@@ -1,0 +1,20 @@
+# Truth-vertex object features for the vertexing MaskFormer recipe.
+# ftagTPDecayVertexID is the link target of tracks_ghost.ftagTrackDecayVertexID.
+# ftagTPDecayVertexType `classes` cover every raw in MaskFormer.yaml's
+# mf_targets.class_map (all list-raw merges and both null raws); `sample_classes`
+# draws all but -1, the invalid_fill for pad slots (25, the other null raw, IS drawn).
+# No NCharged/NNeutral/SimpleVertexType/ParentID/PVDistance: no config variable reads them.
+- { name: pt,   type: distribution, dtype: f4, dist: lognormal }
+- { name: Lxy,  type: distribution, dtype: f4 }
+- { name: deta, type: distribution, dtype: f4 }
+- { name: dphi, type: distribution, dtype: f4 }
+- { name: mass, type: distribution, dtype: f4, dist: lognormal }
+- { name: ftagTPDecayVertexID, type: id, dtype: i4, range: [0, 10000], scope: jet, unique: true }
+- name: ftagTPDecayVertexType
+  type: label
+  dtype: i4
+  classes:
+    [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25]
+  sample_classes:
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25]
+  invalid_fill: -1

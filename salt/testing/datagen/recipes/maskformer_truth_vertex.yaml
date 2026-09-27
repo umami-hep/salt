@@ -1,0 +1,42 @@
+# maskformer_truth_vertex -- the vertexing MaskFormer's feed. Links
+# truth_any.ftagTPDecayVertexID <-> tracks_ghost.ftagTrackDecayVertexID (the
+# inserter owns both sides). The generator draws the PV class (raw 0)
+# independently per slot, so a jet may hold 0 or >1 raw-0 objects;
+# MaskFormerTargets pins all of them first -- fine for a lifecycle smoke
+# fixture, not a physical requirement. The -1 invalid fill on pad slots maps
+# onto the config's null class (class_map "null": {raw: [-1, 25], ...}).
+seed: 42
+n_samples: 1000
+flags: { is_gn3: true }
+modules:
+  - class_path: salt.testing.datagen.modules.Jets
+    init_args:
+      fields: jet_features.yaml
+  - class_path: salt.testing.datagen.modules.Tracks
+    init_args:
+      name: tracks_ghost
+      max_items: 40
+      min_valid: 1
+      fields: track_features.yaml
+  - class_path: salt.testing.datagen.modules.Flows
+    init_args:
+      max_items: 40
+      fields: flow_features.yaml
+  - class_path: salt.testing.datagen.modules.TruthHadronInserter
+    init_args:
+      hadron_name: truth_any
+      track_name: tracks_ghost
+      max_items: 15
+      min_valid: 1
+      link_field: ftagTrackDecayVertexID
+      references: truth_any.ftagTPDecayVertexID
+      required_match: false
+      unmatched_fraction: 0.0
+      unmatched_value: -1
+      hadron_fields: vertex_features.yaml
+  - class_path: salt.testing.datagen.modules.H5Writer
+    init_args: { path: "${OUTPUT_DIR}/maskformer_truth_vertex.h5" }
+  - class_path: salt.testing.datagen.modules.NormWriter
+    init_args: { path: "${OUTPUT_DIR}/norm_dict.yaml" }
+  - class_path: salt.testing.datagen.modules.ClassDictWriter
+    init_args: { path: "${OUTPUT_DIR}/class_dict.yaml" }

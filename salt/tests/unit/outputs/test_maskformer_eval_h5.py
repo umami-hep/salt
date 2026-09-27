@@ -117,10 +117,20 @@ class TestMaskFormerObjectsTestMode:
         assert np.array_equal(idx.numpy(), v1)
         assert (idx == -1).any() and (idx == -2).any()  # padded + no-object sentinels
 
-    def test_declare_io_test_produces_only_object_index(self):
+    def test_declare_io_test_produces_index_and_vertices(self):
+        """TEST also produces the reordered per-vertex leaves the decorator reads."""
         io = _node().declare_io(Mode.TEST)
-        assert list(flatten_spec(io.produces)) == ["outputs.tracks.object_index"]
-        assert set(flatten_spec(io.requires)) == {"objects.masks", "masks.tracks"}
+        assert set(flatten_spec(io.produces)) == {
+            "outputs.tracks.object_index",
+            "outputs.objects.vertices_class_probs",
+            "outputs.objects.vertices_regression",
+        }
+        assert set(flatten_spec(io.requires)) == {
+            "objects.masks",
+            "masks.tracks",
+            "objects.class_probs",
+            "preds.objects.regression",
+        }
 
     def test_declare_io_fit_val_declare_nothing(self):
         for mode in (Mode.FIT, Mode.VAL):

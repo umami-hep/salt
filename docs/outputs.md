@@ -84,7 +84,7 @@ group's columns are, in this order:
 | task outputs | `RunTaskOutput` → each task's `get_output()` | `GN2_pb`, `GN2_pc`, `GN2_pu` |
 | target labels | the same tasks, `write_targets` on (the default) | `target_jets_classification` |
 | pad mask | `PadMaskWriter` | `mask` (bool, `True` = padded) |
-| object groups | the H5 sink's `object_groups` (MaskFormer) | the `objects` group, `HadronIndex` |
+| object groups | the H5 sink's `object_groups` (MaskFormer) | the `objects` group, `VertexIndex` |
 
 Per-token columns (anything on a sequence stream like `tracks`) are zero-padded
 back out to the *source file's* sequence length, so the eval file lines up
@@ -103,7 +103,7 @@ Every eval column name is built from **one** declaration, so the eval file and
 the ONNX outputs can never drift apart.
 
 A task's `get_output()` returns `OutputField`s. Each field declares a bare
-logical **suffix** — `pb`, `pc`, `pu`, `VertexIndex`, `HadronIndex` — and
+logical **suffix** — `pb`, `pc`, `pu`, `VertexIndex` — and
 nothing else about naming. The prefix is added by whoever is writing:
 
 | Destination | Column / output name | Prefix source |
@@ -583,6 +583,16 @@ your own. Either way it goes in the `outputs:` section, and the command leaves
 it alone — the implicit wiring only injects a sink type that is not already
 present:
 
+!!! info "What the shipped `MaskFormer.yaml` is"
+
+    The shipped config is the 15-slot / 14-class vertexing tagger: it runs
+    over `tracks` + `flows`, matches predicted objects against `truth_any`
+    vertices, and adds `salt.outputs.MFLeadVertexDecorator` to produce
+    jet-level `lead_vertex_pt` / `lead_vertex_mass` columns in both the eval
+    H5 and the ONNX tuple. The earlier 5-slot b/c/null truth-hadron example
+    is still readable at
+    `git show 8f59c5752875e60b516681bb74aa825047ae2938:salt/configs/MaskFormer.yaml`.
+
 ```yaml
 outputs:
   run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
@@ -676,8 +686,10 @@ Most sinks want the same columns as the eval H5. Three pieces give you that:
   `(leaf_key, OutputField)` pairs in column order. `leaf_key` is the
   `outputs.<stream>.<task>.<col>` key you pass to `bundle.get()`; the
   `OutputField` carries `h5_name` (the bare suffix, `None` for an ONNX-only
-  field), `dtype`, `axis` and `prefix` (False for label columns, which are not
-  run-name prefixed).
+  field), `dtype`, `axis`, `prefix` (False for label columns, which are not
+  run-name prefixed), and `nan_ok` (declares NaN a legitimate value for this
+  field — `check_onnx` compares such outputs `equal_nan` instead of rejecting
+  any NaN).
 
 The flat column name is then `f"{run_name}_{field.h5_name}"` when
 `field.prefix` else `field.h5_name`, with `run_name` read from `ctx.run_name`
