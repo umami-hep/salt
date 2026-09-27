@@ -72,15 +72,14 @@ class MaskFormerTargets(Processor):
         Constituent identity field tested against ``object_id`` to build
         masks (e.g. ``ftagTruthParentBarcode``).
     class_map : Mapping[str, Mapping[str, Any]]
-        ``{name: {raw: int | list[int], mapped: int, weight?: float}}``.
+        ``{name: {raw: int | list[int], mapped: int}}``.
         MUST contain a ``null`` entry mapped LAST
         (``mapped == len(class_map) - 1``), and the ``mapped`` values MUST
         be exactly ``range(len(class_map))``. jsonargparse may parse the
         YAML ``null:`` key as a Python ``None`` — both spellings are
         accepted, normalised to ``"null"``. ``raw`` may be a single int
         (the common case) or a list/tuple of ints that all map to the same
-        ``mapped`` index — a class *merge*. An optional scalar ``weight``
-        per class feeds :attr:`object_weights` (default ``1.0``).
+        ``mapped`` index — a class *merge*.
     object_stream : str
         File group holding the object features (e.g. ``truth_hadrons``).
         The reader serves it as ``raw.<object_stream>``.
@@ -114,21 +113,14 @@ class MaskFormerTargets(Processor):
     lxy_field : str, optional
         Name of the Lxy field used by ``max_lxy_mm``. Default ``"Lxy"``.
 
-    Attributes
-    ----------
-    object_weights : list[float]
-        Per-class loss weights ordered by mapped index, derived from each
-        class's optional ``weight``.
-
     Raises
     ------
     ConfigError
         On a missing ``null`` class, a null not mapped last, ``mapped``
         values that are not ``range(len(class_map))``, a raw value shared
-        across mapped indices, a non-scalar class weight, a duplicate
-        regression target, a non-positive ``max_objects``,
-        an out-of-range ``pv_class``, or an ``_ObjectCut`` with neither min
-        nor max.
+        across mapped indices, a duplicate regression target, a
+        non-positive ``max_objects``, an out-of-range ``pv_class``, or an
+        ``_ObjectCut`` with neither min nor max.
     """
 
     def __init__(
@@ -136,7 +128,7 @@ class MaskFormerTargets(Processor):
         object_class: str,
         object_id: str,
         constituent_id: str,
-        class_map: Mapping[str, Mapping[str, int]],
+        class_map: Mapping[str, Mapping[str, Any]],
         object_stream: str,
         constituent_stream: str,
         regression_targets: Sequence[str] | None = None,
@@ -155,8 +147,6 @@ class MaskFormerTargets(Processor):
         self.object_stream = str(object_stream)
         self.constituent_stream = str(constituent_stream)
         self._raw_to_mapped = self._checked_class_map(class_map)
-        # per-class loss weights ordered by mapped index (default 1.0 per class)
-        self.object_weights: list[float] = self._class_weights(class_map)
         self.regression_targets: tuple[str, ...] = tuple(regression_targets or ())
         if len(set(self.regression_targets)) != len(self.regression_targets):
             raise ConfigError(
@@ -269,25 +259,6 @@ class MaskFormerTargets(Processor):
                 f"must be exactly range({n})"
             )
         return raw_to_mapped
-
-    @staticmethod
-    def _class_weights(class_map: Mapping[str, Mapping[str, Any]]) -> list[float]:
-        """Per-class loss weights ordered by mapped index; each class carries an optional
-        scalar ``weight`` (default ``1.0``), ordered so the list index aligns with the
-        class index the loss expects.
-        """
-        names = {
-            ("null" if name is None else str(name)): dict(spec) for name, spec in class_map.items()
-        }
-        by_mapped: dict[int, float] = {}
-        for name, spec in names.items():
-            w = spec.get("weight", 1.0)
-            if isinstance(w, (list, tuple)):
-                raise ConfigError(
-                    f"MaskFormerTargets: class_map[{name!r}] 'weight' must be a scalar, got {w!r}"
-                )
-            by_mapped[int(spec["mapped"])] = float(w)
-        return [by_mapped[i] for i in range(len(by_mapped))]
 
     @property
     def null_index(self) -> int:

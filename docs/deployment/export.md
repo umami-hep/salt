@@ -100,7 +100,12 @@ minting `outputs.*` leaves declares its own names and dtypes through
 `manifest_fields(mode)`, and the sink collects them. `ClassProbs` inherits
 `pb`/`pc`/`pu` from its source task, `Combination` names itself, and
 `MaskFormerObjects` derives `leading_objects_<target>` from the regression
-task's `targets`. Each suffix is prefixed with the model name — `GN2v2_pb`,
+task's `targets`, and `MFLeadVertexDecorator` names its jet-level
+`lead_vertex_<x>` scalars from its `outputs:` map (`MFv2_lead_vertex_pt`,
+`MFv2_lead_vertex_mass`). Both producers declare their fields `nan_ok`: a jet
+with no qualifying object emits NaN by design, so `check_onnx` compares those
+outputs with `equal_nan` and keeps every other output strictly NaN-free. Each
+suffix is prefixed with the model name — `GN2v2_pb`,
 `GN2v2_pc`, `GN2v2_pu`.
 
 If a config declares no sink at all, `salt export` wires an `OnnxExportSink`

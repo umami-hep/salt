@@ -93,29 +93,38 @@ def indices_from_mask(mask: BoolTensor, noindex: int = -2) -> Tensor:
     ------
     ValueError
         If ``mask`` is not 2D or 3D.
+
+    Notes
+    -----
+    Trace-safe: no data-dependent Python control flow, so this is safe under
+    ``torch.onnx.export``. A column claimed by several objects gets the highest
+    claiming object index.
     """
     mask = torch.as_tensor(mask)
-    kwargs = {"dtype": torch.long, "device": mask.device}
-    if mask.ndim == 2:
-        indices = torch.ones(mask.shape[-1], **kwargs) * noindex
-        nonzero_idx = torch.where(mask)
-        indices[nonzero_idx[1]] = nonzero_idx[0]
-    elif mask.ndim == 3:
-        indices = torch.ones((mask.shape[0], mask.shape[-1]), **kwargs) * noindex
-        nonzero_idx = torch.where(mask)
-        indices[nonzero_idx[0], nonzero_idx[2]] = nonzero_idx[1]
-    else:
+    if mask.ndim not in {2, 3}:
         raise ValueError("mask must be 2D for single sample or 3D for batch")
-
-    idx_exist = indices >= 0
-    minval = torch.min(indices[idx_exist]).item() if idx_exist.any() else 0
-
-    neg_indices = torch.where(indices < 0)
-    # ensure indices start from 0
-    indices[idx_exist] -= minval
-    indices[neg_indices] = noindex
-
-    return indices
+    # owning object per column = highest claiming object index k (== the previous
+    # nonzero/index_put last-write-wins), via a reduction instead of a scatter with
+    # duplicate indices (undefined in ONNX ScatterND)
+    k = torch.arange(mask.shape[-2], dtype=torch.long, device=mask.device).unsqueeze(-1)
+    claimed = torch.where(mask, k, torch.full_like(k, -1))  # [..., K, L]
+    # append one unclaimed (-1) column along L so the reductions below never see an
+    # empty input when L == 0 (onnxruntime mis-shapes ReduceMax on empty data); it is
+    # sliced off after the amax. Built from k (never empty along L), not from claimed.
+    pad_col = torch.full_like(k, -1).expand(*claimed.shape[:-1], 1)  # [..., K, 1]
+    claimed = torch.cat([claimed, pad_col], dim=-1)  # [..., K, L + 1]
+    # pad one all -1 row on the object axis so amax is defined when K == 0
+    claimed = torch.nn.functional.pad(claimed, (0, 0, 1, 0), value=-1)
+    indices = claimed.amax(dim=-2)[..., :-1]  # [L] or [B, L]; -1 = unclaimed (drop pad column)
+    # rebase so claimed indices start from 0 (batch-global min), as a tensor op so
+    # torch.onnx.export does not bake the trace sample's min in as a constant
+    exists = indices >= 0
+    sentinel = torch.iinfo(torch.long).max
+    masked = torch.where(exists, indices, torch.full_like(indices, sentinel))
+    flat = torch.cat([masked.reshape(-1), masked.new_full((1,), sentinel)])
+    minval = flat.min()
+    minval = torch.where(minval == sentinel, torch.zeros_like(minval), minval)
+    return torch.where(exists, indices - minval, torch.full_like(indices, noindex))
 
 
 def sanitise_mask(

@@ -126,7 +126,11 @@ def test_maskformer_carries_the_contract_on_the_sink():
     assert "export" not in raw
     init_args = raw["outputs"]["onnx_export"]["init_args"]
     assert init_args["model_name"] == "MFv2"
-    assert [entry["port"] for entry in init_args["inputs"]] == ["inputs.jets", "inputs.tracks"]
+    assert [entry["port"] for entry in init_args["inputs"]] == [
+        "inputs.jets",
+        "inputs.tracks",
+        "inputs.flows",
+    ]
 
 
 def test_gn2v2_opendata_carries_the_contract_on_the_sink():
@@ -182,6 +186,22 @@ def maskformer_cfg(tmp_path_factory):
     if "mass" not in jets:
         idx = len(jets)
         jets["mass"] = {"mean": round(0.1 * (idx + 1), 6), "std": round(1.0 + 0.05 * (idx + 1), 6)}
+    # this config's lifetimeSigned* track vars (replacing the fixture's IP3D_signed_*
+    # pair) and flows stream are absent from the shared fixture; synthesize them like
+    # jets.mass (load_config/compile_plan's Normaliser requires every declared var).
+    tracks = nd.setdefault("tracks", {})
+    for name in ("lifetimeSignedD0Significance", "lifetimeSignedZ0SinThetaSignificance"):
+        if name not in tracks:
+            idx = len(tracks)
+            tracks[name] = {
+                "mean": round(0.1 * (idx + 1), 6),
+                "std": round(1.0 + 0.05 * (idx + 1), 6),
+            }
+    flows = nd.setdefault("flows", {})
+    for i, name in enumerate(["pt", "energy", "deta", "dphi", "isCharged"]):
+        flows.setdefault(
+            name, {"mean": round(0.1 * (i + 1), 6), "std": round(1.0 + 0.05 * (i + 1), 6)}
+        )
     with open(nd_path, "w") as fh:
         yaml.dump(nd, fh, sort_keys=False)
     return load_config(_MASKFORMER, [f"model.modules.norm.init_args.norm_dict={nd_path}"])
@@ -194,6 +214,14 @@ def test_maskformer_resolves_its_contract_from_the_sink(maskformer_cfg):
     assert isinstance(sink, OnnxExportSink)
     resolved = sink.export_config("MaskFormer")
     assert resolved.model_name == "MFv2"
-    assert [entry.port for entry in resolved.inputs] == ["inputs.jets", "inputs.tracks"]
-    assert [entry.name for entry in resolved.inputs] == ["jet_features", "track_features"]
-    assert [entry.dyn_axis for entry in resolved.inputs] == [None, "n_tracks"]
+    assert [entry.port for entry in resolved.inputs] == [
+        "inputs.jets",
+        "inputs.tracks",
+        "inputs.flows",
+    ]
+    assert [entry.name for entry in resolved.inputs] == [
+        "jet_features",
+        "track_features",
+        "flow_features",
+    ]
+    assert [entry.dyn_axis for entry in resolved.inputs] == [None, "n_tracks", "n_flows"]

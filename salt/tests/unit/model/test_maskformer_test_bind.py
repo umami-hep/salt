@@ -1,4 +1,8 @@
-"""Regression guard: the MaskFormer TEST-mode bind must not require the regression width."""
+"""MaskFormer TEST-mode bind: the decorator chain now genuinely consumes
+`preds.objects.regression` in TEST (MaskFormerObjects -> MFLeadVertexDecorator),
+so the TEST plan carries the width and binds it — unlike the old 5-slot hadron
+example, where TEST had no consumer for it at all.
+"""
 
 from __future__ import annotations
 
@@ -36,15 +40,20 @@ def _compile(mode: Mode):
 
 
 class TestMaskFormerTestModeBind:
-    """TEST-mode bind must succeed without the regression width; FIT-mode binds it."""
+    """TEST-mode bind resolves the regression width (the decorator chain consumes it);
+    FIT+VAL bind the same width via the matched-loss/matcher path.
+    """
 
-    def test_test_mode_bind_succeeds_without_regression_width(self):
-        """``SaltModule.setup('test')`` shape: TEST plan alone -> bind_all must not raise."""
+    def test_test_mode_bind_resolves_regression_width(self):
+        """``SaltModule.setup('test')`` shape: TEST plan alone -> bind_all must not raise.
+
+        Unlike the old 5-slot hadron example (no TEST consumer), the vertexing
+        config's TEST plan pulls `preds.objects.regression` in through
+        MaskFormerObjects -> MFLeadVertexDecorator, so the width IS present.
+        """
         cfg, test_plan = _compile(Mode.TEST)
         schema = resolve_bind_schema([test_plan])
-        # the key is genuinely absent in TEST (the regression head opts out of TEST)
-        assert _REG_PRED_KEY not in schema.widths
-        # the fix: binding the model modules against the TEST-only schema must succeed
+        assert schema.widths.get(_REG_PRED_KEY) == 5
         bind_all(cfg.model_modules, schema)
 
     def test_fit_mode_binds_regression_width(self):
@@ -55,6 +64,19 @@ class TestMaskFormerTestModeBind:
         assert schema.widths.get(_REG_PRED_KEY) == 5
         assert schema.widths.get(_REG_TGT_KEY) == 5
         bind_all(cfg_fit.model_modules, schema)
+
+    def test_test_plan_contains_decorator_chain(self):
+        """TEST wires the full object -> decorator chain; FIT/VAL wire neither node."""
+        _, test_plan = _compile(Mode.TEST)
+        assert {"maskformer_objects", "mf_lead_vertex", "regression"} <= set(
+            test_plan.module_names
+        )
+        _, fit_plan = _compile(Mode.FIT)
+        _, val_plan = _compile(Mode.VAL)
+        for plan in (fit_plan, val_plan):
+            names = set(plan.module_names)
+            assert "maskformer_objects" not in names
+            assert "mf_lead_vertex" not in names
 
 
 class TestMaskFormerMatchedLossBindGuard:

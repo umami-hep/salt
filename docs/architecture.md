@@ -72,6 +72,11 @@ truth for the v1 reference. Git history is the archive.
 | v1 ↔ v2 numerical parity | `29c67a1` (`29c67a186f01`) | this repo — `git checkout 29c67a1` |
 | v2 MaskFormer ↔ upstream | `6570e85` | upstream salt — see checkout below |
 
+The `6570e85` pin is a CODE-path parity reference for the MaskFormer modules;
+the shipped `salt/configs/MaskFormer.yaml` diverged from upstream's 5-slot
+truth-hadron example at this change (it is now the 15-slot / 14-class
+vertexing configuration), which does not affect the code-path comparison.
+
 The upstream MaskFormer equivalence closes at the upstream pin. To
 reproduce the comparison:
 

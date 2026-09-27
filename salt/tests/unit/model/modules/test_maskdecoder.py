@@ -11,6 +11,7 @@ from salt.graph import (
     Executor,
     Mode,
     flatten_spec,
+    sym_dim,
 )
 from salt.model.modules import (
     MaskDecoder,
@@ -115,6 +116,36 @@ class TestMaskDecoder:
         assert produces["objects.class_logits"].shape[-1] == 3
         # num_classes is C - 1 (last class = null)
         assert md.num_classes == 2
+        # default input (encoded.seq) pads via the whole-sequence key
+        assert md.pad_key == "seq.mask"
+
+    def test_split_slice_input_uses_stream_pad_key(self):
+        # a Split-slice input pads via masks.tracks, not seq.mask, so masks span
+        # only the tracks stream even when other streams are concatenated upstream.
+        md = MaskDecoder(
+            embed_dim=16,
+            num_queries=5,
+            num_layers=2,
+            class_net={"output_size": 3},
+            md={"n_heads": 2, "mask_attention": True, "bidirectional_ca": True},
+            input="encoded.tracks",
+        )
+        md.name = "mask_decoder"
+        assert md.pad_key == "masks.tracks"
+
+        io = md.declare_io(Mode.FIT)
+        req = flatten_spec(io.requires)
+        assert set(req) == {"encoded.tracks", "masks.tracks"}
+        produces = flatten_spec(io.produces)
+        assert produces["objects.masks"].shape[-1] == req["encoded.tracks"].shape[1]
+        assert req["encoded.tracks"].shape[1] == sym_dim("T", "tracks")
+
+        b = Bundle()
+        b.set("encoded.tracks", torch.randn(2, 7, 16))
+        b.set("masks.tracks", torch.zeros(2, 7, dtype=torch.bool))
+        out = md(b, Mode.TEST)
+        assert out["objects.masks"].shape == (2, 5, 7)
+        assert out["objects.class_probs"].shape == (2, 5, 3)
 
     def test_embed_dim_mismatch_at_bind_raises(self, norm_paths):
         # the fixture's encoder produces a 16-wide encoded.seq; a decoder declaring

@@ -56,6 +56,13 @@ class MaskDecoder(SaltModelModule):
     `MaskFormerMatchedLoss`. ``num_classes`` is ``class_net.output_size - 1`` (the last
     class is the "null"/no-object category); ``output_size == 1`` is a binary special
     case that sigmoid-expands to a 2-column ``class_probs``.
+
+    ``input`` may name either the full concatenated encoder output (``encoded.seq``) or
+    a single-stream `Split` slice (``encoded.<stream>``). When a config concatenates
+    several streams (e.g. ``tracks`` + ``flows``) but the object masks / matched
+    per-token index must span only ONE constituent stream, point ``input`` at that
+    stream's slice — the pad mask is derived from the same stream so its length always
+    matches the input width.
     """
 
     def __init__(
@@ -91,7 +98,10 @@ class MaskDecoder(SaltModelModule):
             ``Dense`` config for the mask head (queries -> mask tokens). Defaults
             to a plain ``Dense(embed_dim, embed_dim)``; ``input_size`` is forbidden.
         input : str, optional
-            The encoded-sequence key, by default ``encoded.seq``.
+            The encoded-sequence key, by default ``encoded.seq``. Either the full
+            concatenated ``encoded.seq`` or a `Split` slice ``encoded.<stream>`` — the
+            latter restricts the masks / attention to that one constituent stream when
+            the encoder concatenates several (see class docstring).
         out_stream : str, optional
             The produced object stream name, by default ``objects``.
 
@@ -120,7 +130,7 @@ class MaskDecoder(SaltModelModule):
         if n_classes is None or n_classes < 1:
             raise ConfigError(
                 "MaskDecoder: class_net.output_size is required and >= 1 (the object class "
-                "count C, last class = null; v1 maskformer.py:48-49, MaskFormer.yaml:49)"
+                "count C, last class = null; v1 maskformer.py:48-49)"
             )
         mask_cfg = dict(mask_net or {})
         if "input_size" in mask_cfg:
@@ -130,8 +140,8 @@ class MaskDecoder(SaltModelModule):
         md_cfg = dict(md or {})
         if "n_heads" not in md_cfg:
             raise ConfigError(
-                "MaskDecoder: md config must contain 'n_heads' (the per-layer attention head "
-                "count; v1 MaskDecoderLayer, maskformer.py:375-382, MaskFormer.yaml:43)"
+                "MaskDecoder: md.n_heads is required (the per-layer attention head count; "
+                "v1 MaskDecoderLayer, maskformer.py:375-382)"
             )
 
         self.embed_dim = embed_dim
@@ -139,6 +149,8 @@ class MaskDecoder(SaltModelModule):
         self.num_classes = n_classes - 1  # last class is the null/no-object category
         self.input_key = input
         self.out_stream = out_stream
+        stream = self._input_stream()
+        self.pad_key: str = "seq.mask" if stream == "seq" else f"masks.{stream}"
 
         self.inital_q = nn.Parameter(torch.empty((num_queries, embed_dim)))
         nn.init.normal_(self.inital_q)
@@ -161,7 +173,10 @@ class MaskDecoder(SaltModelModule):
         return parts[1] if len(parts) > 1 else parts[0]
 
     def declare_io(self, mode: Mode) -> IO:
-        """Declare ``input`` + ``seq.mask`` -> the four ``objects.*`` keys (all modes)."""
+        """Declare `input` + its pad mask (`seq.mask` for the concatenated
+        `encoded.seq`, `masks.<stream>` for a `Split` slice `encoded.<stream>`) ->
+        the four objects.* keys (all modes).
+        """
         del mode
         stream = self._input_stream()
         tok = _stream_len(stream)
@@ -170,7 +185,7 @@ class MaskDecoder(SaltModelModule):
         return IO(
             requires=unflatten_spec({
                 self.input_key: TensorSpec(shape=("B", tok, emb), dtype="float32"),
-                "seq.mask": TensorSpec(shape=("B", tok), dtype="bool", kind="pad_mask"),
+                self.pad_key: TensorSpec(shape=("B", tok), dtype="bool", kind="pad_mask"),
             }),
             produces=unflatten_spec({
                 f"{self.out_stream}.embed": TensorSpec(
@@ -220,7 +235,7 @@ class MaskDecoder(SaltModelModule):
         """Refine the queries against the encoded sequence; produce the object predictions."""
         del mode
         x = b.get(self.input_key)
-        pad_mask = b.get("seq.mask")
+        pad_mask = b.get(self.pad_key)
 
         q = self.norm1(self.inital_q.expand(x.shape[0], -1, -1))
         x = self.norm2(x)

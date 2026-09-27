@@ -44,50 +44,49 @@ def get_maskformer_outputs(
     Returns
     -------
     leading_regression : torch.Tensor
-        ``[B, R]`` for the leading object (after optional reordering).
-    obj_indices : torch.Tensor | None
-        Sparse mask indices per object, ``[B, M]``, values in ``[0, L)`` (``NaN``
-        when undefined); ``None`` when there are no tracks (``L == 0``).
+        ``[B, R]`` for the leading object (after optional reordering); all
+        ``NaN`` for a jet where every object is null.
+    obj_indices : torch.Tensor
+        The per-token owning-object index, ``[B, L]`` int64 (`indices_from_mask`):
+        ``-2`` where no object claims a token; ``[B, 0]`` when ``L == 0``.
     class_probs : torch.Tensor
         Possibly-reordered class probabilities, ``[B, M, C]``.
     regression : torch.Tensor
         Possibly-reordered regression tensor, ``[B, M, R]``, ``NaN`` for null objects.
+
+    Notes
+    -----
+    Deliberately no data-dependent early return: this is one straight-line
+    tensor program for every batch/length, so the eager output is identical
+    to the graph ``torch.onnx.export`` traces at any length. An earlier
+    version special-cased ``n_tracks == 0`` and ``not null_preds.any()``
+    (inherited from v1 `2dfc10d`, 2024-07-30) — the second branch fired when
+    NO object was null (i.e. every object real) rather than when all were,
+    and both returned batch-1-shaped dummy tensors instead of the real
+    per-batch shapes. An all-null jet is handled correctly by the single path
+    below: every mask position is suppressed, `indices_from_mask` reports
+    ``-2`` everywhere, and `regression`/`leading_regression` are ``NaN``.
     """
     masks = objects["masks"]
     class_probs = objects["class_probs"]
     regression = objects["regression"]
-    n_tracks = masks.shape[-1]
-    n_obj = masks.shape[1]
-    n_reg = regression.shape[-1]
 
-    if n_tracks == 0:
-        return (
-            torch.full((1, n_obj), torch.nan),
-            None,
-            class_probs,
-            torch.full((1, n_obj, n_reg), torch.nan),
-        )
     null_preds = class_probs[:, :, -1] > max_null
-    if not null_preds.any():
-        return (
-            torch.full((1, n_obj), torch.nan),
-            torch.arange(n_tracks).unsqueeze(0).expand(1, n_tracks),
-            class_probs,
-            torch.full((1, n_obj, n_reg), torch.nan),
-        )
 
     masks = masks.sigmoid() > 0.5
     expanded_null = null_preds.unsqueeze(-1).expand(-1, -1, masks.size(-1))
-    masks[expanded_null] = torch.zeros_like(masks)[expanded_null]
-    regression[null_preds] = torch.nan
+    masks = masks & ~expanded_null
+    null_reg = null_preds.unsqueeze(-1).expand_as(regression)
+    regression = torch.where(null_reg, torch.full_like(regression, torch.nan), regression)
 
     if apply_reorder:
         # leading object = highest regression[0] (e.g. pT); argsort doesn't handle
-        # NaN reliably in Athena, so null entries go to -inf for the sort then
-        # back to NaN afterward
-        regression[null_preds] = -torch.inf
-        order = torch.argsort(regression[:, :, 0], descending=True)
-        regression[null_preds] = torch.nan
+        # NaN reliably in Athena, so null entries go to -inf for the sort
+        # (regression is already NaN there, from above)
+        sort_key = torch.where(
+            null_preds, torch.full_like(regression[:, :, 0], -torch.inf), regression[:, :, 0]
+        )
+        order = torch.argsort(sort_key, descending=True)
         order_expanded = order.unsqueeze(-1).expand(-1, -1, masks.size(-1))
 
         masks = torch.gather(masks, 1, order_expanded)

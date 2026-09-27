@@ -477,9 +477,15 @@ class TestSaltSurface:
         sink = cli._get(cli.config_init, "outputs")["onnx_export"]
         assert isinstance(sink, OnnxExportSink)
         assert sink.model_name == "MFv2"
-        assert [entry.port for entry in sink.inputs] == ["inputs.jets", "inputs.tracks"]
+        assert [entry.port for entry in sink.inputs] == [
+            "inputs.jets",
+            "inputs.tracks",
+            "inputs.flows",
+        ]
         assert sink.inputs[1].sequence is True
         assert sink.inputs[1].dyn_axis == "n_tracks"
+        assert sink.inputs[2].sequence is True
+        assert sink.inputs[2].dyn_axis == "n_flows"
         assert sink.rename == {}
         assert sink.combine == []
 

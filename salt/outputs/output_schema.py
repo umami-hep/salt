@@ -77,6 +77,11 @@ class OutputField:
     prefix : bool
         Whether the H5 column is ``{run_name}_{h5_name}`` or the bare
         `h5_name` (e.g. an unprefixed ``VertexIndex`` column).
+    nan_ok : bool
+        True when NaN is a declared semantic of this output (e.g. MaskFormer
+        leading-object / lead-vertex scalars for a jet with no qualifying
+        object); the ONNX checker compares such outputs with ``equal_nan``
+        instead of refusing NaN. Default False (NaN is a defect).
     value : Tensor | None
         The graph-visible converted tensor. ``None`` for the static manifest
         path (name/dtype/axis minted before any forward); filled by the
@@ -89,6 +94,7 @@ class OutputField:
     axis: str = "global"
     final: bool = True
     prefix: bool = True
+    nan_ok: bool = False
     value: Tensor | None = None
 
     def __post_init__(self) -> None:

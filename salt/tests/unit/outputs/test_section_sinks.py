@@ -346,6 +346,22 @@ def maskformer_cfg(tmp_path_factory):
     if "mass" not in jets:
         idx = len(jets)
         jets["mass"] = {"mean": round(0.1 * (idx + 1), 6), "std": round(1.0 + 0.05 * (idx + 1), 6)}
+    # this config's lifetimeSigned* track vars (replacing the fixture's IP3D_signed_*
+    # pair) and flows stream are absent from the shared fixture; synthesize them like
+    # jets.mass (compile_plan's Normaliser requires every declared var in norm_dict).
+    tracks = nd.setdefault("tracks", {})
+    for name in ("lifetimeSignedD0Significance", "lifetimeSignedZ0SinThetaSignificance"):
+        if name not in tracks:
+            idx = len(tracks)
+            tracks[name] = {
+                "mean": round(0.1 * (idx + 1), 6),
+                "std": round(1.0 + 0.05 * (idx + 1), 6),
+            }
+    flows = nd.setdefault("flows", {})
+    for i, name in enumerate(["pt", "energy", "deta", "dphi", "isCharged"]):
+        flows.setdefault(
+            name, {"mean": round(0.1 * (i + 1), 6), "std": round(1.0 + 0.05 * (i + 1), 6)}
+        )
     with open(nd_path, "w") as fh:
         yaml.dump(nd, fh, sort_keys=False)
     return load_config(

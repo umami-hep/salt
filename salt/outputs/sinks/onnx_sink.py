@@ -42,7 +42,10 @@ class OnnxExportLeaf:
     singular, float32). With both `name` and `names` omitted the Athena suffix
     defaults to the leaf key's terminal segment. `ConfigError` on a
     non-``outputs``/wildcard key, name/names arity violation, unsupported
-    dtype, or names combined with per_token.
+    dtype, or names combined with per_token. `nan_ok` (default False) marks
+    an output whose NaN is a declared semantic (e.g. a MaskFormer
+    leading-object/lead-vertex scalar for a jet with no qualifying object) —
+    the ONNX checker compares it with ``equal_nan`` instead of refusing NaN.
     """
 
     key: str
@@ -51,6 +54,7 @@ class OnnxExportLeaf:
     dtype: str = "float32"
     per_token: bool = False
     dyn_axis: str | None = None
+    nan_ok: bool = False
 
     def __post_init__(self) -> None:
         parts = self.key.split(KEY_SEP)
@@ -274,6 +278,7 @@ class OnnxExportSink(Node):
                         name=field.resolved_onnx_name,
                         dtype=field.onnx_dtype,
                         per_token=field.axis == "per_token",
+                        nan_ok=field.nan_ok,
                     )
                 )
                 continue
@@ -288,6 +293,7 @@ class OnnxExportSink(Node):
                     key=leaf_key,
                     names=[str(f.resolved_onnx_name) for f in group],
                     dtype=group[0].onnx_dtype,
+                    nan_ok=all(f.nan_ok for f in group),
                 )
             )
         return leaves
@@ -434,6 +440,24 @@ class OnnxExportSink(Node):
     def output_dtypes(self) -> list[str]:
         """Per-output dtypes, aligned 1:1 with `output_names`."""
         return [leaf.dtype for leaf in self._ensure_leaves() for _ in leaf.suffixes]
+
+    def nan_ok_outputs(self) -> frozenset[str]:
+        """The flat Athena output names whose NaN is a declared semantic.
+
+        Returns
+        -------
+        frozenset[str]
+            ``{model_name}_{suffix}`` for every suffix of a leaf whose
+            (group-)``nan_ok`` is True — the ONNX checker compares these
+            with ``equal_nan`` instead of refusing NaN.
+        """
+        prefix = self.resolved_model_name()
+        return frozenset(
+            f"{prefix}_{suffix}"
+            for leaf in self._ensure_leaves()
+            if leaf.nan_ok
+            for suffix in leaf.suffixes
+        )
 
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
         """Dynamic-axes mapping for the per-token outputs (``{name: {0: dyn_axis}}``).

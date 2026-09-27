@@ -160,6 +160,122 @@ def test_maskformer_objects_exposes_reordered_per_vertex_leaves():
     )
 
 
+# get_maskformer_outputs (reduces) — regression tests for the early-return fix
+#
+# The deleted early returns were: `n_tracks == 0` (batch-1 dummy shapes) and
+# `not null_preds.any()` (fired when NO slot was null — inverted, batch-1 dummy
+# shapes). These tests pin the single straight-line path's per-batch shapes and
+# NaN/index semantics at every combination the old branches covered.
+
+
+def _class_probs_with_null(p_null: torch.Tensor) -> torch.Tensor:
+    """``[..., 3]`` (b, c, null) class probs with the given per-slot null probability."""
+    rest = (1.0 - p_null) / 2
+    return torch.stack([rest, rest, p_null], dim=-1)
+
+
+def test_get_maskformer_outputs_all_real_objects_no_early_return():
+    """Every slot real (low p_null) -> per-batch shapes, finite outputs, pT-sorted
+    class_probs/regression, valid index range. The deleted ``not null_preds.any()``
+    branch used to fire exactly here (no slot null) and return batch-1 NaN shapes.
+    """
+    b, m, length, r = 3, 5, 7, 3
+    gen = torch.Generator().manual_seed(41)
+    class_probs = _class_probs_with_null(torch.full((b, m), 0.1))
+    masks = torch.randn(b, m, length, generator=gen)
+    regression = torch.randn(b, m, r, generator=gen)
+    leading, indices, _out_cp, out_reg = get_maskformer_outputs(
+        {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
+        apply_reorder=True,
+    )
+    assert leading.shape == (b, r)
+    assert not torch.isnan(leading).any()
+    assert out_reg.shape == (b, m, r)
+    assert not torch.isnan(out_reg).any()
+    # pT-sorted: regression[:, :, 0] non-increasing per jet
+    assert (out_reg[:, :-1, 0] >= out_reg[:, 1:, 0]).all()
+    assert indices.shape == (b, length)
+    assert set(indices.unique().tolist()) <= set(range(m)) | {-2}
+    # leading == the max-pt slot's row of the ORIGINAL regression (a permutation of rows
+    # never changes which row wins the argmax, so this is a valid independent oracle).
+    top = regression[:, :, 0].argmax(-1).view(b, 1, 1).expand(b, 1, r)
+    expected = regression.gather(1, top).squeeze(1)
+    torch.testing.assert_close(leading, expected, rtol=0, atol=0)
+
+
+def test_get_maskformer_outputs_all_null_objects_gives_nan_and_neg2():
+    """Every slot null (high p_null) -> real per-batch NaN shapes, ``-2`` indices everywhere.
+
+    The old code handled this correctly ALREADY via the normal path (the removed branch
+    fired on the OPPOSITE condition) — kept green here as a refactor guard.
+    """
+    b, m, length, r = 3, 5, 7, 3
+    gen = torch.Generator().manual_seed(42)
+    class_probs = _class_probs_with_null(torch.full((b, m), 0.9))
+    masks = torch.randn(b, m, length, generator=gen)
+    regression = torch.randn(b, m, r, generator=gen)
+    leading, indices, _out_cp, out_reg = get_maskformer_outputs(
+        {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
+        apply_reorder=True,
+    )
+    assert leading.shape == (b, r)
+    assert torch.isnan(leading).all()
+    assert out_reg.shape == (b, m, r)
+    assert torch.isnan(out_reg).all()
+    assert indices.shape == (b, length)
+    assert (indices == -2).all()
+
+
+def test_get_maskformer_outputs_mixed_batch_per_jet_independent():
+    """A mixed batch (one all-null jet, one jet with two real slots) resolves per-jet,
+    at the correct per-batch shape (not the old code's hardcoded batch-1 shapes).
+    """
+    m, length, r = 5, 7, 3
+    gen = torch.Generator().manual_seed(43)
+    p_null = torch.tensor([
+        [0.9, 0.9, 0.9, 0.9, 0.9],  # jet 0: all null
+        [0.1, 0.1, 0.9, 0.9, 0.9],  # jet 1: two real slots
+    ])
+    class_probs = _class_probs_with_null(p_null)
+    masks = torch.randn(2, m, length, generator=gen)
+    regression = torch.randn(2, m, r, generator=gen)
+    leading, indices, _out_cp, out_reg = get_maskformer_outputs(
+        {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
+        apply_reorder=True,
+    )
+    assert leading.shape == (2, r)
+    assert torch.isnan(leading[0]).all()
+    assert not torch.isnan(leading[1]).any()
+    assert out_reg.shape == (2, m, r)
+    assert torch.isnan(out_reg[0]).all()
+    assert (~torch.isnan(out_reg[1, :, 0])).sum() == 2
+    assert indices.shape == (2, length)
+    assert (indices[0] == -2).all()
+
+
+def test_get_maskformer_outputs_zero_length_no_early_return():
+    """``L == 0`` (no tracks) still runs the single straight-line path: leading/regression
+    come from the sorted regression tensor, indices are ``[B, 0]``. Regression test for the
+    deleted ``n_tracks == 0`` early return (which used to return batch-1 ``(1, n_obj)`` /
+    ``(1, n_obj, n_reg)`` dummy shapes and ``None`` indices instead).
+    """
+    b, m, r = 2, 5, 3
+    gen = torch.Generator().manual_seed(44)
+    p_null = torch.tensor([[0.1, 0.1, 0.9, 0.9, 0.9], [0.9, 0.9, 0.9, 0.9, 0.9]])
+    class_probs = _class_probs_with_null(p_null)
+    masks = torch.randn(b, m, 0, generator=gen)
+    regression = torch.randn(b, m, r, generator=gen)
+    leading, indices, _out_cp, out_reg = get_maskformer_outputs(
+        {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
+        apply_reorder=True,
+    )
+    assert leading.shape == (b, r)
+    assert not torch.isnan(leading[0]).any()  # jet 0 has real slots
+    assert torch.isnan(leading[1]).all()  # jet 1 all null
+    assert out_reg.shape == (b, m, r)
+    assert indices.shape == (b, 0)
+
+
 # MFLeadVertexDecorator (jet-level capability with NO legacy oracle)
 
 _CP = "outputs.objects.vertices_class_probs"
@@ -325,20 +441,36 @@ def test_lead_vertex_decorator_nan_class_vertex_excluded():
     torch.testing.assert_close(out["outputs.jet.lead_vertex_pt"], torch.tensor([4.0]))
 
 
-def test_lead_vertex_decorator_dummy_path_through_node1a_fills_nan():
-    """Node 1a's ``not null_preds.any()`` dummy path -> decorator emits NaN lead-vertex scalars."""
+def test_lead_vertex_decorator_all_real_objects_gives_real_lead_scalars():
+    """Regression test for the reduces fix: a no-null-slot jet gives REAL lead-vertex
+    scalars. Before the fix, ``get_maskformer_outputs``'s inverted ``not null_preds.any()``
+    branch fired on exactly these inputs (no slot null) and returned an all-NaN
+    ``vertices_regression`` while ``vertices_class_probs`` flowed through real — so the
+    decorator's qualify mask passed vertices whose regression was undefined and every
+    lead-vertex scalar came out NaN. The expected slot is computed independently here
+    from the raw inputs (no `get_maskformer_outputs` call as the oracle): a row
+    permutation never changes which underlying (class, regression) pair wins the
+    qualify-then-argmax-pt selection, so this is valid regardless of reordering.
+    """
     n_reg, n_obj, n_tracks = 3, 4, 6
-    # all class_probs have LOW null prob (last class), so null_preds = (p_null > 0.5)
-    # is all-False -> get_maskformer_outputs takes the `not null_preds.any()` dummy path
+    # all class_probs have LOW null prob (last class) -> no slot is suppressed
     class_probs = torch.tensor([[
-        [0.6, 0.3, 0.1],  # null prob 0.1 < 0.5
-        [0.2, 0.7, 0.1],  # null prob 0.1 < 0.5
-        [0.5, 0.4, 0.1],  # null prob 0.1 < 0.5
-        [0.3, 0.6, 0.1],  # null prob 0.1 < 0.5
+        [0.6, 0.3, 0.1],  # argmax 0 = PV -> excluded
+        [0.2, 0.7, 0.1],  # argmax 1 -> qualifies
+        [0.5, 0.4, 0.1],  # argmax 0 = PV -> excluded
+        [0.3, 0.6, 0.1],  # argmax 1 -> qualifies
     ]])
     masks = torch.randn(1, n_obj, n_tracks, generator=torch.Generator().manual_seed(31))
     reg = torch.randn(1, n_obj, n_reg, generator=torch.Generator().manual_seed(32))
-    # drive the REAL Node 1a (the writer) -> get the exposed per-vertex leaves
+    # the independent oracle: pv_class_index=0, null_index defaults to C-1=2, threshold 0.5
+    pred_class = class_probs.argmax(-1)[0]
+    pnull = class_probs[..., -1][0]
+    qualify = (pnull < 0.5) & (pred_class != 0) & (pred_class != 2)
+    masked_pt = torch.where(qualify, reg[0, :, 0], torch.full_like(reg[0, :, 0], -torch.inf))
+    winner = masked_pt.argmax()
+    expected_pt = reg[0, winner, 0]
+    expected_mass = reg[0, winner, 2]
+
     writer = MaskFormerObjects(n_reg=n_reg, stream="objects", constituent_stream="tracks")
     writer.name = "mf_obj"
     wb = Bundle()
@@ -346,11 +478,9 @@ def test_lead_vertex_decorator_dummy_path_through_node1a_fills_nan():
     wb.set("objects.masks", masks)
     wb.set("preds.objects.regression", reg)
     w_out = writer.forward(wb, Mode.ONNX)
-    # confirm the dummy path was taken: regression is all-NaN, class_probs is real (not NaN)
-    assert torch.isnan(w_out["outputs.objects.vertices_regression"]).all()
+    assert not torch.isnan(w_out["outputs.objects.vertices_regression"]).any()
     assert not torch.isnan(w_out["outputs.objects.vertices_class_probs"]).any()
-    # feed the exposed leaves into the decorator -> the qualify mask passes vertices
-    # but their regression is NaN, so the lead-vertex scalars are NaN (documented).
+
     dec = _decorator()
     out = dec.forward(
         _vbundle(
@@ -359,8 +489,136 @@ def test_lead_vertex_decorator_dummy_path_through_node1a_fills_nan():
         ),
         Mode.ONNX,
     )
-    assert torch.isnan(out["outputs.jet.lead_vertex_pt"]).all()
-    assert torch.isnan(out["outputs.jet.lead_vertex_mass"]).all()
+    torch.testing.assert_close(out["outputs.jet.lead_vertex_pt"], expected_pt.unsqueeze(0))
+    torch.testing.assert_close(out["outputs.jet.lead_vertex_mass"], expected_mass.unsqueeze(0))
+
+
+def test_lead_vertex_decorator_declare_io_fit_val_empty_test_equals_onnx_ports():
+    """FIT/VAL declare nothing (mode-gated to TEST|ONNX); TEST and ONNX ports are the same
+    keys (only their `modes` tag differs).
+    """
+    node = _decorator()
+    for mode in (Mode.FIT, Mode.VAL):
+        io = node.declare_io(mode)
+        assert flatten_spec(io.requires) == {}
+        assert flatten_spec(io.produces) == {}
+    test_io = node.declare_io(Mode.TEST)
+    onnx_io = node.declare_io(Mode.ONNX)
+    assert set(flatten_spec(test_io.requires)) == set(flatten_spec(onnx_io.requires))
+    assert set(flatten_spec(test_io.produces)) == set(flatten_spec(onnx_io.produces))
+
+
+def _mf14_row(argmax_idx: int, pnull: float) -> list[float]:
+    """A 14-class row (pv=0 .. null=13) with the given argmax index and null probability."""
+    row = [0.0] * 14
+    if argmax_idx == 13:
+        row[13] = pnull
+        rest = (1.0 - pnull) / 13
+        for i in range(13):
+            row[i] = rest
+    else:
+        row[13] = pnull
+        row[argmax_idx] = 1.0 - pnull - 0.01 * 12
+        for i in range(14):
+            if i not in (argmax_idx, 13):
+                row[i] = 0.01
+    return row
+
+
+def test_lead_vertex_decorator_14class_vertexing_matches_test_and_onnx_chains():
+    """A realistic 14-class (pv..null) config: the PV slot and the null slot are excluded
+    even with the largest pT; the highest-pT qualifying slot wins; the TEST chain
+    (`MaskFormerObjects.forward(Mode.TEST)` -> decorator) and the ONNX chain
+    (`forward(Mode.ONNX)` -> decorator) agree on the jet-level scalars.
+    """
+    m, r = 15, 5
+    class_rows = [_mf14_row(13, 0.9) for _ in range(m)]  # remaining slots: null-dominant
+    class_rows[0] = _mf14_row(0, 0.05)  # PV, largest pt -> excluded
+    class_rows[3] = _mf14_row(13, 0.9)  # argmax IS null, large pt -> excluded
+    class_rows[7] = _mf14_row(5, 0.05)  # the winner
+    class_rows[9] = _mf14_row(2, 0.05)  # qualifies, loses on pt
+    class_probs = torch.tensor([class_rows])  # [1, 15, 14]
+
+    reg = torch.zeros(1, m, r)
+    reg[0, 0] = torch.tensor([50.0, 0.0, 0.0, 0.0, 9.9])  # PV, excluded
+    reg[0, 3] = torch.tensor([99.0, 0.0, 0.0, 0.0, 8.8])  # null, excluded
+    reg[0, 7] = torch.tensor([12.0, 0.0, 0.0, 0.0, 3.1])  # the winner
+    reg[0, 9] = torch.tensor([9.0, 0.0, 0.0, 0.0, 1.0])  # qualifies, loses on pt
+    masks = torch.randn(1, m, 6, generator=torch.Generator().manual_seed(51))
+    pad = torch.zeros(1, 6, dtype=torch.bool)
+
+    writer = MaskFormerObjects(n_reg=r, stream="objects", constituent_stream="tracks")
+    writer.name = "mf_obj"
+    dec = MFLeadVertexDecorator(
+        source=_CP, outputs={"lead_vertex_pt": 0, "lead_vertex_mass": 4},
+        pt_index=0, pv_class_index=0,
+    )
+    dec.name = "lead_vertex"
+
+    b_onnx = Bundle()
+    b_onnx.set("objects.class_probs", class_probs)
+    b_onnx.set("objects.masks", masks)
+    b_onnx.set("preds.objects.regression", reg)
+    onnx_out = writer.forward(b_onnx, Mode.ONNX)
+    onnx_dec = dec.forward(
+        _vbundle(
+            onnx_out["outputs.objects.vertices_class_probs"],
+            onnx_out["outputs.objects.vertices_regression"],
+        ),
+        Mode.ONNX,
+    )
+    assert onnx_dec["outputs.jet.lead_vertex_pt"].item() == pytest.approx(12.0)
+    assert onnx_dec["outputs.jet.lead_vertex_mass"].item() == pytest.approx(3.1)
+
+    b_test = Bundle()
+    b_test.set("objects.class_probs", class_probs)
+    b_test.set("objects.masks", masks)
+    b_test.set("preds.objects.regression", reg)
+    b_test.set("masks.tracks", pad)
+    test_out = writer.forward(b_test, Mode.TEST)
+    test_dec = dec.forward(
+        _vbundle(
+            test_out["outputs.objects.vertices_class_probs"],
+            test_out["outputs.objects.vertices_regression"],
+        ),
+        Mode.TEST,
+    )
+    torch.testing.assert_close(
+        test_dec["outputs.jet.lead_vertex_pt"], onnx_dec["outputs.jet.lead_vertex_pt"],
+        equal_nan=True,
+    )
+    torch.testing.assert_close(
+        test_dec["outputs.jet.lead_vertex_mass"], onnx_dec["outputs.jet.lead_vertex_mass"],
+        equal_nan=True,
+    )
+
+
+def test_lead_vertex_decorator_14class_all_null_gives_nan():
+    """An all-null 14-class jet (every slot argmax==null) yields NaN jet-level scalars."""
+    m, r = 15, 5
+    class_probs = torch.tensor([[_mf14_row(13, 0.9) for _ in range(m)]])
+    reg = torch.randn(1, m, r, generator=torch.Generator().manual_seed(52))
+    masks = torch.randn(1, m, 6, generator=torch.Generator().manual_seed(53))
+    writer = MaskFormerObjects(n_reg=r, stream="objects", constituent_stream="tracks")
+    writer.name = "mf_obj"
+    b = Bundle()
+    b.set("objects.class_probs", class_probs)
+    b.set("objects.masks", masks)
+    b.set("preds.objects.regression", reg)
+    out = writer.forward(b, Mode.ONNX)
+    dec = MFLeadVertexDecorator(
+        source=_CP, outputs={"lead_vertex_pt": 0, "lead_vertex_mass": 4},
+        pt_index=0, pv_class_index=0,
+    )
+    dec.name = "lead_vertex"
+    dec_out = dec.forward(
+        _vbundle(
+            out["outputs.objects.vertices_class_probs"], out["outputs.objects.vertices_regression"]
+        ),
+        Mode.ONNX,
+    )
+    assert torch.isnan(dec_out["outputs.jet.lead_vertex_pt"]).all()
+    assert torch.isnan(dec_out["outputs.jet.lead_vertex_mass"]).all()
 
 
 def test_lead_vertex_decorator_per_jet_independent_selection():
@@ -449,3 +707,29 @@ def test_lead_vertex_decorator_leaf_packs_into_h5_output_column():
     assert vals[0] == pytest.approx(5.0)
     assert np.isnan(vals[1])  # the NaN fill round-trips into the H5 column
     assert vals[2] == pytest.approx(7.0)
+
+
+def test_lead_vertex_decorator_test_manifest_resolves_h5_columns():
+    """`MFLeadVertexDecorator.manifest_fields(Mode.TEST)` resolves into H5OutputSink's TEST
+    column table (the manifest path, not a hand-seeded `OutputColumn` like the test above).
+    """
+    dec = MFLeadVertexDecorator(
+        source=_CP,
+        outputs={"lead_vertex_pt": 0, "lead_vertex_mass": 4},
+        pt_index=0,
+        pv_class_index=0,
+        jet_stream="jets",
+    )
+    dec.name = "mf_lead_vertex"
+    sink = H5OutputSink()
+    sink.bind_output_section({})
+    sink.bind_model_modules({"mf_lead_vertex": dec})
+    columns = sink._resolve_columns("MFrun")  # noqa: SLF001
+    by_key = {col.key: col for col in columns}
+    assert "outputs.jets.lead_vertex_pt" in by_key
+    assert "outputs.jets.lead_vertex_mass" in by_key
+    assert by_key["outputs.jets.lead_vertex_pt"].stream == "jets"
+    assert by_key["outputs.jets.lead_vertex_pt"].column_names("MFrun") == ["MFrun_lead_vertex_pt"]
+    assert by_key["outputs.jets.lead_vertex_mass"].column_names("MFrun") == [
+        "MFrun_lead_vertex_mass"
+    ]

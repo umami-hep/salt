@@ -1,6 +1,7 @@
-"""``TruthHadronInserter`` — produces the ``truth_hadrons`` object group and
-injects the matching ``ftagTruthParentBarcode`` link field into ``tracks``
-(all fields routed through ``parse_schema``; never hand-builds specs).
+"""``TruthHadronInserter`` — produces an object group (default ``truth_hadrons``,
+e.g. ``truth_any`` for the vertexing recipe) and injects the configurable link
+field (default ``ftagTruthParentBarcode``) into the constituent group (all
+fields routed through ``parse_schema``; never hand-builds specs).
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from .base import GenModule
 
 
 class TruthHadronInserter(GenModule):
-    """Add a truth-hadron group and the constituent link field that points into it."""
+    """Add an object group and the constituent link field that points into it."""
 
     def __init__(
         self,
