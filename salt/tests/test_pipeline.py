@@ -180,13 +180,15 @@ def test_GN2(tmp_path) -> None:
 
 
 def test_GN3V00(tmp_path) -> None:
-    run_combined(tmp_path, "GN3v01/GN3V00.yaml", export_args=["--tasks", *GN3_TASKS], is_gn3=True)
+    run_combined(
+        tmp_path, "GN3/GN3PflowMuonsV00.yaml", export_args=["--tasks", *GN3_TASKS], is_gn3=True
+    )
 
 
 def test_GN3V01(tmp_path) -> None:
     run_combined(
         tmp_path,
-        "GN3v01/GN3V01.yaml",
+        "GN3/GN3V01.yaml",
         export_args=["--tasks", "jets_charge", *GN3_TASKS],
         is_gn3=True,
     )
@@ -201,7 +203,7 @@ def test_GN2emu(tmp_path) -> None:
 
 
 def test_GN2XE(tmp_path) -> None:
-    run_combined(tmp_path, "GN2/GN2XE.yaml", do_onnx=False, do_xbb=True)
+    run_combined(tmp_path, "Xbb/GN2XE.yaml", do_onnx=False, do_xbb=True)
 
 
 def test_ParT(tmp_path) -> None:
@@ -221,35 +223,35 @@ def test_DL1(tmp_path) -> None:
 
 
 def test_regression(tmp_path) -> None:
-    run_combined(tmp_path, "regression.yaml", do_eval=True, do_onnx=True)
+    run_combined(tmp_path, "regression/regression.yaml", do_eval=True, do_onnx=True)
 
 
 def test_nan_regression(tmp_path) -> None:
-    run_combined(tmp_path, "nan_regression.yaml", do_eval=True, do_onnx=False)
+    run_combined(tmp_path, "regression/nan_regression.yaml", do_eval=True, do_onnx=False)
 
 
 def test_regression_gaussian(tmp_path) -> None:
-    run_combined(tmp_path, "regression_gaussian.yaml", do_eval=True, do_onnx=True)
+    run_combined(tmp_path, "regression/regression_gaussian.yaml", do_eval=True, do_onnx=True)
 
 
 def test_regression_betaNLL(tmp_path) -> None:
-    run_combined(tmp_path, "regression_betaNLL.yaml", do_eval=True, do_onnx=True)
+    run_combined(tmp_path, "regression/regression_betaNLL.yaml", do_eval=True, do_onnx=True)
 
 
 def test_regression_mdn(tmp_path) -> None:
-    run_combined(tmp_path, "regression_mdn.yaml", do_eval=True, do_onnx=True)
+    run_combined(tmp_path, "regression/regression_mdn.yaml", do_eval=True, do_onnx=True)
 
 
 def test_regression_multi_target(tmp_path) -> None:
-    run_combined(tmp_path, "regression_multi_target.yaml", do_eval=False, do_onnx=False)
+    run_combined(tmp_path, "regression/regression_multi_target.yaml", do_eval=False, do_onnx=False)
 
 
 def test_regression_weighted(tmp_path) -> None:
-    run_combined(tmp_path, "regression_weighted.yaml", do_eval=True, do_onnx=True)
+    run_combined(tmp_path, "regression/regression_weighted.yaml", do_eval=True, do_onnx=True)
 
 
 def test_flow(tmp_path) -> None:
-    run_combined(tmp_path, "flow.yaml", do_eval=False, do_onnx=False)
+    run_combined(tmp_path, "other/flow.yaml", do_eval=False, do_onnx=False)
 
 
 def test_no_global_inputs(tmp_path) -> None:
@@ -281,7 +283,7 @@ def test_truncate_inputs_error(tmp_path) -> None:
 
 
 def test_maskformer(tmp_path) -> None:
-    run_combined(tmp_path, "MaskFormer.yaml", train_args=None, export_args=["-mf=vertexing"])
+    run_combined(tmp_path, "other/MaskFormer.yaml", train_args=None, export_args=["-mf=vertexing"])
 
 
 def test_param_concat(tmp_path) -> None:

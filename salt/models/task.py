@@ -422,7 +422,7 @@ class RegressionTaskBase(TaskBase, ABC):
             if torch.isnan(loss):
                 raise ValueError(
                     "Regression loss is NaN. This may be due to NaN targets,"
-                    " check configs/nan_regression.yaml for options to deal with this."
+                    " check configs/regression/nan_regression.yaml for options to deal with this."
                 )
             return loss
 

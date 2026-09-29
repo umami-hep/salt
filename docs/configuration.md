@@ -247,7 +247,7 @@ multi_target:
       custom_target: pt_label_handle
       source: pt_visFromTruthTaus
 ```
-`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_multi_target.yaml).
+`pt_label_handle` will be populated with values from `pt_visFromTruthTaus` for $\tau$ jets; all other jets will have `nan` as the target. Multiple conditions can be combined to fill different jets from different sources — see the [example config](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression/regression_multi_target.yaml).
 
 The allowed values of `opp` are: `"=="`, `"!="`, `">="`, `"<="`, `">"`, `"<"`.
 
@@ -330,7 +330,7 @@ It is possible to include edge features as network input, representing relationa
 - `mass` = $\ln\sqrt{\left(\Sigma E\right)^2 - \left(\Sigma p_T\cos\phi\right)^2 - \left(\Sigma p_T\sin\phi\right)^2 - \left(\Sigma p_T\sinh\eta\right)^2}$ (requires `pt`, `eta`, `phi`, `energy`)
 
 To enable edge features, three pieces of config are needed: the `edge_constructors` in the `data` config select which edge features to compute, an `edge_init_nets` entry in the model embeds them, and the encoder needs `edge_embed_dim` set (and optionally `update_edges` to update the edge representations through the encoder layers).
-A complete example can be found in [`GN2XE.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN2/GN2XE.yaml):
+A complete example can be found in [`GN2XE.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/Xbb/GN2XE.yaml):
 
 ```yaml
 data:
@@ -449,7 +449,7 @@ Beyond the basic `num_layers`, `embed_dim` and `out_dim`, several options can be
 
 When edge features are used (`edge_embed_dim > 0`), the edge-aware attention additionally supports the DeParT-style primitives `talking_heads: True` (mix attention scores across heads before and after the softmax) and `edge_gate: False` (disable the multiplicative edge gating to recover a purely additive ParT-style attention bias), both set via `attn_kwargs`.
 
-An example from [`GN3V01.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3v01/GN3V01.yaml):
+An example from [`GN3V01.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3/GN3V01.yaml):
 
 ```yaml
 encoder:
@@ -488,7 +488,7 @@ All tasks share the [`salt.models.TaskBase`][salt.models.TaskBase] arguments `na
 
 For [`salt.models.ClassificationTask`][salt.models.ClassificationTask], in addition to the `label`, `label_map` and `class_names` options described [above][remapping-labels]:
 
-- `sample_weight`: name of a per-sample weight label used to weight the loss. Requires the configured loss to use `reduction: none`, see [`regression_weighted.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_weighted.yaml) for an example with a regression task.
+- `sample_weight`: name of a per-sample weight label used to weight the loss. Requires the configured loss to use `reduction: none`, see [`regression_weighted.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression/regression_weighted.yaml) for an example with a regression task.
 - `use_class_dict: True`: read the class weights for the loss from the `class_dict` file specified in the data config, instead of hardcoding them via the loss `weight` argument.
 
 Regression tasks ([`salt.models.RegressionTask`][salt.models.RegressionTask] and [`salt.models.GaussianRegressionTask`][salt.models.GaussianRegressionTask]) accept one or more `targets` plus at most one of three mutually exclusive target scaling options:
@@ -514,7 +514,7 @@ It weights the Gaussian negative log-likelihood by $\sigma^{2\beta}$ to reduce t
         reduction: none
 ```
 
-See [`regression_betaNLL.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_betaNLL.yaml) for a complete example.
+See [`regression_betaNLL.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression/regression_betaNLL.yaml) for a complete example.
 
 For regression targets whose posterior is multimodal (e.g. a discrete set of candidate values, where a single Gaussian would regress towards the prior mean with a large variance), [`salt.models.MixtureDensityTask`][salt.models.MixtureDensityTask] models the target with a K-component Gaussian mixture.
 The head outputs `3 * n_components` values per object, interpreted as component means, (pre-softplus) variances and mixture-weight logits, and the task is trained with the mixture negative log-likelihood ([`salt.models.MixtureGaussianNLLLoss`][salt.models.MixtureGaussianNLLLoss], constructed internally — omit `loss` from the config).
@@ -536,13 +536,13 @@ At inference time the component with the largest mixture weight is selected and 
 ```
 
 Exactly one target is supported per task instance.
-See [`regression_mdn.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression_mdn.yaml) for a complete example.
+See [`regression_mdn.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression/regression_mdn.yaml) for a complete example.
 
 #### MaskFormer
 
 Salt supports MaskFormer-style object reconstruction, where a mask decoder predicts a set of objects (e.g. truth hadrons) together with the mask of constituents (e.g. tracks) belonging to each of them.
 Two pieces of configuration are needed: an `mf_config` block in the `data` config describing the truth objects and their matching to constituents, and a `mask_decoder` in the model.
-A complete example is provided in [`MaskFormer.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/MaskFormer.yaml).
+A complete example is provided in [`MaskFormer.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/other/MaskFormer.yaml).
 
 ```yaml
 data:
@@ -771,7 +771,7 @@ setup_mup -config GN2/GN2.yaml
 salt fit --config GN2/GN2.yaml
 ```
 
-The config file `GN2_mup.yaml` gives an example of a valid configuration file for mup.
+The config file `GN2/GN2_muP.yaml` gives an example of a valid configuration file for mup.
 
 A gentle introduction to mup is available in this [talk](https://indico.cern.ch/event/1339085/#3-mup-for-gn2-hyperparameter-o).
 
