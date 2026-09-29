@@ -142,16 +142,6 @@ def test_hybrid_named_splits_params_by_policy() -> None:
     assert any("head.weight" == n for n in opt.adamw_param_names)
 
 
-def test_hybrid_unnamed_falls_back_to_ndim_rule() -> None:
-    model = TinyModel()
-    opt = HybridMuonAdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
-
-    # In unnamed mode, naming is synthetic: param_{idx}
-    # We can still check that some 2D params went to Muon and some non-2D went to AdamW.
-    assert len(opt.muon_param_names) > 0
-    assert len(opt.adamw_param_names) > 0
-
-
 def test_hybrid_raises_if_no_muon_params_named_all_excluded() -> None:
     model = TinyModel()
     # Custom policy that excludes everything by matching any name
@@ -172,14 +162,7 @@ def test_hybrid_raises_if_no_adamw_params_all_muon_2d_only() -> None:
 
     model = Only2D()
     with pytest.raises(ValueError, match="no parameters selected for AdamW"):
-        HybridMuonAdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
-
-
-def test_hybrid_unnamed_raises_on_invalid_item_type() -> None:
-    # If items are not named pairs, we take the unnamed path and require actual Parameters.
-    bad_items: list[Any] = [("not-a-param", "still-not-a-param")]
-    with pytest.raises(TypeError, match="expected Parameters"):
-        HybridMuonAdamW(bad_items, lr=1e-3, weight_decay=1e-5)
+        HybridMuonAdamW(model.named_parameters(), lr=1e-3, weight_decay=1e-5)
 
 
 # -----------------------------

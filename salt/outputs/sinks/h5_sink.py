@@ -16,13 +16,11 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import (
     IO,
-    KEY_SEP,
     Mode,
     TensorSpec,
-    flatten_spec,
     unflatten_spec,
 )
-from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn
+from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColumn, group_columns
 from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.array_utils import join_structured_arrays
 from salt.utils.logging import console, get_logger
@@ -132,10 +130,6 @@ class H5OutputSink(RuntimeSink):
         self._object_groups: tuple[ObjectGroup, ...] = tuple(
             ObjectGroup.coerce(g) for g in (object_groups or ())
         )
-        # the sink derives its column schema + copy spec + mask streams from the
-        # bound outputs: section manifest in declaration order; the copy/mask ctor
-        # knobs are the pre-bind defaults the section overrides.
-        self._output_section: Mapping[str, Any] | None = None
         # Mode.TEST = eval schema (default); Mode.ONNX = strictly the export
         # output set (`use_export_selection`, salt inference).
         self._section_mode: Mode = Mode.TEST
@@ -206,34 +200,31 @@ class H5OutputSink(RuntimeSink):
         copy/mask writer whose ``modes:`` exclude this sink's selection mode
         contributes nothing.
         """
-        self._output_section = section
-        self._invalidate_manifest()
+        # local: input_copy_writer -> run_task_output -> salt.model.base would cycle
+        from salt.outputs.input_copy_writer import InputCopyWriter
+        from salt.outputs.pad_mask_writer import PadMaskWriter
+        from salt.outputs.run_task_output import OutputSectionWriter
+
+        super().bind_output_section(section)
         # the section drives copy_inputs + write_pad_mask too (override the ctor
         # knobs): collect from the InputCopyWriter / PadMaskWriter that RUN in
         # this sink's selection mode.
         copy_inputs: dict[str, list[str]] = {}
         mask_streams: list[str] = []
+        mode = self._section_mode
         for writer in section.values():
-            runs_in_mode = getattr(writer, "runs_in_mode", None)
-            if callable(runs_in_mode) and not writer.runs_in_mode(self._section_mode):
+            if not isinstance(writer, OutputSectionWriter) or not writer.runs_in_mode(mode):
                 continue
-            if callable(getattr(writer, "copy_spec", None)):
-                spec = writer.copy_spec()
-                streams = spec.get("streams")
-                variables = spec.get("variables") or {}
+            if isinstance(writer, InputCopyWriter):
                 # streams None -> every stream with a configured task, resolved
-                # at open_schema against the reader (spec stashed until then)
-                if streams is None:
-                    self._copy_all_tasked_streams = True
-                    self._copy_variables = variables
-                else:
-                    self._copy_all_tasked_streams = False
-                    for s in streams:
-                        copy_inputs[s] = list(variables.get(s, []))
-                    self._copy_variables = variables
-            if callable(getattr(writer, "mask_streams", None)):
-                mask_streams.extend(writer.mask_streams())
-        if not getattr(self, "_copy_all_tasked_streams", False):
+                # at open_schema against the reader (variables stashed until then)
+                self._copy_all_tasked_streams = writer.streams is None
+                self._copy_variables = {k: list(v) for k, v in writer.variables.items()}
+                for s in writer.streams or ():
+                    copy_inputs[s] = list(writer.variables.get(s, []))
+            if isinstance(writer, PadMaskWriter):
+                mask_streams.extend(writer.streams)
+        if not self._copy_all_tasked_streams:
             self.copy_inputs = copy_inputs
         self.write_pad_mask = tuple(dict.fromkeys(mask_streams)) if mask_streams else False
 
@@ -267,19 +258,13 @@ class H5OutputSink(RuntimeSink):
         when no producer mints a final column for the selection, or two leaves
         mint the same flat H5 column.
         """
-        by_key: dict[str, list[tuple[str, Any]]] = {}
-        key_order: list[str] = []
-        for output_key, field in self._filter_consumed(
-            collect_manifest_fields(self._manifest_sources(), self._section_mode)
-        ):
-            suffix = self._column_suffix(field)
-            if suffix is None:
-                continue
-            if output_key not in by_key:
-                by_key[output_key] = []
-                key_order.append(output_key)
-            by_key[output_key].append((suffix, field))
-        if not key_order:
+        columns = group_columns(
+            self._filter_consumed(
+                collect_manifest_fields(self._manifest_sources(), self._section_mode)
+            ),
+            self._column_suffix,
+        )
+        if not columns:
             raise ConfigError(
                 "H5OutputSink found no RunTaskOutput task with a final "
                 f"{'export-selection' if self._section_mode is Mode.ONNX else 'H5'} column — "
@@ -287,22 +272,14 @@ class H5OutputSink(RuntimeSink):
                 "salt inference the RunTaskOutput's modes: list must include 'export')"
             )
         seen_cols: dict[tuple[str, str], str] = {}
-        columns: list[OutputColumn] = []
-        for output_key in key_order:
-            pairs = by_key[output_key]
-            stream = output_key.split(KEY_SEP)[1]
-            prefix = pairs[0][1].prefix
-            dtype = pairs[0][1].dtype
-            suffixes = [suffix for suffix, _ in pairs]
-            col = OutputColumn(key=output_key, suffixes=suffixes, dtype=dtype, prefix=prefix)
+        for col in columns:
             for column_name in col.column_names(run_name):
-                if (other := seen_cols.get((stream, column_name))) is not None:
+                if (other := seen_cols.get((col.stream, column_name))) is not None:
                     raise ConfigError(
                         f"H5OutputSink: flat column {column_name!r} in stream "
-                        f"{stream!r} is minted by BOTH {other} AND {output_key!r}"
+                        f"{col.stream!r} is minted by BOTH {other} AND {col.key!r}"
                     )
-                seen_cols[stream, column_name] = output_key
-            columns.append(col)
+                seen_cols[col.stream, column_name] = col.key
         resolved = tuple(columns)
         self._columns = resolved
         self._columns_resolved = True
@@ -325,8 +302,7 @@ class H5OutputSink(RuntimeSink):
         pad-mask stream's ``outputs.<stream>.mask``; produces nothing (terminal
         node, planner keeps it). FIT/VAL/ONNX: empty requires/produces (pruned).
         """
-        if not (mode & Mode.TEST):
-            return IO(requires={}, produces={})
+        del mode  # non-TEST modes never get here (`allowed_modes` = TEST; `Node` gates)
         # dtype is None on the require: OutputColumn.dtype is the H5 numpy
         # descriptor, not the producer's torch dtype — constraining it would
         # conflict with the producer's declared dtype; the sink consumes
@@ -361,17 +337,6 @@ class H5OutputSink(RuntimeSink):
             for field in group.fields:
                 out.setdefault(field.leaf, TensorSpec(shape=None, dtype=None, kind=field.kind))
         return out
-
-    # -- static demand (consumed by SaltModule) ----------------------
-
-    def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
-        """The sink's TEST ``declare_io`` requires, each mapped to a demander
-        description; discovered by `salt.model.sink_prep.select_test_sink` via
-        ``callable(getattr(cb, "writer_demand", None))``.
-        """
-        del model_modules, reader
-        who = "sink 'H5OutputSink' demanding"
-        return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
 
     def _pad_mask_streams(self) -> tuple[str, ...]:
         """The sequence streams a pad-mask column is requested for.

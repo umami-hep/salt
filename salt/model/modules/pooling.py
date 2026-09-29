@@ -16,10 +16,7 @@ from salt.graph.spec import (
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
 from salt.model.modules.transformer_encoder import _SEQ_LEN
-from salt.utils.tensor_utils import (
-    flatten_tensor_dict,
-    masked_softmax,
-)
+from salt.utils.tensor_utils import masked_softmax
 
 
 class GlobalAttentionPooling(SaltModelModule):
@@ -87,7 +84,7 @@ class GlobalAttentionPooling(SaltModelModule):
         Tensor
             Pooled tensor of shape ``[B, D]``.
         """
-        x_flat = flatten_tensor_dict(x, exclude=["objects"])
+        x_flat = torch.cat([v for k, v in x.items() if k != "objects"], dim=1)
 
         if pad_mask is not None:
             pad_mask = torch.cat(list(pad_mask.values()), dim=1).unsqueeze(-1)

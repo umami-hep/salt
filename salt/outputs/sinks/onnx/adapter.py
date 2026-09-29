@@ -14,7 +14,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
 from salt.graph.planner import Plan
-from salt.graph.spec import Mode
+from salt.graph.spec import GraphModule
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
     ExportInput,
@@ -22,6 +22,27 @@ from salt.outputs.sinks.onnx.config import (
 )
 
 __all__ = ["OnnxAdapter"]
+
+
+def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
+    """Find the folded `OnnxExportSink` node among the model modules, if any.
+
+    An export-node config wires an `OnnxExportSink`
+    (``salt.outputs.OnnxExportSink``) into ``model.modules``; it anchors the
+    folded conversion leaves (argmax/split/combine) as a terminal node.
+
+    Raises `ConfigError` if more than one `OnnxExportSink` is configured
+    (the Athena tuple has a single ordering authority).
+    """
+    from salt.outputs import OnnxExportSink
+
+    found = [m for m in modules.values() if isinstance(m, OnnxExportSink)]
+    if len(found) > 1:
+        raise ConfigError(
+            "more than one OnnxExportSink is configured — the ONNX output tuple has a single "
+            "ordering authority; declare exactly one export sink"
+        )
+    return found[0] if found else None
 
 
 class OnnxAdapter(nn.Module):
@@ -46,8 +67,8 @@ class OnnxAdapter(nn.Module):
     Raises
     ------
     ConfigError
-        If the plan is not an ONNX plan, the export config is unresolved,
-        or an alias gather names unknown columns.
+        If a plan module is unmaterialised, or an alias gather names unknown
+        columns.
     """
 
     def __init__(
@@ -57,12 +78,6 @@ class OnnxAdapter(nn.Module):
         feature_fields: Mapping[str, tuple[str, ...]],
     ) -> None:
         super().__init__()
-        if plan.mode is not Mode.ONNX:
-            raise ConfigError(f"OnnxAdapter needs a Mode.ONNX plan, got {plan.mode.name}")
-        if export.model_name is None:
-            raise ConfigError(
-                "OnnxAdapter needs a RESOLVED export config — call resolve_export_config first"
-            )
         self.model_name = export.model_name
         self.plan = plan
         # registering the plan modules makes their parameters/buffers visible to
@@ -97,26 +112,9 @@ class OnnxAdapter(nn.Module):
         # the folded OnnxExportSink in the plan is the sole ONNX-output authority:
         # it names the demanded outputs.* leaves the conversion nodes mint in the
         # traced executor pass — no per-batch compute, no post-executor reduce loop.
-        self._export_sink = self._find_export_sink(plan)
-        if self._export_sink is None:
-            raise ConfigError(
-                "OnnxAdapter needs a folded OnnxExportSink in the plan — the off-graph reduce "
-                "manifest was retired. Declare an OnnxExportSink naming the conversion "
-                "outputs.* leaves; the conversion nodes "
-                "(ClassProbs/SeqClassIndex/MaskFormerObjects/Combination) own "
-                "the math inside the traced graph."
-            )
+        self._export_sink = _onnx_export_sink({step.name: step.module for step in plan.steps})
         if self._export_sink.model_name is None:
             self._export_sink.model_name = self.model_name
-        self._ordered = [
-            (name, dtype, "onnx_export (folded conversion node)")
-            for name, dtype in zip(
-                self._export_sink.output_names(),
-                self._export_sink.output_dtypes(),
-                strict=True,
-            )
-        ]
-        self._nan_ok_outputs: frozenset[str] = frozenset(self._export_sink.nan_ok_outputs())
         # every module recursively receives set_export_mode() — e.g. the encoder's
         # attention switch to torch-math — required for Athena agreement
         self.set_export_mode()
@@ -134,17 +132,17 @@ class OnnxAdapter(nn.Module):
         """The flat ONNX output names, in declared `OnnxExportSink` tuple order
         (the single ordering authority).
         """
-        return [name for name, _, _ in self._ordered]
+        return self._export_sink.output_names()
 
     @property
     def output_dtypes(self) -> list[str]:
         """Per-output dtypes, aligned with `output_names`."""
-        return [dtype for _, dtype, _ in self._ordered]
+        return self._export_sink.output_dtypes()
 
     @property
     def nan_ok_outputs(self) -> frozenset[str]:
         """The output names whose NaN is a declared semantic, compared equal_nan by the checker."""
-        return self._nan_ok_outputs
+        return self._export_sink.nan_ok_outputs()
 
     @property
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
@@ -159,18 +157,30 @@ class OnnxAdapter(nn.Module):
         axes.update(self._export_sink.dynamic_axes())
         return axes
 
-    def example_inputs(self, sequence_length: int = 40) -> tuple[Tensor, ...]:
-        """Random example inputs for tracing, sized from the `Features` declaration.
+    def example_inputs(
+        self,
+        sequence_length: int = 40,
+        *,
+        lengths: Mapping[str, int] | None = None,
+        generator: torch.Generator | None = None,
+    ) -> tuple[Tensor, ...]:
+        """Random example inputs, sized from the `Features` declaration.
 
-        Globals are ``[1, F]`` (batch dim kept), sequences ``[L, F]`` (no batch dim).
+        Globals are ``[1, F]`` (batch dim kept), sequences ``[L, F]`` (no batch dim),
+        ``L = lengths[stream]`` when given (the checker sweep), else `sequence_length`.
         """
         example: list[Tensor] = []
         for entry in self._positional:
             width = len(self._field_list(entry.port))
             if entry.sequence:
-                example.append(torch.rand(sequence_length, width))
+                n = (
+                    sequence_length
+                    if lengths is None
+                    else lengths[stream_of_input_port(entry.port)]
+                )
+                example.append(torch.rand(n, width, generator=generator))
             else:
-                example.append(torch.rand(1, width))
+                example.append(torch.rand(1, width, generator=generator))
         return tuple(example)
 
     # -- the traced forward ---------------------------------------------------
@@ -210,8 +220,7 @@ class OnnxAdapter(nn.Module):
         # the OnnxExportSink names the demanded outputs.* leaves the folded
         # conversion nodes minted in the traced executor pass above — no
         # post-executor reduce loop; the sink is the sole output authority.
-        named = self._export_sink.named_outputs(b)
-        return tuple(named[name] for name, _, _ in self._ordered)
+        return tuple(self._export_sink.named_outputs(b).values())
 
     # -- helpers -----------------------------------------------------------------
 
@@ -238,19 +247,6 @@ class OnnxAdapter(nn.Module):
                 "export input must be a declared dataset feature stream (known: "
                 f"{sorted(self._fields)})"
             ) from None
-
-    @staticmethod
-    def _find_export_sink(plan: Plan) -> Any:
-        """Find the folded `OnnxExportSink` among the plan steps (the output
-        authority); returns it, or None when no sink is wired (which the
-        adapter rejects).
-        """
-        from salt.outputs import OnnxExportSink
-
-        for step in plan.steps:
-            if isinstance(step.module, OnnxExportSink):
-                return step.module
-        return None
 
     def _resolve_alias_gather(self, entry: ExportInput) -> Tensor | None:
         """Resolve an alias entry to its column gather (or None = identity clone).

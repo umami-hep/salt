@@ -13,9 +13,9 @@ import numpy as np
 import pytest
 import torch
 
-from salt.graph import Mode
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode
 from salt.model.bind import ResolvedSchema
 from salt.model.modules.tasks import (
     ClassificationTaskModule,
@@ -23,7 +23,7 @@ from salt.model.modules.tasks import (
     VertexingTaskModule,
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
-from salt.outputs import ClassProbs, SeqClassIndex, SeqClassProbs
+from salt.outputs import ClassProbs
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField, pascal_case
 from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import (
@@ -209,32 +209,6 @@ def test_global_output_time_requires_empty():
 # ===========================================================================
 
 
-def test_seq_get_output_h5_probs_match_seq_class_probs_producer():
-    """Seq head (H5): each ``value`` == the per-class column of `SeqClassProbs` (masked softmax)."""
-    torch.manual_seed(5)
-    b, t, c = 5, 6, 8
-    module = _bind_classification(
-        _STREAM_T, "origin_label", [f"o{i}" for i in range(c)], sequence=True
-    )
-    logits = torch.randn(b, t, c)
-    mask = torch.zeros(b, t, dtype=torch.bool)
-    mask[0, 3:] = True  # padded tail
-    mask[1, :] = True  # fully padded jet
-
-    producer = SeqClassProbs(task=module.name, stream=_STREAM_T, name="probs")
-    producer.name = "sp"
-    producer_out = producer.forward(_pred_bundle(module, logits.clone(), mask), Mode.TEST)[
-        f"outputs.{_STREAM_T}.probs"
-    ]
-
-    fields = module.get_output(_pred_bundle(module, logits.clone(), mask), Mode.TEST, _RUN)
-    assert [f.h5_name for f in fields] == module.class_suffixes
-    for ci, f in enumerate(fields):
-        assert f.axis == "per_token"
-        assert f.onnx_name is None  # H5-only; ONNX side is the argmax index
-        torch.testing.assert_close(f.value, producer_out[..., ci], rtol=0, atol=_FLOAT_TOL)
-
-
 def test_seq_get_output_h5_probs_match_literal_masked_softmax():
     """Seq head (H5): per-leaf ``value`` == the literal per-class masked softmax
     (re-anchored from the retired ``get_h5`` oracle).
@@ -283,8 +257,8 @@ def test_seq_get_output_pad_positions_zeroed():
     )
 
 
-def test_seq_get_output_onnx_index_matches_seq_class_index_producer():
-    """Seq head (ONNX): the single field's ``value`` == `SeqClassIndex` int8 argmax leaf."""
+def test_seq_get_output_onnx_index_matches_literal_masked_argmax():
+    """Seq head (ONNX): the single field's ``value`` == the int8 argmax of the masked softmax."""
     torch.manual_seed(8)
     length, classes = 6, 8
     module = _bind_classification(
@@ -294,11 +268,8 @@ def test_seq_get_output_onnx_index_matches_seq_class_index_producer():
     mask = torch.zeros(1, length, dtype=torch.bool)
     mask[0, 4:] = True  # padded tail
 
-    producer = SeqClassIndex(task=module.name, stream=_STREAM_T, name="index")
-    producer.name = "si"
-    oracle = producer.forward(_pred_bundle(module, logits.clone(), mask), Mode.ONNX)[
-        f"outputs.{_STREAM_T}.index"
-    ]
+    probs = masked_softmax(logits.clone(), mask.unsqueeze(-1))
+    oracle = torch.argmax(probs, dim=-1).squeeze(0).to(torch.int8)
 
     (field,) = module.get_output(_pred_bundle(module, logits.clone(), mask), Mode.ONNX, _RUN)
     assert field.h5_name is None  # ONNX-only leaf

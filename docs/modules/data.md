@@ -1,8 +1,8 @@
 # Data modules
 
-**`SaltDataModule`** (`salt/data/datamodule.py:143`) is the Lightning
+**`SaltDataModule`** (`salt/data/datamodule.py:119`) is the Lightning
 `LightningDataModule` salt provides: you configure it under `data:`, but you
-never subclass it. **`SaltDatasetModule`** (`salt/data/base.py:113`) is the
+never subclass it. **`SaltDatasetModule`** (`salt/data/base.py:106`) is the
 base class of the things you put *inside* it, listed under `data.modules`.
 Neither name appears anywhere else in the docs before this page.
 
@@ -13,8 +13,8 @@ This symbol has zero documentation coverage in the tree before this page.
 **What it is required to do.** Turn the configured `data.modules` dict into
 per-stage dataloaders. The `modules:` dict must contain exactly one `Reader`
 prototype plus any number of processors, or construction raises `ConfigError`
-(the `SaltDatasetModule` type check at `salt/data/datamodule.py:268`, the
-single-`Reader` guard at `:278`). A `None` entry deletes a module, which is
+(the `SaltDatasetModule` type check at `salt/data/datamodule.py:238`, the
+single-`Reader` guard at `:247`). A `None` entry deletes a module, which is
 how a config layered with `--config` removes something an earlier layer
 added.
 
@@ -67,7 +67,9 @@ data:
 
 `train_file`/`val_file`/`test_file` are the legacy per-stage source kwargs,
 still accepted but superseded by `salt.data.InputSamples`
-(`data.modules.input_samples`); see [the minimum graph that
+(`data.modules.input_samples`): when no `InputSamples` is configured,
+`SaltDataModule` synthesises an implicit one from them (plus
+`num_train`/`num_val`/`num_test`); see [the minimum graph that
 compiles](../configuration.md#the-minimum-graph-that-compiles) for the
 equivalent config written the current way.
 
@@ -77,15 +79,14 @@ This symbol has zero documentation coverage in the tree before this page.
 
 **What it is required to be.** The base of every data-graph participant. It
 supplies `name` (the `GraphModule` protocol member) and the abstract
-`declare_io`, plus four optional hooks covered below: `bind`,
-`declare_setup_io`, `setup` and `teardown`. In practice you almost never
-subclass `SaltDatasetModule` directly; you subclass `Reader` or `Processor`
-(both below), which already implement the parts every reader or every
-processor needs.
+`declare_io`, plus the optional `bind` hook covered below. In practice you
+almost never subclass `SaltDatasetModule` directly; you subclass `Reader` or
+`Processor` (both below), which already implement the parts every reader or
+every processor needs.
 
 ### `declare_io(self, mode: Mode) -> IO`
 
-`salt/data/base.py:135`, `@abstractmethod`
+`salt/data/base.py:120`, `@abstractmethod`
 
 **When salt calls it.** Once per mode, during the declare phase, before any
 data file is opened, exactly like the model-side method of the same name.
@@ -145,7 +146,7 @@ nothing downstream raises to say so.
 
 ### `bind`
 
-`bind(self, ctx: WorkerCtx) -> None`, `salt/data/base.py:138`
+`bind(self, ctx: WorkerCtx) -> None`, `salt/data/base.py:123`
 
 **When salt calls it.** Once per (worker process, plan), by `SaltDataset`,
 before the first batch that worker reads.
@@ -162,7 +163,7 @@ model-side `bind`'s job, not this one, and the two are otherwise unrelated
 despite the shared name (see the disambiguation box at the [bottom of this
 page](#model-side-bind-vs-data-side-bind)).
 
-**`WorkerCtx` fields** (`salt/data/base.py:93`), the argument this `bind`
+**`WorkerCtx` fields** (`salt/data/base.py:86`), the argument this `bind`
 receives:
 
 | Field | Meaning |
@@ -191,7 +192,7 @@ demand-narrowed per-group buffers; `Labels.bind`
 !!! note "Two different `bind` methods"
 
     Data-side: `bind(self, ctx: WorkerCtx) -> None` (`SaltDatasetModule`,
-    `salt/data/base.py:138`). Model-side:
+    `salt/data/base.py:123`). Model-side:
     `bind(self, schema: ResolvedSchema) -> None` (`SaltModelModule`,
     `salt/model/base.py:75`, see [`model.md#bind`](model.md#bind)). They take
     different arguments, run at different times, and a module is only ever
@@ -199,7 +200,7 @@ demand-narrowed per-group buffers; `Labels.bind`
 
 ### `read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]`
 
-`salt/data/base.py:178`
+`salt/data/base.py:130`
 
 The default derives each stream's demanded fields from this module's bound
 `raw.<stream>` requires, so most modules never override it. Override only
@@ -208,57 +209,9 @@ when the field demand is knowable only after narrowing a wildcard produce:
 example, mapping each narrowed `labels.<stream>.<field>` key back to the
 `raw.<stream>.<field>` read it needs.
 
-### `declare_setup_io` / `setup` / `teardown`
-
-`declare_setup_io` (`salt/data/base.py:147`) has zero documentation coverage
-in the tree before this page.
-
-These three are the setup-time face of a data module, run once per stage
-inside `datamodule.setup(stage)` rather than once per batch. All three
-default to empty or identity, so most modules never touch them.
-
-- `declare_setup_io(self, stage: SetupStage) -> SetupIO` is the setup-time
-  analogue of `declare_io`: a pure function of config, no data files, no
-  tensors. A non-empty return for some stage is what marks a module as
-  **setup-participating**; it does not change what the per-batch `declare_io`
-  face reports.
-- `setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle`
-  (`salt/data/base.py:158`) is the one sanctioned point a module may mutate
-  the setup-time bundle. It may touch the filesystem (resolving a wildcard,
-  building an index), reads its declared setup-`requires` off `ctx`, and
-  merges back only its declared setup-`produces`. It runs identically on
-  every DDP rank, so it must not depend on anything rank-specific to stay
-  correct.
-- `teardown(self, ctx: SetupBundle, stage: SetupStage) -> None`
-  (`salt/data/base.py:169`) is the symmetric cleanup hook, called from
-  `datamodule.teardown(stage)`, guarded so it only fires for a stage the
-  module actually set up.
-
-**Minimal snippet:**
-
-```python
-def declare_setup_io(self, stage: SetupStage) -> SetupIO:
-    if stage != "fit":
-        return SetupIO()
-    return SetupIO(produces=unflatten_source_spec(
-        {"source.reader.fit.pattern": SourceSpec(kind="path", stages=("fit",))}
-    ))
-
-def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
-    if stage != "fit":
-        return ctx
-    out = {"source.reader.fit.pattern": str(self.resolved_path)}
-    ctx.merge(canonical_produced(out, set(out), self.name), who=self.name, expected=set(out))
-    return ctx
-```
-
-**Read as a real example:** `InputSamples`
-(`salt/data/input_samples.py:124`, `:143`) is the shipped source of
-per-stage file patterns.
-
 ## `Reader`
 
-`salt/data/base.py:196`
+`salt/data/base.py:148`
 
 **What it is required to do.** Turn a source file into a flat dotted dict of
 numpy arrays for one contiguous batch slice. It is the source node of the
@@ -266,29 +219,29 @@ data graph: `declare_io` always returns `requires={}`.
 
 | Member | Kind | Required to do | Override? |
 |---|---|---|---|
-| `streams` (`:245`) | abstract property | name the streams this reader serves, in config order | always |
-| `__len__` (`:256`) | abstract | return the row count served | always |
-| `read(rows, mode)` (`:260`) | abstract | read one contiguous batch, return produced keys | always |
-| `prepare()` (`:248`) | concrete, default no-op | main-process file probing (wildcard->VDS resolution, row counts); idempotent, called lazily by `__len__` | only if there is something to probe |
-| `with_source(...)` (`:401`) | concrete, default raises `NotImplementedError` | clone this reader onto another source file, config-only, signature `with_source(self, filename, num=-1, stage=None) -> Reader` (`salt/data/base.py:401-407`) | required if this reader is used as a `SaltDataModule` prototype |
-| `sources()` (`:428`) | concrete, default introspects a `filename`/`files` attribute | list the concrete on-disk file(s) this reader will read | only when sources are not one such attribute (`MultiSampleReader`) |
-| `restage(root)` (`:442`) | concrete, default copies each `sources()` file via `with_source` | clone this reader reading staged copies under `root` | only for a reader with more than one source |
-| `row_blocks()` (`:265`) | concrete, default one whole-reader block | the reader's natural sequential read units for streaming | only when storage has a coarser natural grain (`UprootReader` per file) |
-| `read_block(block, mode)` (`:278`) | concrete, default the plain row-slice `read` | read one `RowBlock` | only for a multi-sample reader mapping a block to a sub-reader |
-| `schema_group(stream)` (`:360`) | concrete, default `None` | the schema for one served stream, for static validation | only if a schema artifact is configured |
-| `label_universe()` (`:380`) | concrete, default `None` | the `labels.<stream>.<field>` universe, for wildcard narrowing validation | only with a schema |
-| `config_fingerprint()` (`:369`) | concrete, default `{}` | everything about config that changes served rows/fields, without opening a file | only if the reader supports cached artifacts keyed on this |
-| `h5_source` (`:390`) | property, default `None` | the h5py-openable file, when this reader has one | only for an H5-backed reader |
-| `aliases(array)` (`:522`) | concrete, default `False` | whether `array` shares memory with a reusable buffer, for the `debug` boundary check | only if the reader has reusable buffers to check against |
+| `streams` (`:182`) | abstract property | name the streams this reader serves, in config order | always |
+| `__len__` (`:191`) | abstract | return the row count served | always |
+| `read(rows, mode)` (`:195`) | abstract | read one contiguous batch, return produced keys | always |
+| `prepare()` (`:185`) | concrete, default no-op | main-process file probing (wildcard->VDS resolution, row counts); idempotent, called lazily by `__len__` | only if there is something to probe |
+| `with_source(...)` (`:287`) | concrete, default raises `NotImplementedError` | clone this reader onto another source file, config-only, signature `with_source(self, filename, num=-1, stage=None) -> Reader` (`salt/data/base.py:287-292`) | required if this reader is used as a `SaltDataModule` prototype |
+| `sources()` (`:313`) | concrete, default introspects a `filename`/`files` attribute | list the concrete on-disk file(s) this reader will read | only when sources are not one such attribute (`MultiSampleReader`) |
+| `restage(root)` (`:327`) | concrete, default copies each `sources()` file via `with_source` | clone this reader reading staged copies under `root` | only for a reader with more than one source |
+| `row_blocks()` (`:200`) | concrete, default one whole-reader block | the reader's natural sequential read units for streaming | only when storage has a coarser natural grain (`UprootReader` per file) |
+| `read_block(block, mode)` (`:213`) | concrete, default the plain row-slice `read` | read one `RowBlock` | only for a multi-sample reader mapping a block to a sub-reader |
+| `schema_group(stream)` (`:246`) | concrete, default `None` | the schema for one served stream, for static validation | only if a schema artifact is configured |
+| `label_universe()` (`:266`) | concrete, default `None` | the `labels.<stream>.<field>` universe, for wildcard narrowing validation | only with a schema |
+| `config_fingerprint()` (`:255`) | concrete, default `{}` | everything about config that changes served rows/fields, without opening a file | only if the reader supports cached artifacts keyed on this |
+| `h5_source` (`:275`) | property, default `None` | the h5py-openable file, when this reader has one | only for an H5-backed reader |
+| `aliases(array)` (`:387`) | concrete, default `False` | whether `array` shares memory with a reusable buffer, for the `debug` boundary check | only if the reader has reusable buffers to check against |
 
 `with_source` is the one method every `SaltDataModule` prototype reader must
 implement. `SaltDataModule` calls it once per stage
-(`salt/data/datamodule.py:563-564`), passing all three arguments:
+(`salt/data/datamodule.py:417-418`), passing all three arguments:
 `filename` is the resolved per-stage source; `num` is the per-stage row cap
 taken from `data.num_train`/`num_val`/`num_test`, so a hand-written clone
 that drops `num` silently disables those settings; `stage` is the
 multi-source readers' per-stage sourcing hook, mapped from the Lightning
-stage via `_STAGE_OF_MODE` (`salt/data/datamodule.py:118`).
+stage via `_STAGE_OF_MODE` (`salt/data/datamodule.py:116`).
 
 Plus the class attributes `schema` (`Schema | None`, default `None`), `cuts`
 (`GlobalObjectCuts | None`, sample-axis row eligibility, default `None`) and
@@ -310,7 +263,7 @@ from scratch in [`tutorials/mnist.md`](../tutorials/mnist.md).
 
 ## `Processor`
 
-`salt/data/base.py:533`
+`salt/data/base.py:398`
 
 This symbol has zero documentation coverage as a base-class name in the tree
 before this page; concrete processors such as `Features` and `Labels` are
@@ -318,7 +271,7 @@ named, but the base itself never is.
 
 **What it is required to do.** Transform one batch. Implement
 `process(self, batch, rows: slice, mode: Mode) -> dict[str, np.ndarray]`
-(`salt/data/base.py:544`, `@abstractmethod`): read declared requires via
+(`salt/data/base.py:409`, `@abstractmethod`): read declared requires via
 `batch.get(key)`, and return only newly produced keys.
 
 **What you must not do.** Do not return a key you did not declare in
@@ -364,14 +317,14 @@ which hooks it defines.
 builds from the configured `data.modules`
 (`salt/data/dataset.py:16`); it is never itself a `data.modules` entry, and
 putting it there fails the `isinstance(module, SaltDatasetModule)` check at
-`salt/data/datamodule.py:267-271`. The same holds for
+`salt/data/datamodule.py:238-242`. The same holds for
 `salt.data.IterableSaltDataset`, the streaming counterpart, and for
 `salt.data.SaltDataModule` itself, which configures `data.modules` but is
 never one of its own entries.
 
 ### `salt.data.InputSamples`
 
-`salt/data/input_samples.py:24`, `__init__` `:46-50`
+`salt/data/input_samples.py:17`, `__init__` `:40-44`
 
 | `init_arg` | Type | Default |
 |---|---|---|
@@ -379,14 +332,16 @@ never one of its own entries.
 | `num` | `dict[str, int] \| None` | `None` |
 
 `files` keys are restricted to `train`/`val`/`test`; an empty `files` dict
-or a key outside that set raises `ValueError` (`:52-62`). `num` gives the
+or a key outside that set raises `ValueError` (`:46-56`). `num` gives the
 per-stage row cap, `-1` meaning all.
 
-This is a setup-only module: `declare_io` returns an empty `IO` for every
-mode (`:108-113`); `declare_setup_io` produces
-`source.<reader>.<stage>.pattern` per active stage, plus the whole-dict
-`artifacts.<reader>.num` scalar once, on the first active stage (`:124-137`).
-It defines no `bind`.
+This is a config holder, not a per-batch module: `declare_io` returns an
+empty `IO` for every mode (`:60-63`), and `SaltDataModule` keeps it out of
+the per-batch graph (`batch_modules`). For each stage the datamodule reads
+`source(stage)` (`:65-70`): `files[stage]` as a string, passed through
+verbatim (a wildcard is resolved by the reader), and `num.get(stage, -1)`.
+A stage left out of `files` has no source, even when a legacy
+`train_file`/`val_file`/`test_file` names it. It defines no `bind`.
 
 ```yaml
 data:
@@ -619,7 +574,7 @@ only those eleven belong under `data.modules` in a config.
 | `salt.data.UprootReader` | the ROOT/uproot reader | **yes** |
 | `salt.data.xAODReader` | ElementLink-dereferencing `UprootReader` for xAOD POOL / DAOD_PHYSLITE | **yes** |
 | `salt.data.MultiSampleReader` | proportionally stratified multi-sample reader | **yes** |
-| `salt.data.InputSamples` | the per-stage file-pattern setup module | **yes** |
+| `salt.data.InputSamples` | the per-stage file/row-cap config holder | **yes** |
 | `salt.data.Features` | `raw.*` to `inputs.*` float32 materialisation | **yes** |
 | `salt.data.Labels` | `raw.*` to `labels.**` truth extraction | **yes** |
 | `salt.data.FtagLabeller` | on-the-fly label relabelling | **yes** |
@@ -653,7 +608,7 @@ actually have:
 | | Data-side `bind` | Model-side `bind` |
 |---|---|---|
 | Signature | `bind(self, ctx: WorkerCtx) -> None` | `bind(self, schema: ResolvedSchema) -> None` |
-| Defined on | `SaltDatasetModule` (`salt/data/base.py:138`) | `SaltModelModule` (`salt/model/base.py:75`) |
+| Defined on | `SaltDatasetModule` (`salt/data/base.py:123`) | `SaltModelModule` (`salt/model/base.py:75`) |
 | Called by | `SaltDataset`, once per (worker process, plan) | `bind_all`, once per model, after every mode's plan compiles |
 | Typical use | open a file handle, allocate a per-worker read buffer | build `torch.nn` layers sized from resolved widths |
 | May touch a file | yes; the only data-module hook that may | no |

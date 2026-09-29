@@ -44,6 +44,16 @@ def parse_output_modes(modes: Any, who: str) -> Mode:
     return out
 
 
+def _unique_names(values: Sequence[str] | None, who: str, what: str, hint: str) -> tuple[str, ...]:
+    """`values` as a tuple; `ConfigError` when empty (with `hint`) or when a name repeats."""
+    names = list(values or [])
+    if not names:
+        raise ConfigError(f"{who} needs a non-empty '{what}s' list — {hint}")
+    if dup := sorted({n for n in names if names.count(n) > 1}):
+        raise ConfigError(f"{who}: duplicate {what} name(s) {dup} — one entry per {what}")
+    return tuple(names)
+
+
 class OutputSectionWriter(SaltModelModule):
     """Shared base for the ``outputs:`` section writers.
 
@@ -66,10 +76,6 @@ class OutputSectionWriter(SaltModelModule):
     def __init__(self, modes: Sequence[str] | None = None) -> None:
         super().__init__()
         self._section_modes = parse_output_modes(modes, type(self).__name__)
-
-    def section_modes(self) -> Mode:
-        """The Mode flag this writer runs in."""
-        return self._section_modes
 
     def runs_in_mode(self, mode: Mode) -> bool:
         """Whether this writer runs in `mode`."""
@@ -122,16 +128,12 @@ class RunTaskOutput(OutputSectionWriter):
 
     def __init__(self, tasks: Sequence[str], modes: Sequence[str] | None = None) -> None:
         super().__init__(modes=modes)
-        names = list(tasks or [])
-        if not names:
-            raise ConfigError(
-                "RunTaskOutput needs a non-empty 'tasks' list — name the task instances whose "
-                "get_output() fields this writer serialises"
-            )
-        if len(set(names)) != len(names):
-            dup = sorted({n for n in names if names.count(n) > 1})
-            raise ConfigError(f"RunTaskOutput: duplicate task name(s) {dup} — one entry per task")
-        self.tasks = tuple(names)
+        self.tasks = _unique_names(
+            tasks,
+            "RunTaskOutput",
+            "task",
+            "name the task instances whose get_output() fields this writer serialises",
+        )
         # the model module dict, captured at fold/compile so the writer can resolve
         # the tasks it orchestrates (declare_io needs each task's pred_key + stream
         # + output_time_requires + the leaf names get_output mints).
@@ -151,8 +153,7 @@ class RunTaskOutput(OutputSectionWriter):
 
     def _resolved_tasks(self) -> dict[str, Any]:
         """The live task objects this writer orchestrates, in declaration order;
-        raises `ConfigError` when unbound or a named task lacks the
-        ``get_output`` surface.
+        raises `ConfigError` when unbound or a named task is not a model module.
         """
         if self._model_modules is None:
             raise ConfigError(
@@ -168,13 +169,6 @@ class RunTaskOutput(OutputSectionWriter):
                     f"RunTaskOutput {self.name!r}: task {task_name!r} is not a model module — "
                     f"candidates are {sorted(self._model_modules)}"
                 )
-            for attr in ("get_output", "output_time_requires", "pred_key", "stream"):
-                if not hasattr(task, attr):
-                    raise ConfigError(
-                        f"RunTaskOutput {self.name!r}: task {task_name!r} "
-                        f"({type(task).__name__}) does not expose {attr!r} — RunTaskOutput "
-                        "orchestrates _TaskModuleBase tasks"
-                    )
             out[task_name] = task
         return out
 
@@ -208,7 +202,7 @@ class RunTaskOutput(OutputSectionWriter):
             requires[task.pred_key] = TensorSpec(shape=None, dtype=None, kind="data")
             for dep in task.output_time_requires(mode):
                 requires.setdefault(dep, _dep_spec(dep))
-            for field in _task_manifest(task, mode):
+            for field in task.get_output_manifest(mode, "salt"):
                 produces[self.field_leaf_key(task, field)] = TensorSpec(
                     shape=None, dtype=None, kind="data"
                 )
@@ -221,7 +215,7 @@ class RunTaskOutput(OutputSectionWriter):
         """
         produced: dict[str, Tensor] = {}
         for task in self._resolved_tasks().values():
-            for field in task.get_output(b, mode, self._run_name()):
+            for field in task.get_output(b, mode, "salt"):
                 if field.value is None:
                     raise ConfigError(
                         f"task {task.name!r}.get_output field carries no value — RunTaskOutput "
@@ -229,10 +223,6 @@ class RunTaskOutput(OutputSectionWriter):
                     )
                 produced[self.field_leaf_key(task, field)] = field.value
         return produced
-
-    def _run_name(self) -> str:
-        """The run name passed to ``get_output`` (the sink owns the actual prefix)."""
-        return "salt"
 
     # -- section manifest (consumed by the dumb sinks for names/dtypes/order) ----
 
@@ -252,7 +242,8 @@ class RunTaskOutput(OutputSectionWriter):
         out: list[tuple[str, OutputField]] = []
         for task in self._resolved_tasks().values():
             out.extend(
-                (self.field_leaf_key(task, field), field) for field in _task_manifest(task, mode)
+                (self.field_leaf_key(task, field), field)
+                for field in task.get_output_manifest(mode, "salt")
             )
         return out
 
@@ -281,19 +272,3 @@ def _dep_spec(dep: str) -> TensorSpec:
         return TensorSpec(shape=None, dtype=None, kind="label")
     # inputs.* (the ONNX ratio-denominator Feature) — a raw data tensor
     return TensorSpec(shape=None, dtype="float32", kind="data")
-
-
-def _task_manifest(task: Any, mode: Mode) -> list[OutputField]:
-    """The value-free serialisation-leaf metadata for a task in `mode`.
-
-    Uses ``get_output_manifest(mode, run_name)`` (the value-free twin of
-    ``get_output``; the run name is cosmetic, the sink prefixes). Raises
-    `ConfigError` when the task exposes no manifest surface.
-    """
-    manifest = getattr(task, "get_output_manifest", None)
-    if not callable(manifest):
-        raise ConfigError(
-            f"task {task.name!r} ({type(task).__name__}) ships no get_output_manifest — the dumb "
-            "sinks need the column NAMES/DTYPES/ORDER before any batch runs"
-        )
-    return list(manifest(mode, "salt"))

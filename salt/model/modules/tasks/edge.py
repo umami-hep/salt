@@ -272,8 +272,9 @@ class VertexingTaskModule(_TaskModuleBase):
     def head_forward(
         self,
         x: Tensor,
-        labels_dict: Mapping | None,
-        pad_masks: Mapping | None = None,
+        mask: Tensor | None,
+        labels: Tensor | None,
+        origin_labels: Tensor | None,
         context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         """Compute pair classification for vertexing and its loss.
@@ -291,13 +292,8 @@ class VertexingTaskModule(_TaskModuleBase):
         Returns
         -------
         tuple[Tensor, Tensor | None]
-            Predicted edge logits ``[E, 1]`` and the scalar loss.
+            Predicted edge logits ``[E, 1]`` and the scalar loss (``None`` without labels).
         """
-        if pad_masks is not None:
-            mask = pad_masks[self.input_name]
-            x = x[:, self.input_name_slice(pad_masks)]
-        else:
-            mask = None
         b, n, d = x.shape
         ex_size = (b, n, n, d)
         t_mask = torch.ones(b, n, device=x.device) if mask is None else ~mask
@@ -324,12 +320,14 @@ class VertexingTaskModule(_TaskModuleBase):
         tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat[:, :-1, :-1]]
         pred = self.net(tt_matrix, context_matrix)
         loss: Tensor | None = None
-        if labels_dict:
-            loss = self.calculate_loss(pred, labels_dict, adjmat=adjmat[:, :-1, :-1])
+        if labels is not None and origin_labels is not None:
+            loss = self.calculate_loss(pred, labels, origin_labels, adjmat=adjmat[:, :-1, :-1])
 
         return pred, loss
 
-    def calculate_loss(self, pred: Tensor, labels_dict: Mapping, adjmat: Tensor) -> Tensor:
+    def calculate_loss(
+        self, pred: Tensor, labels: Tensor, origin_labels: Tensor, adjmat: Tensor
+    ) -> Tensor:
         """Compute the vertexing loss against pairwise matching labels.
 
         Returns
@@ -337,8 +335,6 @@ class VertexingTaskModule(_TaskModuleBase):
         Tensor
             Weighted average loss scaled by ``self.weight``.
         """
-        labels = labels_dict[self.input_name][self.label]
-
         match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
 
         # negative-class labels never count as a match, even to each other
@@ -350,8 +346,7 @@ class VertexingTaskModule(_TaskModuleBase):
 
         loss = self.loss(pred.squeeze(-1), match_matrix)
 
-        origin_label = self.label.replace("VertexIndex", "OriginLabel")
-        weights = self.get_weights(labels_dict[self.input_name][origin_label], adjmat)
+        weights = self.get_weights(origin_labels, adjmat)
         weighted_loss = loss * weights
 
         num_non_masked_elements = match_matrix.sum()
@@ -396,18 +391,12 @@ class VertexingTaskModule(_TaskModuleBase):
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
         mask = b.get(f"masks.{self.stream}")
-        pad_masks = {self.stream: mask}
         if mode & Mode.TRAINING:
-            derived = self.label.replace("VertexIndex", "OriginLabel")
-            labels_dict = {
-                self.stream: {
-                    self.label: b.get(self.label_key),
-                    derived: b.get(self.origin_label_key),
-                }
-            }
-            preds, loss = self.head_forward(x, labels_dict, pad_masks, context=ctx)
+            labels = b.get(self.label_key)
+            origin_labels = b.get(self.origin_label_key)
+            preds, loss = self.head_forward(x, mask, labels, origin_labels, context=ctx)
             return {self.pred_key: preds, self.loss_key: loss}
-        preds, _ = self.head_forward(x, None, pad_masks, context=ctx)
+        preds, _ = self.head_forward(x, mask, None, None, context=ctx)
         return {self.pred_key: preds}
 
     # -- output rendering ---------------------------------------------------
@@ -441,17 +430,6 @@ class VertexingTaskModule(_TaskModuleBase):
                 # (raw indices, negative = no vertex); padded positions read -1
                 values.append(torch.masked_fill(b.get(self.label_key), mask, -1))
         return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
-
-    def _target_field(self) -> OutputField:
-        """The vertex-index target label: unprefixed because labels are model-independent."""
-        return OutputField(
-            h5_name=f"target_{self.name}",
-            onnx_name=None,
-            dtype="i4",
-            axis="per_token",
-            final=True,
-            prefix=False,
-        )
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
         """`get_output` derives its fields from this list via ``replace(field, value=...)``."""

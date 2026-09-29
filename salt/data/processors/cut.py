@@ -66,11 +66,6 @@ class _ConstituentCuts:
         """
         if not self.cuts:
             return batch
-        if VALID_FIELD not in (batch.dtype.names or ()):
-            raise KeyError(
-                f"constituent cuts need the {VALID_FIELD!r} field on the stream; "
-                f"present: {sorted(batch.dtype.names or ())}"
-            )
         valid = batch[VALID_FIELD]
         keep = self.keep(batch) & valid
         t_dim = batch.shape[1]

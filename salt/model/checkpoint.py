@@ -66,7 +66,6 @@ def warm_start_from_checkpoint(
     *,
     config_modules: Mapping[str, Any],
     plans: Mapping[Mode, Plan],
-    bound: bool,
     payload_key: str,
 ) -> WarmStartResult:
     """Warm-start weights from `path` into the (already-bound) `model` with strict
@@ -80,14 +79,9 @@ def warm_start_from_checkpoint(
     and fully covered (same key set, shapes, dtypes); **new** — config-only, left at
     fresh init for `on_fit_start` to materialise; **dropped** — checkpoint-only.
     A retained module that is only PARTIALLY covered is a hard `ConfigError`: that is
-    an architecture swap — rename it so it drops+adds cleanly. Also raises when
-    unbound, on a missing ``state_dict``, or a v1 layout.
+    an architecture swap — rename it so it drops+adds cleanly. Also raises on a
+    missing ``state_dict`` or a v1 layout.
     """
-    if not bound:
-        raise ConfigError(
-            f"--init_from {path!r}: warm start before bind — the model must compile its "
-            "plans and bind first. This is an internal ordering error."
-        )
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     raw_state = checkpoint.get("state_dict") if isinstance(checkpoint, Mapping) else None
     if not raw_state:

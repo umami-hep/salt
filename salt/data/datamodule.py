@@ -1,7 +1,8 @@
 """`SaltDataModule` — Lightning wiring for the v2 dataset pipeline.
 
 Per-stage readers cloned via `Reader.with_source`; batch-returning dataset
-(no collate); declared setup graph for source resolution and optional staging.
+(no collate); per-stage sources from an `InputSamples` config holder; optional
+staging.
 """
 
 from __future__ import annotations
@@ -14,16 +15,14 @@ from typing import Any
 import lightning
 from torch.utils.data import DataLoader
 
-from salt.data.base import Reader, SaltDatasetModule, SetupBundle
+from salt.data.base import Reader, SaltDatasetModule
 from salt.data.dataset import SaltDataset
-from salt.data.input_samples import InputSamples, deepest_source_path, source_num
+from salt.data.input_samples import InputSamples
 from salt.data.iterable_dataset import DEFAULT_BLOCK_ROWS, IterableSaltDataset
 from salt.data.manifest import CorpusManifest, apply_schema, ensure_manifest
 from salt.data.samplers import RandomBatchSampler
 from salt.graph.errors import ConfigError
-from salt.graph.planner import compile_setup_plan
-from salt.graph.setup_executor import run_setup_plan
-from salt.graph.spec import PRIMARY_MODES, Mode
+from salt.graph.spec import Mode
 from salt.utils.logging import get_logger
 
 __all__ = ["AUTO_PREFETCH_CAP", "SaltDataModule", "auto_prefetch_factor"]
@@ -115,28 +114,6 @@ def auto_prefetch_factor(
 # Single-source readers ignore it; MultiSampleReader uses it to select each
 # sub-reader's per-stage source.
 _STAGE_OF_MODE: dict[Mode, str] = {Mode.FIT: "train", Mode.VAL: "val", Mode.TEST: "test"}
-
-_SETUP_STAGES: tuple[str, ...] = ("train", "val", "test")
-
-
-def _is_setup_only(module: SaltDatasetModule) -> bool:
-    """Whether `module` declares setup IO for some stage but no per-batch IO.
-
-    Such modules (InputSamples/ShmStage) must be partitioned out before
-    the per-batch dataset deepcopy so the dead-module check and single-Reader
-    guard don't miscount them; a dual-face reader stays in the batch set.
-    """
-    has_setup = any(
-        not module.declare_setup_io(stage).is_empty()  # type: ignore[arg-type]
-        for stage in _SETUP_STAGES
-    )
-    if not has_setup:
-        return False
-    has_batch = any(
-        module.declare_io(mode).requires or module.declare_io(mode).produces
-        for mode in PRIMARY_MODES
-    )
-    return not has_batch
 
 
 class SaltDataModule(lightning.LightningDataModule):
@@ -264,9 +241,8 @@ class SaltDataModule(lightning.LightningDataModule):
                     "data-graph entries must subclass SaltDatasetModule; wrap or extend it"
                 )
             module.name = name
-        # single-Reader guard FIRST, over all modules, before the setup-only
-        # partition below: gives us `_reader_name` so InputSamples can be wired
-        # before `declare_setup_io` (which needs the reader name) is probed.
+        # single-Reader guard FIRST, over all modules, before InputSamples is
+        # wired and partitioned out below.
         readers = [(name, m) for name, m in modules.items() if isinstance(m, Reader)]
         if len(readers) != 1:
             raise ConfigError(
@@ -280,25 +256,15 @@ class SaltDataModule(lightning.LightningDataModule):
         self.num_train = num_train
         self.num_val = num_val
         self.num_test = num_test
-        # If a config declares an `InputSamples` setup module it owns the
-        # per-stage source patterns; the deprecated train_file/val_file/test_file
-        # kwargs synthesise an implicit InputSamples so old configs keep working.
-        # Must run before the partition below: wires InputSamples._reader so its
-        # `declare_setup_io` (probed by `_is_setup_only`) can build keys.
+        # An explicit InputSamples owns the per-stage files; otherwise the deprecated
+        # train_file/val_file/test_file kwargs synthesise one so old configs work.
         self._wire_input_samples(modules)
-        # Partition setup-only modules OUT before the per-batch dataset deepcopy:
-        # they never reach SaltDataset, so neither the dead-module check nor
-        # SaltDataset's single-Reader guard miscounts them.
-        self._setup_modules = {name: m for name, m in modules.items() if _is_setup_only(m)}
+        # InputSamples is a config holder: keep it out of per-batch dataset copies so
+        # the dead-module check and SaltDataset's single-Reader guard don't miscount it.
         self._batch_modules = {
-            name: m for name, m in modules.items() if name not in self._setup_modules
+            name: m for name, m in modules.items() if not isinstance(m, InputSamples)
         }
         self._modules = modules
-        self._setup_ctx: SetupBundle | None = None
-        # stages already run into `_setup_ctx`. The ctx is write-once, so a
-        # stage may be planned exactly once — and `prepare_data` runs the same
-        # pass `setup` would, before it.
-        self._setup_done: set[str] = set()
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.test_suff = test_suff
@@ -345,13 +311,12 @@ class SaltDataModule(lightning.LightningDataModule):
         self.test_dset: SaltDataset | IterableSaltDataset | None = None
 
     def _wire_input_samples(self, modules: dict[str, SaltDatasetModule]) -> None:
-        """Assemble the data-sourcing setup graph (mutates `modules` in place).
+        """Pick the single `InputSamples` source holder (mutates `modules` in place).
 
-        1. Alias migration: with no `InputSamples` configured but the
-           deprecated train_file/val_file/test_file kwargs set, synthesise an
-           implicit `InputSamples` and add it to the setup-only namespace.
-        2. Reader-name wiring: poke the single reader's name onto each
-           `InputSamples` instance so its ``source.<reader>.*`` keys match.
+        At most one is allowed. With none configured but the deprecated
+        train_file/val_file/test_file kwargs set, synthesise an implicit
+        `InputSamples` from them (+ the matching ``num_*`` caps) under
+        ``input_samples``.
         """
         existing = [(name, m) for name, m in modules.items() if isinstance(m, InputSamples)]
         if len(existing) > 1:
@@ -374,30 +339,19 @@ class SaltDataModule(lightning.LightningDataModule):
                 num = {"train": self.num_train, "val": self.num_val, "test": self.num_test}
                 implicit = InputSamples(files=files, num={s: num[s] for s in files})
                 implicit.name = "input_samples"
-                # partition right after picks this up into `_setup_modules`
-                # (it is setup-only).
                 modules["input_samples"] = implicit
                 existing = [("input_samples", implicit)]
-        # embed the single Reader's name so the produced
-        # source.<reader>.<stage>.pattern keys match the handoff.
-        for _, samples in existing:
-            samples._reader = self._reader_name  # noqa: SLF001 — assembly poke
         self._input_samples: InputSamples | None = existing[0][1] if existing else None
 
     @property
     def modules(self) -> dict[str, SaltDatasetModule]:
-        """All assembled dataset modules (both graphs) — use `batch_modules` for compiling."""
+        """All assembled dataset modules (incl. InputSamples); compile from `batch_modules`."""
         return dict(self._modules)
 
     @property
     def batch_modules(self) -> dict[str, SaltDatasetModule]:
-        """The per-batch modules (reader + processors), excluding setup-only ones."""
+        """The per-batch modules (reader + processors), excluding InputSamples."""
         return dict(self._batch_modules)
-
-    @property
-    def setup_modules(self) -> dict[str, SaltDatasetModule]:
-        """The setup-only modules (InputSamples/ShmStage) — the setup graph."""
-        return dict(self._setup_modules)
 
     @property
     def reader(self) -> Reader:
@@ -435,60 +389,16 @@ class SaltDataModule(lightning.LightningDataModule):
             if callable(origins):
                 self._sink_origins = {mode: dict(who) for mode, who in origins().items()}
 
-    def _run_setup_pass(self, stages: Iterable[str]) -> None:
-        """Compile + run the setup-graph plan once per `stages` into one shared ctx.
-
-        Accumulates disjoint stage-qualified keys across stages (e.g.
-        ``setup("fit")`` covers both "train" and "val"); `_make_dataset` reads
-        the resolved deepest path off this ctx. No-op with no setup modules.
-        DDP-safe: every rank runs the identical pass (no filesystem touched).
-
-        Idempotent per stage: the ctx is write-once, so an already-planned stage
-        is skipped rather than re-planned — `prepare_data` runs this pass for
-        the stages it must resolve sources for, and `setup` then runs whatever
-        is left.
-        """
-        if self._setup_ctx is None:
-            self._setup_ctx = SetupBundle()
-        if not self._setup_modules:
-            return
-        stage_tuple = tuple(s for s in stages if s not in self._setup_done)
-        if not stage_tuple:
-            return
-        # The whole-dict `num` scalar is written once per ctx: tell InputSamples
-        # which pass stage carries it, and whether a prior pass already wrote it
-        # into this shared ctx (so a `test` pass after `fit` doesn't re-emit the
-        # {train,val,test} cap dict).
-        if self._input_samples is not None:
-            num_key = f"artifacts.{self._reader_name}.num"
-            self._input_samples.set_num_stage(
-                stage_tuple, already_emitted=num_key in self._setup_ctx
-            )
-        for stage in stage_tuple:
-            plan = compile_setup_plan(self._setup_modules, stage)  # type: ignore[arg-type]
-            run_setup_plan(plan, stage, self._setup_ctx)  # type: ignore[arg-type]
-            self._setup_done.add(stage)
-
-    def _resolve_source(self, mode: Mode) -> tuple[str | Path | None, int]:
-        """Resolve the stage's source path + row cap from the setup ctx.
-
-        Uses the `InputSamples`-resolved deepest path + per-stage ``num`` when
-        available; falls back to the legacy ``train_file``/``num_train`` kwargs.
+    def _resolve_source(self, mode: Mode) -> tuple[str | None, int]:
+        """The stage's ``(file, num)`` from the `InputSamples` config holder;
+        ``(None, -1)`` when the stage has no source configured.
         """
         stage = _STAGE_OF_MODE[mode]
-        if self._input_samples is not None and self._setup_ctx is not None:
-            key = f"source.{self._reader_name}.{stage}.pattern"
-            if key in self._setup_ctx:
-                filename = deepest_source_path(self._setup_ctx, self._reader_name, stage)
-                num = source_num(self._setup_ctx, self._reader_name, stage)
-                return filename, num
-        # legacy fallback (no InputSamples, no aliases): the raw kwargs.
-        legacy = {
-            Mode.FIT: (self.train_file, self.num_train),
-            Mode.VAL: (self.val_file, self.num_val),
-            Mode.TEST: (self.test_file, self.num_test),
-        }
-        return legacy[mode]
+        if self._input_samples is not None and stage in self._input_samples.files:
+            return self._input_samples.source(stage)
+        # A stage the InputSamples omits is unconfigured even if a legacy *_file kwarg
+        # names it: those kwargs apply only when no InputSamples is configured.
+        return None, -1
 
     def _stage_reader(self, mode: Mode) -> tuple[Reader | None, int]:
         """The stage's reader clone (config-only, unstaged, unprepared) and its row cap.
@@ -529,7 +439,6 @@ class SaltDataModule(lightning.LightningDataModule):
                 f"manifest: seeded the {_STAGE_OF_MODE[mode]} reader's schema from the manifest "
                 "— plan compilation opens no data file"
             )
-        # only `_batch_modules` are copied — setup-only modules never reach a dataset
         modules = {
             name: (reader if name == self._reader_name else deepcopy(module))
             for name, module in self._batch_modules.items()
@@ -624,9 +533,7 @@ class SaltDataModule(lightning.LightningDataModule):
         # says whether a test corpus is about to be read or is merely configured
         fn = getattr(getattr(self.trainer, "state", None), "fn", None)
         stage = "test" if str(getattr(fn, "value", "")).startswith("test") else "fit"
-        modes = self._modes_for_stage(stage)
-        self._run_setup_pass(_STAGE_OF_MODE[m] for m in modes)
-        for mode in modes:
+        for mode in self._modes_for_stage(stage):
             reader, _num = self._stage_reader(mode)
             if reader is None:
                 continue
@@ -646,16 +553,9 @@ class SaltDataModule(lightning.LightningDataModule):
         return ensure_manifest(reader, self._manifest_path(mode), _STAGE_OF_MODE[mode])
 
     def setup(self, stage: str) -> None:
-        """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST.
-
-        Runs the data-sourcing setup pass (source resolution) into one
-        write-once ctx first, then binds each stage's reader from it.
-        """
+        """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST."""
         self._auto_sinks()
         self._stage_root = self._resolve_stage_root(stage)
-        # setup("fit") resolves both train+val into one ctx; _resolve_source then
-        # reads the deepest path off this ctx (pure path arithmetic, no FS I/O).
-        self._run_setup_pass(_STAGE_OF_MODE[m] for m in self._modes_for_stage(stage))
         if stage == "fit":
             self.train_dset = self._make_dataset(Mode.FIT)
             self.val_dset = self._make_dataset(Mode.VAL)

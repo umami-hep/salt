@@ -170,25 +170,9 @@ class TestWarmStartFromCheckpoint:
             str(path),
             config_modules={"a": None, "b": None},
             plans={},
-            bound=True,
             payload_key="salt_core",
         )
         assert result == WarmStartResult(loaded=["a"], new=["b"], dropped=["c"])
-
-    def test_raises_before_bind(self, tmp_path) -> None:
-        model = _Net()
-        path = tmp_path / "w.ckpt"
-        torch.save({"state_dict": _Net().state_dict()}, path)
-
-        with pytest.raises(ConfigError, match="before bind"):
-            warm_start_from_checkpoint(
-                model,
-                str(path),
-                config_modules={"a": None, "b": None},
-                plans={},
-                bound=False,
-                payload_key="salt_core",
-            )
 
     def test_raises_when_checkpoint_carries_no_state_dict(self, tmp_path) -> None:
         model = _Net()
@@ -201,7 +185,6 @@ class TestWarmStartFromCheckpoint:
                 str(path),
                 config_modules={"a": None, "b": None},
                 plans={},
-                bound=True,
                 payload_key="salt_core",
             )
 
@@ -224,7 +207,6 @@ class TestWarmStartFromCheckpoint:
                 str(path),
                 config_modules={"a": None, "b": None},
                 plans=plans,
-                bound=True,
                 payload_key="salt_core",
             )
 

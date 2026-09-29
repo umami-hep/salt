@@ -11,8 +11,9 @@ import pytest
 import torch
 import yaml
 
-from salt.graph import Bundle, Executor, Mode
-from salt.graph.spec import GraphModule
+from salt.graph.bundle import Bundle
+from salt.graph.executor import Executor
+from salt.graph.spec import GraphModule, Mode
 from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
@@ -33,7 +34,7 @@ from salt.outputs.sinks.onnx import (
     make_session,
     resolve_export_config,
 )
-from salt.outputs import OnnxExportSink, SeqClassIndex
+from salt.outputs import OnnxExportSink, RunTaskOutput
 from salt.tests._fixtures.gn2v2_fixture import (
     ELECTRON_VARIABLES,
     JET_VARIABLES,
@@ -64,7 +65,7 @@ def exported(tmp_path_factory):
     modules = gn2_folded_modules(tmp)
     resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
+    bind_all(modules, resolve_bind_schema([plan, compile_gn2v2(modules, Mode.TEST)]))
     modules["norm"].materialise()
     result = export_graph(
         modules,
@@ -272,28 +273,24 @@ def two_stream(tmp_path_factory):
             ),
         ],
     )
-    # folded path: conversion nodes + OnnxExportSink (the off-graph manifest
-    # is retired). The jets head's softmax + the two argmax aux leaves fold into
-    # ClassProbs/SeqClassIndex nodes named by the sink.
+    # folded path: the jets head's softmax folds into a ClassProbs node; the two
+    # per-token argmax aux leaves ride an export-only RunTaskOutput (the shipped
+    # per-token export path); the sink names all outputs.
     from salt.outputs import ClassProbs
 
     def _n(node, name):
         node.name = name
         return node
 
+    origin_tasks = ["track_origin", "electron_origin"]
     modules.update({
         "jet_probs": _n(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
-        "track_origin_index": _n(
-            SeqClassIndex(task="track_origin", stream="tracks"), "track_origin_index"
-        ),
-        "electron_origin_index": _n(
-            SeqClassIndex(task="electron_origin", stream="electrons"), "electron_origin_index"
-        ),
+        "origin_out": _n(RunTaskOutput(tasks=origin_tasks, modes=["export"]), "origin_out"),
         "onnx_export": _n(OnnxExportSink(), "onnx_export"),
     })
-    # the tuple is collected from the producers above: the jet probs inherit
-    # pb/pc/pu from their task, and each SeqClassIndex inherits its pascal-cased
-    # per-token name (TrackOrigin / ElectronOrigin) and its n_<stream> axis.
+    # collected from the producers above: jet probs inherit pb/pc/pu from their
+    # task; each origin field gets its pascal-cased per-token name (TrackOrigin /
+    # ElectronOrigin) and n_<stream> axis.
     bind_producers(modules)
     resolved = resolve_export_config(export_cfg, "two_stream")
     plan = compile_onnx_plan(modules, resolved, variables)

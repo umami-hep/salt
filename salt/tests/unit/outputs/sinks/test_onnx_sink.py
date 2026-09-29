@@ -177,8 +177,6 @@ def test_dynamic_axis_defaults_to_the_leaf_stream():
     sink = OnnxExportSink(model_name="M")
     sink.bind_model_modules({"p": _StubProducer((_TRK, _per_token("T")))})
     assert sink.dynamic_axes() == {"M_T": {0: "n_tracks"}}
-    override = OnnxExportLeaf(key=_TRK, name="T", per_token=True, dyn_axis="n_custom")
-    assert override.resolved_dyn_axis() == "n_custom"
 
 
 def test_model_name_required_for_names():
@@ -224,38 +222,16 @@ def test_named_outputs_split_count_mismatch_errors_eagerly():
         "p": _StubProducer((_JET, _global("pb")), (_JET, _global("pc")), (_JET, _global("pu")))
     })
     bundle = Bundle({"outputs": {"jets": {"jets_classification": torch.rand(1, 2)}}})  # 2 != 3
-    with pytest.raises(ConfigError, match="2 channels but declares 3 names"):
+    with pytest.raises(ValueError, match="zip"):
         sink.named_outputs(bundle)
 
 
 # config validation
 
 
-def test_leaf_rejects_both_name_and_names():
-    with pytest.raises(ConfigError, match="BOTH"):
-        OnnxExportLeaf(key=_JET, name="x", names=["a", "b"])
-
-
-def test_leaf_defaults_name_to_leaf_terminal_segment():
-    """Single-source naming: omitting name/names defaults the suffix to the leaf terminal."""
-    leaf = OnnxExportLeaf(key=_JET)
-    assert leaf.name == "jets_classification"
-    assert leaf.suffixes == ("jets_classification",)
-
-
 def test_leaf_rejects_non_outputs_key():
     with pytest.raises(ConfigError, match="not under the 'outputs'"):
         OnnxExportLeaf(key="preds.jets.jets_classification", names=["pb", "pc"])
-
-
-def test_leaf_rejects_per_token_with_names():
-    with pytest.raises(ConfigError, match="per_token applies to single-name"):
-        OnnxExportLeaf(key=_JET, names=["pb", "pc"], per_token=True)
-
-
-def test_leaf_rejects_unknown_dtype():
-    with pytest.raises(ConfigError, match="dtype must be"):
-        OnnxExportLeaf(key=_TRK, name="T", dtype="float16")
 
 
 def test_explicit_outputs_list_is_retired():

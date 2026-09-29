@@ -12,10 +12,12 @@ shipped configs' own chains are exercised by the integration suite.
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 import yaml
 
-from salt.utils.config_utils import IncludeError, expand_includes
+from salt.utils.config_utils import IncludeError, _deep_merge_dicts, expand_includes
 
 
 def _write(path, data) -> str:
@@ -135,3 +137,24 @@ class TestPassThrough:
         assert _expanded(child, tmp_path)["trainer"]["max_epochs"] == 1
         _write(base, {"trainer": {"max_epochs": 999}})
         assert _expanded(child, tmp_path)["trainer"]["max_epochs"] == 999
+
+
+@pytest.mark.parametrize(
+    ("base", "over", "expected"),
+    [
+        (
+            {"a": {"b": 1, "c": [1]}, "d": None},
+            {"a": {"b": 2}, "e": 1},
+            {"a": {"b": 2, "c": [1]}, "d": None, "e": 1},
+        ),
+        ({"a": {"b": 1}}, {"a": None}, {"a": None}),
+        ({"a": [1]}, {"a": [2, 3]}, {"a": [2, 3]}),
+        ({"a": {"b": 1}}, {"a": 5}, {"a": 5}),
+        ({"a": 5}, {"a": {"b": 2}}, {"a": {"b": 2}}),
+    ],
+)
+def test_deep_merge_dicts(base, over, expected):
+    """Dicts merge key-by-key; scalars, lists and ``None`` replace; inputs are not mutated."""
+    base_before = copy.deepcopy(base)
+    assert _deep_merge_dicts(base, over) == expected
+    assert base == base_before

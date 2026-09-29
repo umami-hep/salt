@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import torch
 
-from salt.graph import (
-    Executor,
-    Mode,
-    compile_plan,
-    flatten_spec,
-)
+from salt.graph.executor import Executor
+from salt.graph.planner import compile_plan
+from salt.graph.spec import Mode, flatten_spec
 from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,

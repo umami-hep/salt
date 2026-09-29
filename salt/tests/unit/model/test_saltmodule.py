@@ -12,7 +12,9 @@ from lightning import Callback, Trainer
 from torch import nn
 
 from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
-from salt.graph import IO, Bundle, ConfigError, Mode
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import IO, Mode
 from salt.model.base import SaltModelModule
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.outputs import RunTaskOutput
@@ -371,7 +373,7 @@ class TestCheckpoint:
             with pytest.raises(ConfigError, match="plan-hash mismatch for mode FIT"):
                 model.on_load_checkpoint(tampered)
         finally:
-            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model.loaded_from_checkpoint = before  # restore fixture state
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
     def test_val_hash_mismatch_warns(self, fitted):
@@ -384,7 +386,7 @@ class TestCheckpoint:
             with pytest.warns(UserWarning, match="plan-hash mismatch for mode VAL"):
                 model.on_load_checkpoint(tampered)
         finally:
-            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model.loaded_from_checkpoint = before  # restore fixture state
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
     def test_resume_skips_materialise(self, data, fitted):
@@ -422,7 +424,7 @@ class TestCheckpoint:
             with pytest.warns(UserWarning, match="no 'salt_core' payload"):
                 model.on_load_checkpoint(stripped)
         finally:
-            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model.loaded_from_checkpoint = before  # restore fixture state
 
     def test_compiled_checkpoint_orig_mod_prefix_stripped(self, fitted):
         """A ``--compile``-trained checkpoint carries torch.compile's"""
@@ -440,7 +442,7 @@ class TestCheckpoint:
             assert set(prefixed["state_dict"]) == clean_keys
             assert not any("_orig_mod." in k for k in prefixed["state_dict"])
         finally:
-            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model.loaded_from_checkpoint = before  # restore fixture state
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
     def test_noncompiled_checkpoint_state_dict_untouched(self, fitted):
@@ -454,7 +456,7 @@ class TestCheckpoint:
             model.on_load_checkpoint(clean)
             assert set(clean["state_dict"]) == keys_before
         finally:
-            model._loaded_from_checkpoint = before  # noqa: SLF001 - restore fixture state
+            model.loaded_from_checkpoint = before  # restore fixture state
             model._ckpt_plan_hashes = {}  # noqa: SLF001
 
 

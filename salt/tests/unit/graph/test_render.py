@@ -184,7 +184,7 @@ class TestShapeStrWidthSubstitution:
 
     def test_batch_only_stays_symbolic(self):
         # a width on a batch-only key must NOT turn B into a concrete int (the
-        # renderer joins a single dim with no trailing comma, like _fmt_shape)
+        # renderer joins a single dim with no trailing comma)
         spec = TensorSpec(shape=("B",))
         assert _shape_str("labels.jets.flavour", spec, {"labels.jets.flavour": 3}) == "(B)"
 

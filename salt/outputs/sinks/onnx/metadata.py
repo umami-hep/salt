@@ -73,24 +73,16 @@ def build_gnn_config(
     for entry in export.inputs:
         if entry.alias is not None:
             continue  # alias pseudo-inputs have no Athena tensor
-        stream = stream_of_input_port(entry.port)
-        if entry.sequence:
-            metadata["input_sequences"].append({
-                "name": entry.athena_name,
-                "variables": [
-                    {"name": name, "offset": 0.0, "scale": 1.0} for name in variables[stream]
-                ],
-            })
-        else:
-            # offsets/scales are informational placeholders (normalisation lives
-            # inside the graph); '_btagJes' is stripped on GLOBAL variables only
-            metadata["inputs"].append({
-                "name": entry.athena_name,
-                "variables": [
-                    {"name": name.removesuffix("_btagJes"), "offset": 0.0, "scale": 1.0}
-                    for name in variables[stream]
-                ],
-            })
+        # offsets/scales are informational placeholders (normalisation lives
+        # inside the graph); '_btagJes' is stripped on GLOBAL variables only
+        strip = "" if entry.sequence else "_btagJes"
+        metadata["input_sequences" if entry.sequence else "inputs"].append({
+            "name": entry.athena_name,
+            "variables": [
+                {"name": name.removesuffix(strip), "offset": 0.0, "scale": 1.0}
+                for name in variables[stream_of_input_port(entry.port)]
+            ],
+        })
     # combines are recorded as (name, [(scale, suffix), ...]) tuples — JSON-encoded
     # to nested lists — and renames as the raw old->new dict
     metadata["combine_outputs"] = [

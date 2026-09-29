@@ -505,7 +505,7 @@ class TestSectionWriterUnits:
         """InputCopyWriter is manifest-only (no graph leaf — the sink re-reads copies)."""
         icw = InputCopyWriter(streams=["jets", "tracks"])
         assert icw.is_manifest_only() is True
-        assert icw.copy_spec()["streams"] == ["jets", "tracks"]
+        assert icw.streams == ("jets", "tracks")
 
     def test_pad_mask_produces_mask_leaf(self):
         """PadMaskWriter produces outputs.<stream>.mask from masks.<stream>."""

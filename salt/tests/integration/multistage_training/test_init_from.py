@@ -27,7 +27,7 @@ import torch
 from lightning import Callback, Trainer
 
 from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
-from salt.graph import ConfigError
+from salt.graph.errors import ConfigError
 from salt.model.modules.losses import LossSum
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule

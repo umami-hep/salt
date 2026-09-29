@@ -10,7 +10,6 @@ from salt.graph.errors import ConfigError
 from salt.model.modules import Concat
 from salt.model.validation import (
     _concat_first_stream,
-    _edge_encoders,
     check_class_names,
     resolve_origin_weighting,
     validate_edge_port,
@@ -36,12 +35,14 @@ def _edge_encoder(
 
 class TestEdgeEncoders:
     def test_selects_only_modules_with_a_non_none_edges_key(self) -> None:
+        # "n"/"p" carry no edge_stream: selecting either would raise AttributeError
         modules = {
-            "e": SimpleNamespace(edges_key="edges.tracks_emb"),
+            "e": _edge_encoder(),
             "n": SimpleNamespace(edges_key=None),
             "p": SimpleNamespace(),
+            "concat": _concat(["tracks"]),
         }
-        assert _edge_encoders(modules) == [("e", modules["e"])]
+        assert validate_edge_port(modules) == 1
 
 
 class TestConcatFirstStream:

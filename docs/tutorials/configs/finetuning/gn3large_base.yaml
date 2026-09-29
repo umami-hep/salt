@@ -1,17 +1,15 @@
 # Mirror of the public GN3Large checkpoint bundle's ``config_v2.yaml``
 # (CERNBox https://cernbox.cern.ch/s/39Qui940MGt4jyM).
 #
-# DO NOT EDIT BY HAND -- regenerate with:
-#   python -m salt.scripts.regen_gn3large_config \
-#       --source <bundle>/config_v2.yaml \
-#       --output docs/tutorials/configs/finetuning/gn3large_base.yaml
+# Generated once from the CERNBox bundle by the since-removed
+# `salt.scripts.regen_gn3large_config`; the rewrites applied are listed below.
 #
 # Source bundle sha256 (as shipped on CERNBox, before this rewrite):
 #   config_v2.yaml:  85cd266060567be95146057bfca69746e4ae5d027673097644f494f3c9766d48
 #   converted.ckpt:  cbc411f65c9250ec59ce2d7bb269725b3244a0f0b7f6d1bdc354a44e44c4e501
 #   norm_dict_v2.yaml: 82929f1946f8bfb86e6f822d509df59044fe622da3ef5c5f961207a2ac49d698
 #
-# Rewrites applied to the stale bundle file (see regen_gn3large_config.py):
+# Rewrites applied to the stale bundle file:
 #   1. 20 dead class paths under the removed `salt.core` package rewritten
 #      to their current-core equivalent (CLASS_PATH_MAP, see dc97af9).
 #   2. The top-level `export:` alias (retired by 9c7e807) moved under
@@ -36,8 +34,7 @@
 # fp16/bf16 on GPU.
 #
 # A config whose class paths still start with `salt.core` is the pre-2026-09
-# bundle file and must be replaced with this one (or a fresh
-# `--check`-passing regeneration).
+# bundle file and must be replaced with this one.
 name: GN4_big
 data:
   batch_size: 100

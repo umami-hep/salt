@@ -242,8 +242,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
 
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
-    # setup-only modules (InputSamples/ShmStage) are partitioned out of the
-    # tensor compile — `batch_modules`, not `dm.modules` (see compile_setup_plan)
+    # InputSamples is a config holder, not a graph node: compile batch_modules only
     data_modules = dm.batch_modules
     reader = dm.reader
     for module in data_modules.values():
@@ -320,9 +319,10 @@ def _run_free_cli_argv(
 def _build_run_free_cli(args: Sequence[str]) -> Any:
     """Construct the run-free `SaltCLI` from a ready argv (`_run_free_cli_argv`
     output) — the shared core of `_parse_trainer_cli`, ``salt export``'s
-    ``_run_free_cli`` and `salt.model.mup._parse_cli`, which add their
-    command-specific error translation. The parser's `SystemExit` and
-    jsonargparse's instantiate-time `ValueError` propagate.
+    ``_run_free_cli``, `salt.model.mup._parse_cli` and ``salt merge-config``'s
+    ``--print_config`` dump, which add their command-specific error translation.
+    The parser's `SystemExit` and jsonargparse's instantiate-time `ValueError`
+    propagate.
     """
     from salt.main import SaltCLI
 
@@ -541,33 +541,23 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if checked:
             console(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order")
     if cfg.model_modules is not None:
-        # same `validate_mup_routing` as SaltModule construction, surfaced as
-        # validate findings (warnings promotable under --strict); hard errors
-        # would already abort the parse above.
+        # `model_modules` is set only by `_load_fit_config`, whose SaltModule
+        # construction already ran both validators, so these re-runs cannot newly fail.
+        # muP routing: re-run to surface its warnings (promotable under --strict).
         from salt.model.mup import validate_mup_routing
 
         with stdlib_warnings.catch_warnings(record=True) as caught:
             stdlib_warnings.simplefilter("always")
-            try:
-                normalised = validate_mup_routing(cfg.mup_cfg, cfg.model_modules)
-            except ConfigError as err:
-                errors.append(f"muP routing: {err}")
-                normalised = None
+            normalised = validate_mup_routing(cfg.mup_cfg, cfg.model_modules)
         warnings.extend(str(w.message) for w in caught)
-        if normalised is not None:
+        if normalised is not None:  # None = no `mup:` configured
             console(
                 f"OK muP routing: apply_to={normalised['apply_to']} — every target has a mup "
                 "init_arg, no mup:true module left out"
             )
-        # same `validate_edge_port` as SaltModule construction, surfaced here for
-        # the validate report (hard errors would already abort the parse above).
         from salt.model.validation import validate_edge_port
 
-        try:
-            n_edge = validate_edge_port(cfg.model_modules)
-        except ConfigError as err:
-            errors.append(f"edge port: {err}")
-            n_edge = 0
+        n_edge = validate_edge_port(cfg.model_modules)
         if n_edge:
             console(
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
@@ -594,14 +584,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if warned := cfg.mode_warnings.get(mode):
             warnings.append(warned)
         try:
-            plan = compile_plan(
-                cfg.modules,
-                mode,
-                cfg.sources,
-                schema=cfg.schema,
-                sinks=cfg.sinks,
-                sink_origins=cfg.sink_origins.get(mode),
-            )
+            plan = _compile(cfg, mode)
         except GraphError as err:
             return _fail(_format_graph_error(err))
         console(
@@ -673,14 +656,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     _require_mode_ok(cfg, mode)
-    plan = compile_plan(
-        cfg.modules,
-        mode,
-        cfg.sources,
-        schema=cfg.schema,
-        sinks=cfg.sinks,
-        sink_origins=cfg.sink_origins.get(mode),
-    )
+    plan = _compile(cfg, mode)
     console(plan_table(plan))
     _print_onnx_static_caveat(cfg, mode)
     return 0
@@ -692,6 +668,18 @@ def _require_mode_ok(cfg: GraphConfig, mode: Mode) -> None:
     """
     if stored := cfg.mode_errors.get(mode):
         raise ConfigError(stored)
+
+
+def _compile(cfg: GraphConfig, mode: Mode) -> Plan:
+    """Compile `cfg`'s graph for `mode` with its schema, sinks and per-mode sink origins."""
+    return compile_plan(
+        cfg.modules,
+        mode,
+        cfg.sources,
+        schema=cfg.schema,
+        sinks=cfg.sinks,
+        sink_origins=cfg.sink_origins.get(mode),
+    )
 
 
 def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
@@ -727,14 +715,7 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     _require_mode_ok(cfg, mode)
-    plan = compile_plan(
-        cfg.modules,
-        mode,
-        cfg.sources,
-        schema=cfg.schema,
-        sinks=cfg.sinks,
-        sink_origins=cfg.sink_origins.get(mode),
-    )
+    plan = _compile(cfg, mode)
     _print_onnx_static_caveat(cfg, mode)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
@@ -765,16 +746,7 @@ def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
         if plan_mode in cfg.mode_errors:
             continue
         try:
-            plans.append(
-                compile_plan(
-                    cfg.modules,
-                    plan_mode,
-                    cfg.sources,
-                    schema=cfg.schema,
-                    sinks=cfg.sinks,
-                    sink_origins=cfg.sink_origins.get(plan_mode),
-                )
-            )
+            plans.append(_compile(cfg, plan_mode))
         except GraphError:
             # a non-requested mode that does not compile is irrelevant to the
             # requested mode's widths — skip it (the requested mode is already
@@ -834,14 +806,7 @@ def _cmd_why(args: argparse.Namespace) -> int:
     except (TypeError, ValueError) as err:
         raise ConfigError(f"invalid --key {args.key!r}: {err}") from err
     key = KEY_SEP.join(key_parts)
-    plan = compile_plan(
-        cfg.modules,
-        mode,
-        cfg.sources,
-        schema=cfg.schema,
-        sinks=cfg.sinks,
-        sink_origins=cfg.sink_origins.get(mode),
-    )
+    plan = _compile(cfg, mode)
     found = _explain_present(plan, key, mode)
     if found:
         return 0

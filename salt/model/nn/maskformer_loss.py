@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 from torch import Tensor, nn
 from torch.nn import functional
@@ -13,7 +11,8 @@ from salt.model.nn.matcher import HungarianMatcher
 __all__ = ["MaskFormerLoss"]
 
 
-def dice_loss_eager(inputs: Tensor, labels: Tensor):
+@torch.jit.script
+def dice_loss(inputs: Tensor, labels: Tensor):
     """DICE loss (similar to generalized IOU for masks); returns a scalar."""
     inputs = inputs.sigmoid()
     numerator = 2 * (inputs * labels).sum(-1)
@@ -23,12 +22,7 @@ def dice_loss_eager(inputs: Tensor, labels: Tensor):
 
 
 @torch.jit.script
-def dice_loss(inputs: Tensor, labels: Tensor):
-    """TorchScript wrapper for :func:`dice_loss_eager`."""
-    return dice_loss_eager(inputs, labels)
-
-
-def mask_ce_loss_eager(inputs: Tensor, labels: Tensor):
+def mask_ce_loss(inputs: Tensor, labels: Tensor):
     """Binary cross-entropy loss for masks, mean-reduced per example; returns a scalar."""
     loss = functional.binary_cross_entropy_with_logits(inputs, labels, reduction="none")
     loss = loss.mean(1)
@@ -36,12 +30,7 @@ def mask_ce_loss_eager(inputs: Tensor, labels: Tensor):
 
 
 @torch.jit.script
-def mask_ce_loss(inputs: Tensor, labels: Tensor):
-    """TorchScript wrapper for :func:`mask_ce_loss_eager`."""
-    return mask_ce_loss_eager(inputs, labels)
-
-
-def sigmoid_focal_loss_eager(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
+def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
     """Sigmoid focal loss (RetinaNet, https://arxiv.org/abs/1708.02002); returns a scalar.
 
     ``alpha<0`` disables the positive/negative balance weighting.
@@ -58,18 +47,11 @@ def sigmoid_focal_loss_eager(inputs: Tensor, targets: Tensor, alpha: float = -1,
     return loss.mean(1).sum() / len(inputs)
 
 
-@torch.jit.script
-def sigmoid_focal_loss(inputs: Tensor, targets: Tensor, alpha: float = -1, gamma: float = 2):
-    """TorchScript wrapper for :func:`sigmoid_focal_loss_eager`."""
-    return sigmoid_focal_loss_eager(inputs, targets, alpha, gamma)
-
-
 class MaskFormerLoss(nn.Module):
-    """MaskFormer (DETR-style) loss: Hungarian-match preds to truth, then supervise the pair.
+    """MaskFormer (DETR-style) loss terms plus the Hungarian matcher that aligns preds to truth.
 
     ``class_weights`` may be length ``num_classes`` (null weight appended) or
-    ``num_classes + 1`` (used as-is). ``matcher_weights`` defaults to
-    ``loss_weights``. ``losses`` defaults to ``["labels", "masks"]``.
+    ``num_classes + 1`` (used as-is).
     """
 
     def __init__(
@@ -77,15 +59,13 @@ class MaskFormerLoss(nn.Module):
         num_classes: int,
         num_objects: int,
         loss_weights: dict,
-        matcher_weights: dict | None = None,
+        matcher_weights: dict,
         null_class_weight: float = 0.5,
         class_weights: list[float] | None = None,
-        losses: list[str] | None = None,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.null_class_weight = null_class_weight
-        assert self.num_classes > 0
         # num_classes == 1 is a binary task and ignores class_weights.
         if self.num_classes == 1:
             empty_weight = torch.tensor([self.null_class_weight])
@@ -106,9 +86,6 @@ class MaskFormerLoss(nn.Module):
             empty_weight[-1] = self.null_class_weight
         self.register_buffer("empty_weight", empty_weight)
         self.loss_weights = loss_weights
-        if matcher_weights is None:
-            matcher_weights = loss_weights
-        self.losses = losses if losses is not None else ["labels", "masks"]
 
         self.matcher = HungarianMatcher(
             num_classes=num_classes,
@@ -156,75 +133,3 @@ class MaskFormerLoss(nn.Module):
         if self.loss_weights.get("mask_ce"):
             losses["mask_ce"] = mask_ce_loss(pred_masks, target_masks)
         return losses
-
-    def get_loss(
-        self,
-        loss: str,
-        preds: dict[str, Any],
-        labels: dict[str, Any],
-    ) -> dict[str, torch.Tensor]:
-        """Dispatch to ``loss_labels``/``loss_masks`` on ``preds["objects"]``/``labels["objects"]``.
-
-        Weights the result via `weight_loss`.
-        """
-        loss_map = {"labels": self.loss_labels, "masks": self.loss_masks}
-        assert loss in loss_map, f"do you really want to compute {loss} loss?"
-        return self.weight_loss(loss_map[loss](preds["objects"], labels["objects"]))
-
-    def weight_loss(self, losses: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Scale each loss in-place by ``self.loss_weights``."""
-        for k in list(losses.keys()):
-            losses[k] *= self.loss_weights[k]
-        return losses
-
-    def forward(
-        self,
-        preds: dict[str, Any],
-        tasks: list[Any],
-        labels: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, torch.Tensor]]:
-        """Match + supervise the final layer, and each ``intermediate_outputs`` aux layer.
-
-        Returns ``(preds, labels, losses)`` with task predictions/targets folded in.
-        """
-        losses: dict[str, torch.Tensor] = {}
-
-        if "intermediate_outputs" in preds:
-            for i, aux_pred in enumerate(preds["intermediate_outputs"]):
-                for task in tasks:
-                    if task.input_name == "objects":
-                        aux_pred.update(task(aux_pred, labels))
-
-                aux_idx = self.matcher(aux_pred, labels)
-                for k, v in aux_pred.items():
-                    if k in {"x", "embed_xs", "global_rep"}:
-                        continue
-                    aux_pred[k] = v[aux_idx]
-
-                for loss in self.losses:
-                    l_dict = self.get_loss(loss, aux_pred, labels)
-                    l_dict = {k + f"_layer{i}": v for k, v in l_dict.items()}
-                    losses.update(l_dict)
-
-        for task in tasks:
-            if task.input_name == "objects":
-                # store the scaled targets in labels for the matcher to use
-                task_targets = task.get_targets(labels)
-                task_pred, _ = task(preds["objects"]["embed"], labels)
-                preds["objects"].update({task.name: task_pred})
-                labels["objects"][task.name] = task_targets
-
-        idx = self.matcher(preds["objects"], labels["objects"])
-
-        # warning: don't put this into a function or comprehension
-        for k, v in preds["objects"].items():
-            if k in {"x", "embed"}:
-                continue
-
-            if k != "intermediate_outputs":  # don't permute input reps
-                preds["objects"][k] = v[idx]
-
-        for loss in self.losses:
-            losses.update(self.get_loss(loss, preds, labels))
-
-        return preds, labels, losses

@@ -97,36 +97,6 @@ def _needs_logger(callback: Any) -> bool:
     return isinstance(callback, LearningRateMonitor)
 
 
-def _comet_accepts_dict_kwargs() -> bool:
-    """Whether this Lightning `CometLogger` still declares ``dict_kwargs``
-    explicitly (newer versions drop it; a bare ``**kwargs`` does NOT count —
-    the modern logger forwards it to a Comet ``ExperimentConfig`` that rejects
-    the old name).
-    """
-    import inspect
-
-    try:
-        params = inspect.signature(CometLogger.__init__).parameters
-    except (ValueError, TypeError):  # pragma: no cover - builtin/uninspectable
-        return False
-    return "dict_kwargs" in params
-
-
-def _comet_accepts_experiment_name() -> bool:
-    """Whether this Lightning `CometLogger` declares ``experiment_name``
-    explicitly (jsonargparse instantiates by the declared signature, so
-    setting it when absent crashes with "Option not accepted"). When absent,
-    the caller routes the name through ``COMET_EXPERIMENT_NAME`` instead.
-    """
-    import inspect
-
-    try:
-        params = inspect.signature(CometLogger.__init__).parameters
-    except (ValueError, TypeError):  # pragma: no cover - builtin/uninspectable
-        return False
-    return "experiment_name" in params
-
-
 def _best_checkpoint(config_path: Path) -> str:
     """Best-epoch selection: lowest ``loss=`` next to the saved config. Scans
     both ``ckpts/*.ckpt`` and ``checkpoints/*.ckpt`` (Lightning's
@@ -471,7 +441,7 @@ def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] =
     saved configs (which carry both) re-inject without error. No-op when unset.
     """
     override_tree = _schedule_overrides_to_tree(overrides)
-    from salt.parser import _deep_merge_dicts
+    from salt.utils.config_utils import _deep_merge_dicts
 
     for scope, model in _iter_model_blocks(cfg):
         init_args = getattr(model, "init_args", None)
@@ -782,10 +752,7 @@ class SaltCLI(LightningCLI):
 
         if getattr(self.config, "subcommand", None) != "fit":
             return assembled
-        controller = getattr(getattr(self, "model", None), "training_controller", None)
-        schedule = controller.schedule if controller is not None else None
-        if schedule is None:
-            return assembled
+        schedule = self.model.training_controller.schedule
         result = list(assembled)
         needs_driver = schedule.is_multi_stage or schedule.has_freezing or schedule.has_early_stop
         if needs_driver and not any(
@@ -836,14 +803,14 @@ class SaltCLI(LightningCLI):
         # runs BEFORE model setup and resolves the sink's writer_demand, which
         # needs them already bound. The model modules bind even with no outputs:
         # section — a conversion producer in model.modules names its own leaves.
+        from salt.model.sink_prep import bind_manifests
         from salt.outputs.sinks.registry import iter_sinks
 
-        graph_modules = getattr(model, "_graph_modules", None) if model is not None else None
-        for sink in iter_sinks(getattr(self, "trainer", None)):
-            if graph_modules is not None and callable(getattr(sink, "bind_model_modules", None)):
-                sink.bind_model_modules(graph_modules)
-            if writers and callable(getattr(sink, "bind_output_section", None)):
-                sink.bind_output_section(writers)
+        bind_manifests(
+            iter_sinks(getattr(self, "trainer", None)),
+            getattr(model, "_graph_modules", None) or {},
+            writers,
+        )
 
     def _register_section_sinks(self, model: Any) -> None:
         """Wire every ``outputs:``-declared sink onto the trainer.
@@ -1090,7 +1057,7 @@ class SaltCLI(LightningCLI):
     @staticmethod
     def _wire_experiment_logger(cfg: Any) -> None:
         """Wire a configured fit-stage `CometLogger`: threads ``--name`` into
-        ``experiment_name``/``dict_kwargs``, forces ``online=false`` with no
+        ``COMET_EXPERIMENT_NAME``, forces ``online=false`` with no
         ``COMET_API_KEY`` or under ``fast_dev_run``, and sets/creates
         ``COMET_OFFLINE_DIRECTORY`` at the trainer log dir. No-op for a
         non-Comet or unconfigured logger.
@@ -1107,20 +1074,9 @@ class SaltCLI(LightningCLI):
         is_comet = class_path.endswith(CometLogger.__name__) or "comet" in class_path.lower()
         if init_args is None or not is_comet:
             return
-        # newer Lightning CometLogger drops `experiment_name` from its signature
-        # (the label flows through **kwargs instead), and jsonargparse
-        # instantiates by the DECLARED signature — so setting it as an init_arg
-        # on the newer logger crashes at instantiate_classes. Set it only when
-        # the constructor declares it; otherwise route through the env var.
-        if _comet_accepts_experiment_name():
-            init_args.experiment_name = run_name
-        else:
-            os.environ.setdefault("COMET_EXPERIMENT_NAME", run_name)
-        # dict_kwargs: only inject when the constructor still accepts it
-        if _comet_accepts_dict_kwargs():
-            dict_kwargs = getattr(init_args, "dict_kwargs", None) or {}
-            dict_kwargs["name"] = run_name
-            init_args.dict_kwargs = dict_kwargs
+        # the pinned CometLogger declares no `experiment_name` (jsonargparse
+        # instantiates by the declared signature), so the name rides the env var
+        os.environ.setdefault("COMET_EXPERIMENT_NAME", run_name)
         # offline when no API key or smoke run
         if not os.getenv("COMET_API_KEY") or cfg.trainer.fast_dev_run:
             init_args.online = False

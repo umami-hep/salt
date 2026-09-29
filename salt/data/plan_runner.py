@@ -22,7 +22,6 @@ from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, MutationError, Sch
 from salt.graph.executor import canonical_produced
 from salt.graph.planner import Plan, Sinks, compile_plan
 from salt.graph.spec import KEY_SEP, Mode, TensorSpec
-from salt.utils.array_utils import maybe_copy
 
 __all__ = ["MODEL_VISIBLE_NAMESPACES", "_PlanRunner"]
 
@@ -309,7 +308,8 @@ class _PlanRunner:
                         "reader buffer — it would be overwritten by the next batch in this "
                         "worker; copy at the producing module"
                     )
-                value = torch.from_numpy(maybe_copy(value))
+                # not np.ascontiguousarray: it would promote a 0-d leaf to shape (1,)
+                value = torch.from_numpy(value if value.flags.c_contiguous else value.copy())
             node = out
             for part in parts[:-1]:
                 node = node.setdefault(part, {})

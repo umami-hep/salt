@@ -956,6 +956,18 @@ def _dataset_summary(
 # --------------------------------------------------------------------------- #
 
 
+def _add_config_args(parser: argparse.ArgumentParser) -> None:
+    """Add the shared ``--config`` stack and ``--set`` override arguments."""
+    parser.add_argument(
+        "--config",
+        action="append",
+        type=Path,
+        required=True,
+        help="training config; repeat to stack (deep-merged left-to-right, as salt fit)",
+    )
+    parser.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
+
+
 def _dataset_parser() -> argparse.ArgumentParser:
     """Build the ``salt profile dataset`` argument parser."""
     parser = argparse.ArgumentParser(
@@ -966,18 +978,11 @@ def _dataset_parser() -> argparse.ArgumentParser:
             "the annotated per-line report."
         ),
     )
-    parser.add_argument(
-        "--config",
-        action="append",
-        type=Path,
-        required=True,
-        help="training config; repeat to stack (deep-merged left-to-right, as salt fit)",
-    )
-    parser.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
+    _add_config_args(parser)
     parser.add_argument(
         "--steps",
         type=int,
-        default=None,
+        default=DEFAULT_STEPS,
         help=f"batches to profile (default {DEFAULT_STEPS})",
     )
     parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
@@ -1005,14 +1010,7 @@ def _model_parser() -> argparse.ArgumentParser:
             "the per-op table and the per-plan-step / backward / optimizer split."
         ),
     )
-    parser.add_argument(
-        "--config",
-        action="append",
-        type=Path,
-        required=True,
-        help="training config; repeat to stack (deep-merged left-to-right, as salt fit)",
-    )
-    parser.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
+    _add_config_args(parser)
     parser.add_argument(
         "--steps",
         type=int,
@@ -1061,16 +1059,13 @@ _USAGE = (
 def _run_dataset(args: Sequence[str]) -> int:
     """``salt profile dataset``."""
     parsed = _dataset_parser().parse_args(args)
-    steps = parsed.steps
-    if steps is None:
-        steps = DEFAULT_STEPS
     functions: Iterable[str] = _split(parsed.functions) or DEFAULT_DATASET_FUNCTIONS
     functions = (*functions, *_split(parsed.extra_functions))
     try:
         profile_dataset(
             configs=parsed.config,
             out_dir=parsed.out,
-            steps=steps,
+            steps=parsed.steps,
             overrides=parsed.set,
             functions=tuple(functions),
             tag=parsed.tag,

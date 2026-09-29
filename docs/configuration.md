@@ -169,7 +169,7 @@ Which pieces matter depends on the mode. FIT and VAL only need the data half (a 
 Three further things worth knowing about this graph:
 
 - `data:` is not parsed in subclass mode, so it needs no `class_path`; `model:` is, so it does (`salt/main.py:452`). Every shipped config carries `class_path: salt.model.SaltModule`, for example `gn2v2-opendata.yaml:58`.
-- `train_file` / `val_file` / `test_file` are the legacy path superseded by `InputSamples`. When no explicit `InputSamples` module is configured and one of those legacy keys is set, `SaltDataModule` synthesises one automatically (`salt/data/datamodule.py:361-399`); see [Shipped data modules](modules/data.md#shipped-data-modules) for the full mechanism.
+- `train_file` / `val_file` / `test_file` are the legacy path superseded by `InputSamples`. When no explicit `InputSamples` module is configured and one of those legacy keys is set, `SaltDataModule` synthesises one automatically from them and the matching `num_train` / `num_val` / `num_test` (`salt/data/datamodule.py:315-348`). With an explicit `InputSamples` the legacy keys are ignored: a stage its `files` omits has no source. See [Shipped data modules](modules/data.md#shipped-data-modules) for the full mechanism.
 - `salt.data.SaltDataset` is the internal runtime object the datamodule builds for you; it is never a `data.modules` entry.
 
 **Checking a graph without data.** `salt graph validate -c cfg.yaml` compiles all four modes against the config alone, no data file or checkpoint read; add `--mode fit` to check only the data half when there is not yet a task head or an `outputs:` section, see [`salt graph`](cli.md#salt-graph). Every shipped module's full `init_args` are catalogued at [Shipped model modules](modules/model.md#shipped-model-modules) and [Shipped data modules](modules/data.md#shipped-data-modules).
@@ -265,7 +265,7 @@ A dict of named callbacks, deep-merged the same way as `data.modules` and `model
 
 ### `name:`
 
-A plain string naming the run, default `"salt"` when unset. It becomes the Comet experiment name (set as `experiment_name` on the logger's `init_args`, or the `COMET_EXPERIMENT_NAME` environment variable on a Comet build whose constructor no longer declares that parameter) and is also written into the logger's `dict_kwargs.name`.
+A plain string naming the run, default `"salt"` when unset. It becomes the Comet experiment name through the `COMET_EXPERIMENT_NAME` environment variable (an already-set value wins).
 
 ## Deleting and overriding
 
@@ -431,12 +431,11 @@ The full example, including the model and outputs blocks, is `salt/configs/regre
 
 ### Reading from S3
 
-`salt.utils.file_utils` can read training data and configs from an S3 bucket. Set up your own bucket and keys with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html), then add a `config_s3` block under `data:`:
+`salt.utils.file_utils.import_data_S3` fetches training data and configs from an S3 bucket: it downloads every file named in `download_files` to `download_path` and patches their paths in the config. Set up your own bucket and keys with the [CERN OpenStack project](https://clouddocs.web.cern.ch/index.html), then add a `config_s3` block under `data:`:
 
 ```yaml
 data:
   config_s3:
-    use_S3: false        # true if this run needs S3 access at all
     download_S3: false   # true to download download_files locally before training
     pubKey:               # public key
     secKey:               # private key

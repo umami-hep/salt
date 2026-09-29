@@ -167,9 +167,7 @@ def fold_sink_node(
             f"sink node name {name!r} collides with a model module — instance names must be "
             "unique across the pipeline graph; rename the callback key"
         )
-    folded = dict(modules)
-    folded[name] = sink_node
-    return folded
+    return {**modules, name: sink_node}
 
 
 def callback_demand(
@@ -327,49 +325,36 @@ def boundary_demand(
             key: f"{required[key][0]!r} (config: model.modules.{required[key][0]})"
             for key in demand
         }
+        # TEST: the selected sink's writer demand; FIT/VAL: callback demand
+        # (`callback_demand` is empty outside TRAINING). Dataset-namespace keys no
+        # task already demands extend the boundary so their producers survive;
+        # model-produced (preds.*) callback keys are anchored by `model_sinks`.
         if mode is Mode.TEST:
-            for key, who in (prepared.writer_demand or {}).items():
-                if key == "meta.rows" or key in produced or key in required:
-                    continue  # appended below / a plan sink / already demanded
-                if _has_wildcard(key):
-                    raise ConfigError(
-                        f"writer demand key {key!r} ({who}) contains a wildcard — "
-                        "writer requires are concrete keys"
-                    )
-                if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
-                    raise ConfigError(
-                        f"[mode=TEST] key {key!r} is required by {who} but no model "
-                        "module produces it, and it cannot come from the dataset (the "
-                        f"dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                        "keys only).\n  fix: correct the writer's "
-                        "requires, or add a module producing the key"
-                    )
-                demand.append(key)
-                origins[key] = who
+            extra, kind = dict(prepared.writer_demand or {}), "writer"
+            extra.pop("meta.rows", None)  # appended below
+        else:
+            extra = callback_demand(model_modules, mode, prepared.fitval_callbacks)
+            kind = "callback"
+        for key, who in extra.items():
+            if key in produced or key in required:
+                continue  # a plan sink / already demanded
+            if _has_wildcard(key):
+                raise ConfigError(
+                    f"{kind} demand key {key!r} ({who}) contains a wildcard — "
+                    f"{kind} requires are concrete keys"
+                )
+            if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
+                raise ConfigError(
+                    f"[mode={mode.name}] key {key!r} is required by {who} but no "
+                    "model module produces it, and it cannot come from the dataset "
+                    f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
+                    f"keys only).\n  fix: correct the {kind}'s "
+                    "requires, or add a module producing the key"
+                )
+            demand.append(key)
+            origins[key] = who
+        if mode is Mode.TEST:
             demand.append("meta.rows")
-        elif mode & Mode.TRAINING:
-            # FIT/VAL callback demand (mirrors the TEST writer block above): a
-            # callback's dataset-namespace requires that no task already demands
-            # extend the boundary so their producers survive. Model-produced
-            # (preds.*) callback keys are anchored by `model_sinks`, not here.
-            for key, who in callback_demand(model_modules, mode, prepared.fitval_callbacks).items():
-                if key in produced or key in required:
-                    continue  # a model-plan sink / already task-demanded
-                if _has_wildcard(key):
-                    raise ConfigError(
-                        f"callback demand key {key!r} ({who}) contains a wildcard — "
-                        "callback requires are concrete keys"
-                    )
-                if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
-                    raise ConfigError(
-                        f"[mode={mode.name}] key {key!r} is required by {who} but no "
-                        "model module produces it, and it cannot come from the dataset "
-                        f"(the dataset boundary serves {'/'.join(MODEL_VISIBLE_NAMESPACES)} "
-                        "keys only).\n  fix: correct the callback's "
-                        "requires, or add a module producing the key"
-                    )
-                demand.append(key)
-                origins[key] = who
         out[mode] = (demand, origins)
     return out
 

@@ -18,9 +18,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from salt.graph import Bundle, Mode
+from salt.graph.bundle import Bundle
 from salt.graph.executor import canonical_produced
 from salt.graph.planner import Plan
+from salt.graph.spec import Mode
 from salt.model.modules import bind_all, materialise_all, resolve_bind_schema
 from salt.model.modules.tasks import RegressionTaskModule
 from salt.tests._fixtures.gn2v2_fixture import (

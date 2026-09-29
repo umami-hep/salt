@@ -6,9 +6,7 @@ dtypes, group/file attrs); `load_schema`/`save_schema` round-trip it to YAML.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
-from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +14,8 @@ import h5py
 import numpy as np
 import yaml
 
-from salt.graph.errors import SUGGESTION_CUTOFF, SchemaError
-from salt.graph.spec import KEY_SEP, join_key, split_key
+from salt.graph.errors import SchemaError
+from salt.graph.spec import KEY_SEP
 from salt.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
@@ -25,7 +23,6 @@ _LOG = get_logger(__name__)
 __all__ = [
     "SCHEMA_VERSION",
     "GroupSchema",
-    "KeyValidation",
     "Schema",
     "dump_schema",
     "load_schema",
@@ -51,27 +48,6 @@ class GroupSchema:
     def has_valid(self) -> bool:
         """Whether the group carries a ``valid`` field (padded-sequence marker)."""
         return "valid" in self.fields
-
-
-@dataclass(frozen=True)
-class KeyValidation:
-    """Report from `Schema.validate_keys`.
-
-    `present` keys exist in the schema; `missing` keys name an existing group
-    but an absent field; `unknown` keys name a group not in the schema (or are
-    not ``group.field``-shaped at all). `suggestions` maps each bad key to its
-    nearest schema keys.
-    """
-
-    present: tuple[str, ...]
-    missing: tuple[str, ...]
-    unknown: tuple[str, ...]
-    suggestions: dict[str, tuple[str, ...]] = field(default_factory=dict)
-
-    @property
-    def ok(self) -> bool:
-        """Whether every validated key is present in the schema."""
-        return not (self.missing or self.unknown)
 
 
 @dataclass(frozen=True)
@@ -107,54 +83,6 @@ class Schema:
                     )
                 out.append(f"{group}{KEY_SEP}{fld}")
         return tuple(out)
-
-    def validate_keys(self, keys: Iterable[str]) -> KeyValidation:
-        """Validate demanded dotted keys against the schema.
-
-        Each key is interpreted as ``group.field`` (the first component is
-        the group). Malformed string keys (``"jets..pt"``, ``""``) are
-        classified as unknown rather than raising; non-string keys are a
-        caller bug and raise TypeError. Outputs are sorted for deterministic
-        reports.
-
-        Parameters
-        ----------
-        keys : Iterable[str]
-            Dotted keys to check, e.g. ``["jets.pt", "tracks.d0"]``.
-
-        Returns
-        -------
-        KeyValidation
-            The missing/unknown report, with nearest-key suggestions.
-        """
-        universe = sorted(self.keys())
-        present: list[str] = []
-        missing: list[str] = []
-        unknown: list[str] = []
-        suggestions: dict[str, tuple[str, ...]] = {}
-        for key in keys:
-            try:
-                parts = split_key(key)
-            except ValueError:  # malformed key: report unknown, do not raise
-                parts = ()
-            group = parts[0] if parts else None
-            fld = join_key(parts[1:]) if len(parts) > 1 else None
-            if group is None or fld is None or group not in self.groups:
-                unknown.append(key)
-            elif fld in self.groups[group].fields:
-                present.append(key)
-            else:
-                missing.append(key)
-            if key not in present:
-                near = get_close_matches(key, universe, n=3, cutoff=SUGGESTION_CUTOFF)
-                if near:
-                    suggestions[key] = tuple(near)
-        return KeyValidation(
-            present=tuple(sorted(present)),
-            missing=tuple(sorted(missing)),
-            unknown=tuple(sorted(unknown)),
-            suggestions=suggestions,
-        )
 
 
 # ---------------------------------------------------------------------------

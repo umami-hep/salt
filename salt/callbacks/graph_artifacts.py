@@ -13,7 +13,6 @@ import yaml
 from lightning import Callback, LightningModule, Trainer
 
 from salt.data.dataset import SaltDataset
-from salt.graph.errors import GraphError
 from salt.graph.planner import Plan
 from salt.graph.render import dot_source, plan_table
 from salt.graph.spec import Mode, TensorSpec
@@ -30,8 +29,6 @@ class GraphArtifacts(Callback):
 
     - ``plan_<mode>.txt`` for every stage mode (``fit``+``val`` / ``test``):
       the ordered step table for both the dataset plan and the model plan.
-      The TEST table appends the writer-sinks section (writer instance ->
-      consumed ``preds.*`` keys).
     - ``resolved_io.yaml`` — machine-readable: per mode, the plan sources
       and every module's flattened requires/produces with resolved specs.
     - ``graph_<stage>.dot`` + ``graph_<stage>.<image_format>`` (and
@@ -86,15 +83,12 @@ class GraphArtifacts(Callback):
             return
         out_dir = Path(self.output_dir) if self.output_dir else self._default_dir(trainer, stage)
         out_dir.mkdir(parents=True, exist_ok=True)
-        writer_sinks = self._writer_sinks(trainer, pl_module) if stage == "test" else None
         for mode_name in mode_names:
             plan = plans.get(Mode[mode_name.upper()])
             if plan is None:
                 continue
             dataset = self._stage_dataset(trainer, mode_name)
-            (out_dir / f"plan_{mode_name}.txt").write_text(
-                self._plan_text(plan, dataset, writer_sinks if mode_name == "test" else None)
-            )
+            (out_dir / f"plan_{mode_name}.txt").write_text(self._plan_text(plan, dataset))
         (out_dir / "resolved_io.yaml").write_text(self._resolved_io(trainer, plans, mode_names))
         # one graph per stage: FIT (VAL is identical) / TEST
         plan = plans[Mode[stage.upper()]]
@@ -122,32 +116,8 @@ class GraphArtifacts(Callback):
         return Path(trainer.log_dir or trainer.default_root_dir)
 
     @staticmethod
-    def _writer_sinks(trainer: Trainer, pl_module: LightningModule) -> list[str] | None:
-        """``"name (Class): key, key"`` lines from the attached writer callback's
-        `per_writer_demand`, or None when no writer/reader/module dict is attached.
-        """
-        callbacks = getattr(trainer, "callbacks", None) or []
-        cb = next((c for c in callbacks if callable(getattr(c, "per_writer_demand", None))), None)
-        reader = getattr(getattr(trainer, "datamodule", None), "reader", None)
-        modules = getattr(pl_module, "_graph_modules", None)
-        if cb is None or reader is None or not modules:
-            return None
-        try:
-            per_writer = cb.per_writer_demand(modules, reader)
-        except GraphError:
-            return None  # a broken writers block fails the run elsewhere
-        return [
-            f"  {name} ({type(cb.writers[name]).__name__}): " + ", ".join(keys)
-            for name, keys in per_writer.items()
-        ]
-
-    @staticmethod
-    def _plan_text(
-        plan: Plan, dataset: SaltDataset | None, writer_sinks: list[str] | None = None
-    ) -> str:
-        """Build one ``plan_<mode>.txt`` payload: dataset plan + model plan, with
-        `writer_sinks` lines (TEST only) appended as a writer-sinks section.
-        """
+    def _plan_text(plan: Plan, dataset: SaltDataset | None) -> str:
+        """Build one ``plan_<mode>.txt`` payload: dataset plan + model plan."""
         sections: list[str] = []
         if dataset is not None:
             sections.append(f"# dataset plan\n{plan_table(dataset.plan)}")
@@ -158,8 +128,6 @@ class GraphArtifacts(Callback):
             if columns:
                 sections.append("read columns (demand-narrowed):\n" + "\n".join(columns))
         sections.append(f"# model plan\n{plan_table(plan)}")
-        if writer_sinks:
-            sections.append("# writer sinks\n" + "\n".join(writer_sinks))
         return "\n\n".join(sections) + "\n"
 
     def _resolved_io(

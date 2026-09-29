@@ -100,16 +100,6 @@ def _quote(text: str) -> str:
     return f'"{_esc(text)}"'
 
 
-def _fmt_shape(spec: TensorSpec | None) -> str:
-    """Format a spec's shape as ``"(d0, d1, ...)"`` for edge labels."""
-    # `not spec.shape` covers both None and the empty tuple () — a scalar
-    # (e.g. a `losses.*` leaf) has no dims worth showing, so it keeps just its
-    # key rather than a noisy "()".
-    if spec is None or not spec.shape:
-        return ""
-    return "(" + ", ".join(str(dim) for dim in spec.shape) + ")"
-
-
 def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
     """Resolve the `TensorSpec` an edge carries (mirrors `dot_source`'s lookup)."""
     if producer == SOURCES:
@@ -127,12 +117,6 @@ _KIND_COLOURS = {
     "default": "#333333",  # neutral row text
     "shape": "#888888",  # grey shape annotation
 }
-
-
-def _graph_label(text: str) -> str:
-    r"""A Graphviz quoted-string graph label (escapes ``\\`` and ``"``)."""
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
 
 
 def _row_colour(key: str, spec: TensorSpec | None) -> str:
@@ -287,7 +271,7 @@ def dot_source(
         lines.extend([
             '  labelloc="t";',
             '  fontname="Helvetica";',
-            f"  label={_graph_label(title)};",
+            f"  label={_quote(title)};",
         ])
 
     # consumed keys per module: each require edge into the module, with the

@@ -428,26 +428,12 @@ class TestDeterminism:
 
 
 class TestExecutorConstruction:
-    def test_superset_modules_mapping_is_fine(self):
+    def test_pruned_plan_runs_its_own_steps(self):
         modules = mods(*diamond_modules())
         test_plan = compile_plan(modules, Mode.TEST, SRC_X, sinks=SINKS_BY_MODE)
-        # loss_sum is not in the TEST plan but may stay in the mapping
-        out = Executor(test_plan, modules).run(input_bundle())
+        # loss_sum is not in the TEST plan; the executor runs only the plan's steps
+        out = Executor(test_plan).run(input_bundle())
         assert "preds.x" in out
-
-    def test_missing_module_raises(self):
-        modules = mods(*diamond_modules())
-        plan = compile_plan(modules, Mode.FIT, SRC_X, sinks=SINKS_BY_MODE)
-        incomplete = {name: mod for name, mod in modules.items() if name != "head"}
-        with pytest.raises(ConfigError, match="no entry 'head'"):
-            Executor(plan, incomplete)
-
-    def test_name_mismatch_raises(self):
-        a = ToyModule("a", requires={"inputs.x": ts()}, produces={"preds.x": ts()})
-        plan = compile_plan(mods(a), Mode.FIT, SRC_X)
-        imposter = ToyModule("zzz", requires={"inputs.x": ts()}, produces={"preds.x": ts()})
-        with pytest.raises(ConfigError, match="name='zzz'"):
-            Executor(plan, {"a": imposter})
 
     def test_non_callable_module_raises(self):
         class Inert:
@@ -470,7 +456,7 @@ class TestRecordSteps:
     def _run_under_profiler(enabled):
         modules = mods(*diamond_modules())
         plan = compile_plan(modules, Mode.FIT, SRC_X, sinks=SINKS_BY_MODE)
-        executor = Executor(plan, modules)
+        executor = Executor(plan)
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU]
         ) as prof:

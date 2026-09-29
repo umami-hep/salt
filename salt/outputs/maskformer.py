@@ -318,7 +318,7 @@ class MaskFormerObjects(SaltModelModule):
             "masks": b.get(self.masks_key).clone(),
             "regression": b.get(self.reg_key).clone(),
         }
-        return get_maskformer_outputs(objects, apply_reorder=True)
+        return get_maskformer_outputs(objects)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """TEST -> raw-mask ``object_index`` + the reordered vertex leaves; ONNX -> the reorder

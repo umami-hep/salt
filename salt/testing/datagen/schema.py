@@ -395,29 +395,8 @@ def _validate_link(
 
 
 def _check_no_cycles(schema: Schema) -> None:
-    edges: dict[str, set[str]] = {g.name: set() for g in schema.groups if g.alias_of is None}
-    for g in schema.groups:
-        if g.alias_of is not None:
-            continue
-        for f in g.fields:
-            if isinstance(f, LinkField):
-                # referenced -> referencing
-                edges[f.ref_group].add(g.name)
-    # Kahn's algorithm
-    indeg = dict.fromkeys(edges, 0)
-    for dsts in edges.values():
-        for d in dsts:
-            indeg[d] += 1
-    queue = [n for n, d in indeg.items() if d == 0]
-    visited = 0
-    while queue:
-        n = queue.pop()
-        visited += 1
-        for d in edges[n]:
-            indeg[d] -= 1
-            if indeg[d] == 0:
-                queue.append(d)
-    if visited != len(edges):
+    # a cycle leaves its groups out of the topological order
+    if len(topo_sort_link_groups(schema)) != sum(g.alias_of is None for g in schema.groups):
         raise SchemaError("Reference graph contains a cycle")
 
 

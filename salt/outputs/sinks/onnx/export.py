@@ -27,7 +27,7 @@ from salt.graph.spec import (
     sym_dim,
     unflatten_spec,
 )
-from salt.outputs.sinks.onnx.adapter import OnnxAdapter
+from salt.outputs.sinks.onnx.adapter import OnnxAdapter, _onnx_export_sink
 from salt.outputs.sinks.onnx.check import CheckResult, check_onnx
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
@@ -102,42 +102,20 @@ def derive_onnx_sources(export: ExportConfig, variables: Mapping[str, Sequence[s
     return unflatten_spec(flat)
 
 
-def _folded_output_table(adapter: OnnxAdapter) -> str:
-    """Render the folded export-sink output table from the adapter.
-
-    The "what does Athena see" table, rendered from the adapter's generated
-    names/dtypes. One row per flat ONNX output: name, dtype, the
-    folded-source note.
+def _folded_output_table(
+    names: Sequence[str], dtypes: Sequence[str], model_name: str | None
+) -> str:
+    """Render the "what does Athena see" table: one row per flat ONNX output
+    (name, dtype, the folded-source note).
     """
-    rows = list(zip(adapter.output_names, adapter.output_dtypes, strict=True))
+    rows = list(zip(names, dtypes, strict=True))
     width = max((len(name) for name, _ in rows), default=1)
-    lines = [f"ONNX output manifest (folded conversion nodes, model_name={adapter.model_name}):"]
+    lines = [f"ONNX output manifest (folded conversion nodes, model_name={model_name}):"]
     lines += [
         f"  {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)"
         for name, dtype in rows
     ]
     return "\n".join(lines)
-
-
-def _onnx_export_sink(modules: Mapping[str, GraphModule]) -> Any:
-    """Find the folded `OnnxExportSink` node among the model modules, if any.
-
-    An export-node config wires an `OnnxExportSink`
-    (``salt.outputs.OnnxExportSink``) into ``model.modules``; it anchors the
-    folded conversion leaves (argmax/split/combine) as a terminal node.
-
-    Raises `ConfigError` if more than one `OnnxExportSink` is configured
-    (the Athena tuple has a single ordering authority).
-    """
-    from salt.outputs import OnnxExportSink
-
-    found = [m for m in modules.values() if isinstance(m, OnnxExportSink)]
-    if len(found) > 1:
-        raise ConfigError(
-            "more than one OnnxExportSink is configured — the ONNX output tuple has a single "
-            "ordering authority; declare exactly one export sink"
-        )
-    return found[0] if found else None
 
 
 def compile_onnx_plan(
@@ -170,7 +148,7 @@ def compile_onnx_plan(
             "compile_onnx_plan needs a folded OnnxExportSink in model.modules — "
             "the off-graph reduce manifest was retired. "
             "Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
-            "conversion nodes (ClassProbs/SeqClassIndex/MaskFormerObjects/"
+            "conversion nodes (ClassProbs/MaskFormerObjects/"
             "Combination) own the math inside the traced graph."
         )
     # the folded OnnxExportSink anchors its conversion leaves as a terminal node
@@ -203,6 +181,20 @@ def compile_onnx_plan(
                 f"stream, {fix}"
             ) from err
         raise
+
+
+def _build_adapter(
+    modules: dict[str, GraphModule], resolved: ExportConfig, variables: Mapping[str, Sequence[str]]
+) -> tuple[Plan, OnnxAdapter]:
+    """Compile the ONNX plan and wrap it in a full-precision eval `OnnxAdapter`."""
+    plan = compile_onnx_plan(modules, resolved, variables)
+    feature_fields = {
+        entry.port: tuple(variables[stream_of_input_port(entry.port)]) for entry in resolved.inputs
+    }
+    adapter = OnnxAdapter(plan, resolved, feature_fields)
+    adapter.eval()
+    adapter.float()  # export in full precision
+    return plan, adapter
 
 
 def export_graph(
@@ -255,13 +247,7 @@ def export_graph(
         metadata.
     """
     resolved = resolve_export_config(export, run_name)
-    plan = compile_onnx_plan(modules, resolved, variables)
-    feature_fields = {
-        entry.port: tuple(variables[stream_of_input_port(entry.port)]) for entry in resolved.inputs
-    }
-    adapter = OnnxAdapter(plan, resolved, feature_fields)
-    adapter.eval()
-    adapter.float()  # export in full precision
+    plan, adapter = _build_adapter(modules, resolved, variables)
     onnx_path = Path(onnx_path)
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
@@ -299,9 +285,9 @@ def export_graph(
     from salt.graph.render import plan_table
 
     plan_txt_path = onnx_path.parent / "plan_onnx.txt"
-    # the folded export-sink's output table renders from the adapter's generated
-    # names/dtypes.
-    output_table = _folded_output_table(adapter)
+    output_table = _folded_output_table(
+        adapter.output_names, adapter.output_dtypes, adapter.model_name
+    )
     plan_txt_path.write_text(plan_table(plan) + "\n\n" + output_table + "\n")
     return ExportResult(
         adapter=adapter,
@@ -446,8 +432,9 @@ def _resolve_export_contract(
     """The resolved export contract for a parsed run config.
 
     The single seam every export-side caller goes through: applies a
-    ``-n/--name`` override on top of the sink's own fields, and resolves the
-    contract against the run ``name:``.
+    ``-n/--name`` override on top of the sink's own fields, resolves the
+    contract against the run ``name:``, and defaults an unset sink
+    `model_name` to the resolved one.
 
     A `ConfigError` propagates from the sink's own resolution when the
     contract is incomplete or malformed.
@@ -469,7 +456,10 @@ def _resolve_export_contract(
     if model_name is not None:
         export_sink.model_name = model_name
     run_name = cli._get(cli.config_init, "name") or "salt"  # noqa: SLF001 - main.py precedent
-    return export_sink.export_config(run_name)
+    resolved = export_sink.export_config(run_name)
+    if export_sink.model_name is None:
+        export_sink.model_name = resolved.model_name
+    return resolved
 
 
 def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str, Any]) -> None:
@@ -493,6 +483,31 @@ def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str
                 f"the checkpoint schema stores width {stored} — the Features list drifted "
                 "since training"
             )
+
+
+def _load_folded_modules(
+    cli: Any, ckpt_path: Path, export_sink: Any
+) -> tuple[Any, dict[str, GraphModule]]:
+    """Load the checkpoint data-less (binds from the stored ``salt_core`` schema
+    before the strict state-dict load) and fold `export_sink` into its graph
+    modules; raises `ConfigError` when the sink name collides with a module.
+    """
+    from salt.model.saltmodule import SaltModule
+
+    model = SaltModule.load_from_checkpoint(
+        ckpt_path,
+        modules=cli.model._graph_modules,  # noqa: SLF001 - same-package adapter (cli.py precedent)
+        map_location=torch.device("cpu"),
+        weights_only=False,  # pytorch 2.6+ flipped this default to True
+    )
+    modules = dict(model._graph_modules)  # noqa: SLF001 - same-package adapter
+    if export_sink.name in modules:
+        raise ConfigError(
+            f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
+            "the sink's outputs: section key"
+        )
+    modules[export_sink.name] = export_sink
+    return model, modules
 
 
 def _print_check_result(result: CheckResult) -> None:
@@ -608,14 +623,12 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
             "OnnxExportSink in the outputs: section, naming the conversion outputs.* "
             "leaves. Add the conversion nodes + the OnnxExportSink."
         )
-    resolved = _resolve_export_contract(cli, export_sink, parsed.name)
-    if export_sink.model_name is None:
-        export_sink.model_name = resolved.model_name
-    rows = list(zip(export_sink.output_names(), export_sink.output_dtypes(), strict=True))
-    width = max((len(name) for name, _ in rows), default=1)
-    console(f"ONNX output manifest (folded conversion nodes, model_name={export_sink.model_name}):")
-    for name, dtype in rows:
-        console(f"  {name:<{width}}  {dtype:<7}  folded conversion node (outputs.* leaf)")
+    _resolve_export_contract(cli, export_sink, parsed.name)
+    console(
+        _folded_output_table(
+            export_sink.output_names(), export_sink.output_dtypes(), export_sink.model_name
+        )
+    )
     return 0
 
 
@@ -627,8 +640,6 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     contract, or schema drift; `FileExistsError` on an existing output
     without ``--overwrite``.
     """
-    from salt.model.saltmodule import SaltModule
-
     ckpt_path: Path = parsed.ckpt_path
     config_paths = _resolve_config_paths(parsed)
     config_path = config_paths[0]
@@ -647,30 +658,13 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
             f"config {config_path} has no OnnxExportSink — the ONNX output manifest and the "
             "export contract are declared by an OnnxExportSink in the outputs: section, "
             "naming the conversion outputs.* leaves the folded nodes mint (ClassProbs/"
-            "SeqClassIndex/MaskFormerObjects/Combination). Add the conversion nodes + the "
+            "MaskFormerObjects/Combination). Add the conversion nodes + the "
             "OnnxExportSink to the run config, or stack an override file carrying only the "
             f"sink as a second config:\n  salt export --ckpt_path {ckpt_path} "
             f"-c {config_path} -c my_export_sink.yaml"
         )
     resolved = _resolve_export_contract(cli, export_sink, parsed.name)
-    # data-less checkpoint load: binds from the stored salt_core schema before the
-    # strict state-dict load
-    model = SaltModule.load_from_checkpoint(
-        ckpt_path,
-        modules=cli.model._graph_modules,  # noqa: SLF001 - same-package adapter (cli.py precedent)
-        map_location=torch.device("cpu"),
-        weights_only=False,  # pytorch 2.6+ flipped this default to True
-    )
-    if export_sink.model_name is None:
-        export_sink.model_name = resolved.model_name
-    # fold the export sink into the modules the planner/adapter see
-    modules = dict(model._graph_modules)  # noqa: SLF001 - same-package adapter
-    if export_sink.name in modules:
-        raise ConfigError(
-            f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the sink's outputs: section key"
-        )
-    modules[export_sink.name] = export_sink
+    model, modules = _load_folded_modules(cli, ckpt_path, export_sink)
     _cross_check_schema(model, resolved, variables)
     onnx_path: Path = parsed.output or (config_path.parent / "network.onnx")
     if onnx_path.exists() and not parsed.overwrite:

@@ -7,11 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from salt.graph import (
-    ConfigError,
-    Mode,
-    flatten_spec,
-)
+from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode, flatten_spec
 from salt.model.modules import (
     ResolvedSchema,
 )
@@ -219,50 +216,44 @@ class TestEdgeHeadCompileSeam:
         return task
 
     @staticmethod
-    def _inputs(seed: int = 0) -> tuple[torch.Tensor, dict, dict]:
-        """A batch, its pad-mask dict and a vertex/origin label dict.
+    def _inputs(
+        seed: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """A batch, its pad mask, and the vertex-index / origin labels.
 
         Returns
         -------
-        tuple[torch.Tensor, dict, dict]
-            Encoded tracks, pad masks, labels.
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            Encoded tracks, pad mask, vertex labels, origin labels.
         """
         generator = torch.Generator().manual_seed(seed)
         b, n = 3, 6
         x = torch.randn(b, n, 8, generator=generator)
-        pad_masks = {"tracks": torch.arange(n)[None, :] >= torch.tensor([[6], [4], [2]])}
+        mask = torch.arange(n)[None, :] >= torch.tensor([[6], [4], [2]])
         # explicit, not random: every jet must carry at least one matched pair
         # or the loss normalisation divides by zero and NaN breaks the
         # bitwise comparisons below
-        labels = {
-            "tracks": {
-                "ftagTruthVertexIndex": torch.tensor(
-                    [[0, 0, 1, 1, -1, 2], [1, 1, 0, 0, -1, -1], [2, 2, 0, 1, 1, 0]]
-                ),
-                "ftagTruthOriginLabel": torch.tensor(
-                    [[3, 3, 4, 1, 0, 5], [1, 1, 3, 3, 0, 2], [5, 5, 1, 4, 4, 0]]
-                ),
-            }
-        }
-        return x, pad_masks, labels
+        labels = torch.tensor([[0, 0, 1, 1, -1, 2], [1, 1, 0, 0, -1, -1], [2, 2, 0, 1, 1, 0]])
+        origins = torch.tensor([[3, 3, 4, 1, 0, 5], [1, 1, 3, 3, 0, 2], [5, 5, 1, 4, 4, 0]])
+        return x, mask, labels, origins
 
     def test_eager_is_unchanged_by_the_disable_marker(self):
         """`torch.compiler.disable` is a no-op outside a compiled region."""
         head = self._head()
-        x, pad_masks, labels = self._inputs()
-        preds, loss = head.head_forward(x, labels, pad_masks)
+        x, mask, labels, origins = self._inputs()
+        preds, loss = head.head_forward(x, mask, labels, origins)
         assert preds.shape[-1] == 1
         assert loss.ndim == 0
-        again, _ = head.head_forward(x, labels, pad_masks)
+        again, _ = head.head_forward(x, mask, labels, origins)
         assert torch.equal(preds, again)
 
     def test_compiled_matches_eager_bitwise(self):
         head = self._head()
-        x, pad_masks, labels = self._inputs(seed=2)
-        expected, expected_loss = head.head_forward(x, labels, pad_masks)
+        x, mask, labels, origins = self._inputs(seed=2)
+        expected, expected_loss = head.head_forward(x, mask, labels, origins)
         torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface
         compiled = torch.compile(head.head_forward, backend="eager")
-        got, got_loss = compiled(x, labels, pad_masks)
+        got, got_loss = compiled(x, mask, labels, origins)
         assert torch.equal(got, expected)
         assert torch.equal(got_loss, expected_loss)
 
@@ -275,11 +266,11 @@ class TestEdgeHeadCompileSeam:
         `test_tensor_utils` documents for the flash seam).
         """
         head = self._head()
-        x, pad_masks, labels = self._inputs(seed=3)
+        x, mask, labels, origins = self._inputs(seed=3)
 
         def step(x):
             scaled = x * 2.0
-            preds, loss = head.head_forward(scaled, labels, pad_masks)
+            preds, loss = head.head_forward(scaled, mask, labels, origins)
             return preds.sum() + loss
 
         torch._dynamo.reset()  # noqa: SLF001 - the dynamo test surface

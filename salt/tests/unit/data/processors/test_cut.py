@@ -507,7 +507,7 @@ def test_constituent_cuts_no_cuts_is_a_noop() -> None:
 
 def test_constituent_cuts_need_the_valid_field() -> None:
     rec = np.zeros((1, 2), dtype=[("d0", "f4")])
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError, match=VALID_FIELD):
         _ConstituentCuts(cuts=("d0 < 1",)).apply(rec)
 
 

@@ -160,7 +160,7 @@ def _merged(tmp_path: Path, *overlays: str) -> tuple[dict, Path]:
 
 
 class TestBase:
-    """`gn3large_base.yaml` — the regenerated public GN3Large bundle mirror."""
+    """`gn3large_base.yaml` — the committed public GN3Large bundle mirror."""
 
     def test_header_and_body_sha256_self_consistent(self):
         text = BASE.read_text()

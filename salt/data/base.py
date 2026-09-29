@@ -14,10 +14,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from salt.data.readers.stream import OffsetIndex, StreamConfig, _truncate_pad
-from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.planner import PlanStep
-from salt.graph.setup_spec import SetupIO, SetupStage
 from salt.graph.spec import IO, KEY_SEP, UNNAMED, Mode
 from salt.schema import GroupSchema, Schema
 
@@ -30,14 +28,9 @@ __all__ = [
     "Reader",
     "RowBlock",
     "SaltDatasetModule",
-    "SetupBundle",
     "StreamConfig",
     "WorkerCtx",
 ]
-
-# The run `Bundle`'s write-once, dotted-key machinery is leaf-type-agnostic,
-# so it is reused verbatim as the setup carrier (leaves are paths/scalars).
-SetupBundle = Bundle
 
 
 @dataclass(frozen=True)
@@ -133,39 +126,6 @@ class SaltDatasetModule(ABC):
         This is the only place dataset modules may touch data files. Called
         once per (worker process, plan) by `SaltDataset`.
         """
-
-    # -- setup-time face (once per stage, not per batch; all default no-op) ----
-
-    def declare_setup_io(self, stage: SetupStage) -> SetupIO:
-        """Return the module's setup-time interface for `stage`; default empty.
-
-        The setup-time analogue of `declare_io`. A function of the module's own
-        config only — no data files, no tensors. A non-empty return for some
-        stage is what marks a module as setup-participating; the per-batch
-        `declare_io` face is unaffected.
-        """
-        del stage
-        return SetupIO()
-
-    def setup(self, ctx: SetupBundle, stage: SetupStage) -> SetupBundle:
-        """Run this module's setup-time side-effect for `stage`; default identity.
-
-        The sole sanctioned setup-time ctx-mutation point. Runs once per stage
-        inside ``datamodule.setup(stage)``, reads its declared setup-`requires`
-        off `ctx`, may touch the filesystem, and merges back only its declared
-        setup-`produces` (write-once). Same code path on every DDP rank.
-        """
-        del stage
-        return ctx
-
-    def teardown(self, ctx: SetupBundle, stage: SetupStage) -> None:
-        """Reverse a setup-time side-effect for `stage`; default no-op.
-
-        The symmetric cleanup hook (e.g. `ShmStage` rmtree-ing its
-        ``/dev/shm`` root). Called from ``datamodule.teardown(stage)``, guarded
-        so it fires only for the stage(s) the module actually set up.
-        """
-        del ctx, stage
 
     def read_fields(self, step: PlanStep) -> dict[str, dict[str, str]]:
         """Per-stream raw fields this module demands from the reader.

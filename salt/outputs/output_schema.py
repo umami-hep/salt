@@ -5,7 +5,7 @@ structured object groups) plus the shared output-suffix constants.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +21,9 @@ __all__ = [
     "ObjectGroupField",
     "OutputColumn",
     "OutputField",
+    "check_output_key",
+    "coerce",
+    "group_columns",
     "pascal_case",
 ]
 
@@ -47,6 +50,29 @@ def pascal_case(name: str) -> str:
     ``onnx_names`` entry).
     """
     return "".join(part[:1].upper() + part[1:] for part in name.split("_"))
+
+
+def check_output_key(key: str, who: str, *, min_parts: int = 2) -> None:
+    """Reject a wildcard or non-``outputs`` leaf key with a construction-time `ConfigError`.
+
+    `who` names the rejecting config field in the message (e.g. ``"Combination
+    source"``); `min_parts` is the minimum number of ``.``-separated components.
+    """
+    parts = key.split(KEY_SEP)
+    if any(part in {"*", "**"} for part in parts):
+        raise ConfigError(f"{who} {key!r} contains a wildcard — output leaf keys are concrete")
+    if len(parts) < min_parts or parts[0] != _OUTPUTS_NAMESPACE:
+        raise ConfigError(
+            f"{who} {key!r} is not under the {_OUTPUTS_NAMESPACE!r} namespace — it must be an "
+            f"'{_OUTPUTS_NAMESPACE}.<stream>.<name>' producer leaf, not a raw prediction"
+        )
+
+
+def coerce[T](cls: type[T], obj: T | Mapping[str, Any]) -> T:
+    """Build a `cls` config dataclass from an instance (returned as-is) or a plain mapping."""
+    if isinstance(obj, cls):
+        return obj
+    return cls(**dict(obj))
 
 
 @dataclass(frozen=True)
@@ -156,16 +182,7 @@ class OutputColumn:
     prefix: bool = True
 
     def __post_init__(self) -> None:
-        parts = self.key.split(KEY_SEP)
-        if any(part in {"*", "**"} for part in parts):
-            raise ConfigError(
-                f"OutputColumn key {self.key!r} contains a wildcard — sink demand keys are concrete"
-            )
-        if parts[0] != _OUTPUTS_NAMESPACE:
-            raise ConfigError(
-                f"OutputColumn key {self.key!r} is not under the {_OUTPUTS_NAMESPACE!r} "
-                "namespace — sinks consume producer outputs.* leaves, not raw predictions"
-            )
+        check_output_key(self.key, "OutputColumn key", min_parts=1)
         if not list(self.suffixes):
             raise ConfigError(
                 f"OutputColumn {self.key!r} needs a non-empty suffix list — name the "
@@ -184,6 +201,26 @@ class OutputColumn:
     def np_dtype(self, run_name: str) -> np.dtype:
         """The structured numpy dtype this leaf contributes to its group."""
         return np.dtype([(col, self.dtype) for col in self.column_names(run_name)])
+
+
+def group_columns(
+    fields: Iterable[tuple[str, OutputField]], suffix_of: Callable[[OutputField], str | None]
+) -> list[OutputColumn]:
+    """One `OutputColumn` per leaf key, in first-appearance order.
+
+    A field's column suffix is ``suffix_of(field)`` (fields it maps to None are
+    skipped); dtype and prefix come from the leaf's first kept field.
+    """
+    by_key: dict[str, list[tuple[str, OutputField]]] = {}
+    for key, fld in fields:
+        if (suffix := suffix_of(fld)) is not None:
+            by_key.setdefault(key, []).append((suffix, fld))
+    columns: list[OutputColumn] = []
+    for key, pairs in by_key.items():
+        first = pairs[0][1]
+        suffixes = [s for s, _ in pairs]
+        columns.append(OutputColumn(key, suffixes, dtype=first.dtype, prefix=first.prefix))
+    return columns
 
 
 _VALID_KINDS = ("data", "label", "pad_mask")
@@ -264,13 +301,6 @@ class ObjectGroupField:
         dt = self.resolved_dtype(half_precision)
         return np.dtype([(col, dt) for col in self.column_names(run_name)])
 
-    @classmethod
-    def coerce(cls, obj: ObjectGroupField | Mapping[str, Any]) -> ObjectGroupField:
-        """Build from a dataclass or a plain config mapping."""
-        if isinstance(obj, ObjectGroupField):
-            return obj
-        return cls(**dict(obj))
-
 
 @dataclass(frozen=True)
 class ObjectGroup:
@@ -323,5 +353,5 @@ class ObjectGroup:
         if isinstance(obj, ObjectGroup):
             return obj
         data = dict(obj)
-        data["fields"] = tuple(ObjectGroupField.coerce(f) for f in data.get("fields", ()))
+        data["fields"] = tuple(coerce(ObjectGroupField, f) for f in data.get("fields", ()))
         return cls(**data)

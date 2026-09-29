@@ -41,8 +41,7 @@ class TrainingScheduleCallback(Callback):
         """
         if stage != "fit":
             return
-        controller = getattr(pl_module, "training_controller", None)
-        schedule = controller.schedule if controller is not None else None
+        schedule = pl_module.training_controller.schedule
         strategy = trainer.strategy
         # Same predicate that puts SaltModule into reducer-safe freeze mode: a
         # DDP-family strategy + a freeze set that changes across stages. The
@@ -108,11 +107,9 @@ class TrainingScheduleCallback(Callback):
         `on_train_epoch_start`); on the final stage it sets ``trainer.should_stop``.
         No-op unless the active stage declares `early_stop`.
         """
-        controller = getattr(pl_module, "training_controller", None)
-        if controller is None:
-            return
+        controller = pl_module.training_controller
         schedule = controller.schedule
-        if schedule is None or not schedule.has_early_stop or trainer.sanity_checking:
+        if not schedule.has_early_stop or trainer.sanity_checking:
             return
         stage = schedule.stages[controller.current_stage_index]
         if stage.early_stop is None:
@@ -126,7 +123,8 @@ class TrainingScheduleCallback(Callback):
         if is_final:
             trainer.should_stop = True
         else:
-            controller.mark_pending_early_advance()
+            # consumed at the next train-epoch-start transition
+            controller.pending_early_advance = True
 
 
 def _read_monitor(trainer: Trainer, monitor: str) -> float | None:
@@ -192,9 +190,8 @@ class StageScopedCallbacks(Callback):
         del trainer  # validation only reads the model's schedule
         if stage != "fit":
             return
-        controller = getattr(pl_module, "training_controller", None)
-        schedule = controller.schedule if controller is not None else None
-        if schedule is None or not schedule.has_stage_callbacks:
+        schedule = pl_module.training_controller.schedule
+        if not schedule.has_stage_callbacks:
             return
         for stage_cfg in schedule.stages:
             for spec in stage_cfg.callbacks or ():
@@ -215,12 +212,8 @@ class StageScopedCallbacks(Callback):
         stage's fresh, and call their `setup` (Lightning already ran its own setup
         phase before this stage existed). Cheap no-op while the stage is unchanged.
         """
-        controller = getattr(pl_module, "training_controller", None)
-        if controller is None:
-            return
+        controller = pl_module.training_controller
         schedule = controller.schedule
-        if schedule is None:
-            return
         index = controller.current_stage_index
         if index == self._active_stage_index:
             return

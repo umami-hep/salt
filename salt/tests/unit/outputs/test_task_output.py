@@ -4,29 +4,18 @@ from __future__ import annotations
 
 import torch
 
-from salt.graph import (
-    IO,
-    Mode,
-    TensorSpec,
-    compile_plan,
-    sym_dim,
-    unflatten_spec,
-)
 from salt.graph.bundle import Bundle
+from salt.graph.planner import compile_plan
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.model.modules import resolve_bind_schema
 from salt.outputs import (
     ClassProbs,
     ClassProbsOp,
     ConversionOp,
-    SeqClassIndex,
-    SeqClassIndexOp,
-    SeqClassProbs,
-    SeqClassProbsOp,
     TaskOutput,
 )
 from salt.tests.unit.outputs.conftest import (  # noqa: PLC2701 — shared split helpers
     _STREAM_J,
-    _STREAM_T,
     _producer,
 )
 
@@ -44,46 +33,6 @@ def test_class_probs_subclass_forwards_like_op():
         generic.forward(Bundle({"preds": {_STREAM_J: {"t": logits}}}), Mode.TEST)[
             f"outputs.{_STREAM_J}.out"
         ],
-        rtol=0,
-        atol=0,
-    )
-
-
-def test_seq_class_index_subclass_forwards_like_op():
-    """The thin `SeqClassIndex` subclass == a `TaskOutput` carrying `SeqClassIndexOp`."""
-    torch.manual_seed(12)
-    logits = torch.randn(3, 4, 8)
-    mask = torch.zeros(3, 4, dtype=torch.bool)
-    mask[0, 2:] = True
-    sub = SeqClassIndex(task="t", stream=_STREAM_T, name="origin")
-    sub.name = "p"
-    generic = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassIndexOp())
-    generic.name = "g"
-    b1 = Bundle({"preds": {_STREAM_T: {"t": logits}}, "masks": {_STREAM_T: mask}})
-    b2 = Bundle({"preds": {_STREAM_T: {"t": logits}}, "masks": {_STREAM_T: mask}})
-    torch.testing.assert_close(
-        sub.forward(b1, Mode.TEST)[f"outputs.{_STREAM_T}.origin"],
-        generic.forward(b2, Mode.TEST)[f"outputs.{_STREAM_T}.origin"],
-        rtol=0,
-        atol=0,
-    )
-
-
-def test_seq_class_probs_subclass_forwards_like_op():
-    """The thin `SeqClassProbs` subclass == a `TaskOutput` carrying `SeqClassProbsOp`."""
-    torch.manual_seed(42)
-    logits = torch.randn(3, 4, 8)
-    mask = torch.zeros(3, 4, dtype=torch.bool)
-    mask[0, 2:] = True
-    sub = SeqClassProbs(task="t", stream=_STREAM_T, name="origin")
-    sub.name = "p"
-    generic = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassProbsOp())
-    generic.name = "g"
-    b1 = Bundle({"preds": {_STREAM_T: {"t": logits}}, "masks": {_STREAM_T: mask}})
-    b2 = Bundle({"preds": {_STREAM_T: {"t": logits}}, "masks": {_STREAM_T: mask}})
-    torch.testing.assert_close(
-        sub.forward(b1, Mode.TEST)[f"outputs.{_STREAM_T}.origin"],
-        generic.forward(b2, Mode.TEST)[f"outputs.{_STREAM_T}.origin"],
         rtol=0,
         atol=0,
     )
@@ -119,67 +68,6 @@ def test_class_probs_width_resolves_in_test_only_bind():
     test = compile_plan(modules, Mode.TEST, sources={}, sinks=[out_key])
     schema = resolve_bind_schema([test])
     assert schema.width(out_key) == 3  # softmax preserves the class dim
-
-
-def test_seq_class_index_width_collapses_to_one():
-    """``SeqClassIndex`` collapses the class dim to one index column at bind."""
-    pred_key = f"preds.{_STREAM_T}.t"
-    out_key = f"outputs.{_STREAM_T}.origin"
-    src = _stub_source(pred_key, 8)
-    # also need a source for the demanded pad mask
-    mask_key = f"masks.{_STREAM_T}"
-
-    class _MaskSrc:
-        name = "msrc"
-
-        def declare_io(self, mode):
-            del mode
-            return IO(
-                produces=unflatten_spec(
-                    {
-                        mask_key: TensorSpec(
-                            shape=("B", sym_dim("T", _STREAM_T)), dtype="bool", kind="pad_mask"
-                        )
-                    }
-                )
-            )
-
-    producer = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassIndexOp())
-    producer.name = "producer"
-    modules = {"src": src, "msrc": _MaskSrc(), "producer": producer}
-    test = compile_plan(modules, Mode.TEST, sources={}, sinks=[out_key])
-    schema = resolve_bind_schema([test])
-    assert schema.width(out_key) == 1  # argmax collapses the class dim
-
-
-def test_seq_class_probs_width_preserved_in_test_only_bind():
-    """``SeqClassProbs`` preserves the class dim (C probs out, unlike argmax's collapse)."""
-    pred_key = f"preds.{_STREAM_T}.t"
-    out_key = f"outputs.{_STREAM_T}.origin"
-    src = _stub_source(pred_key, 8)
-    mask_key = f"masks.{_STREAM_T}"
-
-    class _MaskSrc:
-        name = "msrc"
-
-        def declare_io(self, mode):
-            del mode
-            return IO(
-                produces=unflatten_spec(
-                    {
-                        mask_key: TensorSpec(
-                            shape=("B", sym_dim("T", _STREAM_T)), dtype="bool", kind="pad_mask"
-                        )
-                    }
-                )
-            )
-
-    producer = TaskOutput(task="t", stream=_STREAM_T, name="origin", op=SeqClassProbsOp())
-    producer.name = "producer"
-    modules = {"src": src, "msrc": _MaskSrc(), "producer": producer}
-    test = compile_plan(modules, Mode.TEST, sources={}, sinks=[out_key])
-    schema = resolve_bind_schema([test])
-    assert schema.width(out_key) == 8  # softmax preserves the class dim
 
 
 def test_identity_op_still_clones_p0_contract():

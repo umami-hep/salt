@@ -11,7 +11,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
 from salt.model.base import SaltModelModule
-from salt.outputs.output_schema import OutputField
+from salt.outputs.output_schema import OutputField, check_output_key
 
 
 class Combination(SaltModelModule):
@@ -54,17 +54,7 @@ class Combination(SaltModelModule):
     ) -> None:
         super().__init__()
         parts = split_key(source)
-        if any(part in {"*", "**"} for part in parts):
-            raise ConfigError(
-                f"Combination source {source!r} contains a wildcard — conversion sources are "
-                "concrete"
-            )
-        if len(parts) < 2 or parts[0] != "outputs":
-            raise ConfigError(
-                f"Combination source {source!r} must be an 'outputs.<stream>.<name>' producer "
-                "leaf — a combination reads a bundle prob/pred leaf, not a raw prediction or a "
-                "renamed Athena output"
-            )
+        check_output_key(source, "Combination source")
         if not terms:
             raise ConfigError(
                 f"Combination {name!r}: 'terms' must map at least one source channel index to a "

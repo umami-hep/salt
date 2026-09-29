@@ -33,26 +33,3 @@ def listify(maybe_list: list[Any] | Any | None) -> Sequence[Any]:
     if isinstance(maybe_list, list):
         return maybe_list
     return [maybe_list]
-
-
-def maybe_pad(src: np.ndarray, tgt: np.ndarray) -> np.ndarray:
-    """Pad ``src`` to match ``tgt``'s shape along the sequence (2nd) dimension.
-
-    Convenience helper for 2D arrays where the second dimension is a
-    variable-length sequence. Returns ``src`` unchanged if the shapes already
-    match; otherwise a zero-padded copy along axis 1.
-    """
-    if src.shape == tgt.shape:
-        return src
-    seq_len = tgt.shape[1] if tgt.ndim == 2 else None
-    if seq_len and seq_len != src.shape[1]:
-        n_pad = seq_len - src.shape[1]
-        src = np.pad(src, ((0, 0), (0, n_pad)), mode="constant")
-    return src
-
-
-def maybe_copy(src: np.ndarray) -> np.ndarray:
-    """Return ``src`` unchanged if C-contiguous, otherwise a contiguous copy."""
-    if src.flags.c_contiguous:
-        return src
-    return src.copy()

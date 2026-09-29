@@ -1,8 +1,8 @@
 # TEST FIXTURE — not a shipped config. Overlay on salt/configs/gn2v2-opendata.yaml
-# exercising the folded ONNX export path: a ClassProbs softmax, a SeqClassIndex
-# argmax and a Combination (pbc = pb+pc) minted in-graph, each naming its own
-# ONNX output through its manifest. No shipped config uses this shape, so it
-# lives here rather than in salt/configs.
+# exercising the folded ONNX export path: a ClassProbs softmax and a Combination
+# (pbc = pb+pc) minted in-graph, each naming its own ONNX output through its
+# manifest. No shipped config uses this shape, so it lives here rather than in
+# salt/configs.
 
 model:
   modules:
@@ -10,11 +10,6 @@ model:
     jet_probs:
       class_path: salt.outputs.ClassProbs
       init_args: {task: jets_classification, stream: jets}
-    # distinct leaf name so the ONNX argmax never collides with the section's
-    # test-mode track_origin leaves
-    track_origin_index:
-      class_path: salt.outputs.SeqClassIndex
-      init_args: {task: track_origin, stream: tracks, name: track_origin_index}
     pbc:
       class_path: salt.outputs.Combination
       init_args:

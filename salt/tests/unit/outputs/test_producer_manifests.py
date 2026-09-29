@@ -13,8 +13,6 @@ from salt.outputs import (
     Combination,
     MaskFormerObjects,
     MFLeadVertexDecorator,
-    SeqClassIndex,
-    SeqClassProbs,
 )
 from salt.outputs.sinks.sink import collect_manifest_fields
 from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
@@ -49,22 +47,6 @@ def test_class_probs_names_come_from_the_task(gn2v2_modules):
     assert [f.resolved_onnx_name for _, f in fields] == ["pb", "pc", "pu"]
     assert {f.onnx_dtype for _, f in fields} == {"float32"}
     assert {f.axis for _, f in fields} == {"global"}
-
-
-def test_seq_class_index_names_come_from_the_task(gn2v2_modules):
-    """`SeqClassIndex` mints ONE int8 per-token field, pascal-cased by the source task."""
-    node = _bound(SeqClassIndex(task="track_origin", stream="tracks"), gn2v2_modules)
-    ((key, field),) = node.manifest_fields(Mode.ONNX)
-    assert key == "outputs.tracks.track_origin"
-    assert field.resolved_onnx_name == "TrackOrigin"
-    assert field.onnx_dtype == "int8"
-    assert field.axis == "per_token"
-
-
-def test_seq_class_probs_declares_no_onnx_field(gn2v2_modules):
-    """Per-token probability columns are an eval-H5 representation with no ONNX twin."""
-    node = _bound(SeqClassProbs(task="track_origin", stream="tracks"), gn2v2_modules)
-    assert node.manifest_fields(Mode.ONNX) == []
 
 
 @pytest.mark.parametrize("mode", [Mode.FIT, Mode.VAL, Mode.TEST])

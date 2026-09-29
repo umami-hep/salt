@@ -121,7 +121,7 @@ class MaskformerMetrics(Callback):
 
     def _compute(self, bundle: Bundle) -> dict[str, Tensor]:
         """Compute ``{metric name: scalar tensor}`` from the matched object bundle keys."""
-        from salt.utils.mask_utils import mask_from_logits, reco_metrics
+        from salt.utils.mask_utils import reco_metrics, sanitise_mask
 
         class_logits = bundle.get(self._matched_key("class_logits")).detach()
         object_class = bundle.get(self._matched_key("object_class")).detach()
@@ -157,7 +157,7 @@ class MaskformerMetrics(Callback):
         # mask reco metrics: predicted masks suppressed on padded tokens + null objects
         pad_key = f"masks.{self.constituent_stream}"
         pad_mask = bundle.get(pad_key).detach() if pad_key in bundle else None
-        recon = mask_from_logits(pred_masks, "sigmoid", pad_mask, obj_class_pred)
+        recon = sanitise_mask(pred_masks.sigmoid() > 0.5, pad_mask, obj_class_pred)
         for name, (recall, purity) in self.mask_criteria.items():
             eff, fake = reco_metrics(
                 recon, tgt_masks, min_recall=recall, min_purity=purity, reduce=True

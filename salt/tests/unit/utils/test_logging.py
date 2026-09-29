@@ -19,7 +19,6 @@ def _isolate_salt_logging(monkeypatch):
     saved_propagate = root.propagate
     saved_configured = salt_logging._CONFIGURED
     saved_explicit_level = salt_logging._EXPLICIT_LEVEL
-    saved_style = salt_logging._style
 
     monkeypatch.delenv(LEVEL_ENV_VAR, raising=False)
 
@@ -34,7 +33,6 @@ def _isolate_salt_logging(monkeypatch):
     root.propagate = saved_propagate
     salt_logging._CONFIGURED = saved_configured
     salt_logging._EXPLICIT_LEVEL = saved_explicit_level
-    salt_logging._style = saved_style
 
 
 def test_default_level_is_info():
@@ -127,19 +125,3 @@ def test_console_not_suppressed_at_critical_level():
     console("still here", file=buf)
 
     assert buf.getvalue() == "still here\n"
-
-
-def test_style_is_identity_today():
-    assert salt_logging._style("INFO", "hello") == "hello"
-
-
-def test_style_is_a_single_seam_for_both_surfaces(monkeypatch, capsys):
-    monkeypatch.setattr(salt_logging, "_style", lambda level, text: f"[{level}] {text}")
-
-    logger = get_logger("salt.seam_test")
-    logger.warning("from logger")
-    console("from console")
-
-    captured = capsys.readouterr()
-    assert "[WARNING] WARNING salt.seam_test: from logger" in captured.err
-    assert captured.out == "[CONSOLE] from console\n"

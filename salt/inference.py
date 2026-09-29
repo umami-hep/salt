@@ -23,11 +23,13 @@ from salt.outputs.sinks.onnx.config import (
     stream_of_input_port,
 )
 from salt.outputs.sinks.onnx.export import (
+    _build_adapter,
     _cross_check_schema,
     _features_variables,
+    _load_folded_modules,
+    _resolve_config_paths,
     _resolve_export_contract,
     _run_free_cli,
-    compile_onnx_plan,
 )
 from salt.outputs.sinks.sink import SinkContext
 from salt.utils.logging import console
@@ -254,7 +256,6 @@ def run_inference(
         contract, or any sink schema error.
     """
     from salt.cli import _static_onnx_export_sink
-    from salt.model.saltmodule import SaltModule
 
     overrides = [f"data.test_file={test_file}", *set_overrides]
     if num_test is not None:
@@ -270,32 +271,11 @@ def run_inference(
             "section RunTaskOutput `export` in its modes: list (or omit modes: for both)"
         )
     variables = _features_variables(cli)
-    # the sink carries the Athena input contract salt inference feeds the model
-    # through, resolved via the same seam `salt export` uses
+    # the sink's Athena input contract, resolved/loaded via the same seams as `salt export`
     resolved = _resolve_export_contract(cli, export_sink)
-    if export_sink.model_name is None:
-        export_sink.model_name = resolved.model_name
-    model = SaltModule.load_from_checkpoint(
-        ckpt_path,
-        modules=cli.model._graph_modules,  # noqa: SLF001 - export.py precedent
-        map_location=torch.device("cpu"),
-        weights_only=False,
-    )
+    model, modules = _load_folded_modules(cli, ckpt_path, export_sink)
     _cross_check_schema(model, resolved, variables)
-    modules = dict(model._graph_modules)  # noqa: SLF001 - export.py precedent
-    if export_sink.name in modules:
-        raise ConfigError(
-            f"OnnxExportSink name {export_sink.name!r} collides with a model module — rename "
-            "the sink's outputs: section key"
-        )
-    modules[export_sink.name] = export_sink
-    plan = compile_onnx_plan(modules, resolved, variables)
-    feature_fields = {
-        entry.port: tuple(variables[stream_of_input_port(entry.port)]) for entry in resolved.inputs
-    }
-    adapter = OnnxAdapter(plan, resolved, feature_fields)
-    adapter.eval()
-    adapter.float()  # the export_graph precision contract
+    _, adapter = _build_adapter(modules, resolved, variables)
     # the dataset: the CLI datamodule with the INFERENCE demand — export input
     # ports + pad masks + meta.rows, never labels (Labels narrows to nothing,
     # so a label-stripped file binds and reads green).
@@ -393,19 +373,6 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
-def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
-    """The run-config stack: explicit ``-c`` files, or the ``salt export`` sibling
-    inference (``<ckpt>/../../config.yaml``); raises `ConfigError` when neither
-    resolves.
-    """
-    if parsed.config:
-        return list(parsed.config)
-    inferred = parsed.ckpt_path.parents[1] / "config.yaml"
-    if not inferred.is_file():
-        raise ConfigError(f"could not find a run config at {inferred} — pass --config")
-    return [inferred]
-
-
 def main(args: Sequence[str] | None = None) -> int:
     """``salt inference`` entry point.
 
@@ -415,12 +382,6 @@ def main(args: Sequence[str] | None = None) -> int:
         0 on success, 1 on a config/graph error (printed as one clean block).
     """
     parsed = _parse_args(args)
-    for entry in parsed.set_overrides:
-        if "=" not in entry:
-            console(
-                f"salt inference: --set entries must be KEY=VALUE, got {entry!r}", file=sys.stderr
-            )
-            return 1
     try:
         out = run_inference(
             _resolve_config_paths(parsed),

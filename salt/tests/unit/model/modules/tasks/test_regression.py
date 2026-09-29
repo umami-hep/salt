@@ -5,13 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.graph import (
-    Bundle,
-    ConfigError,
-    Executor,
-    Mode,
-    flatten_spec,
-)
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.spec import Mode, flatten_spec
 from salt.model.modules import (
     ResolvedSchema,
     bind_all,

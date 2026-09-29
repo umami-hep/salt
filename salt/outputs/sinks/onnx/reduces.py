@@ -19,40 +19,32 @@ __all__ = ["get_maskformer_outputs"]
 # function the folded MaskFormerObjects conversion node composes.
 
 
-def get_maskformer_outputs(
-    objects: Mapping[str, Tensor],
-    max_null: float = 0.5,
-    apply_reorder: bool = True,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def get_maskformer_outputs(objects: Mapping[str, Tensor]) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Convert raw MaskFormer-style outputs to convenient per-object tensors.
 
     Thresholds the "null" class probability and suppresses masks/regression for
-    objects with ``p_null > max_null``; converts per-position mask logits into
-    sparse mask indices; optionally reorders objects so the "leading" object
-    (highest ``regression[0]``, e.g. pT) is first.
+    objects with ``p_null > 0.5``; converts per-position mask logits into
+    sparse mask indices; reorders objects so the "leading" object (highest
+    ``regression[0]``, e.g. pT) is first.
 
     Parameters
     ----------
     objects : Mapping[str, Tensor]
         Keys: ``"masks"`` (mask logits ``[B, M, L]``), ``"class_probs"``
         (``[B, M, C]``, last class is null), ``"regression"`` (``[B, M, R]``).
-    max_null : float, optional
-        Maximum allowed null probability for an object to be kept, by default ``0.5``.
-    apply_reorder : bool, optional
-        Reorder objects in descending order of ``regression[..., 0]``, by default ``True``.
 
     Returns
     -------
     leading_regression : torch.Tensor
-        ``[B, R]`` for the leading object (after optional reordering); all
+        ``[B, R]`` for the leading object (after reordering); all
         ``NaN`` for a jet where every object is null.
     obj_indices : torch.Tensor
         The per-token owning-object index, ``[B, L]`` int64 (`indices_from_mask`):
         ``-2`` where no object claims a token; ``[B, 0]`` when ``L == 0``.
     class_probs : torch.Tensor
-        Possibly-reordered class probabilities, ``[B, M, C]``.
+        Reordered class probabilities, ``[B, M, C]``.
     regression : torch.Tensor
-        Possibly-reordered regression tensor, ``[B, M, R]``, ``NaN`` for null objects.
+        Reordered regression tensor, ``[B, M, R]``, ``NaN`` for null objects.
 
     Notes
     -----
@@ -71,7 +63,7 @@ def get_maskformer_outputs(
     class_probs = objects["class_probs"]
     regression = objects["regression"]
 
-    null_preds = class_probs[:, :, -1] > max_null
+    null_preds = class_probs[:, :, -1] > 0.5
 
     masks = masks.sigmoid() > 0.5
     expanded_null = null_preds.unsqueeze(-1).expand(-1, -1, masks.size(-1))
@@ -79,23 +71,21 @@ def get_maskformer_outputs(
     null_reg = null_preds.unsqueeze(-1).expand_as(regression)
     regression = torch.where(null_reg, torch.full_like(regression, torch.nan), regression)
 
-    if apply_reorder:
-        # leading object = highest regression[0] (e.g. pT); argsort doesn't handle
-        # NaN reliably in Athena, so null entries go to -inf for the sort
-        # (regression is already NaN there, from above)
-        sort_key = torch.where(
-            null_preds, torch.full_like(regression[:, :, 0], -torch.inf), regression[:, :, 0]
-        )
-        order = torch.argsort(sort_key, descending=True)
-        order_expanded = order.unsqueeze(-1).expand(-1, -1, masks.size(-1))
+    # leading object = highest regression[0] (e.g. pT); Athena's argsort mishandles
+    # NaN, so null entries (NaN regression) sort as -inf
+    sort_key = torch.where(
+        null_preds, torch.full_like(regression[:, :, 0], -torch.inf), regression[:, :, 0]
+    )
+    order = torch.argsort(sort_key, descending=True)
+    order_expanded = order.unsqueeze(-1).expand(-1, -1, masks.size(-1))
 
-        masks = torch.gather(masks, 1, order_expanded)
-        class_probs = torch.gather(
-            class_probs, 1, order.unsqueeze(-1).expand(-1, -1, class_probs.size(-1))
-        )
-        regression = torch.gather(
-            regression, 1, order.unsqueeze(-1).expand(-1, -1, regression.size(-1))
-        )
+    masks = torch.gather(masks, 1, order_expanded)
+    class_probs = torch.gather(
+        class_probs, 1, order.unsqueeze(-1).expand(-1, -1, class_probs.size(-1))
+    )
+    regression = torch.gather(
+        regression, 1, order.unsqueeze(-1).expand(-1, -1, regression.size(-1))
+    )
     leading_regression = regression[:, 0]
 
     obj_indices = indices_from_mask(masks)

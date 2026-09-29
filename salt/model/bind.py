@@ -11,7 +11,7 @@ from difflib import get_close_matches
 from typing import Any
 
 from salt.graph.errors import SUGGESTION_CUTOFF, GraphError
-from salt.graph.planner import Plan
+from salt.graph.planner import DimTable, Plan
 from salt.graph.spec import GraphModule, TensorSpec, is_symbolic_dim
 from salt.model.base import SaltModelModule
 
@@ -123,7 +123,7 @@ def resolve_bind_schema(
             for key, spec in step.requires.items():
                 observed.setdefault(key, []).append(spec)
 
-    dims = _DimBindings()
+    dims = DimTable(error=BindError)
     for key, specs in observed.items():
         shaped = [s for s in specs if s.shape is not None]
         for i, a in enumerate(shaped):
@@ -214,7 +214,7 @@ def reader_stream_datasets(reader: Any) -> dict[str, str]:
 def _back_bind_symbols(
     observed: Mapping[str, list[TensorSpec]],
     widths: dict[str, int],
-    dims: _DimBindings,
+    dims: DimTable,
 ) -> bool:
     """Bind symbolic last dims from resolved key widths, then re-resolve sharers.
 
@@ -323,53 +323,3 @@ def materialise_all(modules: Mapping[str, SaltModelModule | GraphModule]) -> Non
     for module in modules.values():
         if isinstance(module, SaltModelModule):
             module.materialise()
-
-
-class _DimBindings:
-    """Union-find over symbolic dims with concrete bindings (mirrors planner `_DimTable`)."""
-
-    def __init__(self) -> None:
-        self._parent: dict[str, str] = {}
-        self._size: dict[str, tuple[int, str]] = {}  # root -> (size, where)
-
-    def _find(self, dim: str) -> str:
-        self._parent.setdefault(dim, dim)
-        root = dim
-        while self._parent[root] != root:
-            root = self._parent[root]
-        while self._parent[dim] != root:  # path compression
-            self._parent[dim], dim = root, self._parent[dim]
-        return root
-
-    def bind(self, dim: str, size: int, where: str) -> None:
-        """Bind a symbolic dim to a concrete size; conflicts raise `BindError`."""
-        root = self._find(dim)
-        previous = self._size.get(root)
-        if previous is not None and previous[0] != size:
-            raise BindError(
-                f"symbolic dim {dim!r} resolves to {previous[0]} at {previous[1]} but "
-                f"{size} at {where} — conflicting widths"
-            )
-        if previous is None:
-            self._size[root] = (size, where)
-
-    def union(self, a: str, b: str, where: str) -> None:
-        """Unify two symbolic dims; conflicting concrete bindings raise `BindError`."""
-        root_a, root_b = self._find(a), self._find(b)
-        if root_a == root_b:
-            return
-        size_a, size_b = self._size.get(root_a), self._size.get(root_b)
-        if size_a is not None and size_b is not None and size_a[0] != size_b[0]:
-            raise BindError(
-                f"unifying {a!r} with {b!r} at {where}: {a!r} is {size_a[0]} "
-                f"(from {size_a[1]}) but {b!r} is {size_b[0]} (from {size_b[1]}) — "
-                "conflicting widths"
-            )
-        self._parent[root_b] = root_a
-        if size_a is None and size_b is not None:
-            self._size[root_a] = size_b
-
-    def size_of(self, dim: str) -> int | None:
-        """Return the resolved concrete size of a symbolic dim, or None if unbound."""
-        entry = self._size.get(self._find(dim))
-        return entry[0] if entry is not None else None

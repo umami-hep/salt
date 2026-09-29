@@ -31,8 +31,6 @@ __all__ = [
     "build_model_at_widths",
     "coord_check",
     "generate_shapes",
-    "module_mup_enabled",
-    "module_supports_mup",
     "plot_coord_data",
     "setup_mup",
     "validate_mup_routing",
@@ -44,20 +42,6 @@ _MUP_KEYS = frozenset({"apply_to", "shape_path"})
 # ---------------------------------------------------------------------------
 # routing + base shapes (used by `SaltModule`)
 # ---------------------------------------------------------------------------
-
-
-def module_supports_mup(module: Any) -> bool:
-    """Whether `module` accepts a ``mup`` init_arg (the ``apply_to`` target test).
-
-    Eligible iff the module carries a ``mup`` attribute (init_arg landed) —
-    duck-typed so user modules participate too.
-    """
-    return hasattr(module, "mup")
-
-
-def module_mup_enabled(module: Any) -> bool:
-    """Whether `module`'s ``mup`` flag is truthy (the validator's mup-on test)."""
-    return bool(getattr(module, "mup", False))
 
 
 def validate_mup_routing(
@@ -104,7 +88,8 @@ def validate_mup_routing(
                 f"known modules: {sorted(modules)} (apply_to is an explicit "
                 "instance-name list)"
             )
-        if not module_supports_mup(modules[raw]):
+        # eligible iff the ``mup`` init_arg landed — duck-typed so user modules participate
+        if not hasattr(modules[raw], "mup"):
             raise ConfigError(
                 f"model.init_args.mup.apply_to names {raw!r} "
                 f"({type(modules[raw]).__name__}), which has no 'mup' init_arg — only modules "
@@ -112,7 +97,7 @@ def validate_mup_routing(
             )
     applied = set(apply_to)
     for name, module in modules.items():
-        if name not in applied and module_mup_enabled(module):
+        if name not in applied and bool(getattr(module, "mup", False)):
             warnings.warn(
                 f"module {name!r} has mup: true but is NOT in model.init_args.mup.apply_to — its "
                 "base shapes / MuAdamW grouping are skipped by the routing stage, so its training "
@@ -168,11 +153,6 @@ def _parse_cli(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> A
             "YAML can be supplied data-free via --set, e.g. "
             "--set model.modules.norm.init_args.norm_dict=unused.yaml"
         ) from err
-
-
-def _parse_model(configs: Sequence[str | Path], set_overrides: Sequence[str]) -> Any:
-    """Parse and return just the constructed `SaltModule` (the apply_to-width probe)."""
-    return _parse_cli(configs, set_overrides).model
 
 
 def _width_overrides(model: Any, width: int) -> list[str]:
@@ -244,7 +224,7 @@ def build_model_at_widths(
     """
     # parse once to read the apply_to width-arg list, then re-parse with the
     # width overrides applied — the second parse is the model we return
-    probe = _parse_model(configs, set_overrides)
+    probe = _parse_cli(configs, set_overrides).model
     overrides = [*set_overrides, *_width_overrides(probe, width)]
     cli = _parse_cli(configs, overrides)
     model = cli.model
@@ -262,12 +242,12 @@ def build_model_at_widths(
         )
         bind_all(model._graph_modules, schema)  # noqa: SLF001 - same-package tooling
         model.schema = schema
-        model._bound = True  # noqa: SLF001 - same-package tooling
+        model.bound = True
         if materialise:
             # materialise only the model side; the dataset modules' file-touching
             # materialise is skipped — the coord-check synthesises its own batch
             materialise_all(model._graph_modules)  # noqa: SLF001 - same-package tooling
-            model._materialised = True  # noqa: SLF001 - same-package tooling
+            model.materialised = True
         # store the combined plan + the model-only coord-check plan (run
         # data-free from a synthesised boundary batch) for the coord-check executor
         model._mup_combined = combined  # noqa: SLF001 - same-package tooling
@@ -390,7 +370,7 @@ def generate_shapes(
     """
     from mup import make_base_shapes
 
-    probe = _parse_model(configs, set_overrides)
+    probe = _parse_cli(configs, set_overrides).model
     cfg = _require_mup_cfg(probe)
     first = probe.net[cfg["apply_to"][0]]
     configured = int(getattr(first, getattr(first, "MUP_WIDTH_ARG")))  # noqa: B009

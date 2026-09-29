@@ -39,7 +39,7 @@ class SaltModelModule(nn.Module):
     the contract every FORWARD-REACHABLE participant must implement, but
     neither is a hard `abstractmethod` — a manifest-only ``outputs:`` section
     writer (e.g. `InputCopyWriter`) legitimately implements no ``forward``
-    (its serialisation surface is `copy_spec`/`columns` instead) because it
+    (the sink reads its `streams`/`variables` instead) because it
     never enters the executor's forward loop. Instantiation-time validation
     (`SaltModule.__init__`/`SaltDataModule.__init__`) checks
     ``isinstance(m, SaltModelModule)``, not method presence.

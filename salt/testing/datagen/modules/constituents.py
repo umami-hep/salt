@@ -4,14 +4,11 @@
 
 from __future__ import annotations
 
-from ..engine import _build_group_array
-from ..schema import parse_schema
 from ._fields import resolve_fields
-from ._util import infer_n
-from .base import GenModule
+from .base import _GroupModule
 
 
-class Constituents(GenModule):
+class Constituents(_GroupModule):
     """Generate a variable-length constituent group with a per-item ``valid`` mask."""
 
     def __init__(
@@ -46,56 +43,17 @@ class Constituents(GenModule):
         self.mutates = []
         self._group_spec = None
 
-    def _schema(self, data):
-        sch = parse_schema({
-            "n_samples": infer_n(data, self.n_samples),
-            "groups": [self._group_dict],
-            **self._fill,
-        })
-        self._group_spec = sch.group(self.name)
-        return sch
-
-    def __call__(self, data, rng):
-        sch = self._schema(data)
-        group = sch.group(self.name)
-        arr, _ = _build_group_array(rng, sch, group, self.flags or {})
-        data[self.name] = arr
-        return data
-
-    def group_spec(self):
-        if self._group_spec is None:
-            self._schema({})
-        return self._group_spec
-
 
 # -- thin named subclasses ---------------------------------------------------- #
-# Each fixes a default `name` (and sometimes `max_items` / `mask_invalid`). All
-# constructor params are fully type-annotated so jsonargparse can resolve them
-# from a recipe's class_path/init_args block (no untyped **kwargs).
+# Each fixes a default `name` (and sometimes `max_items` / `mask_invalid`) and
+# forwards everything else as `**kw` to `Constituents`, whose params are fully
+# type-annotated: jsonargparse resolves a recipe's class_path/init_args block
+# through the `**kw` chain (two levels for e.g. Electrons -> Tracks -> Constituents).
 class Tracks(Constituents):
     """Constituent group named ``tracks`` (40 items by default)."""
 
-    def __init__(
-        self,
-        fields: list[dict] | str,
-        name: str = "tracks",
-        max_items: int = 40,
-        valid_fraction: float = 0.5,
-        min_valid: int = 0,
-        mask_invalid: bool = True,
-        n_samples: int | None = None,
-        flags: dict[str, bool] | None = None,
-    ):
-        super().__init__(
-            name=name,
-            max_items=max_items,
-            fields=fields,
-            valid_fraction=valid_fraction,
-            min_valid=min_valid,
-            mask_invalid=mask_invalid,
-            n_samples=n_samples,
-            flags=flags,
-        )
+    def __init__(self, fields: list[dict] | str, name: str = "tracks", max_items: int = 40, **kw):
+        super().__init__(name=name, max_items=max_items, fields=fields, **kw)
 
 
 class TracksLoose(Tracks):
