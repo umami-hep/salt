@@ -619,6 +619,16 @@ The total loss is a combination of the individual task losses, controlled by `mo
 - `GLS`: [geometric loss combination](https://arxiv.org/abs/1904.08492) of the task losses. Task weights are not used and must all be left at 1.
 - `DWA`: [dynamic weight averaging](https://arxiv.org/abs/1803.10704) of the task losses. Task weights are not used and must all be left at 1.
 
+Under `GLS` each task is effectively weighted by the inverse of its own loss, so a task that starts to diverge is gradually given up on while the total loss barely moves. These weights are logged as `{stage}/{task}_gls_weight`, so you can watch for it happening. If you need to prevent it, `model.gls_weight_floor` puts a lower bound on each weight, given as a fraction of the uniform weight `1/N`:
+
+```yaml
+model:
+  loss_mode: GLS
+  gls_weight_floor: 0.5 # no task drops below half the uniform weight
+```
+
+The default `0.0` leaves plain GLS untouched. When training on multiple GPUs, the weights are computed from the task losses averaged over all devices, so every device applies the same weights.
+
 `DWA` sets each task's weight from how quickly its loss came down over the last two epochs, so a task making slow progress, or getting worse, is given more weight instead of less. The weights are fixed within an epoch, sum to the number of tasks and are logged as `{stage}/{task}_dwa_weight`. The first two epochs have no history to work from and use uniform weights. How sharply the weights react is set by `model.dwa_temperature`, where larger values keep them closer to uniform:
 
 ```yaml

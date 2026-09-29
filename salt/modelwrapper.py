@@ -1,4 +1,3 @@
-import math
 import warnings
 from collections.abc import Mapping
 from typing import Any
@@ -75,6 +74,13 @@ class ModelWrapper(lightning.LightningModule):
     dwa_temperature : float, optional
         Softmax temperature ``T`` for ``loss_mode="DWA"``. Larger values flatten the
         weights towards uniform. Default is ``2.0``, as in the original paper.
+    gls_weight_floor : float, optional
+        Lower bound on each task's GLS gradient weight, expressed as a fraction of the
+        uniform weight ``1/N``. Under GLS a task's weight is proportional to ``1/loss``,
+        so a diverging task is progressively abandoned; a floor keeps it being trained.
+        ``0.0`` disables the floor and reproduces plain GLS, in which case the total
+        loss is exactly the geometric mean; with a floor it is no longer. Ignored
+        unless ``loss_mode="GLS"``. Default is ``0.0``.
     optimizer : str, optional
         Optimizer to use. Default is ``"AdamW"``. Other options: ``"lion"``, ``"HybridMuonAdamW"``.
     optimizer_kwargs : dict | None, optional
@@ -94,6 +100,7 @@ class ModelWrapper(lightning.LightningModule):
         mup_config: dict | None = None,
         loss_mode: str = "wsum",
         dwa_temperature: float = 2.0,
+        gls_weight_floor: float = 0.0,
         optimizer: str = "AdamW",
         optimizer_kwargs: dict | None = None,
         edge_constructors: list[dict] | None = None,
@@ -144,6 +151,10 @@ class ModelWrapper(lightning.LightningModule):
         allowed_loss_modes = ["wsum", "GLS", "DWA"]
         assert loss_mode in allowed_loss_modes, f"Loss mode must be one of {allowed_loss_modes}"
         self.loss_mode = loss_mode
+        assert gls_weight_floor >= 0.0, "gls_weight_floor must be non-negative"
+        self.gls_weight_floor = gls_weight_floor
+        # populated by total_loss under GLS so the weights can be logged
+        self._gls_weights: dict[str, torch.Tensor] = {}
         if loss_mode in {"GLS", "DWA"}:
             assert all(task.weight == 1.0 for task in self.model.tasks), (
                 f"{loss_mode} does not utilise task weights - set all weights to 1"
@@ -214,8 +225,23 @@ class ModelWrapper(lightning.LightningModule):
                 return torch.stack(list(loss.values())).sum()
             return torch.stack([self._dwa_weights[k] * v for k, v in loss.items()]).sum()
         if self.loss_mode == "GLS":
-            loss_prod = math.prod(subloss for subloss in loss.values())
-            return torch.pow(loss_prod, 1.0 / len(loss))
+            sublosses = torch.stack(list(loss.values()))
+            with torch.no_grad():
+                # at least fp32 as a safeguard for mixed precision, averaged across ranks for DDP
+                global_losses = sublosses.to(torch.promote_types(sublosses.dtype, torch.float32))
+                if self.trainer.world_size > 1:
+                    gathered = self.all_gather(global_losses)
+                    assert isinstance(gathered, torch.Tensor)
+                    global_losses = gathered.mean(dim=0)
+                # log-space geometric mean; a running product under/overflows as tasks converge
+                geo_mean = torch.exp(torch.log(global_losses).mean())
+                # detached weights reproduce the geometric-mean gradient exactly: w_i = L/(N*L_i)
+                weights = geo_mean / (len(loss) * global_losses)
+                # floor is a fraction of the uniform weight 1/N, so it is scale free
+                if self.gls_weight_floor > 0.0:
+                    weights = weights.clamp_min(self.gls_weight_floor / len(loss))
+            self._gls_weights = dict(zip(loss, weights, strict=True))
+            return (weights * sublosses).sum()
         return sum(subloss for subloss in loss.values())
 
     def forward(
@@ -392,6 +418,9 @@ class ModelWrapper(lightning.LightningModule):
         # effective per-task gradient weights, empty unless running under DWA
         for t_name, weight in self._dwa_weights.items():
             self.log(f"{stage}/{t_name}_dwa_weight", weight, **kwargs)
+        # effective per-task gradient weights, empty unless running under GLS
+        for t_name, weight in self._gls_weights.items():
+            self.log(f"{stage}/{t_name}_gls_weight", weight, **kwargs)
 
     def training_step(self, batch: tuple) -> dict[str, Any]:
         """Lightning training step.
