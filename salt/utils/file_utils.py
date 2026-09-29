@@ -1,8 +1,5 @@
-"""Utilities for temporary file handling and S3 downloads.
-
-Build temporary file paths (e.g. on RAM disks), copy/move/remove files safely,
-convert S3 path formats to canonical S3 URLs, download files from S3
-(optionally in parallel), and patch config dicts/paths after downloading.
+"""File helpers: `copy_file`, plus the S3 download chain driven by `import_data_S3`
+(`download_script_S3` -> `download_S3`), which fetches config-listed files in parallel.
 """
 
 import os
@@ -25,11 +22,6 @@ from salt.utils.logging import get_logger
 _LOG = get_logger(__name__)
 
 
-def get_temp_path(move_files_temp: str, in_path: str | Path) -> Path:
-    """Create the full temporary path for a file: ``move_files_temp / in_path.name``."""
-    return Path(Path(move_files_temp) / Path(in_path).name)
-
-
 def copy_file(in_path: Path, out_path: Path) -> None:
     """Copy a file to a destination unless the destination already exists.
 
@@ -39,59 +31,6 @@ def copy_file(in_path: Path, out_path: Path) -> None:
         return
     out_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(in_path, out_path)
-
-
-def remove_file(path: Path) -> None:
-    """Remove a file if it exists."""
-    if path.is_file():
-        path.unlink()
-    else:
-        _LOG.info(f"No file to delete at {path}")
-
-
-def remove_files_temp(train_temp_path: Path, val_temp_path: Path) -> None:
-    """Remove the temporary train/validation files and the temp directory (if empty)."""
-    remove_file(train_temp_path)
-    remove_file(val_temp_path)
-    # Best-effort: remove the parent directory (succeeds only if empty)
-    val_temp_path.parent.rmdir()
-
-
-def move_files_temp(move_files_temp: str, train_path: str | Path, val_path: str | Path) -> None:
-    """Copy training/validation files to a temporary location before training.
-
-    Useful when the temporary location is a RAM disk (e.g. ``/dev/shm``). The
-    original files are not deleted.
-    """
-    temp_train_path = get_temp_path(move_files_temp, train_path)
-    temp_val_path = get_temp_path(move_files_temp, val_path)
-
-    copy_file(Path(train_path), temp_train_path)
-    copy_file(Path(val_path), temp_val_path)
-
-
-def convert_path_to_S3url(path: Path | str) -> str:
-    """Normalize a path into a canonical ``s3://`` URL.
-
-    Accepts several forms (e.g., ``s3:/bucket/key`` or ``prefix...s3:/bucket/key``)
-    and converts them into ``s3://bucket/key``.
-    """
-    path = str(path)
-    s3_start = "s3://"
-    s3_inc_start = "s3:/"
-
-    # If there's something before the "s3:/", remove it
-    if s3_inc_start in path and s3_inc_start != path[: len(s3_inc_start)]:
-        assert len(path.split(s3_inc_start)) <= 2, (
-            "path is invalid: do not set 's3:/' in the paths!"
-        )
-        path = path.split(s3_inc_start)[-1]
-
-    if s3_start == path[: len(s3_start)]:
-        return path
-    if s3_inc_start == path[: len(s3_inc_start)]:
-        return s3_start + path[len(s3_inc_start) :]
-    return s3_start + path
 
 
 def download_S3(
@@ -192,71 +131,3 @@ def import_data_S3(config_path: str | Path) -> str:
         local_config = Path(config_path)
 
     return str(local_config)
-
-
-def setup_S3_CLI(sc_data: dict) -> dict:
-    """Prepare environment and optionally download S3 data (CLI-friendly path).
-
-    Similar to :func:`import_data_S3`, but operates directly on an in-memory
-    ``data`` configuration dictionary containing a ``config_s3`` section.
-    """
-    config_s3 = sc_data["config_s3"]
-    os.environ["AWS_ACCESS_KEY_ID"] = config_s3["pubKey"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = config_s3["secKey"]
-    os.environ["AWS_ENDPOINT_URL"] = config_s3["url"]
-
-    if config_s3.get("download_S3"):
-        local_path = Path(config_s3["download_path"])
-        local_path.mkdir(parents=True, exist_ok=True)
-        _LOG.info("-" * 100)
-        _LOG.info(f"S3 download in progress at local path: {local_path}")
-
-        # Parallelise the download
-        args = [
-            (config_s3["bucket"], local_path, key, sc_data[key], count)
-            for count, key in enumerate(config_s3["download_files"])
-        ]
-        with Pool() as pool:
-            output = pool.starmap(download_script_S3, args)
-
-        # Update the config
-        for file, result in output:
-            _LOG.info(f"Downloaded {file} as {result.split('/')[-1]} at local path")
-            sc_data[file] = str(result)
-
-        _LOG.info("Data part of the config updated to track the downloaded files.")
-        _LOG.info("-" * 100 + " \n")
-    return sc_data
-
-
-def require_S3(path: Path | str) -> bool:
-    """Return whether the YAML config at ``path`` requires S3 access.
-
-    True if ``data.config_s3.use_S3 == true``.
-    """
-    with open(path) as file:
-        _LOG.debug("Doign this")
-        cfg = yaml.safe_load(file)
-        return (
-            "config_s3" in cfg["data"]
-            and "use_S3" in cfg["data"]["config_s3"]
-            and cfg["data"]["config_s3"]["use_S3"]
-        )
-
-
-def require_S3_CLI(config_s3: dict | None) -> bool:
-    """Return whether S3 is required: ``config_s3`` sets ``use_S3`` or ``download_S3``."""
-    if config_s3 is None:
-        return False
-    if config_s3.get("use_S3"):
-        return True
-    return config_s3.get("download_S3") is not None
-
-
-def download_from_S3() -> None:
-    """Convenience entry-point: locate ``configs/base.yaml`` relative to this file
-    and delegate to :func:`import_data_S3`.
-    """
-    config_dir = Path(__file__).parent.parent / "configs"
-    config = f"{config_dir}/base.yaml"
-    config = import_data_S3(config)

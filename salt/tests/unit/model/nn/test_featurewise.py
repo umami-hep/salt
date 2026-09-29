@@ -8,12 +8,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.graph import (
-    Bundle,
-    ConfigError,
-    Mode,
-    flatten_spec,
-)
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode, flatten_spec
 from salt.model.modules import (
     FeaturewiseTransformation,
     PositionalEncoder,

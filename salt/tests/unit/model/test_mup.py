@@ -10,8 +10,9 @@ import torch
 import yaml
 from torch import nn
 
-from salt.graph import ConfigError, Mode
+from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan
+from salt.graph.spec import Mode
 from salt.model.mup import (
     _combined_graph,
     _parse_cli,
@@ -19,8 +20,6 @@ from salt.model.mup import (
     build_model_at_widths,
     coord_check,
     generate_shapes,
-    module_mup_enabled,
-    module_supports_mup,
     plot_coord_data,
     setup_mup,
     validate_mup_routing,
@@ -128,10 +127,10 @@ def _muP_modules(norm_dict: Path) -> dict:
 class TestRoutingValidator:
     def test_module_supports_and_enabled(self, norm_dict):
         mods = _muP_modules(norm_dict)
-        assert module_supports_mup(mods["track_embed"])
-        assert module_supports_mup(mods["encoder"])
-        assert module_mup_enabled(mods["track_embed"])  # built with mup=True
-        assert not module_supports_mup(mods["pool"])  # no mup init_arg
+        assert hasattr(mods["track_embed"], "mup")
+        assert hasattr(mods["encoder"], "mup")
+        assert mods["track_embed"].mup  # built with mup=True
+        assert not hasattr(mods["pool"], "mup")  # no mup init_arg
 
     def test_valid_routing_normalises(self, norm_dict):
         cfg = validate_mup_routing(

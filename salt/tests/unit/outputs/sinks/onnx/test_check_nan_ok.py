@@ -19,7 +19,7 @@ from salt.graph.spec import Mode
 from salt.outputs import OnnxExportSink, OutputField
 from salt.outputs.sinks.onnx import check as check_module
 from salt.outputs.sinks.onnx.check import check_onnx, compare_once
-from salt.outputs.sinks.onnx.config import ExportInput
+from salt.outputs.sinks.onnx.config import ExportInput, stream_of_input_port
 
 pytestmark = pytest.mark.cpu_always
 
@@ -31,8 +31,8 @@ class _StubAdapter(nn.Module):
     """A stub exposing exactly what `compare_once`/`check_onnx` read from an
     `OnnxAdapter`: no bundle/executor machinery, just the naming + forward
     surface. `_positional` carries one global port (``inputs.jets``) and one
-    sequence port (``inputs.tracks``), mirroring a real adapter's ctor, so
-    `_draw_inputs`'s per-length sweep exercises the real code path; every
+    sequence port (``inputs.tracks``), mirroring a real adapter's ctor, and
+    `example_inputs` mirrors `OnnxAdapter.example_inputs` for the per-length sweep; every
     test output here is a GLOBAL scalar, so `forward` ignores the drawn
     tensors' values (and the sequence length) and returns fixed outputs.
     """
@@ -57,6 +57,16 @@ class _StubAdapter(nn.Module):
 
     def _field_list(self, port: str) -> tuple[str, ...]:
         return _TRACKS_FIELDS if port == "inputs.tracks" else _JETS_FIELDS
+
+    def example_inputs(self, sequence_length=40, *, lengths=None, generator=None):
+        """Mirrors `OnnxAdapter.example_inputs`: globals ``[1, F]``, sequences ``[L, F]``."""
+        drawn = []
+        for e in self._positional:
+            n = 1
+            if e.sequence:
+                n = sequence_length if lengths is None else lengths[stream_of_input_port(e.port)]
+            drawn.append(torch.rand(n, len(self._field_list(e.port)), generator=generator))
+        return tuple(drawn)
 
     def forward(self, *inputs: Tensor) -> tuple[Tensor, ...]:
         """Ignores `inputs` — every test output here is a global scalar."""

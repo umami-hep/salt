@@ -169,22 +169,14 @@ def compute_class_dict(
     out: dict[str, dict[str, list[float]]] = {}
 
     for g in sch.groups:
-        if g.alias_of is not None:
-            # aliases inherit the same labels; only emit if present in data
-            if g.name not in data:
-                continue
-            src = sch.group(g.alias_of)
-            label_fields = [f for f in src.fields if isinstance(f, LabelField)]
-            group_name_for_arr = g.name
-        else:
-            if g.name not in data:
-                continue
-            label_fields = [f for f in g.fields if isinstance(f, LabelField)]
-            group_name_for_arr = g.name
-
+        if g.name not in data:
+            continue
+        # aliases inherit their source group's labels
+        src = sch.group(g.alias_of) if g.alias_of is not None else g
+        label_fields = [f for f in src.fields if isinstance(f, LabelField)]
         if not label_fields:
             continue
-        arr = data[group_name_for_arr]
+        arr = data[g.name]
         is_constituent = "valid" in arr.dtype.names
         valid_mask = arr["valid"] if is_constituent else None
 

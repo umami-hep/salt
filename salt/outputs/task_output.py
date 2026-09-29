@@ -1,4 +1,4 @@
-"""`TaskOutput` — the generic conversion producer, plus its thin pre-wired subclasses."""
+"""`TaskOutput` — the generic conversion producer, plus its thin pre-wired `ClassProbs`."""
 
 from __future__ import annotations
 
@@ -11,23 +11,17 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.model.base import SaltModelModule
-from salt.outputs.conversion_ops import (
-    ClassProbsOp,
-    ConversionOp,
-    SeqClassIndexOp,
-    SeqClassProbsOp,
-)
+from salt.outputs.conversion_ops import ClassProbsOp, ConversionOp
 from salt.outputs.output_schema import OutputField
 
 
 class TaskOutput(SaltModelModule):
     """Generic producer: ``preds.<stream>.<task>`` -> ``outputs.<stream>.<name>``.
 
-    The copy/softmax/argmax majority needs no dedicated class — one
+    The copy/softmax majority needs no dedicated class — one
     parameterised producer applies a `ConversionOp` (the eval math) to a
     task's published prediction and writes the result. The default op is an
-    identity copy; the thin `ClassProbs` / `SeqClassIndex` / `SeqClassProbs`
-    subclasses pre-select a P1 op.
+    identity copy; the thin `ClassProbs` subclass pre-selects `ClassProbsOp`.
 
     Both ports declare ``shape=None`` (rank-agnostic — a global head is
     ``[B, C]``, a sequence head ``[B, T, C]``); the output last-dim width is
@@ -78,13 +72,12 @@ class TaskOutput(SaltModelModule):
         would duplicate its columns. Each field the task's
         ``get_output_manifest(Mode.ONNX)`` names is tagged with this producer's
         own leaf key, so the ONNX name and dtype come from the task and are
-        typed nowhere. Empty when the op has no ONNX representation.
+        typed nowhere. Empty outside ONNX.
 
         A `ConfigError` propagates from the task resolution when the model
-        modules are unbound, or the source task is missing or ships no
-        manifest surface.
+        modules are unbound or the source task is missing.
         """
-        if not (mode & Mode.ONNX) or not self.op.has_onnx_manifest:
+        if not (mode & Mode.ONNX):
             return []
         task = self._resolved_task()
         return [
@@ -107,12 +100,6 @@ class TaskOutput(SaltModelModule):
             raise ConfigError(
                 f"{who}: task {self.task!r} is not a model module — candidates are "
                 f"{sorted(self._model_modules)}"
-            )
-        if not callable(getattr(task, "get_output_manifest", None)):
-            raise ConfigError(
-                f"{who}: task {self.task!r} ({type(task).__name__}) ships no "
-                "get_output_manifest — the ONNX sink needs the output NAMES/DTYPES before "
-                "any batch runs"
             )
         return task
 
@@ -172,67 +159,3 @@ class ClassProbs(TaskOutput):
         bce: bool = False,
     ) -> None:
         super().__init__(task=task, stream=stream, name=name, op=ClassProbsOp(bce=bce))
-
-
-class SeqClassIndex(TaskOutput):
-    """Per-token class-index producer (a `TaskOutput` pre-wired with `SeqClassIndexOp`).
-
-    Reads a sequence classification head's logits, applies masked softmax +
-    ``argmax``, and writes the integer per-token class index (e.g.
-    ``TrackOrigin``). The class dim collapses, so the output width is 1.
-
-    Parameters
-    ----------
-    task : str
-        The source classification task's instance name.
-    stream : str
-        The constituent stream the head publishes under (also the output
-        stream).
-    name : str | None, optional
-        The output leaf name, by default `task`.
-    has_pad_mask : bool, optional
-        Whether the stream carries a per-token pad mask, by default True
-        (False for a fixed-count query bank).
-    """
-
-    def __init__(
-        self,
-        task: str,
-        stream: str,
-        name: str | None = None,
-        has_pad_mask: bool = True,
-    ) -> None:
-        super().__init__(
-            task=task, stream=stream, name=name, op=SeqClassIndexOp(has_pad_mask=has_pad_mask)
-        )
-
-
-class SeqClassProbs(TaskOutput):
-    """Per-token class-probability producer (a `TaskOutput` pre-wired with `SeqClassProbsOp`).
-
-    Reads a sequence classification head's logits, applies masked softmax,
-    and writes the ``[B, L, C]`` per-token per-class probabilities — the
-    eval-H5 columns (`SeqClassIndex` is the ONNX argmax counterpart).
-
-    Parameters
-    ----------
-    task : str
-        The source classification task's instance name.
-    stream : str
-        The constituent stream the head publishes under (also the output stream).
-    name : str | None, optional
-        The output leaf name, by default `task`.
-    has_pad_mask : bool, optional
-        Whether the stream carries a per-token pad mask, by default True.
-    """
-
-    def __init__(
-        self,
-        task: str,
-        stream: str,
-        name: str | None = None,
-        has_pad_mask: bool = True,
-    ) -> None:
-        super().__init__(
-            task=task, stream=stream, name=name, op=SeqClassProbsOp(has_pad_mask=has_pad_mask)
-        )

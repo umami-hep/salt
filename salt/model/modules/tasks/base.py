@@ -121,6 +121,19 @@ class _TaskModuleBase(SaltModelModule):
         """
         return self.write_targets and bool(mode & Mode.TEST)
 
+    def _target_field(self, axis: str = "per_token") -> OutputField:
+        """The value-free ``target_{task}`` i4 label column, unprefixed (labels are
+        model-independent).
+        """
+        return OutputField(
+            h5_name=f"target_{self.name}",
+            onnx_name=None,
+            dtype="i4",
+            axis=axis,
+            final=True,
+            prefix=False,
+        )
+
     # -- output rendering: the get_output surface --------------------------------
     #
     # Per-family rendering lives on the task; `RunTaskOutput` only orchestrates

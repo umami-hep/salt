@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -12,8 +12,8 @@ import numpy as np
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.outputs.output_schema import OutputColumn
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.outputs.output_schema import OutputColumn, group_columns
 from salt.outputs.sinks.sink import RuntimeSink, SinkContext, collect_manifest_fields
 from salt.utils.logging import console
 
@@ -141,7 +141,6 @@ class JSONLOutputSink(RuntimeSink):
         self.columns = tuple(columns) if columns is not None else None
         self.output = output
         self.overwrite = overwrite
-        self._output_section: Mapping[str, Any] | None = None
         # per-run state, reset at open_schema
         self._handle: TextIO | None = None
         self._run_name = "salt"
@@ -150,15 +149,6 @@ class JSONLOutputSink(RuntimeSink):
         self.output_path: Path | None = None
 
     # -- section binding ---------------------------------------------------
-
-    def bind_output_section(self, section: Mapping[str, Any]) -> None:
-        """Capture the ``outputs:`` section this sink derives its columns from.
-
-        Called by `SaltModule` / the CLI on every attached callback exposing
-        this method, before any ``declare_io`` / ``writer_demand`` resolution.
-        """
-        self._output_section = section
-        self._invalidate_manifest()
 
     def _invalidate_manifest(self) -> None:
         """Drop the cached column table after a manifest source rebinds."""
@@ -177,26 +167,10 @@ class JSONLOutputSink(RuntimeSink):
                 "JSONLOutputSink has no `outputs:` section bound — it derives its columns "
                 "from the section (RunTaskOutput + friends), so declare one; see docs/outputs.md"
             )
-        by_key: dict[str, list[Any]] = {}
-        order: list[str] = []
-        for leaf_key, field in self._filter_consumed(
+        fields = self._filter_consumed(
             collect_manifest_fields(self._output_section.values(), Mode.TEST)
-        ):
-            if field.h5_name is None:
-                continue
-            if leaf_key not in by_key:
-                by_key[leaf_key] = []
-                order.append(leaf_key)
-            by_key[leaf_key].append(field)
-        return tuple(
-            OutputColumn(
-                key=key,
-                suffixes=[f.h5_name for f in by_key[key]],
-                dtype=by_key[key][0].dtype,
-                prefix=by_key[key][0].prefix,
-            )
-            for key in order
         )
+        return tuple(group_columns(fields, lambda f: f.h5_name))
 
     def _names_of(self, col: OutputColumn) -> list[str]:
         """A column's flat eval-H5 names under the current run name."""
@@ -251,8 +225,7 @@ class JSONLOutputSink(RuntimeSink):
         nothing (a terminal node). Every other mode declares nothing, so the
         planner prunes the sink outside TEST.
         """
-        if not (mode & Mode.TEST):
-            return IO(requires={}, produces={})
+        del mode  # non-TEST modes never get here (`allowed_modes` = TEST; `Node` gates)
         req: dict[str, TensorSpec] = {
             col.key: TensorSpec(shape=None, dtype=None, kind="data")
             for col in self._ensure_columns()
@@ -263,12 +236,6 @@ class JSONLOutputSink(RuntimeSink):
     def is_test_sink(self) -> bool:
         """Always False — auxiliary sink; `H5OutputSink` anchors the TEST demand."""
         return False
-
-    def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
-        """The sink's TEST ``declare_io`` requires, each mapped to a demander description."""
-        del model_modules, reader
-        who = "sink 'JSONLOutputSink' demanding"
-        return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
 
     # -- lifecycle ---------------------------------------------------------
 

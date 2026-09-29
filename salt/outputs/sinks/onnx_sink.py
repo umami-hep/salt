@@ -12,7 +12,7 @@ from torch import Tensor
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, KEY_SEP, Mode, TensorSpec, flatten_spec, unflatten_spec
-from salt.outputs.output_schema import _OUTPUTS_NAMESPACE, OutputField
+from salt.outputs.output_schema import OutputField, check_output_key, coerce
 
 # salt.outputs already imports salt.outputs.sinks.onnx at module level
 # (salt.outputs.maskformer -> salt.outputs.sinks.onnx.reduces), and nothing under
@@ -32,20 +32,18 @@ from salt.outputs.sinks.sink import Node, collect_manifest_fields
 class OnnxExportLeaf:
     """One ONNX output: the conversion ``outputs.*`` leaf + its Athena naming.
 
-    Internal representation of one resolved output (not a config surface); the
-    sink only NAMES demanded conversion leaves into the flat Athena tuple.
-    Three shapes: **split_scalars** (``names`` plural, float32 global — one
-    converted prob leaf split into N named scalars; the split is a naming
-    concern owned here, not a conversion node); **single per-token leaf**
-    (``name`` singular, int8, ``per_token=True`` — passed through with its
-    dynamic axis, default ``n_<stream>``); **single global leaf** (``name``
-    singular, float32). With both `name` and `names` omitted the Athena suffix
-    defaults to the leaf key's terminal segment. `ConfigError` on a
-    non-``outputs``/wildcard key, name/names arity violation, unsupported
-    dtype, or names combined with per_token. `nan_ok` (default False) marks
-    an output whose NaN is a declared semantic (e.g. a MaskFormer
-    leading-object/lead-vertex scalar for a jet with no qualifying object) —
-    the ONNX checker compares it with ``equal_nan`` instead of refusing NaN.
+    Internal representation of one resolved output (not a config surface),
+    minted only by `OnnxExportSink._leaves_from_fields`, which sets exactly one
+    of `name`/`names`. Three shapes: **split_scalars** (``names`` plural,
+    float32 global — one converted prob leaf split into N named scalars; the
+    split is a naming concern owned here, not a conversion node); **single
+    per-token leaf** (``name`` singular, int8, ``per_token=True`` — passed
+    through with dynamic axis ``n_<stream>``); **single global leaf** (``name``
+    singular, float32). `ConfigError` on a non-``outputs``/wildcard key.
+    `nan_ok` (default False) marks an output whose NaN is a declared semantic
+    (e.g. a MaskFormer leading-object/lead-vertex scalar for a jet with no
+    qualifying object) — the ONNX checker compares it with ``equal_nan``
+    instead of refusing NaN.
     """
 
     key: str
@@ -53,47 +51,10 @@ class OnnxExportLeaf:
     names: Sequence[str] | None = None
     dtype: str = "float32"
     per_token: bool = False
-    dyn_axis: str | None = None
     nan_ok: bool = False
 
     def __post_init__(self) -> None:
-        parts = self.key.split(KEY_SEP)
-        if any(part in {"*", "**"} for part in parts):
-            raise ConfigError(
-                f"OnnxExportLeaf key {self.key!r} contains a wildcard — export output "
-                "keys are concrete"
-            )
-        if len(parts) < 2 or parts[0] != _OUTPUTS_NAMESPACE:
-            raise ConfigError(
-                f"OnnxExportLeaf key {self.key!r} is not under the {_OUTPUTS_NAMESPACE!r} "
-                "namespace — the ONNX sink names the conversion outputs.* leaves the folded "
-                "nodes mint, not raw predictions"
-            )
-        if self.name is not None and self.names is not None:
-            raise ConfigError(
-                f"OnnxExportLeaf {self.key!r} sets BOTH 'name' (single output) and 'names' "
-                "(per-class split_scalars) — pick one"
-            )
-        if self.name is None and self.names is None:
-            # single-source naming: default the ONNX suffix to the leaf key's
-            # terminal segment (the producing node names the leaf once).
-            object.__setattr__(self, "name", self.key.split(KEY_SEP)[-1])
-        if self.names is not None:
-            if not list(self.names) or len(set(self.names)) != len(self.names):
-                raise ConfigError(
-                    f"OnnxExportLeaf {self.key!r}: 'names' must be a non-empty list without "
-                    f"duplicates, got {self.names!r}"
-                )
-            if self.per_token:
-                raise ConfigError(
-                    f"OnnxExportLeaf {self.key!r}: per-class split_scalars outputs ('names') are "
-                    "GLOBAL float scalars — per_token applies to single-name index leaves only"
-                )
-        if self.dtype not in {"float32", "int8"}:
-            raise ConfigError(
-                f"OnnxExportLeaf {self.key!r}: dtype must be 'float32' or 'int8', got "
-                f"{self.dtype!r} (the ONNX output dtypes salt export supports)"
-            )
+        check_output_key(self.key, "OnnxExportLeaf key")
 
     @property
     def stream(self) -> str:
@@ -104,10 +65,6 @@ class OnnxExportLeaf:
     def suffixes(self) -> tuple[str, ...]:
         """The Athena suffix list (the plural names, or the single name as a 1-tuple)."""
         return tuple(self.names) if self.names is not None else (str(self.name),)
-
-    def resolved_dyn_axis(self) -> str:
-        """The dynamic-axis name for a per-token output (default ``n_<stream>``)."""
-        return self.dyn_axis or f"n_{self.stream}"
 
 
 class OnnxExportSink(Node):
@@ -198,7 +155,7 @@ class OnnxExportSink(Node):
                 "OnnxExportSink no longer accepts an explicit `outputs:` OnnxExportLeaf list — "
                 "the ONNX tuple is collected from the producers' own manifests. A module that "
                 "mints outputs.* leaves names them by implementing manifest_fields(mode) "
-                "(RunTaskOutput does it for the section's tasks; ClassProbs / SeqClassIndex / "
+                "(RunTaskOutput does it for the section's tasks; ClassProbs / "
                 "Combination / MaskFormerObjects do it for the model graph). Use `consumes:` "
                 "(fnmatch patterns over the leaf key) to narrow what this sink takes."
             )
@@ -207,10 +164,10 @@ class OnnxExportSink(Node):
         self.model_name = model_name
         # the export-only half of the contract, coerced from dataclasses OR plain
         # config mappings (jsonargparse resolves the union either way)
-        self.inputs: list[ExportInput] = [ExportInput.coerce(e) for e in inputs or ()]
+        self.inputs: list[ExportInput] = [coerce(ExportInput, e) for e in inputs or ()]
         self.track_selection = track_selection
         self.rename: dict[str, str] = dict(rename or {})
-        self.combine: list[ExportCombine] = [ExportCombine.coerce(c) for c in combine or ()]
+        self.combine: list[ExportCombine] = [coerce(ExportCombine, c) for c in combine or ()]
 
     @staticmethod
     def _validate_leaves(leaves: Sequence[OnnxExportLeaf]) -> None:
@@ -232,18 +189,6 @@ class OnnxExportSink(Node):
                     )
                 seen_suffixes.add(suffix)
 
-    def bind_output_section(self, section: Mapping[str, Any]) -> None:
-        """Capture the ``outputs:`` section — the first manifest source.
-
-        The sink NAMES nothing itself: it names the ``outputs.*`` leaves the
-        section's writers declare through ``manifest_fields(Mode.ONNX)``. It
-        does no math and no ``torch.split`` / ``.squeeze`` for a section field
-        — ``get_output`` already squeezed each global per-class value to a
-        0-dim scalar, so the sink only names the already-scalar values.
-        """
-        self._output_section = section
-        self._invalidate_manifest()
-
     def _invalidate_manifest(self) -> None:
         """Drop the cached leaf tuple after a manifest source rebinds."""
         self._leaves_resolved = False
@@ -259,17 +204,11 @@ class OnnxExportSink(Node):
         mixed into one is a `ConfigError`.
         """
         by_key: dict[str, list[OutputField]] = {}
-        key_order: list[str] = []
         for leaf_key, field in fields:
-            if field.resolved_onnx_name is None:
-                continue
-            if leaf_key not in by_key:
-                by_key[leaf_key] = []
-                key_order.append(leaf_key)
-            by_key[leaf_key].append(field)
+            if field.resolved_onnx_name is not None:
+                by_key.setdefault(leaf_key, []).append(field)
         leaves: list[OnnxExportLeaf] = []
-        for leaf_key in key_order:
-            group = by_key[leaf_key]
+        for leaf_key, group in by_key.items():
             if len(group) == 1:
                 field = group[0]
                 leaves.append(
@@ -334,7 +273,7 @@ class OnnxExportSink(Node):
                 "Mode.ONNX field. Sources searched: "
                 f"{self._manifest_source_names()}. Wire a RunTaskOutput whose `modes:` include "
                 "'export' in the outputs: section, or a conversion producer "
-                "(ClassProbs / SeqClassIndex / Combination / MaskFormerObjects) in model.modules."
+                "(ClassProbs / Combination / MaskFormerObjects) in model.modules."
             )
         self._validate_leaves(leaves)
         self._leaves = tuple(leaves)
@@ -460,7 +399,7 @@ class OnnxExportSink(Node):
         )
 
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
-        """Dynamic-axes mapping for the per-token outputs (``{name: {0: dyn_axis}}``).
+        """Dynamic-axes mapping for the per-token outputs (``{name: {0: "n_<stream>"}}``).
 
         Only per-token leaves register an axis; global scalars
         (split_scalars, combines) carry none.
@@ -469,7 +408,7 @@ class OnnxExportSink(Node):
         axes: dict[str, dict[int, str]] = {}
         for leaf in self._ensure_leaves():
             if leaf.per_token:
-                axes[f"{prefix}_{leaf.suffixes[0]}"] = {0: leaf.resolved_dyn_axis()}
+                axes[f"{prefix}_{leaf.suffixes[0]}"] = {0: f"n_{leaf.stream}"}
         return axes
 
     def named_outputs(self, bundle: Bundle) -> dict[str, Tensor]:
@@ -482,29 +421,16 @@ class OnnxExportSink(Node):
         single-name leaves (the int8 index leaf, a combination scalar) pass
         through under their Athena name. The
         `OnnxAdapter` calls this to source the folded outputs from the
-        bundle instead of running a ``reduce.fn`` loop.
-
-        Raises
-        ------
-        ConfigError
-            When a split leaf's last dim contradicts its declared names
-            count.
+        bundle instead of running a ``reduce.fn`` loop. A split leaf whose
+        last dim contradicts its names count fails the strict ``zip`` (a
+        ValueError in eager eval).
         """
         prefix = self.resolved_model_name()
         named: dict[str, Tensor] = {}
         for leaf in self._ensure_leaves():
             value = bundle.get(leaf.key)
             if leaf.names is not None:
-                # the split-count guard runs only in EAGER eval, never inside the
-                # trace (it compares the leaf's last dim — a Python-bool branch the
-                # tracer would constant-fold with a TracerWarning); the count is
-                # validated equally by `torch.split(..., strict=True)` zip below
-                if not torch.jit.is_tracing() and value.shape[-1] != len(leaf.names):
-                    raise ConfigError(
-                        f"OnnxExportSink: leaf {leaf.key!r} produces {value.shape[-1]} channels "
-                        f"but declares {len(leaf.names)} names {list(leaf.names)} — one scalar "
-                        "per class"
-                    )
+                # the strict zip is the split-count check (a ValueError in eager eval)
                 for suffix, part in zip(
                     leaf.names, torch.split(value, 1, -1), strict=True
                 ):  # v1 task.py:301

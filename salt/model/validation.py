@@ -19,17 +19,6 @@ __all__ = ["check_class_names", "resolve_origin_weighting", "validate_edge_port"
 _EDGE_OK_BACKENDS = frozenset({"torch-math"})
 
 
-def _edge_encoders(modules: Mapping[str, Any]) -> list[tuple[str, Any]]:
-    """The encoder modules that declare an edge port (duck-typed on a non-None
-    ``edges_key`` attribute — a `TransformerEncoder` with ``edges:`` configured).
-    """
-    return [
-        (name, module)
-        for name, module in modules.items()
-        if getattr(module, "edges_key", None) is not None
-    ]
-
-
 def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
     """The `Concat`'s first stream (the edge-stream-first reference), identified
     by its produced ``seq.x`` key (not by attribute, since `Normaliser`/`Split`
@@ -63,7 +52,12 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
     only supports raw torch attention. Either violation is a `ConfigError`;
     returns the number of edge-bearing encoders validated.
     """
-    encoders = _edge_encoders(modules)
+    # duck-typed: a `TransformerEncoder` with ``edges:`` configured sets ``edges_key``
+    encoders = [
+        (name, module)
+        for name, module in modules.items()
+        if getattr(module, "edges_key", None) is not None
+    ]
     if not encoders:
         return 0
     concat = _concat_first_stream(modules)

@@ -316,8 +316,7 @@ class TestPendingEarlyAdvance:
         c.start_fit(t)
         assert c.next_stage_index_early_stop(1) == 0
         assert c.next_stage_index_early_stop(2) == 1
-        c.mark_pending_early_advance()
-        assert c.pending_early_advance is True
+        c.pending_early_advance = True  # the callback sets it on a non-final trigger
         assert c.next_stage_index_early_stop(1) == 1
 
     def test_final_stage_never_advances_and_flag_resets_on_entry(self):
@@ -325,7 +324,7 @@ class TestPendingEarlyAdvance:
         t = make_trainer()
         c.preflight(t)
         c.start_fit(t)
-        c.mark_pending_early_advance()
+        c.pending_early_advance = True
         c.advance_to_stage(1, 10, 2, "epochs")
         assert c.next_stage_index_early_stop(99) == 1
         assert c.pending_early_advance is False

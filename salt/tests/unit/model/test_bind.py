@@ -6,7 +6,9 @@ import pytest
 import torch
 from torch import nn
 
-from salt.graph import IO, Bundle, Executor, Mode
+from salt.graph.bundle import Bundle
+from salt.graph.executor import Executor
+from salt.graph.spec import IO, Mode
 from salt.model.modules import (
     BindError,
     SaltModelModule,
@@ -60,11 +62,11 @@ class TestResolvedSchema:
                 schema.width(key)
 
     def test_conflicting_widths_raise(self):
-        from salt.model.bind import _DimBindings
+        from salt.graph.planner import DimTable
 
-        dims = _DimBindings()
+        dims = DimTable(error=BindError)
         dims.bind("F:x", 3, "here")
-        with pytest.raises(BindError, match="conflicting widths"):
+        with pytest.raises(BindError, match="conflicting sizes"):
             dims.bind("F:x", 4, "there")
 
 

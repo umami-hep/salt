@@ -1,12 +1,10 @@
 """Shared helpers for the generation modules: ``add_field``, ``infer_n``,
-``field_dicts_from_array``, ``reconstruct_schema``.
+``field_dicts_from_array``.
 """
 
 from __future__ import annotations
 
 import numpy as np
-
-from ..schema import GroupSpec, Schema
 
 
 def add_field(arr: np.ndarray, name: str, dtype) -> np.ndarray:
@@ -63,26 +61,3 @@ def field_dicts_from_array(arr: np.ndarray) -> list[dict]:
             "dtype": np.dtype(arr.dtype[fname]).str,
         })
     return specs
-
-
-def reconstruct_schema(
-    group_specs: list[GroupSpec],
-    n_samples: int,
-    fill_float: float = float("nan"),
-    fill_int: int = -1,
-    file_attrs: dict | None = None,
-) -> Schema:
-    """Build a thin ``Schema`` from a list of already-parsed ``GroupSpec``s.
-
-    Hands the writers exactly what ``write_h5`` / ``compute_norm_dict`` /
-    ``compute_class_dict`` need (class_names attrs + the
-    class_dict-length==output_size guarantee) without re-running schema
-    validation (the specs were already parsed via ``parse_schema``).
-    """
-    return Schema(
-        n_samples=n_samples,
-        groups=list(group_specs),
-        fill_float=fill_float,
-        fill_int=fill_int,
-        file_attrs=dict(file_attrs or {"config": "{}"}),
-    )

@@ -53,21 +53,6 @@ def make_session(onnx_path: str | Path):
     )
 
 
-def _draw_inputs(
-    adapter: OnnxAdapter, lengths: Mapping[str, int], gen: torch.Generator
-) -> tuple[torch.Tensor, ...]:
-    """Draw one random input tuple: globals ``[1, F]``, sequences ``[L, F]``."""
-    drawn: list[torch.Tensor] = []
-    for entry in adapter._positional:  # noqa: SLF001 - same-package checker
-        width = len(adapter._field_list(entry.port))  # noqa: SLF001 - same-package checker
-        if entry.sequence:
-            length = lengths[stream_of_input_port(entry.port)]
-            drawn.append(torch.rand(length, width, generator=gen))
-        else:
-            drawn.append(torch.rand(1, width, generator=gen))
-    return tuple(drawn)
-
-
 def compare_once(
     adapter: OnnxAdapter,
     session,
@@ -120,7 +105,7 @@ def compare_once(
         NaN entries) raises `AssertionError` (from the comparison asserts),
         naming the output and the failing lengths.
     """
-    inputs = _draw_inputs(adapter, lengths, gen)
+    inputs = adapter.example_inputs(lengths=lengths, generator=gen)
     with torch.no_grad():
         torch_outputs = adapter(*inputs)
     ort_inputs = {

@@ -669,16 +669,12 @@ def apply_stage_freeze(
     DDP reducer keeps managing it across flips); the freeze is enforced by the
     optimizer-membership filter + grad clearing instead.
     """
-    for name in frozen - previously_frozen:  # newly frozen
-        module = net[name]
-        if not reducer_safe:
-            module.requires_grad_(False)
-        module.eval()
-    for name in previously_frozen - frozen:  # newly unfrozen
-        module = net[name]
-        if not reducer_safe:
-            module.requires_grad_(True)
-        module.train()
+    # newly frozen first (train=False, i.e. eval()), then newly unfrozen
+    for names, train in ((frozen - previously_frozen, False), (previously_frozen - frozen, True)):
+        for name in names:
+            if not reducer_safe:
+                net[name].requires_grad_(train)
+            net[name].train(train)
 
 
 def trainable_named_params(
@@ -726,24 +722,17 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 # from records + the persisted tracker, not epoch arithmetic.
 
 
+@dataclass
 class EarlyStopTracker:
     """Live early-stop counters for the ACTIVE stage: checkpointed for exact
     mid-stage resume, reset at each stage entry. Held on the `TrainingController`
     (`salt.model.multistage_training`); the callback drives it but stays stateless.
     """
 
-    def __init__(
-        self,
-        config: EarlyStopConfig,
-        *,
-        best_score: float | None = None,
-        wait_count: int = 0,
-        check_count: int = 0,
-    ) -> None:
-        self.config = config
-        self.best_score = best_score
-        self.wait_count = wait_count
-        self.check_count = check_count
+    config: EarlyStopConfig
+    best_score: float | None = None
+    wait_count: int = 0
+    check_count: int = 0
 
     def check(self, value: float) -> bool:
         """Fold one validation-check `value` into the counters and report whether

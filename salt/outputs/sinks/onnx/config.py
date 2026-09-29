@@ -4,9 +4,7 @@ module body stays torch-free.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
 
 from salt.graph.errors import ConfigError
 from salt.graph.spec import split_key
@@ -69,13 +67,6 @@ class ExportInput:
     alias: str | None = None
     athena_name: str | None = None
 
-    @classmethod
-    def coerce(cls, obj: ExportInput | Mapping[str, Any]) -> ExportInput:
-        """Build from a dataclass or a plain config mapping."""
-        if isinstance(obj, ExportInput):
-            return obj
-        return cls(**dict(obj))
-
 
 @dataclass
 class ExportCombine:
@@ -97,13 +88,6 @@ class ExportCombine:
 
     name: str
     inputs: dict[str, float] = field(default_factory=dict)
-
-    @classmethod
-    def coerce(cls, obj: ExportCombine | Mapping[str, Any]) -> ExportCombine:
-        """Build from a dataclass or a plain config mapping."""
-        if isinstance(obj, ExportCombine):
-            return obj
-        return cls(**dict(obj))
 
 
 @dataclass

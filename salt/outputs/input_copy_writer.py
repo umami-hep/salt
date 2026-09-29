@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
 
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.outputs.run_task_output import OutputSectionWriter
@@ -17,7 +16,7 @@ class InputCopyWriter(OutputSectionWriter):
     serialisation concern (re-read by the sink through one cached handle, with
     source dtypes/order), so this writer carries only:
 
-    - the column manifest (``section_fields`` / a copy spec the sink consumes), and
+    - the copy intent (`streams` / `variables`, read by the sink at bind), and
     - the ``meta.rows`` row anchor (a TEST require), so the demand closure keeps the
       sink's copy machinery anchored.
 
@@ -70,13 +69,3 @@ class InputCopyWriter(OutputSectionWriter):
             return IO(requires={}, produces={})
         req = {"meta.rows": TensorSpec(shape=(2,), dtype="int64", kind="meta", modes=Mode.TEST)}
         return IO(requires=unflatten_spec(req), produces={})
-
-    def copy_spec(self) -> dict[str, Any]:
-        """The input-copy intent the dumb H5 sink consumes: ``{"streams":
-        <list|None>, "variables": {stream: [vars]}}``; the sink resolves the
-        file read.
-        """
-        return {
-            "streams": list(self.streams) if self.streams is not None else None,
-            "variables": {k: list(v) for k, v in self.variables.items()},
-        }

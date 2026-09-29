@@ -7,7 +7,7 @@ merges returns under write-once + declaration checks.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from typing import Any, NoReturn, cast
 
 import torch
@@ -85,40 +85,20 @@ class Executor:
     declared key set enforced on every merge.
     """
 
-    def __init__(self, plan: Plan, modules: Mapping[str, GraphModule] | None = None) -> None:
-        """Bind a plan to the live module instances that will execute it.
+    def __init__(self, plan: Plan) -> None:
+        """Bind a plan to the live module instances frozen into its steps.
 
-        `modules` (e.g. the config's full instance dict) may be a superset
-        of the plan's modules — pruned or mode-inactive entries are
-        ignored; when omitted, the live instances frozen into the plan
-        steps are used. Raises `ConfigError` if a plan module is missing
-        from `modules`, doesn't implement `GraphModule`, isn't callable, or
-        its declared name mismatches its plan-step name.
+        Raises `ConfigError` if a non-sink plan module isn't callable.
         """
         self.plan = plan
         self._modules: dict[str, GraphModule] = {}
         self._allowed: dict[str, frozenset[str]] = {}
-        # sink steps stay IN plan.steps (render + demand) but are partitioned
-        # OUT of the per-batch forward loop — the inverse of the setup-only
-        # partition: a sink produces no tensor and is never called.
+        # sink steps stay in `plan.steps` (render + demand) but are partitioned
+        # OUT of the per-batch forward loop: a sink produces no tensor and is
+        # never called.
         self._forward_steps: list[PlanStep] = []
         for step in plan.steps:
-            module = step.module if modules is None else modules.get(step.name)
-            if module is None:
-                raise ConfigError(
-                    f"modules mapping has no entry {step.name!r}, required by the "
-                    f"{plan.mode.name} plan"
-                )
-            if not isinstance(module, GraphModule):
-                raise ConfigError(
-                    f"module {step.name!r} ({type(module).__name__}) does not implement the "
-                    "GraphModule protocol (name + declare_io)"
-                )
-            if module.name != step.name:
-                raise ConfigError(
-                    f"module supplied for step {step.name!r} declares name={module.name!r} — "
-                    "instance names must match their plan-step names"
-                )
+            module = step.module
             self._modules[step.name] = module
             self._allowed[step.name] = _declared_reads(module, step, plan.mode)
             if _is_sink(module):

@@ -116,13 +116,11 @@ class MaskFormerMatchedLoss(SaltModelModule):
         self.matcher_weights.setdefault(
             "object_class_ce", self.loss_weights.get("object_class_ce", 1.0)
         )
-        # the matcher asserts the cost-weight sum is positive; raise a clear
-        # ConfigError here instead of a bare AssertionError deeper in construction.
+        # an all-zero matcher cost is degenerate; the matcher itself does not re-check.
         if sum(self.matcher_weights.values()) == 0:
             raise ConfigError(
                 "MaskFormerMatchedLoss: the matcher cost weights sum to 0 — at least one "
-                f"matcher_weights entry must be positive (got {self.matcher_weights}; v1 "
-                "HungarianMatcher asserts this, matcher.py:167)"
+                f"matcher_weights entry must be positive (got {self.matcher_weights})"
             )
 
         # object_class_ce is always computed; the others only when their loss
@@ -303,12 +301,11 @@ class MaskFormerMatchedLoss(SaltModelModule):
             f"matched.{OBJECT_STREAM}.target_masks": target_masks,
         }
 
-        permuted_preds = {"objects": {"class_logits": m_class_logits, "masks": m_masks}}
-        truth_labels = {"objects": {"object_class": object_class, "masks": target_masks}}
-        losses: dict[str, Tensor] = {}
-        losses.update(self.v1_loss.get_loss("labels", permuted_preds, truth_labels))
+        permuted = {"class_logits": m_class_logits, "masks": m_masks}
+        truth = {"object_class": object_class, "masks": target_masks}
+        losses = self.v1_loss.loss_labels(permuted, truth)
         if any(self.loss_weights.get(c) for c in ("mask_dice", "mask_focal", "mask_ce")):
-            losses.update(self.v1_loss.get_loss("masks", permuted_preds, truth_labels))
+            losses.update(self.v1_loss.loss_masks(permuted, truth))
 
         for component in self.components:
             if component == "regression":
@@ -320,5 +317,5 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 out[f"matched.{OBJECT_STREAM}.target_regression"] = reg_tgt
                 out["losses.regression"] = self.loss_weights["regression"] * reg_loss
             else:
-                out[f"losses.{component}"] = losses[component]
+                out[f"losses.{component}"] = self.loss_weights[component] * losses[component]
         return out

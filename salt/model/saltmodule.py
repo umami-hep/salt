@@ -188,9 +188,11 @@ class SaltModule(lightning.LightningModule):
         self.plans: dict[Mode, Plan] = {}
         self._executors: dict[Mode, Executor] = {}
         self.schema: ResolvedSchema | None = None
-        self._bound = False
-        self._materialised = False
-        self._loaded_from_checkpoint = False
+        # lifecycle state: two-phase bind ran (exactly once); this instance ran
+        # `materialise_all` (fresh fits only); any checkpoint was loaded into it
+        self.bound = False
+        self.materialised = False
+        self.loaded_from_checkpoint = False
         self._ckpt_plan_hashes: dict[str, str] = {}
         # --init_from warm start (fresh trainer state; distinct from resume
         # ckpt_path). setup("fit") runs the load after bind; on_fit_start
@@ -256,23 +258,6 @@ class SaltModule(lightning.LightningModule):
         for w in writers.values():
             if callable(getattr(w, "bind_model_modules", None)):
                 w.bind_model_modules(model_modules)
-
-    # -- lifecycle state (read-only — tests assert on these) --------------------
-
-    @property
-    def bound(self) -> bool:
-        """Whether the two-phase bind has run (exactly once)."""
-        return self._bound
-
-    @property
-    def materialised(self) -> bool:
-        """Whether this instance ran `materialise_all` (fresh fits only)."""
-        return self._materialised
-
-    @property
-    def loaded_from_checkpoint(self) -> bool:
-        """Whether any checkpoint was loaded into this instance."""
-        return self._loaded_from_checkpoint
 
     # -- static declarations -----------------------------------------------------
 
@@ -421,13 +406,11 @@ class SaltModule(lightning.LightningModule):
             self.compile_mode(Mode.VAL, self._boundary(dm.val_dset, "val"))
             self._assert_fit_val_identical()
             reader = dm.train_dset.reader
-            check_class_names(self._graph_modules, reader)
-            resolve_origin_weighting(self._graph_modules, reader)
         else:
             self.compile_mode(Mode.TEST, self._boundary(dm.test_dset, "test"))
             reader = dm.test_dset.reader
-            check_class_names(self._graph_modules, reader)
-            resolve_origin_weighting(self._graph_modules, reader)
+        check_class_names(self._graph_modules, reader)
+        resolve_origin_weighting(self._graph_modules, reader)
         # the reader's stream->dataset map rides on the schema so norm/class-dict
         # lookups resolve by dataset name, not the raw config stream name
         self._ensure_bound(reader_stream_datasets(reader))
@@ -441,7 +424,6 @@ class SaltModule(lightning.LightningModule):
                 self._init_from,
                 config_modules=self._graph_modules,
                 plans=self.plans,
-                bound=self._bound,
                 payload_key=CKPT_KEY,
             )
             self._init_warm_started = True
@@ -552,7 +534,7 @@ class SaltModule(lightning.LightningModule):
         `ConfigError` if no plan was compiled yet. `datasets` is the reader's
         stream->dataset map (empty when bound without a reader).
         """
-        if self._bound:
+        if self.bound:
             return
         if not self.plans:
             raise ConfigError("bind before any compiled plan — call setup/compile_mode first")
@@ -562,7 +544,7 @@ class SaltModule(lightning.LightningModule):
         """Bind all modules to a resolved schema, exactly once; raises
         `ConfigError` on a second bind (would silently discard loaded values).
         """
-        if self._bound:
+        if self.bound:
             raise ConfigError(
                 "SaltModule modules are already bound — bind happens exactly once, before any "
                 "state-dict load"
@@ -570,7 +552,7 @@ class SaltModule(lightning.LightningModule):
         bind_all(self._graph_modules, schema)
         apply_mup_shapes(self.net, self.mup_cfg)
         self.schema = schema
-        self._bound = True
+        self.bound = True
 
     # -- materialise (fresh fits only) --------------------------------------------
 
@@ -585,7 +567,7 @@ class SaltModule(lightning.LightningModule):
         received no checkpoint weights are materialised (a newly-added
         `Normaliser` reads its norm_dict; retained modules keep loaded stats).
         """
-        if self._materialised or self._loaded_from_checkpoint:
+        if self.materialised or self.loaded_from_checkpoint:
             return
         targets = self._graph_modules
         if self._init_warm_started:
@@ -596,7 +578,7 @@ class SaltModule(lightning.LightningModule):
             }
         self._run_preflights(targets)
         materialise_all(targets)
-        self._materialised = True
+        self.materialised = True
 
     def train(self, mode: bool = True) -> SaltModule:
         """Set training mode, then re-assert ``eval()`` on the schedule's frozen
@@ -758,7 +740,7 @@ class SaltModule(lightning.LightningModule):
         if cleaned is not state_dict:
             checkpoint["state_dict"] = cleaned
 
-        self._loaded_from_checkpoint = True
+        self.loaded_from_checkpoint = True
         payload = checkpoint.get(CKPT_KEY)
         if payload is None:
             warnings.warn(
@@ -770,7 +752,7 @@ class SaltModule(lightning.LightningModule):
         self._ckpt_plan_hashes = dict(payload.get("plan_hashes", {}))
         for mode, plan in self.plans.items():
             self._verify_ckpt_hash(mode, plan)
-        if not self._bound:
+        if not self.bound:
             stored = payload["schema"]
             self._bind(
                 ResolvedSchema(

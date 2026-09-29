@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from torch import nn
 
-from salt.graph import IO, Mode
+from salt.graph.spec import IO, Mode
 from salt.model.modules import SaltModelModule
 
 

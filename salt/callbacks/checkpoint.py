@@ -14,21 +14,28 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from salt.graph.errors import ConfigError
 
 
-def _forced_ckpt_dir(trainer: Trainer, dirname: str) -> str:
-    """Resolve ``<log_dir>/<dirname>``; raises `ConfigError` for an unsupported
-    ``s3://`` log dir.
-    """
-    log_dir = trainer.log_dir or trainer.default_root_dir
-    if log_dir is not None and str(log_dir).startswith(("s3://", "s3:/")):
-        raise ConfigError(
-            "salt.callbacks.Checkpoint/StepCheckpoint do not support s3:// log dirs "
-            "yet (rides with the Comet/run-dir wiring); use a local trainer.log_dir "
-            "(v1 checkpoint.py:34-43 s3 branch deferred)"
-        )
-    return str(Path(log_dir) / dirname)
+class _RunDirCheckpoint(ModelCheckpoint):
+    """`ModelCheckpoint` whose directory is forced to ``<log_dir>/<dirname>`` on a real fit."""
+
+    dirname: str
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Fix the checkpoint dir to ``<log_dir>/<dirname>`` on a real fit; raises
+        `ConfigError` for an unsupported ``s3://`` log dir.
+        """
+        if stage == "fit" and not trainer.fast_dev_run:
+            log_dir = trainer.log_dir or trainer.default_root_dir
+            if log_dir is not None and str(log_dir).startswith(("s3://", "s3:/")):
+                raise ConfigError(
+                    "salt.callbacks.Checkpoint/StepCheckpoint do not support s3:// log dirs "
+                    "yet (rides with the Comet/run-dir wiring); use a local trainer.log_dir "
+                    "(v1 checkpoint.py:34-43 s3 branch deferred)"
+                )
+            self.dirpath = str(Path(log_dir) / self.dirname)
+        super().setup(trainer=trainer, pl_module=pl_module, stage=stage)
 
 
-class Checkpoint(ModelCheckpoint):
+class Checkpoint(_RunDirCheckpoint):
     """Save a checkpoint per epoch under ``ckpts/`` with the ``loss=`` filename stem.
 
     Filename and directory are a contract: ``salt test`` without
@@ -76,16 +83,8 @@ class Checkpoint(ModelCheckpoint):
         )
         self.dirname = dirname
 
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Fix the checkpoint dir to ``<log_dir>/<dirname>`` on a real fit; raises
-        `ConfigError` for an unsupported ``s3://`` log dir.
-        """
-        if stage == "fit" and not trainer.fast_dev_run:
-            self.dirpath = _forced_ckpt_dir(trainer, self.dirname)
-        super().setup(trainer=trainer, pl_module=pl_module, stage=stage)
 
-
-class StepCheckpoint(ModelCheckpoint):
+class StepCheckpoint(_RunDirCheckpoint):
     """Opt-in intra-epoch checkpoint for crash/requeue recovery between epoch ends.
 
     Saves under the same forced ``ckpts/`` directory as `Checkpoint`, with the
@@ -167,11 +166,3 @@ class StepCheckpoint(ModelCheckpoint):
             train_time_interval=interval,
         )
         self.dirname = dirname
-
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        """Fix the checkpoint dir to ``<log_dir>/<dirname>`` on a real fit; raises
-        `ConfigError` for an unsupported ``s3://`` log dir.
-        """
-        if stage == "fit" and not trainer.fast_dev_run:
-            self.dirpath = _forced_ckpt_dir(trainer, self.dirname)
-        super().setup(trainer=trainer, pl_module=pl_module, stage=stage)

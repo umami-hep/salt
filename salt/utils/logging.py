@@ -21,23 +21,6 @@ _CONFIGURED = False
 _EXPLICIT_LEVEL: int | str | None = None
 
 
-def _style(level: str, text: str) -> str:  # noqa: ARG001 - the two-arg signature is the seam's contract; a colour implementation branches on `level`
-    """Colour hook. Identity today; the single seam to add colour later.
-
-    Called by both surfaces: the formatter passes `record.levelname`,
-    `console` passes the literal string `"CONSOLE"`.
-    """
-    return text
-
-
-class _SaltFormatter(logging.Formatter):
-    """Formats a record then runs the result through the `_style` seam."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        formatted = super().format(record)
-        return _style(record.levelname, formatted)
-
-
 def _resolve_level(level: int | str) -> int:
     """Resolve an int or a level name (case-insensitive) to a numeric level."""
     if isinstance(level, int):
@@ -94,7 +77,7 @@ def _ensure_configured() -> None:
     root = logging.getLogger(ROOT_NAME)
     if not any(getattr(h, "_salt_handler", False) for h in root.handlers):
         handler = _StderrHandler()
-        handler.setFormatter(_SaltFormatter("%(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
         root.addHandler(handler)
     level = _EXPLICIT_LEVEL if _EXPLICIT_LEVEL is not None else _env_level()
     root.setLevel(_resolve_level(level))
@@ -166,7 +149,6 @@ def console(
         Whether to flush the stream after writing, by default `False`.
     """
     stream = sys.stdout if file is None else file
-    text = _style("CONSOLE", sep.join(str(a) for a in args))
-    stream.write(text + end)
+    stream.write(sep.join(str(a) for a in args) + end)
     if flush:
         stream.flush()

@@ -10,7 +10,7 @@ import hashlib
 import heapq
 import json
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from itertools import pairwise
@@ -26,11 +26,6 @@ from salt.graph.errors import (
     GraphError,
     KindError,
     ShapeError,
-)
-from salt.graph.setup_spec import (
-    SetupStage,
-    SourceSpec,
-    flatten_source_spec,
 )
 from salt.graph.spec import (
     KEY_SEP,
@@ -56,7 +51,6 @@ __all__ = [
     "PlanStep",
     "Sinks",
     "compile_plan",
-    "compile_setup_plan",
     "deadcode",
 ]
 
@@ -191,35 +185,12 @@ def compile_plan(
     return _assemble_plan(res)
 
 
-def compile_setup_plan(
-    modules: dict[str, GraphModule],
-    stage: SetupStage,
-) -> Plan:
-    """Compile the SETUP-time source plan for one stage.
-
-    The setup-graph twin of `compile_plan`, sharing topo-sort, connectivity/
-    kind/cycle checks and `plan_hash`. Differs in two ways: the IO getter is
-    ``module.declare_setup_io(stage)`` (a `SetupIO` of `SourceSpec` leaves,
-    not ``declare_io(mode)``); shape-unification is skipped (`SourceSpec`
-    has no shape/dtype). No demand pruning, no sinks, no all-modes-dead
-    check. `stage` is a Lightning-style stage, NOT a `Mode`; the returned
-    `Plan.mode` is set to `Mode.ALL` as a placeholder — the setup executor
-    never reads it.
-
-    Raises `ConfigError`/`ConnectivityError`/`KindError`/`CycleError` per
-    the respective validation failure.
-    """
-    res = _resolve(modules, Mode.ALL, {}, None, None, None, _setup_face(stage))
-    return _assemble_plan(res)
-
-
 def _assemble_plan(res: _Resolution) -> Plan:
-    """Topo-sort a resolved graph and freeze it into a hashed `Plan` (shared core).
+    """Topo-sort a resolved graph and freeze it into a hashed `Plan`.
 
-    The tail shared by `compile_plan` and `compile_setup_plan`: deterministic
-    Kahn order, immutable `PlanStep`/`Edge` views, and the structural
-    `plan_hash`. Leaf-type-agnostic — `TensorSpec` and `SourceSpec` both
-    serialise via `_spec_payload`.
+    The tail of `compile_plan`: deterministic Kahn order, immutable
+    `PlanStep`/`Edge` views, and the structural `plan_hash` (each `TensorSpec`
+    serialised via `_spec_payload`).
     """
     order = _topo_order(res)
     steps = tuple(
@@ -330,49 +301,6 @@ def deadcode(
 
 
 # ---------------------------------------------------------------------------
-# IO-face adapter (tensor vs setup graph share _compile_core)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _IOFace:
-    """The per-graph IO contract `_resolve` reads through.
-
-    Lets the tensor and setup planners share node/edge/topo/hash machinery,
-    differing only in the IO getter and whether shape-unification runs: the
-    tensor face reads ``declare_io(mode)`` and unifies; the setup face reads
-    ``declare_setup_io(stage)`` and skips unification (`SourceSpec` has no
-    shape/dtype). Both leaf types expose ``.kind``/``.optional``/
-    ``.active_in(...)``, so kind-matching and gating stay leaf-agnostic.
-    """
-
-    getter: Callable[[GraphModule], Any]
-    flatten: Callable[[Any], dict[str, Any]]
-    unify: bool
-    gate: Callable[[Any, Mode], bool]  # (spec, mode) -> active; mode ignored by setup face
-
-
-def _tensor_face(mode: Mode) -> _IOFace:
-    """The tensor IO face bound to `mode` (the per-batch graph)."""
-    return _IOFace(
-        getter=lambda module: module.declare_io(mode),
-        flatten=flatten_spec,
-        unify=True,
-        gate=lambda spec, m: spec.active_in(m),
-    )
-
-
-def _setup_face(stage: SetupStage) -> _IOFace:
-    """The setup IO face bound to `stage` (the setup graph)."""
-    return _IOFace(
-        getter=lambda module: module.declare_setup_io(stage),
-        flatten=flatten_source_spec,
-        unify=False,
-        gate=lambda spec, _m: spec.active_in(stage),
-    )
-
-
-# ---------------------------------------------------------------------------
 # resolution (shared by compile_plan / deadcode / the all-modes-dead probe)
 # ---------------------------------------------------------------------------
 
@@ -406,12 +334,9 @@ class _Resolution:
 
     mode: Mode
     sources: dict[str, TensorSpec]
-    nodes: dict[str, _Node]  # mode-active modules, pre-prune, in config order
     alive: dict[str, _Node]  # post demand-prune, in config order
     edges: list[Edge]  # among alive modules (+ SOURCES/SINKS), sorted
     pruned: dict[str, str]  # demand-pruned module -> reason
-    inactive: tuple[str, ...]  # mode-inactive module names (expected absences)
-    sink_keys: tuple[str, ...]
 
 
 def _resolve(
@@ -421,18 +346,10 @@ def _resolve(
     schema: Collection[str] | None,
     sink_keys: list[str] | None,
     sink_origins: Mapping[str, str] | None = None,
-    face: _IOFace | None = None,
 ) -> _Resolution:
-    """Resolve one mode's graph: narrow wildcards, build edges, check, prune.
-
-    `face` selects the IO contract: the default tensor face reads
-    ``declare_io(mode)`` and unifies shapes; the setup face reads
-    ``declare_setup_io(stage)`` and skips unification.
-    """
-    if face is None:
-        face = _tensor_face(mode)
+    """Resolve one mode's graph: narrow wildcards, build edges, check, prune."""
     src = _active_sources(sources, mode)
-    nodes, inactive = _collect_nodes(modules, mode, face)
+    nodes = _collect_nodes(modules, mode)
     producer_of = _concrete_producers(src, nodes, mode)
     sink_list = _checked_sink_keys(sink_keys)
     demand = _collect_demand(nodes, sink_list or [])
@@ -447,7 +364,6 @@ def _resolve(
         modules,
         sources,
         sink_origins,
-        face,
         rewriter_of,
     )
     _check_wildcard_self_feed(nodes, edges, mode)
@@ -468,12 +384,9 @@ def _resolve(
     return _Resolution(
         mode=mode,
         sources=src,
-        nodes=nodes,
         alive=alive,
         edges=sorted(edges),
         pruned=pruned,
-        inactive=tuple(inactive),
-        sink_keys=tuple(sink_list or []),
     )
 
 
@@ -493,18 +406,14 @@ def _active_sources(sources: NestedSpec, mode: Mode) -> dict[str, TensorSpec]:
     return src
 
 
-def _collect_nodes(
-    modules: dict[str, GraphModule], mode: Mode, face: _IOFace
-) -> tuple[dict[str, _Node], list[str]]:
+def _collect_nodes(modules: dict[str, GraphModule], mode: Mode) -> dict[str, _Node]:
     """Build per-module nodes with mode-active flattened ports, in config
     declaration order (the topological tie-break, recorded as `_Node.rank`).
 
-    Returns active nodes and mode-inactive module names. Raises
-    `ConfigError` on protocol/name violations, reserved names, or wildcard
-    misuse.
+    Returns active nodes. Raises `ConfigError` on protocol/name violations,
+    reserved names, or wildcard misuse.
     """
     nodes: dict[str, _Node] = {}
-    inactive: list[str] = []
     for rank, (name, module) in enumerate(modules.items()):
         if name in {SOURCES, SINKS}:
             raise ConfigError(
@@ -521,7 +430,7 @@ def _collect_nodes(
                 f"module mapped at key {name!r} declares name={module.name!r} — instance names "
                 "must match their config keys"
             )
-        io = face.getter(module)
+        io = module.declare_io(mode)
         # framework-internal seam, not user API. TODO: bind the capability to
         # shipped code so user classes cannot grant it to themselves.
         allow_wildcards = bool(getattr(module, "allow_wildcards", False))
@@ -529,16 +438,16 @@ def _collect_nodes(
         produces: dict[str, Any] = {}
         patterns: dict[str, Any] = {}
         rewrites: dict[str, Any] = {}
-        for key, spec in face.flatten(io.requires).items():
+        for key, spec in flatten_spec(io.requires).items():
             if _has_wildcard(key):
                 raise ConfigError(
                     f"module {name!r} declares wildcard require {key!r} — only framework "
                     "producers may declare patterns, and only in produces"
                 )
-            if face.gate(spec, mode):
+            if spec.active_in(mode):
                 requires[key] = spec
-        for key, spec in face.flatten(io.produces).items():
-            if not face.gate(spec, mode):
+        for key, spec in flatten_spec(io.produces).items():
+            if not spec.active_in(mode):
                 continue
             if _has_wildcard(key):
                 if not allow_wildcards:
@@ -550,12 +459,12 @@ def _collect_nodes(
                 patterns[key] = spec
             else:
                 produces[key] = spec
-        for key, spec in face.flatten(getattr(io, "rewrites", {})).items():
+        for key, spec in flatten_spec(getattr(io, "rewrites", {})).items():
             if _has_wildcard(key):
                 raise ConfigError(
                     f"module {name!r} declares wildcard rewrite {key!r} — rewrites are concrete"
                 )
-            if face.gate(spec, mode):
+            if spec.active_in(mode):
                 rewrites[key] = spec
         for key in rewrites:
             if key not in requires:
@@ -569,10 +478,9 @@ def _collect_nodes(
                     "OR rewritten, never both"
                 )
         if not (requires or produces or patterns or rewrites):
-            inactive.append(name)
             continue
         nodes[name] = _Node(name, rank, module, requires, produces, patterns, rewrites=rewrites)
-    return nodes, inactive
+    return nodes
 
 
 def _concrete_producers(
@@ -724,13 +632,11 @@ def _build_edges(
     modules: dict[str, GraphModule],
     sources: NestedSpec,
     sink_origins: Mapping[str, str] | None = None,
-    face: _IOFace | None = None,
     rewriter_of: dict[str, str] | None = None,
 ) -> list[Edge]:
     """Bind every require/sink to its producer; check kinds and unify shapes.
 
-    Kind-matching runs for every face; shape unification (`_unify_edge`)
-    runs only for the tensor face (`SourceSpec` has no shape/dtype). Missing
+    Every bound edge is kind-matched and shape-unified (`_unify_edge`). Missing
     producers raise `ConnectivityError` (via `_raise_missing_producer`);
     unification conflicts raise `ShapeError`; kind mismatches raise
     `KindError`. Returns the resolved edges (pre-prune); optional-but-absent
@@ -742,9 +648,8 @@ def _build_edges(
     producer (it reads the key it replaces). A rewriter's rewrite spec may
     narrow but never widen a concrete dim of the producer's spec (`ShapeError`).
     """
-    unify = face.unify if face is not None else True
     rewriter_of = rewriter_of or {}
-    dims = _DimTable(mode)
+    dims = DimTable(mode)
     edges: list[Edge] = []
     for name, node in nodes.items():
         for key, spec in node.requires.items():
@@ -782,8 +687,7 @@ def _build_edges(
                     f"kind={spec.kind!r} but producer {producer!r} provides "
                     f"kind={pspec.kind!r}"
                 )
-            if unify:
-                _unify_edge(key, producer, name, pspec, spec, dims, mode)
+            _unify_edge(key, producer, name, pspec, spec, dims, mode)
     for key in sink_keys:
         producer = producer_of.get(key)
         if producer is None:
@@ -1007,12 +911,13 @@ def _find_cycle(residual: set[str], adj: dict[str, dict[str, str]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-class _DimTable:
+class DimTable:
     """Union-find over symbolic dims with concrete bindings."""
 
-    def __init__(self, mode: Mode) -> None:
-        """Create an empty table for error messages tagged with `mode`."""
-        self._mode = mode
+    def __init__(self, mode: Mode | None = None, error: type[GraphError] = ShapeError) -> None:
+        """Create an empty table; conflicts raise `error`, tagged ``[mode=X]`` if `mode`."""
+        self._tag = f"[mode={mode.name}] " if mode is not None else ""
+        self._error = error
         self._parent: dict[str, str] = {}
         self._size: dict[str, tuple[int, str]] = {}  # root -> (size, endpoint)
 
@@ -1026,21 +931,21 @@ class _DimTable:
         return root
 
     def bind(self, dim: str, size: int, endpoint: str) -> None:
-        """Bind a symbolic dim to a concrete size; raises `ShapeError` on
+        """Bind a symbolic dim to a concrete size; raises the table's error on
         conflict, naming both endpoints and the conflicting sizes.
         """
         root = self._find(dim)
         previous = self._size.get(root)
         if previous is not None and previous[0] != size:
-            raise ShapeError(
-                f"[mode={self._mode.name}] symbolic dim {dim!r} is {previous[0]} at "
+            raise self._error(
+                f"{self._tag}symbolic dim {dim!r} is {previous[0]} at "
                 f"{previous[1]} but {size} at {endpoint} — conflicting sizes"
             )
         if previous is None:
             self._size[root] = (size, endpoint)
 
     def union(self, a: str, b: str, endpoint: str) -> None:
-        """Unify two symbolic dims; raises `ShapeError` on conflicting
+        """Unify two symbolic dims; raises the table's error on conflicting
         concrete bindings, naming both binding endpoints and the sizes.
         """
         root_a, root_b = self._find(a), self._find(b)
@@ -1048,14 +953,19 @@ class _DimTable:
             return
         size_a, size_b = self._size.get(root_a), self._size.get(root_b)
         if size_a is not None and size_b is not None and size_a[0] != size_b[0]:
-            raise ShapeError(
-                f"[mode={self._mode.name}] unifying {a!r} with {b!r} at {endpoint}: "
+            raise self._error(
+                f"{self._tag}unifying {a!r} with {b!r} at {endpoint}: "
                 f"{a!r} is {size_a[0]} (from {size_a[1]}) but {b!r} is {size_b[0]} "
                 f"(from {size_b[1]}) — conflicting sizes"
             )
         self._parent[root_b] = root_a
         if size_a is None and size_b is not None:
             self._size[root_a] = size_b
+
+    def size_of(self, dim: str) -> int | None:
+        """Return the resolved concrete size of a symbolic dim, or None if unbound."""
+        entry = self._size.get(self._find(dim))
+        return entry[0] if entry is not None else None
 
 
 def _unify_edge(
@@ -1064,7 +974,7 @@ def _unify_edge(
     consumer: str,
     pspec: TensorSpec,
     cspec: TensorSpec,
-    dims: _DimTable,
+    dims: DimTable,
     mode: Mode,
 ) -> None:
     """Unify one edge's producer/consumer specs (shape rank, dims, dtype);
@@ -1266,24 +1176,8 @@ def _alive_probe(
 # ---------------------------------------------------------------------------
 
 
-def _spec_payload(spec: TensorSpec | SourceSpec) -> dict[str, Any]:
-    """Canonical JSON-able form of a leaf spec for hashing (tensor OR setup).
-
-    Both leaf types serialise through the same helper: a `SourceSpec` has no
-    ``shape``/``dtype``/``fields`` and gates on string `stages` rather than
-    `Mode`, so those keys are emitted as None / the stage list. The setup
-    hash is structural and stable, giving the setup graph a reproducible
-    identity for ``salt graph`` exactly like the tensor graph.
-    """
-    if isinstance(spec, SourceSpec):
-        return {
-            "shape": None,
-            "dtype": None,
-            "kind": spec.kind,
-            "stages": list(spec.stages),
-            "optional": spec.optional,
-            "fields": None,
-        }
+def _spec_payload(spec: TensorSpec) -> dict[str, Any]:
+    """Canonical JSON-able form of a `TensorSpec` leaf for the structural plan hash."""
     return {
         "shape": list(spec.shape) if spec.shape is not None else None,
         "dtype": spec.dtype,

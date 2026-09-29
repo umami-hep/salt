@@ -58,27 +58,6 @@ def attach_context(x: Tensor | dict[str, Tensor], context: Tensor) -> Tensor | d
     return attach_context_single(x, context)
 
 
-def flatten_tensor_dict(
-    x: dict[str, Tensor],
-    include: list[str] | None = None,
-    exclude: list[str] | None = None,
-) -> Tensor:
-    """Concatenate a dict of tensors along ``dim=1`` (``include``/``exclude`` are exclusive).
-
-    Raises
-    ------
-    ValueError
-        If both ``include`` and ``exclude`` are provided.
-    """
-    if include and exclude:
-        raise ValueError("Cannot use 'include' and 'exclude' together")
-    if include:
-        return torch.cat([x[emb] for emb in include], dim=1)
-    if exclude:
-        return torch.cat([x[emb] for emb in x if emb not in exclude], dim=1)
-    return torch.cat(list(x.values()), dim=1)
-
-
 def masked_softmax(x: Tensor, mask: BoolTensor | None, dim: int = -1) -> Tensor:
     """Softmax that ignores padded elements: masked (``True``) entries are set to
     ``-inf`` before the softmax and zeroed after.

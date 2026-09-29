@@ -7,9 +7,8 @@ from collections.abc import Sequence
 from torch import Tensor
 
 from salt.graph.bundle import Bundle
-from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
-from salt.outputs.run_task_output import OutputSectionWriter
+from salt.outputs.run_task_output import OutputSectionWriter, _unique_names
 
 
 class PadMaskWriter(OutputSectionWriter):
@@ -43,16 +42,12 @@ class PadMaskWriter(OutputSectionWriter):
     def __init__(self, streams: Sequence[str], modes: Sequence[str] | None = None) -> None:
         super().__init__(modes=modes)
         self.name = type(self).name
-        names = list(streams or [])
-        if not names:
-            raise ConfigError(
-                "PadMaskWriter needs a non-empty 'streams' list — name the sequence streams whose "
-                "boolean pad-mask column to write"
-            )
-        if len(set(names)) != len(names):
-            dup = sorted({n for n in names if names.count(n) > 1})
-            raise ConfigError(f"PadMaskWriter: duplicate stream(s) {dup} — one entry per stream")
-        self.streams = tuple(names)
+        self.streams = _unique_names(
+            streams,
+            "PadMaskWriter",
+            "stream",
+            "name the sequence streams whose boolean pad-mask column to write",
+        )
 
     def output_key(self, stream: str) -> str:
         """The ``outputs.<stream>.mask`` leaf for a stream."""
@@ -77,7 +72,3 @@ class PadMaskWriter(OutputSectionWriter):
         return {
             self.output_key(stream): b.get(f"masks.{stream}").clone() for stream in self.streams
         }
-
-    def mask_streams(self) -> tuple[str, ...]:
-        """The streams a mask column is written for (the sink reads this)."""
-        return self.streams

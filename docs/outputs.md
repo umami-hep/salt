@@ -461,7 +461,6 @@ same way, with nothing hidden in trainer state.
 | `ckpt_path` | the checkpoint being evaluated (output paths template on it) |
 | `datamodule` | the datamodule; `ctx.reader` is the shortcut to `test_dset.reader` |
 | `num_test_batches` | per-dataloader batch counts, or `None` for "the whole dataset" |
-| `world_size` | devices taking part; always 1 (multi-device TEST is out of scope) |
 
 `declare_io` is the important one. It is the *single* declaration that drives
 both the planner (demand-gating keeps exactly the producers you require alive)

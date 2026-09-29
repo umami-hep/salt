@@ -43,7 +43,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     "salt/data/datamodule.py": (
         "salt/tests/unit/data/test_manifest.py",
         "salt/tests/unit/data/test_iterable_dataset.py",
-        "salt/tests/unit/graph/test_setup_executor.py",
     ),
     "salt/data/dataset.py": (
         "salt/tests/unit/data/test_row_cuts_h5.py",

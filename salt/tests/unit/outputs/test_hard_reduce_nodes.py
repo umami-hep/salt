@@ -97,7 +97,6 @@ def test_maskformer_object_forward_matches_inlined_reduces():
             "masks": masks.clone(),
             "regression": reg.clone(),
         },
-        apply_reorder=True,
     )
     torch.testing.assert_close(
         out["outputs.objects.leading_object"],
@@ -150,7 +149,6 @@ def test_maskformer_objects_exposes_reordered_per_vertex_leaves():
     out = node.forward(b, Mode.ONNX)
     _, _, exp_cp, exp_reg = get_maskformer_outputs(
         {"class_probs": class_probs.clone(), "masks": masks.clone(), "regression": reg.clone()},
-        apply_reorder=True,
     )
     torch.testing.assert_close(
         out["outputs.objects.vertices_class_probs"], exp_cp, rtol=0, atol=0, equal_nan=True
@@ -186,7 +184,6 @@ def test_get_maskformer_outputs_all_real_objects_no_early_return():
     regression = torch.randn(b, m, r, generator=gen)
     leading, indices, _out_cp, out_reg = get_maskformer_outputs(
         {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
-        apply_reorder=True,
     )
     assert leading.shape == (b, r)
     assert not torch.isnan(leading).any()
@@ -216,7 +213,6 @@ def test_get_maskformer_outputs_all_null_objects_gives_nan_and_neg2():
     regression = torch.randn(b, m, r, generator=gen)
     leading, indices, _out_cp, out_reg = get_maskformer_outputs(
         {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
-        apply_reorder=True,
     )
     assert leading.shape == (b, r)
     assert torch.isnan(leading).all()
@@ -241,7 +237,6 @@ def test_get_maskformer_outputs_mixed_batch_per_jet_independent():
     regression = torch.randn(2, m, r, generator=gen)
     leading, indices, _out_cp, out_reg = get_maskformer_outputs(
         {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
-        apply_reorder=True,
     )
     assert leading.shape == (2, r)
     assert torch.isnan(leading[0]).all()
@@ -267,7 +262,6 @@ def test_get_maskformer_outputs_zero_length_no_early_return():
     regression = torch.randn(b, m, r, generator=gen)
     leading, indices, _out_cp, out_reg = get_maskformer_outputs(
         {"class_probs": class_probs, "masks": masks.clone(), "regression": regression.clone()},
-        apply_reorder=True,
     )
     assert leading.shape == (b, r)
     assert not torch.isnan(leading[0]).any()  # jet 0 has real slots

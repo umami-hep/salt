@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import re
-import warnings
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -19,36 +18,20 @@ class MuonParamPolicy:
     """Policy for deciding which parameters should be optimized by Muon.
 
     Determines whether a parameter is assigned to the Muon optimizer based on its
-    tensor dimensionality (must be 2D), explicit module-name include/exclude
-    lists, and — as a fallback — broad name regexes.
+    tensor dimensionality (must be 2D) and broad name regexes.
 
     Selection order:
 
     1. Non-2D or non-trainable parameters always go to AdamW (Muon needs 2D
        weight matrices).
-    2. ``exclude`` — an explicit module-name substring match forces the
-       parameter to AdamW (highest priority).
-    3. ``include`` — an explicit module-name substring match forces the
-       parameter to Muon, overriding the broad ``exclude_name_patterns`` regexes.
-    4. ``exclude_name_patterns`` — broad regex defaults: a 2D parameter whose
+    2. ``exclude_name_patterns`` — broad regex defaults: a 2D parameter whose
        lowercased name matches any pattern goes to AdamW.
-
-    A policy whose ``include`` / ``exclude`` list matches ZERO parameters is
-    surfaced as a warning by `HybridMuonAdamW` (a likely typo or renamed module).
 
     Parameters
     ----------
     exclude_name_patterns : tuple[str, ...]
         Case-insensitive regex patterns. If a 2D parameter's name matches any
-        of these (and no ``include`` entry overrides it), it is excluded from
-        Muon.
-    include : tuple[str, ...]
-        Explicit module-name substrings that force a 2D parameter onto Muon,
-        overriding ``exclude_name_patterns`` (but not ``exclude``). Empty by
-        default.
-    exclude : tuple[str, ...]
-        Explicit module-name substrings that force a parameter onto AdamW,
-        taking precedence over everything else. Empty by default.
+        of these, it is excluded from Muon.
     """
 
     exclude_name_patterns: tuple[str, ...] = (
@@ -57,27 +40,17 @@ class MuonParamPolicy:
         r"embedding|embeddings|\bembed\b",
         r"\bhead\b|classifier|output|out_proj|final",
     )
-    include: tuple[str, ...] = field(default_factory=tuple)
-    exclude: tuple[str, ...] = field(default_factory=tuple)
 
     def is_muon_param(self, name: str, param: nn.Parameter) -> bool:
         """Return whether a parameter should be optimized by Muon.
 
         Applies the selection order documented on the class: 2D/trainable gate,
-        explicit ``exclude``, explicit ``include``, then the broad
-        ``exclude_name_patterns`` defaults.
+        then the broad ``exclude_name_patterns`` defaults.
         """
         if not param.requires_grad:
             return False
         if param.ndim != 2:
             return False
-
-        # explicit exclude wins over everything (AdamW)
-        if any(token in name for token in self.exclude):
-            return False
-        # explicit include overrides the broad regexes (Muon)
-        if any(token in name for token in self.include):
-            return True
 
         lname = name.lower()
         return all(not re.search(pat, lname) for pat in self.exclude_name_patterns)
@@ -92,14 +65,14 @@ class HybridMuonAdamW(Optimizer):
     - ``torch.optim.Muon`` for (selected) 2D weight matrices
     - ``torch.optim.AdamW`` for all remaining parameters
 
-    Use ``model.named_parameters()`` as input to enable name-based exclusions
-    (biases/norms/embeddings/heads).
+    Parameters must be passed as ``(name, Parameter)`` pairs (e.g.
+    ``model.named_parameters()``) so the name-based exclusions
+    (biases/norms/embeddings/heads) can apply.
 
     Parameters
     ----------
-    params : Iterable[nn.Parameter | tuple[str, nn.Parameter]]
-        Either an iterable of Parameters (as returned by ``model.parameters()``)
-        or an iterable of ``(name, Parameter)`` pairs (as returned by
+    params : Iterable[tuple[str, nn.Parameter]]
+        An iterable of ``(name, Parameter)`` pairs (as returned by
         ``model.named_parameters()``).
     lr : float
         Base learning rate. Used for both Muon and AdamW unless overridden by
@@ -141,19 +114,11 @@ class HybridMuonAdamW(Optimizer):
     ValueError
         If no parameters are selected for Muon.
         If no parameters are selected for AdamW
-    TypeError
-        If parameters to HybridMuonAdamW are not Parameters or (name, Parameter) pairs.
-
-    Notes
-    -----
-    - If initialized with ``model.parameters()`` (no names), the selection falls
-      back to a simple rule: **Muon for params with ``ndim == 2``**, AdamW for
-      everything else.
     """
 
     def __init__(
         self,
-        params: Iterable[nn.Parameter | tuple[str, nn.Parameter]],
+        params: Iterable[tuple[str, nn.Parameter]],
         *,
         lr: float,
         weight_decay: float = 1e-5,
@@ -180,47 +145,25 @@ class HybridMuonAdamW(Optimizer):
         if not items:
             raise ValueError("HybridMuonAdamW received an empty parameter list.")
 
-        named = _looks_like_named_params(items)
-
         muon_params: list[nn.Parameter] = []
         adamw_params: list[nn.Parameter] = []
         self._muon_names: list[str] = []
         self._adamw_names: list[str] = []
 
-        if named:
-            all_names = [name for name, _ in items]  # type: ignore[misc]
-            self._warn_dead_routing(self.policy, all_names)
-            for name, p in items:  # type: ignore[misc]
-                if not p.requires_grad:
-                    continue
-                if self.policy.is_muon_param(name, p):
-                    muon_params.append(p)
-                    self._muon_names.append(name)
-                else:
-                    adamw_params.append(p)
-                    self._adamw_names.append(name)
-        else:
-            # No names available: fall back to ndim-based selection
-            for idx, p in enumerate(items):  # type: ignore[assignment]
-                if not isinstance(p, nn.Parameter):
-                    raise TypeError(
-                        "HybridMuonAdamW expected Parameters or (name, Parameter) pairs."
-                    )
-                if not p.requires_grad:
-                    continue
-                name = f"param_{idx}"
-                if p.ndim == 2:
-                    muon_params.append(p)
-                    self._muon_names.append(name)
-                else:
-                    adamw_params.append(p)
-                    self._adamw_names.append(name)
+        for name, p in items:
+            if not p.requires_grad:
+                continue
+            if self.policy.is_muon_param(name, p):
+                muon_params.append(p)
+                self._muon_names.append(name)
+            else:
+                adamw_params.append(p)
+                self._adamw_names.append(name)
 
         if len(muon_params) == 0:
             raise ValueError(
                 "HybridMuonAdamW: no parameters selected for Muon. "
-                "If you passed model.parameters(), this can happen if there are no 2D parameters. "
-                "If you passed model.named_parameters(), check your exclusion policy."
+                "Check that the model has trainable 2D parameters and your exclusion policy."
             )
         if len(adamw_params) == 0:
             raise ValueError(
@@ -272,23 +215,6 @@ class HybridMuonAdamW(Optimizer):
 
         # Ensure internal optimizers start consistent with the wrappers base LR.
         self._sync_lrs_from_wrapper()
-
-    @staticmethod
-    def _warn_dead_routing(policy: MuonParamPolicy, names: Sequence[str]) -> None:
-        """Warn when an explicit ``include``/``exclude`` token matches no parameter
-        name (likely a typo/renamed module). Staticmethod so it's testable
-        without constructing the optimizer (whose ``torch.optim.Muon`` needs
-        torch>=2.9).
-        """
-        for label, tokens in (("include", policy.include), ("exclude", policy.exclude)):
-            for token in tokens:
-                if not any(token in name for name in names):
-                    warnings.warn(
-                        f"HybridMuonAdamW policy.{label} entry {token!r} matched 0 parameter "
-                        f"names — a dead routing entry (typo or renamed module?). Known prefixes: "
-                        f"{sorted({name.split('.')[0] for name in names})} .",
-                        stacklevel=3,
-                    )
 
     def _sync_lrs_from_wrapper(self) -> None:
         """Propagate the wrapper's scheduler-driven ``param_groups[0]["lr"]`` to
@@ -498,15 +424,6 @@ try:
     _lion_available = True
 except ImportError:
     _lion_available = False
-
-
-def _looks_like_named_params(items: Sequence[Any]) -> bool:
-    """Heuristically determine whether an iterable looks like named parameters."""
-    first = items[0]
-    if not isinstance(first, tuple) or len(first) != 2:
-        return False
-    name, param = first
-    return isinstance(name, str) and isinstance(param, nn.Parameter)
 
 
 # ---------------------------------------------------------------------------

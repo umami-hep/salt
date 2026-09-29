@@ -7,7 +7,7 @@ from __future__ import annotations
 import yaml
 
 from ..io import compute_class_dict, compute_norm_dict, write_h5
-from ._util import reconstruct_schema
+from ..schema import Schema
 from .base import GenModule
 
 
@@ -27,7 +27,7 @@ class _Writer(GenModule):
         n = next(iter(data.values())).shape[0] if data else 1
         # keep only specs for groups that are actually in data
         specs = [g for g in self._group_specs if g.name in data]
-        return reconstruct_schema(specs, n_samples=n)
+        return Schema(n_samples=n, groups=specs)
 
 
 class H5Writer(_Writer):

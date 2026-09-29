@@ -128,16 +128,12 @@ class SinkContext:
         Lightning's per-dataloader batch counts, used to size a
         ``limit_test_batches``-capped run. None (the default, and what a
         non-Lightning driver supplies) means "the whole dataset".
-    world_size : int, optional
-        Devices taking part, by default 1. Multi-device test writing is out
-        of scope, so anything else is refused at wiring time.
     """
 
     run_name: str
     datamodule: Any
     ckpt_path: str | None
     num_test_batches: Any = None
-    world_size: int = 1
 
     @classmethod
     def from_trainer(cls, trainer: Any) -> SinkContext:
@@ -155,7 +151,6 @@ class SinkContext:
             datamodule=getattr(trainer, "datamodule", None),
             ckpt_path=None if ckpt_path is None else str(ckpt_path),
             num_test_batches=getattr(trainer, "num_test_batches", None),
-            world_size=int(getattr(trainer, "world_size", 1) or 1),
         )
 
     @property
@@ -346,6 +341,11 @@ class Node:
 
     # -- manifest sources ---------------------------------------------------
 
+    def bind_output_section(self, section: Mapping[str, Any]) -> None:
+        """Capture the ``outputs:`` section — the FIRST manifest source."""
+        self._output_section = section
+        self._invalidate_manifest()
+
     def bind_model_modules(self, model_modules: Mapping[str, Any]) -> None:
         """Capture the model's graph modules — the SECOND manifest source.
 
@@ -441,12 +441,16 @@ class Node:
         del mode
         return IO(requires={}, produces={})
 
-    def writer_demand(
-        self, model_modules: Mapping[str, Any], reader: Any
-    ) -> dict[str, str]:  # pragma: no cover - overridden
-        """The TEST demand this node anchors, GENERATED from `declare_io` (subclass override)."""
+    def writer_demand(self, model_modules: Mapping[str, Any], reader: Any) -> dict[str, str]:
+        """The TEST demand this node anchors, GENERATED from `declare_io`.
+
+        Each TEST ``declare_io`` require maps to a demander description;
+        discovered by `salt.model.sink_prep.select_test_sink` via
+        ``callable(getattr(cb, "writer_demand", None))``.
+        """
         del model_modules, reader
-        return {}
+        who = f"sink {type(self).__name__!r} demanding"
+        return {key: f"{who} {key}" for key in flatten_spec(self.declare_io(Mode.TEST).requires)}
 
 
 class RuntimeSink(Node):

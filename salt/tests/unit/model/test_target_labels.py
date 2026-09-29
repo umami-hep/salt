@@ -16,9 +16,8 @@ from typing import Any
 import pytest
 import torch
 
-from salt.graph import Mode
 from salt.graph.bundle import Bundle
-from salt.graph.spec import flatten_spec
+from salt.graph.spec import Mode, flatten_spec
 from salt.model.bind import ResolvedSchema
 from salt.model.modules.tasks import (
     ClassificationTaskModule,

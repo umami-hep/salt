@@ -23,8 +23,10 @@ import pytest
 import torch
 from torch import nn
 
-from salt.graph import Bundle, Executor, Mode
+from salt.graph.bundle import Bundle
+from salt.graph.executor import Executor
 from salt.graph.render import dot_source
+from salt.graph.spec import Mode
 from salt.model.modules import bind_all, resolve_bind_schema
 from salt.outputs.sinks.onnx import (
     ExportConfig,
@@ -41,7 +43,6 @@ from salt.outputs import (
     MaskFormerObjects,
     MFLeadVertexDecorator,
     OnnxExportSink,
-    SeqClassIndex,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -82,30 +83,30 @@ def _export_cfg() -> ExportConfig:
     )
 
 
-# the GN2 export contract (ClassProbs + SeqClassIndex): the vertexing head's
-# VertexIndex export rides the live VertexingTaskModule.get_output path (not a
-# conversion node), covered by the pipeline matrix's EXPECTED_OUTPUTS table
-# (salt/tests/integration/pipeline/test_pipeline.py) + tests/unit get_output.
+# GN2 per-token TrackOrigin / VertexIndex exports ride RunTaskOutput (not a
+# conversion node); covered by the pipeline matrix's EXPECTED_OUTPUTS
+# (salt/tests/integration/pipeline/test_pipeline.py) + unit get_output tests.
 
 
 def _folded_gn2_export(tmp_path):
     """A deterministically-weighted GN2 export through the folded conversion nodes
-    (ClassProbs pb/pc/pu + SeqClassIndex TrackOrigin); no vertexing node.
+    (ClassProbs pb/pc/pu); no per-token or vertexing node.
     """
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
+    # TEST plan keeps the track_origin head (demand-pruned from the ONNX plan) bindable,
+    # as in production multi-plan binding.
+    test_plan = compile_gn2v2(modules, Mode.TEST)
     jp = ClassProbs(task="jets_classification", stream="jets")
     jp.name = "jet_probs"
-    ti = SeqClassIndex(task="track_origin", stream="tracks")
-    ti.name = "track_origin_index"
     sink = OnnxExportSink()
     sink.name = "onnx_export"
-    modules.update({"jet_probs": jp, "track_origin_index": ti, "onnx_export": sink})
+    modules.update({"jet_probs": jp, "onnx_export": sink})
     _bind_producers(modules)
     resolved = resolve_export_config(_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
+    bind_all(modules, resolve_bind_schema([plan, test_plan]))
     modules["norm"].materialise()
     result = export_graph(
         modules, _export_cfg(), VARIABLES, tmp_path / "folded.onnx", run_name="GN2_v2"
@@ -115,30 +116,28 @@ def _folded_gn2_export(tmp_path):
 
 @pytest.fixture(scope="module")
 def folded(tmp_path_factory):
-    """A deterministically-weighted GN2 export through the FOLDED path (SeqClassIndex +
+    """A deterministically-weighted GN2 export through the FOLDED path (ClassProbs +
     Combination + sink)."""
     tmp = tmp_path_factory.mktemp("onnx_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
+    test_plan = compile_gn2v2(modules, Mode.TEST)  # keeps the pruned track_origin head bindable
     jet_probs = ClassProbs(task="jets_classification", stream="jets")
     jet_probs.name = "jet_probs"
-    track_index = SeqClassIndex(task="track_origin", stream="tracks")
-    track_index.name = "track_origin_index"
     pbc = Combination(source="outputs.jets.jets_classification", name="pbc", terms={0: 1.0, 1: 1.0})
     pbc.name = "pbc"
     export_sink = OnnxExportSink()
     export_sink.name = "onnx_export"
     modules.update({
         "jet_probs": jet_probs,
-        "track_origin_index": track_index,
         "pbc": pbc,
         "onnx_export": export_sink,
     })
     _bind_producers(modules)
     resolved = resolve_export_config(_export_cfg(), "GN2_v2")
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
+    bind_all(modules, resolve_bind_schema([plan, test_plan]))
     modules["norm"].materialise()
     result = export_graph(
         modules, _export_cfg(), VARIABLES, tmp / "folded.onnx", run_name="GN2_v2"
@@ -150,17 +149,10 @@ def folded(tmp_path_factory):
 
 
 def test_folded_export_contract(folded):
-    """The export sink names the conversion leaves: split + combine + per-token int8 axis."""
+    """The export sink names the conversion leaves: split + combine."""
     adapter = folded.result.adapter
-    assert adapter.output_names == [
-        "GN2v2_pb",
-        "GN2v2_pc",
-        "GN2v2_pu",
-        "GN2v2_pbc",
-        "GN2v2_TrackOrigin",
-    ]
-    assert adapter.output_dtypes == ["float32", "float32", "float32", "float32", "int8"]
-    assert adapter.dynamic_axes["GN2v2_TrackOrigin"] == {0: "n_tracks"}
+    assert adapter.output_names == ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu", "GN2v2_pbc"]
+    assert adapter.output_dtypes == ["float32", "float32", "float32", "float32"]
 
 
 def test_folded_check_onnx_agrees_including_zero_tokens(folded):
@@ -224,14 +216,6 @@ def test_folded_pb_pc_pu_equal_single_softmax_of_raw_logits(tmp_path):
         # path would break the 1e-6 agreement
         ref = torch.softmax(res.get("preds.jets.jets_classification"), dim=-1).numpy().ravel()
         np.testing.assert_allclose(folded, ref, atol=1e-6)
-
-
-def test_folded_int8_track_origin_check_onnx(tmp_path):
-    """The folded int8 TrackOrigin leaf is torch-vs-ort exact incl L=0."""
-    result, _ = _folded_gn2_export(tmp_path)
-    grid = [{"tracks": length} for length in (0, 1, 2, 7, 21)]
-    cr = check_onnx(result.adapter, result.onnx_path, trials=2, float_rtol=1e-6, float_atol=1e-6, lengths_grid=grid)
-    assert cr.passed, cr.failures
 
 
 # =====================================================================

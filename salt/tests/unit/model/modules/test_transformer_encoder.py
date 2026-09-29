@@ -8,14 +8,11 @@ import pytest
 import torch
 from torch import nn
 
-from salt.graph import (
-    Bundle,
-    ConfigError,
-    Executor,
-    Mode,
-    PlanStep,
-    flatten_spec,
-)
+from salt.graph.bundle import Bundle
+from salt.graph.errors import ConfigError
+from salt.graph.executor import Executor
+from salt.graph.planner import PlanStep
+from salt.graph.spec import Mode, flatten_spec
 from salt.model.modules import (
     BindError,
     TransformerEncoder,

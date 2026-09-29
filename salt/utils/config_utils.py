@@ -65,16 +65,11 @@ class IncludeError(ValueError):
 def _resolve_include(ref: str, source: Path, config_dir: Path) -> Path:
     """Locate one ``include:`` entry.
 
-    Absolute paths are used as given. A relative path is tried against the
-    including config's own directory first, then the shipped ``salt/configs``
-    root, so a config can name a sibling without knowing where it sits.
+    A relative path is tried against the including config's own directory
+    first, then the shipped ``salt/configs`` root, so a config can name a
+    sibling without knowing where it sits. Absolute paths are used as given
+    (joining one onto a directory yields it unchanged).
     """
-    candidate = Path(ref)
-    if candidate.is_absolute():
-        if not candidate.is_file():
-            raise IncludeError(f"{source}: include '{ref}' does not exist")
-        return candidate
-
     tried = [source.parent / ref, config_dir / ref]
     for path in tried:
         if path.is_file():
@@ -83,20 +78,23 @@ def _resolve_include(ref: str, source: Path, config_dir: Path) -> Path:
     raise IncludeError(f"{source}: include '{ref}' not found. Tried:\n  {listed}")
 
 
-def _merge(base: Any, over: Any) -> Any:
-    """``DeepMergeParser`` semantics: dicts union key-by-key, lists replace.
+def _deep_merge_dicts(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``over`` onto ``base``: nested dicts merge key-by-key;
+    any scalar / list / ``None`` replaces.
 
     ``None`` markers are KEPT, not treated as deletions here — deletion happens
-    at assembly time, where ``SaltModule``/``SaltDataModule``/``SaltCLI``
-    filter their module dicts. Resolving them earlier would let a later config
-    resurrect an entry an earlier one deleted.
+    at assembly time (``SaltModule``/``SaltDataModule``/``SaltCLI`` filter their
+    module dicts; `TrainingSchedule.from_config` drops null-deleted stage names).
+    Resolving them earlier would let a later config resurrect an entry an
+    earlier one deleted.
     """
-    if not isinstance(base, dict) or not isinstance(over, dict):
-        return over
-    out = dict(base)
-    for key, value in over.items():
-        out[key] = _merge(out[key], value) if key in out else value
-    return out
+    merged = dict(base)
+    for key, val in over.items():
+        if isinstance(val, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
 
 
 def _expand(path: Path, config_dir: Path, stack: tuple[Path, ...]) -> tuple[dict, list[Path]]:
@@ -123,11 +121,11 @@ def _expand(path: Path, config_dir: Path, stack: tuple[Path, ...]) -> tuple[dict
     for ref in refs:
         target = _resolve_include(ref, path, config_dir)
         sub, sub_sources = _expand(target, config_dir, (*stack, resolved))
-        merged = _merge(merged, sub)
+        merged = _deep_merge_dicts(merged, sub)
         sources.extend(sub_sources)
 
     # the including config wins over everything it includes
-    return _merge(merged, raw), [*sources, resolved]
+    return _deep_merge_dicts(merged, raw), [*sources, resolved]
 
 
 def expand_includes(config_path: str, config_dir: Path | None = None) -> str:

@@ -1784,8 +1784,8 @@ def _uses_input_samples(fit: Artifacts) -> bool:
     ``InputSamples`` from ``train_file``/``val_file``/``test_file`` when none
     already exists, so for these rows plain ``data.test_file=``/
     ``data.num_test=`` overrides are silently ignored — the resolution path
-    reads ``source.<reader>.test.pattern`` off the ``InputSamples`` setup
-    context instead (``salt/data/datamodule.py::_resolve_source``).
+    reads the stage's file and row cap from ``InputSamples.files``/``num``
+    instead (``salt/data/datamodule.py::_resolve_source``).
     """
     cfg = yaml.safe_load(fit.saved_config.read_text())
     return "input_samples" in ((cfg.get("data") or {}).get("modules") or {})

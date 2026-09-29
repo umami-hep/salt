@@ -87,10 +87,7 @@ class TestDumpSchema:
         schema = dump_schema(path)
         assert schema.groups["jets"].fields == {"eta": "float32"}
         assert "skipping field jets/'kin.pt'" in capsys.readouterr().err
-        # the full chain stays usable: keys() and validate_keys() work
         assert schema.keys() == ("jets.eta",)
-        report = schema.validate_keys(["jets.eta"])
-        assert report.ok
 
     def test_dotted_dataset_name_skipped_with_warning(self, tmp_path, capsys):
         path = tmp_path / "dotted_ds.h5"
@@ -192,52 +189,11 @@ class TestLoadTolerance:
             load_schema(self._write(tmp_path, payload))
 
 
-# validate_keys (the planner-facing missing/unknown report)
-
-
-class TestValidateKeys:
-    @pytest.fixture
-    def schema(self):
-        return Schema(
-            groups={
-                "jets": GroupSchema(fields={"pt": "float32", "eta": "float32"}),
-                "tracks": GroupSchema(fields={"d0": "float32", "valid": "bool"}),
-            }
-        )
-
-    def test_all_present(self, schema):
-        report = schema.validate_keys(["jets.pt", "tracks.d0", "tracks.valid"])
-        assert report.ok
-        assert report.present == ("jets.pt", "tracks.d0", "tracks.valid")
-        assert not report.missing
-        assert not report.unknown
-
-    def test_missing_field_with_suggestion(self, schema):
-        report = schema.validate_keys(["jets.ptt"])
-        assert not report.ok
-        assert report.missing == ("jets.ptt",)
-        assert "jets.pt" in report.suggestions["jets.ptt"]
-
-    def test_unknown_group(self, schema):
-        report = schema.validate_keys(["trcks.d0"])
-        assert report.unknown == ("trcks.d0",)
-        assert "tracks.d0" in report.suggestions["trcks.d0"]
-
-    def test_single_component_key_is_unknown(self, schema):
-        report = schema.validate_keys(["jets"])
-        assert report.unknown == ("jets",)
-
-    def test_malformed_key_is_unknown_not_a_raise(self, schema):
-        # the docstring promise: malformed keys are classified, not raised
-        report = schema.validate_keys(["jets..pt", ""])
-        assert set(report.unknown) == {"jets..pt", ""}
-        assert not report.ok
-
-    def test_keys_with_dotted_field_raises_schema_error(self):
-        # in-memory Schema with a dotted field: keys() must not leak ValueError
-        schema = Schema(groups={"jets": GroupSchema(fields={"kin.pt": "float32"})})
-        with pytest.raises(SchemaError, match="cannot form a dotted bundle key"):
-            schema.keys()
+def test_keys_with_dotted_field_raises_schema_error():
+    # in-memory Schema with a dotted field: keys() must not leak ValueError
+    schema = Schema(groups={"jets": GroupSchema(fields={"kin.pt": "float32"})})
+    with pytest.raises(SchemaError, match="cannot form a dotted bundle key"):
+        schema.keys()
 
 
 # integration: schema.keys() feeds planner wildcard narrowing (rule (d))

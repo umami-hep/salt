@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from salt.graph import Bundle, Mode
+from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, ConnectivityError, ShapeError
+from salt.graph.spec import Mode
 from salt.model.modules import (
     Concat,
     GlobalAttentionPooling,
@@ -34,12 +35,12 @@ from salt.outputs import (
     OnnxExportLeaf,
     OnnxExportSink,
     OutputField,
-    SeqClassIndex,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
     build_gn2v2_modules,
+    compile_gn2v2,
     write_parity_norm_dict,
 )
 
@@ -86,9 +87,6 @@ def gn2_folded_modules(tmp_path):
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     modules.update({
         "jet_probs": _named(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
-        "track_origin_index": _named(
-            SeqClassIndex(task="track_origin", stream="tracks"), "track_origin_index"
-        ),
         "onnx_export": _named(OnnxExportSink(), "onnx_export"),
     })
     bind_producers(modules)
@@ -216,16 +214,6 @@ class TestExportSinkOutputs:
     # conversion math itself is proven bitwise in
     # test_onnx_fold_classification/objects). These assert that surface.
 
-    def test_name_and_names_exclusive(self):
-        with pytest.raises(ConfigError, match="BOTH"):
-            OnnxExportLeaf(key="outputs.jets.c", name="both", names=["pb", "pc"])
-
-    def test_name_defaults_to_leaf_terminal_segment(self):
-        """Single-source naming: omitting name/names defaults the suffix to the leaf terminal."""
-        leaf = OnnxExportLeaf(key="outputs.tracks.HadronIndex", dtype="int8", per_token=True)
-        assert leaf.name == "HadronIndex"
-        assert leaf.suffixes == ("HadronIndex",)
-
     def test_names_default_to_split(self):
         leaf = OnnxExportLeaf(key="outputs.jets.c", names=["pb", "pc", "pu"])
         assert leaf.suffixes == ("pb", "pc", "pu")
@@ -238,14 +226,6 @@ class TestExportSinkOutputs:
         )
         assert leaf.dtype == "int8"
         assert leaf.per_token
-
-    def test_bad_dtype_rejected(self):
-        with pytest.raises(ConfigError, match="float32.*int8|int8.*float32"):
-            OnnxExportLeaf(key="outputs.jets.c", name="x", dtype="float64")
-
-    def test_split_names_with_per_token_rejected(self):
-        with pytest.raises(ConfigError, match="per_token"):
-            OnnxExportLeaf(key="outputs.tracks.c", names=["pb", "pc"], per_token=True)
 
     def test_non_outputs_key_rejected(self):
         with pytest.raises(ConfigError, match="outputs"):
@@ -298,7 +278,7 @@ def gn2_modules(tmp_path_factory):
     modules = gn2_folded_modules(tmp)
     resolved = gn2_resolved()
     plan = compile_onnx_plan(modules, resolved, VARIABLES)
-    bind_all(modules, resolve_bind_schema([plan]))
+    bind_all(modules, resolve_bind_schema([plan, compile_gn2v2(modules, Mode.TEST)]))
     modules["norm"].materialise()
     return modules, resolved, plan
 
@@ -380,17 +360,9 @@ def gn2_adapter(gn2_modules):
 class TestOnnxAdapter:
     def test_generated_names_and_axes(self, gn2_adapter):
         assert gn2_adapter.input_names == ["jet_features", "track_features"]
-        assert gn2_adapter.output_names == [
-            "GN2v2_pb",
-            "GN2v2_pc",
-            "GN2v2_pu",
-            "GN2v2_TrackOrigin",
-        ]
-        assert gn2_adapter.dynamic_axes == {
-            "track_features": {0: "n_tracks"},
-            "GN2v2_TrackOrigin": {0: "n_tracks"},
-        }
-        assert gn2_adapter.output_dtypes == ["float32"] * 3 + ["int8"]
+        assert gn2_adapter.output_names == ["GN2v2_pb", "GN2v2_pc", "GN2v2_pu"]
+        assert gn2_adapter.dynamic_axes == {"track_features": {0: "n_tracks"}}
+        assert gn2_adapter.output_dtypes == ["float32"] * 3
 
     def test_example_inputs_shapes(self, gn2_adapter):
         jets, tracks = gn2_adapter.example_inputs(sequence_length=40)
@@ -404,10 +376,8 @@ class TestOnnxAdapter:
         tracks = torch.rand(length, 19, generator=gen)
         with torch.no_grad():
             outputs = gn2_adapter(jets, tracks)
-        assert len(outputs) == 4
-        assert all(out.dim() == 0 for out in outputs[:3])
-        assert outputs[3].shape == (length,)
-        assert outputs[3].dtype == torch.int8
+        assert len(outputs) == 3
+        assert all(out.dim() == 0 for out in outputs)
 
     def test_global_input_must_have_batch_dim(self, gn2_adapter):
         with pytest.raises(AssertionError, match="batch, features"):
@@ -416,14 +386,6 @@ class TestOnnxAdapter:
     def test_wrong_arity_rejected(self, gn2_adapter):
         with pytest.raises(AssertionError, match="positional inputs"):
             gn2_adapter(torch.rand(1, 2))
-
-    def test_non_onnx_plan_rejected(self, gn2_modules):
-        from salt.tests._fixtures.gn2v2_fixture import compile_gn2v2
-
-        modules, resolved, _ = gn2_modules
-        test_plan = compile_gn2v2(modules, Mode.TEST)
-        with pytest.raises(ConfigError, match="Mode.ONNX plan|ONNX plan"):
-            OnnxAdapter(test_plan, resolved, {})
 
 
 class TestAliasGather:

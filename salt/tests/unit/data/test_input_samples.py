@@ -1,4 +1,4 @@
-"""Tests for `InputSamples` + the datamodule data-sourcing setup pass."""
+"""Tests for `InputSamples` + the datamodule's per-stage source resolution."""
 
 from __future__ import annotations
 
@@ -15,15 +15,7 @@ from salt.data import (
     InputSamples,
     Labels,
 )
-from salt.data.input_samples import (
-    SOURCE_REGISTRY,
-    deepest_source_path,
-    source_num,
-)
-from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.planner import compile_setup_plan
-from salt.graph.setup_executor import run_setup_plan
 from salt.graph.spec import Mode
 from salt.schema import dump_schema, save_schema
 from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
@@ -88,59 +80,26 @@ def build_modules_no_input_samples(data) -> dict:
     }
 
 
-# InputSamples unit behaviour — declare + setup (path arithmetic only)
+# InputSamples unit behaviour — a per-stage (file, num) config holder
 
 
 class TestInputSamplesUnit:
-    def test_declare_produces_pattern_and_num(self):
-        inp = InputSamples(files={"train": "/a.h5", "val": "/b.h5", "test": "/c.h5"})
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        io = inp.declare_setup_io("train")
-        flat = _flat(io.produces)
-        assert "source.reader.train.pattern" in flat
-        assert flat["source.reader.train.pattern"].kind == "path"
-        # whole-dict num SCALAR on the first stage
-        assert "artifacts.reader.num" in flat
-        assert flat["artifacts.reader.num"].kind == "scalar"
+    def test_source_wildcard_passes_through_verbatim(self):
+        inp = InputSamples(files={"train": "/data/train_*.h5"})
+        assert inp.source("train") == ("/data/train_*.h5", -1)
 
-    def test_num_emitted_once_across_stages(self):
-        inp = InputSamples(files={"train": "/a.h5", "val": "/b.h5"})
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        train_flat = _flat(inp.declare_setup_io("train").produces)
-        val_flat = _flat(inp.declare_setup_io("val").produces)
-        assert "artifacts.reader.num" in train_flat  # first stage carries it
-        assert "artifacts.reader.num" not in val_flat  # second stage does NOT
-
-    def test_setup_is_pure_path_arithmetic(self):
+    def test_source_str_and_num_default(self):
         inp = InputSamples(
-            files={"train": "/data/train.h5", "val": "/data/val.h5"},
-            num={"train": 500, "val": -1},
+            files={"train": Path("/data/train.h5"), "val": "/data/val.h5"},
+            num={"train": 500},
         )
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        ctx = Bundle()
-        inp.setup(ctx, "train")
-        inp.setup(ctx, "val")
-        assert ctx.get("source.reader.train.pattern") == "/data/train.h5"
-        assert ctx.get("source.reader.val.pattern") == "/data/val.h5"
-        # whole-dict opaque num leaf, indexed [stage]
-        assert ctx.get("artifacts.reader.num") == {"train": 500, "val": -1}
+        assert inp.source("train") == ("/data/train.h5", 500)
+        assert isinstance(inp.source("train")[0], str)
+        assert inp.source("val") == ("/data/val.h5", -1)
 
-    def test_wildcard_passes_through_verbatim(self):
-        inp = InputSamples(files={"train": "/data/pp_*.h5"})
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        ctx = Bundle()
-        inp.setup(ctx, "train")
-        assert ctx.get("source.reader.train.pattern") == "/data/pp_*.h5"
-
-    def test_reader_name_required(self):
+    def test_unconfigured_stage_is_none(self):
         inp = InputSamples(files={"train": "/a.h5"})
-        inp.name = "input_samples"
-        with pytest.raises(RuntimeError, match="no reader name wired"):
-            inp.declare_setup_io("train")
+        assert inp.source("test") == (None, -1)
 
     def test_unknown_stage_rejected(self):
         with pytest.raises(ValueError, match="unknown stage"):
@@ -150,13 +109,6 @@ class TestInputSamplesUnit:
         with pytest.raises(ValueError, match="non-empty"):
             InputSamples(files={})
 
-    def test_inactive_stage_empty(self):
-        inp = InputSamples(files={"train": "/a.h5"})
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        assert inp.declare_setup_io("test").is_empty()
-        assert inp.setup(Bundle(), "test") is not None  # no-op, returns ctx
-
     def test_declare_io_per_batch_empty(self):
         inp = InputSamples(files={"train": "/a.h5"})
         io = inp.declare_io(Mode.FIT)
@@ -164,41 +116,7 @@ class TestInputSamplesUnit:
         assert not io.produces
 
 
-def _flat(nested):
-    from salt.graph.setup_spec import flatten_source_spec
-
-    return flatten_source_spec(nested)
-
-
-# the setup pass end-to-end (compile_setup_plan + run_setup_plan)
-
-
-class TestSetupPassResolution:
-    def test_resolves_files_per_stage(self, data):
-        inp = InputSamples(files={"train": data["h5"], "val": data["h5"]}, num={"train": 200})
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        ctx = Bundle()
-        for stage in ("train", "val"):
-            plan = compile_setup_plan({"input_samples": inp}, stage)
-            run_setup_plan(plan, stage, ctx)
-        assert ctx.get("source.reader.train.pattern") == str(data["h5"])
-        assert ctx.get("source.reader.val.pattern") == str(data["h5"])
-        assert source_num(ctx, "reader", "train") == 200
-        assert source_num(ctx, "reader", "val") == -1  # whole-dict default
-
-    def test_deepest_path_is_pattern_when_only_pattern_registered(self, data):
-        # only `pattern` exists in the registry, so deepest == pattern.
-        inp = InputSamples(files={"train": data["h5"]})
-        inp.name = "input_samples"
-        inp._reader = "reader"
-        ctx = Bundle()
-        run_setup_plan(compile_setup_plan({"input_samples": inp}, "train"), "train", ctx)
-        assert deepest_source_path(ctx, "reader", "train") == str(data["h5"])
-        assert SOURCE_REGISTRY == ("pattern", "staged_path")
-
-
-# datamodule integration — binds the reader from the resolved ctx
+# datamodule integration — binds each stage's reader from InputSamples.source
 
 
 class TestDatamoduleBinding:
@@ -210,15 +128,13 @@ class TestDatamoduleBinding:
             pin_memory=False,
         )
         dm.setup("fit")
-        # the per-stage reader was bound to the ctx-resolved path
+        # the per-stage reader was bound to the InputSamples-resolved path
         assert dm.train_dset is not None
         assert dm.val_dset is not None
         assert len(dm.train_dset) == N_JETS
         assert len(dm.val_dset) == N_JETS
-        # the resolved ctx carries the per-stage pattern keys
-        assert dm._setup_ctx is not None
-        assert dm._setup_ctx.get("source.reader.train.pattern") == str(data["h5"])
-        assert dm._setup_ctx.get("source.reader.val.pattern") == str(data["h5"])
+        assert dm._resolve_source(Mode.FIT) == (str(data["h5"]), -1)
+        assert dm._resolve_source(Mode.VAL) == (str(data["h5"]), -1)
 
     def test_num_cap_applies_from_input_samples(self, data):
         dm = SaltDataModule(
@@ -231,12 +147,12 @@ class TestDatamoduleBinding:
         assert len(dm.train_dset) == 300
         assert len(dm.val_dset) == 400
 
-    def test_input_samples_is_setup_only_not_in_batch_dict(self, data):
+    def test_input_samples_excluded_from_batch_modules(self, data):
         dm = SaltDataModule(
             modules=build_modules_with_input_samples(data), sinks=SINKS, pin_memory=False
         )
-        assert "input_samples" in dm._setup_modules
-        assert "input_samples" not in dm._batch_modules
+        assert "input_samples" in dm.modules
+        assert "input_samples" not in dm.batch_modules
         # and the per-batch compile (via _make_dataset) never sees it
         dm.setup("fit")
         assert "input_samples" not in dm.train_dset.plan.module_names
@@ -257,6 +173,17 @@ class TestDatamoduleBinding:
         with pytest.raises(ConfigError, match="at most one InputSamples"):
             SaltDataModule(modules=modules, sinks=SINKS)
 
+    def test_mixed_explicit_and_legacy_kwarg_is_unconfigured(self, data):
+        """An explicit InputSamples omitting `test` ignores a legacy test_file (G9-03)."""
+        modules = build_modules_with_input_samples(data)
+        modules["input_samples"] = InputSamples(files={"train": data["h5"], "val": data["h5"]})
+        dm = SaltDataModule(modules=modules, test_file=data["h5"], sinks=SINKS, pin_memory=False)
+        assert dm._resolve_source(Mode.TEST) == (None, -1)
+        with pytest.raises(ConfigError, match="no file configured"):
+            dm._make_dataset(Mode.TEST)
+        with pytest.raises(ConfigError, match="No test file specified"):
+            dm.setup("test")
+
 
 # deprecated-alias path (implicit InputSamples) + byte-identity parity
 
@@ -270,9 +197,8 @@ class TestAliasMigrationWindow:
             sinks=SINKS,
             pin_memory=False,
         )
-        # an implicit InputSamples was synthesised into the setup namespace
-        assert "input_samples" in dm._setup_modules
-        assert isinstance(dm._setup_modules["input_samples"], InputSamples)
+        assert isinstance(dm.modules["input_samples"], InputSamples)
+        assert "input_samples" not in dm.batch_modules
         dm.setup("fit")
         assert len(dm.train_dset) == N_JETS
         assert len(dm.val_dset) == N_JETS

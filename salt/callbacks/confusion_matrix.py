@@ -46,8 +46,6 @@ class ConfusionMatrix(Callback):
         self.task_name = task_name
         self.class_names_override = class_names_override
         # resolved at setup
-        self.task_stream: str | None = None
-        self.task_label_name: str | None = None
         self.task_class_names: list[str] = []
         self.requires: tuple[str, ...] = ()
         # per-epoch accumulators
@@ -112,8 +110,6 @@ class ConfusionMatrix(Callback):
         self.pred_labels = []
         modules = getattr(pl_module, "_graph_modules", None)
         stream, label, class_names = self._resolve_task(modules)
-        self.task_stream = stream
-        self.task_label_name = label
         if isinstance(self.class_names_override, dict):
             self.task_class_names = [
                 self.class_names_override.get(name, name) for name in class_names

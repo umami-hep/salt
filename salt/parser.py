@@ -10,6 +10,7 @@ from typing import Any
 from lightning.pytorch.cli import LightningArgumentParser
 
 from salt.graph.errors import ConfigError
+from salt.utils.config_utils import _deep_merge_dicts, expand_includes
 
 # --model.modules.X=null: jsonargparse's SUBCLASS adapter re-emits nested args
 # as "--key=value" strings, so a None value arrives at the inner dict typehint
@@ -62,20 +63,6 @@ def _extract_schedule_cli_overrides(
     return kept, overrides
 
 
-def _deep_merge_dicts(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``over`` onto ``base``: nested dicts merge key-by-key;
-    any scalar / list / ``None`` (the stage-name null-delete idiom, filtered at
-    assembly by `TrainingSchedule.from_config`) replaces.
-    """
-    merged = dict(base)
-    for key, val in over.items():
-        if isinstance(val, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge_dicts(merged[key], val)
-        else:
-            merged[key] = val
-    return merged
-
-
 def _expand_config_includes(args: list[Any]) -> list[Any]:
     """Rewrite every ``--config``/``-c`` value to its include-expanded form.
 
@@ -83,10 +70,6 @@ def _expand_config_includes(args: list[Any]) -> list[Any]:
     before jsonargparse reads the file. Configs without includes are passed
     through untouched.
     """
-    from salt.utils.config_utils import (
-        expand_includes,
-    )  # local import: avoids a parser<->config_utils cycle
-
     out: list[Any] = []
     expect_value = False
     for arg in args:

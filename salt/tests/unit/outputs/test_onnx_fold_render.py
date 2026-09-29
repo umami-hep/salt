@@ -20,7 +20,7 @@ _OVERRIDES = [
     "trainer.logger=false",
 ]
 
-_FOLDED_NODES = ("jet_probs", "track_origin_index", "pbc")
+_FOLDED_NODES = ("jet_probs", "pbc")
 
 
 @pytest.fixture(scope="module")
@@ -70,7 +70,7 @@ def test_export_sink_pruned_from_test_render(fold_cfg):
 def test_fit_val_plan_hash_unchanged_by_folded_onnx_nodes(fold_cfg, mode):
     """FIT/VAL ``plan_hash`` is byte-identical with vs without the folded ONNX nodes."""
     full = _compile(fold_cfg, mode).plan_hash
-    fold_only = {"jet_probs", "track_origin_index", "pbc", "onnx_export"}
+    fold_only = {"jet_probs", "pbc", "onnx_export"}
     base_modules = {k: v for k, v in fold_cfg.modules.items() if k not in fold_only}
     base = compile_plan(
         base_modules,

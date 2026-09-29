@@ -251,12 +251,6 @@ class TrainingController:
         assert self.early_stop_tracker is not None
         return self.early_stop_tracker.check(monitored)
 
-    def mark_pending_early_advance(self) -> None:
-        """Flag that the active (non-final) stage's early-stop has fired — consumed
-        at the next train-epoch-start transition (`next_stage_index_early_stop`).
-        """
-        self.pending_early_advance = True
-
     # -- optimizer --------------------------------------------------------------
 
     def active_optim_config(self) -> tuple[Mapping[str, float], str]:

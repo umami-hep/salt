@@ -22,7 +22,7 @@ from typing import Any
 import yaml
 
 from salt.graph.errors import ConfigError
-from salt.graph.planner import compile_plan, deadcode
+from salt.graph.planner import deadcode
 from salt.graph.render import dot_source
 from salt.graph.spec import Mode
 from salt.schedule import StageConfig, TrainingSchedule
@@ -171,20 +171,12 @@ def _dump_merged_config(fit_args: list[str]) -> str:
     `fit_args`, produced through the real `SaltCLI` parser (run-free, trainer- and
     data-free: ``--print_config`` dumps and exits before any instantiation).
     """
-    import warnings
-
-    from salt.main import SaltCLI
+    from salt.cli import _build_run_free_cli
 
     buffer = io.StringIO()
     try:
-        with (
-            contextlib.redirect_stdout(buffer),
-            warnings.catch_warnings(),
-        ):
-            warnings.filterwarnings(
-                "ignore", message=r".*args parameter is intended to run from within Python.*"
-            )
-            SaltCLI(args=[*fit_args, "--print_config"], run=False)
+        with contextlib.redirect_stdout(buffer):
+            _build_run_free_cli([*fit_args, "--print_config"])
     except SystemExit as err:
         if err.code not in {0, None}:
             raise ConfigError(
@@ -205,7 +197,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     with the stage's frozen mask. A ``.dot`` is always written; each is
     rasterised to ``.png``/``.pdf`` only when `do_plots` is set.
     """
-    from salt.cli import _resolve_widths, load_config
+    from salt.cli import _compile, _resolve_widths, load_config
 
     merged = yaml.safe_load(merged_text)
     schedule = _schedule_from_merged(merged)
@@ -213,14 +205,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     cfg = load_config([str(output_path)])
     if err := cfg.mode_errors.get(Mode.FIT):
         raise ConfigError(f"salt merge-config: the FIT-mode plan does not compile: {err}")
-    plan = compile_plan(
-        cfg.modules,
-        Mode.FIT,
-        cfg.sources,
-        schema=cfg.schema,
-        sinks=cfg.sinks,
-        sink_origins=cfg.sink_origins.get(Mode.FIT),
-    )
+    plan = _compile(cfg, Mode.FIT)
     findings = deadcode(cfg.modules, Mode.FIT, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
     widths = _resolve_widths(cfg)
