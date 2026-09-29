@@ -750,6 +750,17 @@ def get_default_onnx_feature_map(
                 "name_salt": input_name,
                 "is_global": False,
             })
+        # athena calls the calo topo-clusters "clusters" and dispatches on that
+        # name, so the group has to be renamed here. They are always sorted by
+        # descending pt, which needs no suffix of its own.
+        elif "calo" in input_name or "clusters" in input_name:
+            feature_map.append({
+                "name_athena_in": "clusters_r22default",
+                "name_athena_out": "cluster_features",
+                "athena_num_name": "n_clusters",
+                "name_salt": input_name,
+                "is_global": False,
+            })
         # For backwards compatibility, due to mismatching
         # naming convention flow/flows between athena and TDD
         elif input_name == "flow":

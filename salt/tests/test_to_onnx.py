@@ -239,6 +239,18 @@ def test_get_default_onnx_feature_map_covers_special_input_names():
     ]
 
 
+def test_get_default_onnx_feature_map_renames_calo_to_clusters():
+    feature_map = get_default_onnx_feature_map("r22loose", ["jets", "calo"], "jets")
+
+    assert feature_map[1] == {
+        "name_athena_in": "clusters_r22default",
+        "name_athena_out": "cluster_features",
+        "athena_num_name": "n_clusters",
+        "name_salt": "calo",
+        "is_global": False,
+    }
+
+
 def test_default_export_schema_keeps_athena_sequence_inputs(norm_dict_path, feature_map):
     onnx_model = build_onnx_model(norm_dict_path, feature_map)
 
