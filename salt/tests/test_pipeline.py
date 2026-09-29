@@ -310,6 +310,12 @@ def test_gls_weighting(tmp_path) -> None:
     # And this *should* work
     run_combined(tmp_path, "legacy/dips.yaml", train_args=args)
 
+    # As above with a floor under the weights, in a fresh dir as the previous inputs are still open
+    args = ["--model.loss_mode=GLS", "--model.gls_weight_floor=0.5"]
+    floor_path = Path(tmp_path) / "floor"
+    floor_path.mkdir()
+    run_combined(floor_path, "legacy/dips.yaml", train_args=args)
+
 
 def test_dwa_weighting(tmp_path) -> None:
     # Should fail, as we still have weights here

@@ -23,6 +23,7 @@ class _Stub:
     def __init__(self, temperature=2.0, loss_mode="DWA"):
         self.loss_mode = loss_mode
         self.dwa_temperature = temperature
+        self._gls_weights = {}
         self._dwa_prev = {}
         self._dwa_prev2 = {}
         self._dwa_weights = {}
