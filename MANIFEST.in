@@ -1,1 +1,1 @@
-include salt/configs/*.yaml
+recursive-include salt/configs *.yaml

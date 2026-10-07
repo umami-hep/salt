@@ -1,12 +1,19 @@
-# To be used on top of GN3_Hybrid or GN3V00
-# Adds B-jet charge classification task
-name: GN3_Charge
+name: GN3PflowMuonsChargeV00
 
 model:
+  # Lion GLS addition
+  optimizer: lion
+  loss_mode: GLS
+  lrs_config:
+    initial: 2e-8
+    max: 1e-4
+    end: 2e-6
+    pct_start: 0.01
+    weight_decay: 1e-5
+
   model:
     class_path: salt.models.SaltModel
     init_args:
-
       init_nets:
         - input_name: tracks
           dense_config: &init
@@ -33,6 +40,10 @@ model:
           attn_kwargs:
             num_heads: 8
           num_registers: 8
+
+      pool_net:
+        class_path: salt.models.GlobalAttentionPooling
+        init_args: { input_size: *out_dim }
 
       tasks:
         class_path: torch.nn.ModuleList
@@ -106,7 +117,7 @@ model:
                   <<: *task_dense_config
                   output_size: 1
                   activation: *activation
-              # B-jet charge classification task
+            # B-jet charge classification task
             - class_path: salt.models.ClassificationTask
               init_args:
                 name: jets_charge
@@ -121,3 +132,62 @@ model:
                   <<: *task_dense_config
                   output_size: 3
                   input_size: *out_dim
+
+data:
+  input_map:
+    jets: jets
+    tracks: tracks_ghost
+    flows: flows
+  # loose tracks
+  selections: null
+  non_finite_to_num: True
+  variables:
+    jets:
+      - pt_btagJes
+      - eta_btagJes
+    tracks:
+      - d0
+      - z0SinTheta
+      - dphi
+      - deta
+      - qOverP
+      - lifetimeSignedD0Significance
+      - lifetimeSignedZ0SinThetaSignificance
+      - phiUncertainty
+      - thetaUncertainty
+      - qOverPUncertainty
+      - numberOfPixelHits
+      - numberOfSCTHits
+      - numberOfInnermostPixelLayerHits
+      - numberOfNextToInnermostPixelLayerHits
+      - numberOfInnermostPixelLayerSharedHits
+      - numberOfInnermostPixelLayerSplitHits
+      - numberOfPixelSharedHits
+      - numberOfPixelSplitHits
+      - numberOfSCTSharedHits
+      # Soft Muon variables
+      - leptonID
+      - muon_quality
+      - muon_qOverPratio
+      - muon_momentumBalanceSignificance
+      - muon_scatteringNeighbourSignificance
+    flows:
+      - pt
+      - energy
+      - deta
+      - dphi
+      - isCharged
+
+  train_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/pp_output_train.h5
+  val_file: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/pp_output_val.h5
+  norm_dict: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/norm_dict.yaml
+  class_dict: /share/lustre/wlai/datasets/atlas/gn3v00/ghost_high_stat_full/output/class_dict.yaml
+
+  batch_size: 1000
+  num_workers: 20
+
+trainer:
+  max_epochs: 20
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed

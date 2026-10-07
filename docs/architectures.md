@@ -16,9 +16,9 @@ they use.
 | Model | Config | Reference |
 |---|---|---|
 | **GN2** | [`GN2/GN2.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN2/GN2.yaml) | [Transforming jet flavour tagging at ATLAS](https://doi.org/10.1038/s41467-025-65059-6) (Nat. Commun., 2025) |
-| **GN3V00** | [`GN3_dev/GN3_baseline_loose.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3_dev/GN3_baseline_loose.yaml) (approximate dev config) | [GN3: Multi-task, Multi-modal Transformers for Jet Flavour Tagging in ATLAS](https://cds.cern.ch/record/2953652) |
-| **GN3PflowMuonsV00** | [`GN3v01/GN3V00.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3v01/GN3V00.yaml) | [GN3: Multi-task, Multi-modal Transformers for Jet Flavour Tagging in ATLAS](https://cds.cern.ch/record/2953652) |
-| **GN3EPCLV01** | [`GN3EPCLV01.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3EPCLV01.yaml) | [Identification of the charge of heavy-flavour jets using transformers with the ATLAS experiment](https://cds.cern.ch/record/2961896) |
+| **GN3V00** | [`GN3/GN3V00.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3/GN3V00.yaml) | [GN3: Multi-task, Multi-modal Transformers for Jet Flavour Tagging in ATLAS](https://cds.cern.ch/record/2953652) |
+| **GN3PflowMuonsV00** | [`GN3/GN3PflowMuonsV00.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3/GN3PflowMuonsV00.yaml) | [GN3: Multi-task, Multi-modal Transformers for Jet Flavour Tagging in ATLAS](https://cds.cern.ch/record/2953652) |
+| **GN3EPCLV01** | [`GN3/GN3EPCLV01.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/GN3/GN3EPCLV01.yaml) | [Identification of the charge of heavy-flavour jets using transformers with the ATLAS experiment](https://cds.cern.ch/record/2961896) |
 | **ParT** | [`ParticleTransformer/ParT.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/ParticleTransformer/ParT.yaml) | [Particle Transformer for Jet Tagging](https://arxiv.org/abs/2202.03772) (CMS) |
 | **DeParT** | [`ParticleTransformer/DeParT.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/ParticleTransformer/DeParT.yaml) | [Jet tagging using Dynamically Enhanced Particle Transformer](https://cds.cern.ch/record/2878932) (ATLAS) |
 
