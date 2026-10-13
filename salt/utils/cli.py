@@ -511,6 +511,10 @@ class SaltCLI(LightningCLI):
     ) -> list:
         """Load class weights for a classification task from a class-dict YAML.
 
+        The weights of a label are either a list ordered by class index, or a mapping
+        from label value to weight. A mapping is ordered via the task's ``label_map``
+        if given, otherwise the label values are used as class indices.
+
         Parameters
         ----------
         task : JsonNamespace
@@ -527,7 +531,8 @@ class SaltCLI(LightningCLI):
         Raises
         ------
         ValueError
-            If the class dict path is missing, weights already provided, or label is absent.
+            If the class dict path is missing, weights already provided, label is absent,
+            or the class dict does not cover all classes.
         """
         if (class_dict_path := data.class_dict) is None:
             raise ValueError("use_class_dict=True requires class_dict to be specified")
@@ -550,7 +555,26 @@ class SaltCLI(LightningCLI):
                 "Use use_class_dict=False and specify class weights manually."
             )
 
-        return class_dict[input_name][task.init_args.label]
+        weights = class_dict[input_name][task.init_args.label]
+        if isinstance(weights, list):
+            return weights
+
+        label_map = task.init_args.get("label_map") or {label: label for label in weights}
+        # weights scale as 1 / count, so sum the inverse weights of labels merged into one class
+        inv_weights: dict[int, float] = {}
+        for label, class_idx in label_map.items():
+            if int(label) in weights:
+                inv_weights[int(class_idx)] = (
+                    inv_weights.get(int(class_idx), 0) + 1 / weights[int(label)]
+                )
+
+        num_classes = max(int(class_idx) for class_idx in label_map.values()) + 1
+        if missing := [i for i in range(num_classes) if i not in inv_weights]:
+            raise ValueError(
+                f"No class_dict entries for class indices {missing} of {task.init_args.label}. "
+                "Use a label_map to map the label values to class indices."
+            )
+        return [1 / inv_weights[i] for i in range(num_classes)]
 
     @staticmethod
     def get_output_dir_path(default_output_dir_path: str, name: str, log_suffix: str | None) -> str:

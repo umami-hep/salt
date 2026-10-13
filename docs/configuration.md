@@ -489,7 +489,7 @@ All tasks share the [`salt.models.TaskBase`][salt.models.TaskBase] arguments `na
 For [`salt.models.ClassificationTask`][salt.models.ClassificationTask], in addition to the `label`, `label_map` and `class_names` options described [above][remapping-labels]:
 
 - `sample_weight`: name of a per-sample weight label used to weight the loss. Requires the configured loss to use `reduction: none`, see [`regression_weighted.yaml`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/configs/regression/regression_weighted.yaml) for an example with a regression task.
-- `use_class_dict: True`: read the class weights for the loss from the `class_dict` file specified in the data config, instead of hardcoding them via the loss `weight` argument.
+- `use_class_dict: True`: read the class weights for the loss from the `class_dict` file specified in the data config, instead of hardcoding them via the loss `weight` argument. The class dict can store the weights of a label either as a list ordered by class index, or as a mapping from label value to weight. A mapping is ordered via the task's `label_map` if given, so `use_class_dict` also works for labels like `HadronGhostTruthLabelID`. Labels mapped to the same class are combined, e.g. the PDG IDs folded into the classes of a jet charge task, and label values missing from the class dict are skipped.
 
 Regression tasks ([`salt.models.RegressionTask`][salt.models.RegressionTask] and [`salt.models.GaussianRegressionTask`][salt.models.GaussianRegressionTask]) accept one or more `targets` plus at most one of three mutually exclusive target scaling options:
 

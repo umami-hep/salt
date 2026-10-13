@@ -1,6 +1,8 @@
 import pathlib
 
 import pytest
+import yaml
+from jsonargparse import Namespace
 
 from salt.callbacks import SaveConfigCallback
 from salt.data.datamodules import SaltDataModule
@@ -66,3 +68,43 @@ def test_get_best_epoch_negative_loss(tmp_path):
     (ckpt_dir / "epoch=001-loss=-0.25.ckpt").touch()
     best = get_best_epoch(tmp_path / "config.yaml")
     assert best.endswith("epoch=001-loss=-0.25.ckpt")
+
+
+def class_weights_from_dict(tmp_path, weights, label_map=None):
+    cd_path = tmp_path / "class_dict.yaml"
+    cd_path.write_text(yaml.dump({"jets": {"label": weights}}))
+    loss = Namespace(init_args=Namespace(weight=None))
+    task = Namespace(
+        init_args=Namespace(input_name="jets", label="label", label_map=label_map, loss=loss)
+    )
+    data = Namespace(class_dict=str(cd_path), input_map=None)
+    return SaltCLI.get_class_weights_from_class_dict(task, data)
+
+
+def test_class_dict_list(tmp_path):
+    assert class_weights_from_dict(tmp_path, [1.0, 4.0, 2.0]) == [1.0, 4.0, 2.0]
+
+
+def test_class_dict_mapping(tmp_path):
+    weights = class_weights_from_dict(tmp_path, {0: 1.0, 1: 4.0, 2: 2.0})
+    assert weights == pytest.approx([1.0, 4.0, 2.0])
+
+
+def test_class_dict_mapping_label_map(tmp_path):
+    # charge-style task: several PDG IDs per class, 5554 is mapped but not in the class dict
+    weights = class_weights_from_dict(
+        tmp_path,
+        {-5122: 8.0, -511: 2.0, -15: 4.0, 0: 1.0, 15: 4.0, 511: 2.0, 5122: 8.0},
+        label_map={511: 1, -511: 0, 5122: 0, -5122: 1, 5554: 0, 0: 2, 15: 2, -15: 2},
+    )
+    assert weights == pytest.approx([1.6, 1.6, 2 / 3])
+
+
+def test_class_dict_mapping_missing_class(tmp_path):
+    with pytest.raises(ValueError, match="No class_dict entries"):
+        class_weights_from_dict(tmp_path, {0: 1.0, 2: 2.0})
+
+
+def test_class_dict_mapping_label_map_missing_class(tmp_path):
+    with pytest.raises(ValueError, match="No class_dict entries"):
+        class_weights_from_dict(tmp_path, {0: 1.0, 4: 4.0}, label_map={0: 0, 4: 1, 5: 2})
