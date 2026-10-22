@@ -1,7 +1,9 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 import torch
 import yaml
@@ -12,6 +14,7 @@ from salt.models import ClassificationTask, GlobalAttentionPooling, SaltModel
 from salt.modelwrapper import ModelWrapper
 from salt.onnx import to_onnx as to_onnx_module
 from salt.onnx.check import compare_outputs
+from salt.onnx.softmax import decompose_softmax
 from salt.onnx.to_onnx import (
     ONNXModel,
     add_metadata,
@@ -974,3 +977,25 @@ def test_main_raises_when_object_export_has_no_maskformer_config(tmp_path, monke
             "hadrons",
             "--force",
         ])
+
+
+@pytest.mark.parametrize("axis", [-1, 1])
+def test_decompose_softmax_keeps_outputs(axis):
+    graph = helper.make_graph(
+        nodes=[helper.make_node("Softmax", ["x"], ["y"], axis=axis)],
+        name="softmax",
+        inputs=[helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 40, 40])],
+        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 40, 40])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    expected_session = ort.InferenceSession(model.SerializeToString())
+
+    decomposed = decompose_softmax(model)
+    onnx.checker.check_model(decomposed)
+    assert "Softmax" not in {node.op_type for node in decomposed.graph.node}
+
+    x = {"x": np.random.default_rng(42).normal(0, 5, (2, 40, 40)).astype(np.float32)}
+    session = ort.InferenceSession(decomposed.SerializeToString())
+    np.testing.assert_allclose(
+        session.run(None, x)[0], expected_session.run(None, x)[0], rtol=1e-6, atol=1e-7
+    )

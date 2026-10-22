@@ -14,6 +14,7 @@ from salt.models.task import ClassificationTask, mask_fill_flattened
 from salt.models.transformer import change_attn_backends
 from salt.modelwrapper import ModelWrapper
 from salt.onnx.check import compare_outputs
+from salt.onnx.softmax import decompose_softmax
 from salt.utils.configs import MaskformerConfig
 from salt.utils.get_structured_input_dict import get_structured_input_dict
 from salt.utils.union_find import get_node_assignment_jit
@@ -1021,6 +1022,8 @@ def add_metadata(
 ) -> None:
     """Attach training/config metadata and IO schema to the exported ONNX model.
 
+    Softmax nodes are also decomposed, as their onnxruntime kernel depends on the CPU.
+
     Parameters
     ----------
     config_path : Path
@@ -1049,7 +1052,7 @@ def add_metadata(
     print("Adding Metadata...")
 
     # Load and validate the ONNX graph
-    onnx_model = onnx.load(onnx_path)
+    onnx_model = decompose_softmax(onnx.load(onnx_path))
     onnx.checker.check_model(onnx_model)
 
     # Build a metadata dict including paths, hashes, and I/O schema
