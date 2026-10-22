@@ -105,6 +105,7 @@ Please take note of the following considerations when comparing Athena and Pytho
 
 - Models in Athena are evaluated with full precision inputs. Make sure to dump using the TDD at full precision (use the provided flag `--force-full-precision`).
 - Models evaluated in Python are limited to 40 input tracks, whereas models evaluated in Athena have no such limit.
+- The exported model has every Softmax written out as max, exp, sum and divide, because the onnxruntime Softmax gives slightly different results on different CPUs. The outputs agree with PyTorch at the same level as before.
 
 
 Once you have evaluated your model using the TDD, you should use the resulting h5 file to run `salt test`.
