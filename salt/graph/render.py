@@ -47,18 +47,11 @@ def plan_table(plan: Plan) -> str:
     lines = [f"plan [mode={mode.name}] {len(plan.steps)} steps  plan_hash={plan.plan_hash}"]
     index = {step.name: i for i, step in enumerate(plan.steps)}
     for i, step in enumerate(plan.steps, start=1):
-        binding = [
-            (index[edge.producer], edge.key)
-            for edge in plan.edges
-            if edge.consumer == step.name and edge.producer in index
-        ]
-        if binding:
-            latest, _ = max(binding)
-            after = plan.steps[latest].name
-        elif any(e.consumer == step.name and e.producer == SOURCES for e in plan.edges):
-            after = SOURCES
+        producers = [edge.producer for edge in plan.edges if edge.consumer == step.name]
+        if binding := [index[p] for p in producers if p in index]:
+            after = plan.steps[max(binding)].name
         else:
-            after = "(no inputs)"
+            after = SOURCES if SOURCES in producers else "(no inputs)"
         needs = ", ".join(sorted(step.requires)) or "nothing"
         # a wildcard producer narrowed to nothing (e.g. Labels in TEST/ONNX)
         # runs as a no-op and reads no fields — say so, or the step looks
@@ -69,16 +62,14 @@ def plan_table(plan: Plan) -> str:
     narrowed_lines = []
     for step in plan.steps:
         io = step.module.declare_io(mode)
-        declared = io.produces
-        concrete = {key for key in flatten_spec(declared) if not _has_wildcard(key)}
+        concrete = {key for key in flatten_spec(io.produces) if not _has_wildcard(key)}
         # a step's own rewrite keys are declared (not narrowed wildcards) — a
         # rewriter must not be mis-reported as a narrowed wildcard producer
         concrete |= set(flatten_spec(getattr(io, "rewrites", {})))
         if extra := sorted(set(step.produces) - concrete):
             narrowed_lines.append(f"  {step.name}: {', '.join(extra)}")
     if narrowed_lines:
-        lines.append(f"narrowed wildcards [mode={mode.name}]:")
-        lines.extend(narrowed_lines)
+        lines += [f"narrowed wildcards [mode={mode.name}]:", *narrowed_lines]
     lines.append(f"sources: {', '.join(sorted(plan.sources)) or '(none)'}")
     return "\n".join(lines)
 
@@ -102,9 +93,7 @@ def _quote(text: str) -> str:
 
 def _edge_spec(plan: Plan, producer: str, key: str) -> TensorSpec | None:
     """Resolve the `TensorSpec` an edge carries (mirrors `dot_source`'s lookup)."""
-    if producer == SOURCES:
-        return plan.sources.get(key)
-    return plan.step(producer).produces.get(key)
+    return plan.sources.get(key) if producer == SOURCES else plan.step(producer).produces.get(key)
 
 
 # Row font colour for the signature-card rows: the port-card layout has no
@@ -117,6 +106,7 @@ _KIND_COLOURS = {
     "default": "#333333",  # neutral row text
     "shape": "#888888",  # grey shape annotation
 }
+_TABLE_OPEN = '<\n    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">'
 
 
 def _row_colour(key: str, spec: TensorSpec | None) -> str:
@@ -139,10 +129,7 @@ def _is_feature_dim(dim: int | str) -> bool:
     """Whether a shape entry is a symbolic feature dim (resolvable to a width)
     — true for any symbolic family except the data-dependent ``B``/``T``/``L``/``S``.
     """
-    if not is_symbolic_dim(dim):
-        return False
-    family, _ = split_symbolic_dim(str(dim))
-    return family not in _DATA_DIM_FAMILIES
+    return is_symbolic_dim(dim) and split_symbolic_dim(str(dim))[0] not in _DATA_DIM_FAMILIES
 
 
 def _shape_str(key: str, spec: TensorSpec | None, widths: Mapping[str, int] | None) -> str:
@@ -204,11 +191,7 @@ def _card_node(
     if outs:
         rows.append(_card_section("out"))
         rows.extend(_card_row(k, s, c, bold=True) for k, s, c in outs)
-    table = (
-        '<\n    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="4">\n'
-        + "\n".join(rows)
-        + "\n    </TABLE>>"
-    )
+    table = "\n".join([_TABLE_OPEN, *rows, "    </TABLE>>"])
     return f"  {_quote(name)} [label={table}];"
 
 
@@ -268,11 +251,7 @@ def dot_source(
         '  edge [color="#777777", arrowsize=0.8, penwidth=1.3];',
     ]
     if title is not None:
-        lines.extend([
-            '  labelloc="t";',
-            '  fontname="Helvetica";',
-            f"  label={_quote(title)};",
-        ])
+        lines.extend(['  labelloc="t";', '  fontname="Helvetica";', f"  label={_quote(title)};"])
 
     # consumed keys per module: each require edge into the module, with the
     # spec carried by the producing edge (via the _edge_spec lookup).
@@ -294,11 +273,9 @@ def dot_source(
         ins = _rows(consumed.get(step.name, {}).items())
         outs = _rows(step.produces.items())
         cls = type(step.module).__name__
-        if frozen is not None and step.name in frozen:
-            fill = _NS_COLOURS["frozen"]
-            lines.append(_card_node(step.name, step.name, cls, fill, ins, outs, badge="frozen"))
-        else:
-            lines.append(_card_node(step.name, step.name, cls, _module_colour(step), ins, outs))
+        badge = "frozen" if frozen is not None and step.name in frozen else None
+        fill = _NS_COLOURS["frozen"] if badge else _module_colour(step)
+        lines.append(_card_node(step.name, step.name, cls, fill, ins, outs, badge=badge))
     if any(edge.consumer == SINKS for edge in plan.edges):
         lines.append(
             _card_node(SINKS, SINKS, "", "#f5f5f5", _rows(consumed.get(SINKS, {}).items()), [])
@@ -310,13 +287,8 @@ def dot_source(
         # grey dashed border distinguishes a demand-pruned card from a live one
         lines.append(line.replace("];", ", style=dashed, color=grey];"))
 
-    seen: set[tuple[str, str]] = set()
-    for edge in plan.edges:
-        pair = (edge.producer, edge.consumer)
-        if pair in seen:
-            continue
-        seen.add(pair)
-        lines.append(f"  {_quote(edge.producer)} -> {_quote(edge.consumer)};")
+    pairs = dict.fromkeys((edge.producer, edge.consumer) for edge in plan.edges)  # first-seen order
+    lines.extend(f"  {_quote(producer)} -> {_quote(consumer)};" for producer, consumer in pairs)
     lines.append("}")
     return "\n".join(lines) + "\n"
 

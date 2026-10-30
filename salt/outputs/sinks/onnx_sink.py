@@ -209,19 +209,8 @@ class OnnxExportSink(Node):
                 by_key.setdefault(leaf_key, []).append(field)
         leaves: list[OnnxExportLeaf] = []
         for leaf_key, group in by_key.items():
-            if len(group) == 1:
-                field = group[0]
-                leaves.append(
-                    OnnxExportLeaf(
-                        key=leaf_key,
-                        name=field.resolved_onnx_name,
-                        dtype=field.onnx_dtype,
-                        per_token=field.axis == "per_token",
-                        nan_ok=field.nan_ok,
-                    )
-                )
-                continue
-            if any(f.axis == "per_token" for f in group):
+            single = len(group) == 1
+            if not single and any(f.axis == "per_token" for f in group):
                 raise ConfigError(
                     f"OnnxExportSink: leaf {leaf_key!r} declares several ONNX fields including a "
                     "per-token one — a multi-name split leaf is a set of GLOBAL float scalars, so "
@@ -230,9 +219,11 @@ class OnnxExportSink(Node):
             leaves.append(
                 OnnxExportLeaf(
                     key=leaf_key,
-                    names=[str(f.resolved_onnx_name) for f in group],
+                    name=group[0].resolved_onnx_name if single else None,
+                    names=None if single else [str(f.resolved_onnx_name) for f in group],
                     dtype=group[0].onnx_dtype,
-                    nan_ok=all(f.nan_ok for f in group),
+                    per_token=single and group[0].axis == "per_token",
+                    nan_ok=group[0].nan_ok if single else all(f.nan_ok for f in group),
                 )
             )
         return leaves
@@ -282,9 +273,7 @@ class OnnxExportSink(Node):
 
     def _ensure_leaves(self) -> tuple[OnnxExportLeaf, ...]:
         """The resolved export leaves (cached until a manifest source rebinds)."""
-        if self._leaves_resolved:
-            return self._leaves
-        return self._resolve_leaves()
+        return self._leaves if self._leaves_resolved else self._resolve_leaves()
 
     @property
     def leaves(self) -> tuple[OnnxExportLeaf, ...]:
@@ -405,11 +394,11 @@ class OnnxExportSink(Node):
         (split_scalars, combines) carry none.
         """
         prefix = self.resolved_model_name()
-        axes: dict[str, dict[int, str]] = {}
-        for leaf in self._ensure_leaves():
-            if leaf.per_token:
-                axes[f"{prefix}_{leaf.suffixes[0]}"] = {0: f"n_{leaf.stream}"}
-        return axes
+        return {
+            f"{prefix}_{leaf.suffixes[0]}": {0: f"n_{leaf.stream}"}
+            for leaf in self._ensure_leaves()
+            if leaf.per_token
+        }
 
     def named_outputs(self, bundle: Bundle) -> dict[str, Tensor]:
         """Flatten the executed bundle's conversion leaves into named Athena tensors.
@@ -431,9 +420,7 @@ class OnnxExportSink(Node):
             value = bundle.get(leaf.key)
             if leaf.names is not None:
                 # the strict zip is the split-count check (a ValueError in eager eval)
-                for suffix, part in zip(
-                    leaf.names, torch.split(value, 1, -1), strict=True
-                ):  # v1 task.py:301
+                for suffix, part in zip(leaf.names, torch.split(value, 1, -1), strict=True):
                     named[f"{prefix}_{suffix}"] = part.squeeze()
             else:
                 named[f"{prefix}_{leaf.name}"] = value

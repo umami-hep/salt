@@ -10,7 +10,8 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -94,10 +95,7 @@ class CorpusManifest:
     @property
     def group_rows(self) -> list[int]:
         """Total rows per group id."""
-        out = [0] * len(self.group_names)
-        for entry in self.entries:
-            out[entry.group] += entry.n_rows
-        return out
+        return _rows_per_group(self.entries, len(self.group_names))
 
     @property
     def n_rows(self) -> int:
@@ -206,9 +204,8 @@ class CorpusManifest:
         for entry in self.entries:
             if not entry.path:
                 continue
-            p = Path(entry.path)
             try:
-                st = p.stat()
+                st = Path(entry.path).stat()
             except OSError:
                 problems.append(f"missing: {entry.path}")
                 continue
@@ -272,21 +269,10 @@ def build_manifest(reader: Reader, meta: dict[str, Any] | None = None) -> Corpus
     for block, path in zip(blocks, paths, strict=True):
         size, mtime_ns = -1, -1
         if path:
-            try:
+            with suppress(OSError):
                 st = Path(path).stat()
                 size, mtime_ns = st.st_size, st.st_mtime_ns
-            except OSError:
-                pass
-        entries.append(
-            ManifestEntry(
-                group=block.group,
-                start=block.start,
-                stop=block.stop,
-                path=path,
-                size=size,
-                mtime_ns=mtime_ns,
-            )
-        )
+        entries.append(ManifestEntry(block.group, block.start, block.stop, path, size, mtime_ns))
     return CorpusManifest(
         entries=entries,
         group_names=names,
@@ -321,9 +307,7 @@ def apply_schema(manifest: CorpusManifest, reader: Reader) -> bool:
     if not manifest.schema or getattr(reader, "schema", None) is not None:
         return False
     reader.schema = Schema(
-        groups={
-            stream: GroupSchema(fields=dict(fields)) for stream, fields in manifest.schema.items()
-        }
+        groups={s: GroupSchema(fields=dict(f)) for s, f in manifest.schema.items()}
     )
     return True
 
@@ -415,3 +399,11 @@ def _block_paths(reader: Reader, blocks: list[RowBlock]) -> list[str]:
         }
         return [by_group[b.group].get(b.start, "") for b in blocks]
     return ["" for _ in blocks]
+
+
+def _rows_per_group(blocks: Iterable[RowBlock | ManifestEntry], n_groups: int) -> list[int]:
+    """Total ``n_rows`` per group id over exactly `n_groups` groups (length set by the caller)."""
+    out = [0] * n_groups
+    for block in blocks:
+        out[block.group] += block.n_rows
+    return out

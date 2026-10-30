@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from typing import Any
 
 import torch
@@ -12,9 +11,8 @@ from torch import Tensor
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.graph.spec import IO, Mode, TensorSpec
 from salt.model.bind import ResolvedSchema
-from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import (
     _checked_weight_source,
     _loss_class,
@@ -122,36 +120,10 @@ class ClassificationTaskModule(_TaskModuleBase):
         are TRAINING-only.
         """
         del mode
-        n_classes = len(self.class_names)
-        width = sym_dim("D", self.name)
-        if self.sequence:
-            input_spec = TensorSpec(shape=("B", _stream_len(self.stream), width), dtype="float32")
-            label_spec = TensorSpec(
-                shape=("B", _stream_len(self.stream)),
-                dtype="int64",
-                kind="label",
-                modes=Mode.TRAINING,
-            )
-            pred_spec = TensorSpec(
-                shape=("B", _stream_len(self.stream), n_classes), dtype="float32"
-            )
-        else:
-            input_spec = TensorSpec(shape=("B", width), dtype="float32")
-            label_spec = TensorSpec(shape=("B",), dtype="int64", kind="label", modes=Mode.TRAINING)
-            pred_spec = TensorSpec(shape=("B", n_classes), dtype="float32")
-        requires: dict[str, TensorSpec] = {self.input_key: input_spec}
-        if self.context is not None:
-            requires[self.context] = TensorSpec(shape=None, dtype="float32")
-        if self.has_pad_mask:
-            requires[f"masks.{self.stream}"] = TensorSpec(
-                shape=("B", _stream_len(self.stream)), dtype="bool", kind="pad_mask"
-            )
-        requires[self.label_key] = label_spec
-        produces: dict[str, TensorSpec] = {
-            self.pred_key: self._pred_spec(pred_spec),
-            self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
-        }
-        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+        label = TensorSpec(shape=self._tokens, dtype="int64", kind="label", modes=Mode.TRAINING)
+        return self._head_io(
+            label_specs={self.label_key: label}, pred_shape=(*self._tokens, len(self.class_names))
+        )
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Builds the head; when `weight_source` is set, allocates a ones-initialised
@@ -210,12 +182,12 @@ class ClassificationTaskModule(_TaskModuleBase):
         path = self.weight_source["from_class_dict"]
         with open(path) as fh:
             class_dict = yaml.safe_load(fh)
-        key = self._class_dict_key
         try:
-            values = class_dict[key][self.label]
+            values = class_dict[self._class_dict_key][self.label]
         except (KeyError, TypeError):
             raise ValueError(
-                f"Label {self.label!r} for stream {self.stream!r} (class-dict key {key!r}) "
+                f"Label {self.label!r} for stream {self.stream!r} "
+                f"(class-dict key {self._class_dict_key!r}) "
                 f"not found in class dict {path} — drop weight_source and specify class "
                 f"weights manually (cli.py:483-488 semantics)"
             ) from None
@@ -263,33 +235,22 @@ class ClassificationTaskModule(_TaskModuleBase):
         """``["masks.<stream>"]`` for a padded seq head, plus the task's label key in
         TEST when ``write_targets`` (never in ONNX).
         """
-        # has_pad_mask already implies sequence, so this covers all three cases:
-        # global [] / no-pad-mask seq [] / padded seq [masks.<stream>]
-        deps: list[str] = [f"masks.{self.stream}"] if self.has_pad_mask else []
-        if self._emit_targets(mode):
-            deps.append(self.label_key)
-        return deps
+        return self._output_deps(mode, [self.label_key])
 
-    def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
-        """Global head: sigmoid (BCE) or softmax, one ``f4`` field per class (ONNX squeezes to
+    def _output_values(self, b: Bundle, mode: Mode) -> list[Tensor]:
+        """Global head: `run_inference` probs, one ``f4`` field per class (ONNX squeezes to
         rank-0 scalars). Sequence head: masked softmax, one ``f4`` field per class in H5 modes;
         ONNX instead emits a single int8 argmax field named ``pascal_case(name)``.
         """
         assert self.net is not None, "get_output before bind()"
-        fields = self.get_output_manifest(mode, run_name)
         logits = b.get(self.pred_key)
+        classes = range(len(self.class_names))
         if not self.sequence:
-            if isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
-                probs = torch.sigmoid(logits)
-            else:
-                assert logits.ndim == 2, "global classification head expects [B, C] logits"
-                probs = torch.softmax(logits, dim=-1)
+            probs = self.run_inference(logits)
             # ONNX sink squeezes [1, C] per-class columns to rank-0 scalars; H5
             # sink packs the full [B] column, so only squeeze in ONNX mode
-            squeeze_global = bool(mode & Mode.ONNX)
             values = [
-                probs[..., c].squeeze() if squeeze_global else probs[..., c]
-                for c, _ in enumerate(self.class_suffixes)
+                probs[..., c].squeeze() if mode & Mode.ONNX else probs[..., c] for c in classes
             ]
         else:
             mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
@@ -297,17 +258,16 @@ class ClassificationTaskModule(_TaskModuleBase):
             if mode & Mode.ONNX:
                 # zero-row append/strip -> [L] int8 argmax leaf under the pascal-case task name
                 padded = torch.concatenate([probs, torch.zeros((1, 1, probs.shape[-1]))], dim=1)
-                index = torch.argmax(padded, dim=-1)[:, :-1].squeeze(0).char()
-                values = [index]
+                values = [torch.argmax(padded, dim=-1)[:, :-1].squeeze(0).char()]
             else:
                 # H5-only: the ONNX side of a seq head is the argmax leaf above, not the
                 # manifest's per-class fields. Callers MUST select ONNX outputs by calling
                 # with mode=Mode.ONNX, not by scanning resolved_onnx_name — these fields
                 # fall back to a (misleading) per-class ONNX suffix since onnx_name=None.
-                values = [probs[..., c] for c, _ in enumerate(self.class_suffixes)]
+                values = [probs[..., c] for c in classes]
         if self._emit_targets(mode):
             values.append(self._consumed_labels(b))
-        return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
+        return values
 
     def _consumed_labels(self, b: Bundle) -> Tensor:
         """The class label exactly as the loss consumes it (`forward`'s training
@@ -332,28 +292,11 @@ class ClassificationTaskModule(_TaskModuleBase):
         fields from this list via ``replace(field, value=...)``.
         """
         del run_name
-        if not self.sequence:
-            fields = [
-                OutputField(h5_name=px, dtype="f4", axis="global", final=True)
-                for px in self.class_suffixes
-            ]
-            if self._emit_targets(mode):
-                fields.append(self._target_field("per_token" if self.sequence else "global"))
-            return fields
-        if mode & Mode.ONNX:
-            return [
-                OutputField(
-                    h5_name=None,
-                    onnx_name=pascal_case(self.name),
-                    dtype="int8",
-                    axis="per_token",
-                    final=True,
-                )
-            ]
-        fields = [
-            OutputField(h5_name=px, onnx_name=None, dtype="f4", axis="per_token", final=True)
-            for px in self.class_suffixes
-        ]
+        if self.sequence and mode & Mode.ONNX:
+            name = pascal_case(self.name)
+            return [OutputField(None, onnx_name=name, dtype="int8", axis="per_token", final=True)]
+        axis = "per_token" if self.sequence else "global"
+        fields = [OutputField(px, dtype="f4", axis=axis, final=True) for px in self.class_suffixes]
         if self._emit_targets(mode):
-            fields.append(self._target_field("per_token" if self.sequence else "global"))
+            fields += self._target_fields("i4")
         return fields

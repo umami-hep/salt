@@ -148,9 +148,7 @@ class TrainingController:
         ConfigError
             A stage declares `early_stop` but ``trainer.limit_val_batches == 0``.
         """
-        if not self.schedule.has_early_stop:
-            return
-        if getattr(trainer, "limit_val_batches", 1) == 0:
+        if self.schedule.has_early_stop and getattr(trainer, "limit_val_batches", 1) == 0:
             raise ConfigError(
                 "training_schedule declares an 'early_stop' stage but the trainer has validation "
                 "disabled (limit_val_batches=0) — early stopping is evaluated on validation-epoch "
@@ -182,10 +180,7 @@ class TrainingController:
         """
         frozen = self.schedule.frozen_names(stage)
         apply_stage_freeze(
-            self.net,
-            frozen,
-            self.frozen_module_names,
-            reducer_safe=self.reducer_safe_freeze,
+            self.net, frozen, self.frozen_module_names, reducer_safe=self.reducer_safe_freeze
         )
         self.frozen_module_names = frozen
 
@@ -223,10 +218,8 @@ class TrainingController:
         idx = self.current_stage_index
         if idx >= len(self.schedule.stages) - 1:
             return idx
-        stage = self.schedule.stages[idx]
-        cap_reached = stage.epochs is not None and (current_epoch - self.stage_start_epoch) >= (
-            stage.epochs
-        )
+        epochs = self.schedule.stages[idx].epochs
+        cap_reached = epochs is not None and current_epoch - self.stage_start_epoch >= epochs
         return idx + 1 if (self.pending_early_advance or cap_reached) else idx
 
     def evaluate_early_stop(self, monitored: float | None) -> bool:
@@ -293,9 +286,8 @@ class TrainingController:
         max_epochs = trainer.max_epochs
         steps_per_epoch = max(1, round(total / max_epochs))
         index = self.current_stage_index
-        is_final = index == len(self.schedule.stages) - 1
         stage = self.schedule.stages[index]
-        if is_final:
+        if index == len(self.schedule.stages) - 1:  # the final stage
             budget_epochs = max_epochs - self.stage_start_epoch
         else:
             assert stage.epochs is not None  # non-final stages require epochs

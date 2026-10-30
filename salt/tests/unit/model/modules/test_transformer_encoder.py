@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from salt.model.modules import (
     BindError,
     TransformerEncoder,
 )
+from salt.model.nn.attention import Attention, EdgeAttention
+from salt.model.nn.transformer import Transformer
 from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 
@@ -238,3 +241,26 @@ class TestDerivedWidthsFixpoint:
             _apply_derived_widths(
                 [SimpleNamespace(steps=(PlanStep(name="clash", module=_Mod()),))], widths
             )
+
+
+class TestSetBackend:
+    def test_edge_attention_set_backend_warns_and_returns(self):
+        attn = EdgeAttention(embed_dim=16, edge_embed_dim=8, num_heads=2)
+        with pytest.warns(UserWarning, match="EdgeAttention does not support different backends"):
+            out = attn.set_backend("torch-flash")
+        assert out == "torch-flash"
+
+    def test_edge_transformer_set_backend_warns_not_raises(self):
+        tf = Transformer(num_layers=2, embed_dim=16, edge_embed_dim=8, attn_kwargs={"num_heads": 2})
+        assert all(isinstance(layer.attn.fn, EdgeAttention) for layer in tf.layers)
+        with pytest.warns(UserWarning, match="EdgeAttention does not support different backends"):
+            tf.set_backend("torch-math")
+        assert tf.attn_type == "torch-math"
+
+    def test_plain_transformer_set_backend_no_warning(self):
+        tf = Transformer(num_layers=2, embed_dim=16, edge_embed_dim=0, attn_kwargs={"num_heads": 2})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            tf.set_backend("torch-math")
+        assert tf.attn_type == "torch-math"
+        assert all(type(layer.attn.fn) is Attention for layer in tf.layers)

@@ -239,13 +239,11 @@ class RunTaskOutput(OutputSectionWriter):
         """
         if not self.runs_in_mode(mode):
             return []
-        out: list[tuple[str, OutputField]] = []
-        for task in self._resolved_tasks().values():
-            out.extend(
-                (self.field_leaf_key(task, field), field)
-                for field in task.get_output_manifest(mode, "salt")
-            )
-        return out
+        return [
+            (self.field_leaf_key(task, field), field)
+            for task in self._resolved_tasks().values()
+            for field in task.get_output_manifest(mode, "salt")
+        ]
 
     # marker for the dumb-sink discovery (a RunTaskOutput section writer)
     def is_run_task_output(self) -> bool:

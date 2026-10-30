@@ -8,17 +8,16 @@ import os
 import warnings
 from collections.abc import Mapping
 from dataclasses import replace
-from difflib import get_close_matches
 from typing import Any
 
 import numpy as np
 import torch
 from torch.utils.data import get_worker_info
 
-from salt.data.base import Reader, SaltDatasetModule, WorkerCtx
+from salt.data.base import Reader, SaltDatasetModule, WorkerCtx, _nearest_hint
 from salt.data.processors.labels import Labels
 from salt.graph.bundle import Bundle
-from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, MutationError, SchemaError
+from salt.graph.errors import ConfigError, MutationError, SchemaError
 from salt.graph.executor import canonical_produced
 from salt.graph.planner import Plan, Sinks, compile_plan
 from salt.graph.spec import KEY_SEP, Mode, TensorSpec
@@ -135,14 +134,8 @@ class _PlanRunner:
         self._read_fields: dict[str, dict[str, str]] = self._collect_read_fields()
         self._bound_pid: int | None = None
         self._exec_steps = tuple(
-            (
-                step.name,
-                step.module,
-                isinstance(step.module, Reader),
-                set(step.produces),
-                set(step.rewrites),
-            )
-            for step in self._plan.steps
+            (s.name, s.module, isinstance(s.module, Reader), set(s.produces), set(s.rewrites))
+            for s in self._plan.steps
         )
         # dedupe by key, keeping the LAST occurrence in plan order — a
         # rewritten key (e.g. masks.<stream>) converts once, using the
@@ -184,10 +177,7 @@ class _PlanRunner:
                 for field in spec.fields:
                     if field in gschema.fields:
                         continue
-                    near = get_close_matches(
-                        field, sorted(gschema.fields), n=3, cutoff=SUGGESTION_CUTOFF
-                    )
-                    hint = f"; nearest: {', '.join(near)}" if near else ""
+                    hint = _nearest_hint(field, gschema.fields)
                     raise SchemaError(
                         f"field {field!r} demanded by module {step.name!r} not present in "
                         f"the schema for stream {parts[1]!r}{hint}"
@@ -203,8 +193,7 @@ class _PlanRunner:
         origins = self._sink_origins or {}
         out: dict[str, dict[str, str]] = {}
         for step in self._plan.steps:
-            collector = getattr(step.module, "read_fields", None)
-            if collector is None:
+            if (collector := getattr(step.module, "read_fields", None)) is None:
                 continue
             for stream, fields in collector(step).items():
                 bucket = out.setdefault(stream, {})

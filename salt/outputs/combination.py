@@ -46,12 +46,7 @@ class Combination(SaltModelModule):
         a negative/non-int channel index.
     """
 
-    def __init__(
-        self,
-        source: str,
-        name: str,
-        terms: Mapping[int, float],
-    ) -> None:
+    def __init__(self, source: str, name: str, terms: Mapping[int, float]) -> None:
         super().__init__()
         parts = split_key(source)
         check_output_key(source, "Combination source")
@@ -95,14 +90,7 @@ class Combination(SaltModelModule):
         """
         if not (mode & Mode.ONNX):
             return []
-        field = OutputField(
-            h5_name=None,
-            onnx_name=self.output_name,
-            dtype="f4",
-            axis="global",
-            final=True,
-        )
-        return [(self.output_key, field)]
+        return [(self.output_key, OutputField(h5_name=None, onnx_name=self.output_name))]
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """The combination collapses the source last dim to a single scalar column (width 1)."""
@@ -113,5 +101,4 @@ class Combination(SaltModelModule):
         """Compute ``sum(scale * source[..., index])`` over `terms`, in declared order."""
         del mode
         source = b.get(self.source)
-        out = sum(scale * source[..., index] for index, scale in self.terms)
-        return {self.output_key: out}
+        return {self.output_key: sum(scale * source[..., index] for index, scale in self.terms)}

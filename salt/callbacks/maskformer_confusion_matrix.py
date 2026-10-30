@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import torch
 from lightning import Callback, LightningModule, Trainer
-from lightning.pytorch.loggers.comet import CometLogger
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch import Tensor
 
-from salt.callbacks.confusion_matrix import ConfusionMatrix
+from salt.callbacks.confusion_matrix import _flush_epoch
 from salt.graph.bundle import Bundle
 
 
@@ -84,8 +82,7 @@ class MaskformerConfusionMatrix(Callback):
         del trainer, pl_module
         if stage != "fit":
             return
-        self.truth_labels = []
-        self.pred_labels = []
+        self.truth_labels, self.pred_labels = [], []
 
     def on_validation_batch_end(
         self,
@@ -113,22 +110,8 @@ class MaskformerConfusionMatrix(Callback):
         if not self.truth_labels:
             return
         if trainer.current_epoch % self.log_every_n_epochs != 0:
-            self.truth_labels = []
-            self.pred_labels = []
+            self.truth_labels, self.pred_labels = [], []
             return
         n_classes = len(self.class_names) if self.class_names is not None else self._num_classes
         labels = self.class_names or [str(i) for i in range(n_classes)]
-        self.last_truth_labels = self.truth_labels
-        self.last_pred_labels = self.pred_labels
-        self.last_matrix, _ = ConfusionMatrix.confusion_counts(
-            self.truth_labels, self.pred_labels, n_classes
-        )
-        if isinstance(trainer.logger, CometLogger):
-            trainer.logger.experiment.log_confusion_matrix(
-                y_true=torch.cat(self.truth_labels).tolist(),
-                y_predicted=torch.cat(self.pred_labels).tolist(),
-                labels=labels,
-                epoch=trainer.current_epoch,
-            )
-        self.truth_labels = []
-        self.pred_labels = []
+        _flush_epoch(self, trainer, n_classes, labels, as_lists=True)

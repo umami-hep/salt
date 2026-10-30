@@ -12,8 +12,6 @@ from salt.graph.spec import KEY_SEP, check_key_component, split_key
 
 __all__ = ["Bundle"]
 
-_MISSING = object()
-
 
 class Bundle:
     """Nested dict of tensors with dotted-path access and write-once semantics.
@@ -50,9 +48,8 @@ class Bundle:
         than a leaf, or descends through an existing leaf.
         """
         split_key(key)
-        value = self._leaves.get(key, _MISSING)
-        if value is not _MISSING:
-            return value
+        if key in self._leaves:
+            return self._leaves[key]
         if key in self._nodes:
             raise KeyError(f"bundle key {key!r} is a subtree, not a leaf; use subtree()")
         blocker = self._leaf_prefix_of(key)
@@ -138,26 +135,23 @@ class Bundle:
                 f"module {who!r} declares overwrite keys not in its expected produces: "
                 f"{sorted(overwrite_set - expected_set)}"
             )
-        flat = _flatten_produced(produced, expected_set, prefix="")
+        flat = _flatten_produced(produced, expected_set, who)
         got = set(flat)
         if got != expected_set:
-            missing = sorted(expected_set - got)
-            extra = sorted(got - expected_set)
             raise DeclarationError(
                 f"module {who!r} returned keys that do not match its declared produces: "
-                f"missing={missing} unexpected={extra}"
+                f"missing={sorted(expected_set - got)} unexpected={sorted(got - expected_set)}"
             )
         # Pre-check every key before inserting any, so a collision leaves the
         # bundle untouched. Keys within one merge cannot collide with each
         # other (they come from a single nested dict).
         for key in flat:
-            if key in overwrite_set:
-                if key not in self._leaves:
-                    raise DeclarationError(
-                        f"module {who!r} rewrites {key!r} but it is not present in the bundle"
-                    )
-            else:
+            if key not in overwrite_set:
                 self._check_writable(key, who=who)
+            elif key not in self._leaves:
+                raise DeclarationError(
+                    f"module {who!r} rewrites {key!r} but it is not present in the bundle"
+                )
         for key, value in flat.items():
             self._insert(tuple(key.split(KEY_SEP)), key, value)
 
@@ -211,7 +205,9 @@ class Bundle:
             self._nodes.add(KEY_SEP.join(parts[:depth]))
 
 
-def _flatten_produced(produced: dict[str, Any], expected: set[str], prefix: str) -> dict[str, Any]:
+def _flatten_produced(
+    produced: dict[str, Any], expected: AbstractSet[str], who: str, dotted: bool = False
+) -> dict[str, Any]:
     """Flatten a produced nested dict to dotted keys, guided by the declaration.
 
     A dict value whose dotted path is itself in `expected` is a declared
@@ -219,13 +215,38 @@ def _flatten_produced(produced: dict[str, Any], expected: set[str], prefix: str)
     are treated as structure and descended for precise mismatch reporting.
     Empty undeclared dicts are recorded as leaves so they surface as
     unexpected keys rather than vanishing silently.
+
+    ``dotted=False`` (`Bundle.merge`): every key must be a single component
+    (`check_key_component`'s TypeError/ValueError). ``dotted=True``
+    (`salt.graph.executor.canonical_produced`): dotted keys are accepted at any
+    nesting level; non-string/malformed keys, or a key produced more than once,
+    raise `DeclarationError`.
     """
     flat: dict[str, Any] = {}
-    for name, value in produced.items():
-        check_key_component(name)
-        key = f"{prefix}{KEY_SEP}{name}" if prefix else name
-        if key in expected or not isinstance(value, dict) or not value:
-            flat[key] = value
-        else:
-            flat.update(_flatten_produced(value, expected, prefix=key))
+
+    def walk(tree: dict[str, Any], prefix: str) -> None:
+        for name, value in tree.items():
+            if not dotted:
+                check_key_component(name)
+            elif not isinstance(name, str):
+                raise DeclarationError(f"module {who!r} returned a non-str produced key {name!r}")
+            key = f"{prefix}{KEY_SEP}{name}" if prefix else name
+            if dotted:
+                try:
+                    split_key(key)
+                except (TypeError, ValueError) as err:
+                    raise DeclarationError(
+                        f"module {who!r} returned an invalid produced key {key!r}: {err}"
+                    ) from err
+            if isinstance(value, dict) and value and key not in expected:
+                walk(value, key)
+            elif key in flat:
+                raise DeclarationError(
+                    f"module {who!r} returned key {key!r} more than once (e.g. both nested and "
+                    "dotted spellings) (write-once)"
+                )
+            else:
+                flat[key] = value
+
+    walk(produced, "")
     return flat

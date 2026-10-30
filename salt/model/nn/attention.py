@@ -67,13 +67,6 @@ def merge_masks(
     return mask
 
 
-def repeat_kv(keys: Tensor, values: Tensor, repeats: int, dim: int) -> tuple[Tensor, Tensor]:
-    """Repeat keys and values along a dimension."""
-    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
-    values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
-    return keys, values
-
-
 def projection_packed(
     q: Tensor,
     kv: Tensor | None,
@@ -114,6 +107,78 @@ def torch_attn(
         )
 
 
+def _init_packed_mha(
+    mod: nn.Module,
+    embed_dim: int,
+    num_heads: int,
+    dropout: float,
+    bias: bool,
+    do_qk_norm: bool,
+    do_v_norm: bool,
+    mup: bool,
+) -> None:
+    """Set up the shared `Attention`/`EdgeAttention` attributes, norms and projections.
+
+    Head geometry, optional q/k/v RMSNorms, packed QKV + out projection. Registration order
+    (norms, ``in_proj_weight``, ``in_proj_bias``, ``out_proj``) is the ``state_dict`` key order
+    and the ``nn.Linear`` RNG draw order — keep it.
+    """
+    mod.embed_dim = embed_dim
+    mod.num_heads = num_heads
+    mod.head_dim = embed_dim // num_heads
+    mod.dropout = dropout
+    mod.bias = bias
+    mod.do_qk_norm = do_qk_norm
+    mod.do_v_norm = do_v_norm
+    mod.mup = mup
+    mod.scale = 1 / mod.head_dim if mup else 1 / math.sqrt(mod.head_dim)
+    if do_qk_norm:
+        mod.q_norm = RMSNorm(mod.head_dim)
+        mod.k_norm = RMSNorm(mod.head_dim)
+    if do_v_norm:
+        mod.v_norm = RMSNorm(mod.head_dim)
+    # packed QKV projection: better parallelism for self-attention than 3 separate Linears
+    mod.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+    mod.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
+    mod.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+
+def _reset_in_proj(mod: nn.Module) -> None:
+    """Init the packed QKV projection (muP: https://arxiv.org/abs/2203.03466) and zero its bias."""
+    if mod.mup:
+        nn.init.normal_(mod.in_proj_weight, mean=0.0, std=1.0 / mod.head_dim**0.5)  # K,V proj
+        nn.init.constant_(mod.in_proj_weight[: mod.embed_dim, :], 0.0)  # Q projection
+    else:
+        nn.init.xavier_uniform_(mod.in_proj_weight)
+    if mod.bias:
+        nn.init.constant_(mod.in_proj_bias, 0.0)
+
+
+def _qkv_heads(
+    mod: nn.Module,
+    x: Tensor,
+    b: int,
+    kv: Tensor | None,
+    mask: BoolTensor | None,
+    kv_mask: BoolTensor | None,
+    attn_mask: BoolTensor | None,
+) -> tuple[Tensor, Tensor, Tensor, BoolTensor | None]:
+    """Project to per-head ``[B, H, L, D_h]`` q/k/v (+ q/k/v norms); merge the sender mask."""
+    q, k, v = projection_packed(x, kv, mod.in_proj_weight, mod.in_proj_bias)
+
+    shape = (b, -1, mod.num_heads, mod.head_dim)
+    q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
+
+    if mod.do_qk_norm:
+        q = mod.q_norm(q)
+        k = mod.k_norm(k)
+    if mod.do_v_norm:
+        v = mod.v_norm(v)
+
+    s_mask = mask if kv is None else kv_mask  # who is sending, x or kv
+    return q, k, v, merge_masks(s_mask, attn_mask, q.shape)
+
+
 class Attention(nn.Module):
     """Multihead attention: packed QKV projection, switchable backend, optional Q/K/V norms.
 
@@ -135,29 +200,8 @@ class Attention(nn.Module):
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
         assert attn_type in ATTN_TYPES, "Invalid attention type!"
-
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.dropout = dropout
-        self.bias = bias
         self.attn_type = attn_type
-        self.do_qk_norm = do_qk_norm
-        self.do_v_norm = do_v_norm
-        self.mup = mup
-
-        self.scale = 1 / self.head_dim if mup else 1 / math.sqrt(self.head_dim)
-
-        if self.do_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-        if self.do_v_norm:
-            self.v_norm = RMSNorm(self.head_dim)
-
-        # packed QKV projection: better parallelism for self-attention than 3 separate Linears
-        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
-        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        _init_packed_mha(self, embed_dim, num_heads, dropout, bias, do_qk_norm, do_v_norm, mup)
         self.reset_parameters()
         self.set_backend(attn_type)
 
@@ -178,20 +222,13 @@ class Attention(nn.Module):
 
     def reset_parameters(self) -> None:
         """Initialize the parameters."""
-        if self.mup:
-            # muP init: https://arxiv.org/abs/2203.03466
-            nn.init.normal_(self.in_proj_weight, mean=0.0, std=1.0 / self.head_dim**0.5)  # K,V proj
-            nn.init.constant_(self.in_proj_weight[: self.embed_dim, :], 0.0)  # Q projection
-            nn.init.normal_(self.out_proj.weight, std=(1.0 / self.embed_dim) ** 0.5)  # Output proj
-            if self.bias:
-                nn.init.constant_(self.in_proj_bias, 0.0)
-                nn.init.constant_(self.out_proj.bias, 0.0)
+        _reset_in_proj(self)
+        if not self.mup:
+            self.out_proj.reset_parameters()
             return
-
-        nn.init.xavier_uniform_(self.in_proj_weight)
-        self.out_proj.reset_parameters()
+        nn.init.normal_(self.out_proj.weight, std=(1.0 / self.embed_dim) ** 0.5)  # Output proj
         if self.bias:
-            nn.init.constant_(self.in_proj_bias, 0.0)
+            nn.init.constant_(self.out_proj.bias, 0.0)
 
     def _flash_forward(self, x: Tensor, culens: Tensor, maxlen: int) -> Tensor:
         """FlashAttention backend; returns ``[N_total, D]``."""
@@ -219,23 +256,10 @@ class Attention(nn.Module):
     ) -> Tensor:
         """Attention using PyTorch SDPA backends; returns ``[B, L_q, D]``."""
         b, s, d = x.shape
-
-        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
-
-        shape = (b, -1, self.num_heads, self.head_dim)
-        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
-
-        if self.do_qk_norm:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-        if self.do_v_norm:
-            v = self.v_norm(v)
-
-        s_mask = mask if kv is None else kv_mask  # Who is sending, x or kv
-        mask = merge_masks(s_mask, attn_mask, q.shape)
+        q, k, v, merged = _qkv_heads(self, x, b, kv, mask, kv_mask, attn_mask)
         dropout = self.dropout if self.training else 0.0
         a_out = torch_attn(
-            q, k, v, mask, dropout=dropout, softmax_scale=self.scale, backend=self.attn_type
+            q, k, v, merged, dropout=dropout, softmax_scale=self.scale, backend=self.attn_type
         )
 
         a_out = a_out.transpose(1, 2).contiguous().view(b, s, d)
@@ -284,31 +308,10 @@ class EdgeAttention(nn.Module):
     ) -> None:
         super().__init__()
         assert embed_dim % num_heads == 0, "Dim not div by the number of heads!"
-
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
         self.edge_embed_dim = edge_embed_dim
         self.edge_head_dim = edge_embed_dim // num_heads
-        self.dropout = dropout
-        self.bias = bias
-        self.do_qk_norm = do_qk_norm
-        self.do_v_norm = do_v_norm
         self.update_edges = update_edges
-        self.mup = mup
-
-        self.scale = 1 / self.head_dim if mup else 1 / math.sqrt(self.head_dim)
-
-        if self.do_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-        if self.do_v_norm:
-            self.v_norm = RMSNorm(self.head_dim)
-
-        # packed QKV projection: better parallelism for self-attention than 3 separate Linears
-        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
-        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim)) if bias else None
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        _init_packed_mha(self, embed_dim, num_heads, dropout, bias, do_qk_norm, do_v_norm, mup)
 
         self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
         self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
@@ -327,33 +330,16 @@ class EdgeAttention(nn.Module):
         return attn_type
 
     def reset_parameters(self) -> None:
-        """Initialize the parameters."""
-        if self.mup:
-            # muP init: https://arxiv.org/abs/2203.03466
-            nn.init.normal_(self.in_proj_weight, mean=0.0, std=1.0 / self.head_dim**0.5)  # K,V proj
-            nn.init.constant_(self.in_proj_weight[: self.embed_dim, :], 0.0)  # Q projection
-            linear_layers = [self.out_proj]
-            nn.init.normal_(self.linear_e.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
-            nn.init.normal_(self.linear_g.weight, std=(1.0 / self.edge_embed_dim) ** 0.5)
-            linear_layers.extend([self.linear_e, self.linear_g])
-            if self.update_edges:
-                nn.init.normal_(self.linear_e_out.weight, std=(1.0 / self.num_heads) ** 0.5)
-                linear_layers.append(self.linear_e_out)
-            if self.bias:
-                nn.init.constant_(self.in_proj_bias, 0.0)
-                for layer in linear_layers:
-                    nn.init.constant_(layer.bias, 0.0)
-            return
-
-        nn.init.xavier_uniform_(self.in_proj_weight)
-        if self.bias:
-            nn.init.constant_(self.in_proj_bias, 0.0)
-
+        """Initialize the parameters (muP keeps the ``out_proj`` weight at its default init)."""
+        _reset_in_proj(self)
         layers = [self.linear_e, self.linear_g, self.out_proj]
         if self.update_edges:
             layers.append(self.linear_e_out)
         for layer in layers:
-            layer.reset_parameters()
+            if not self.mup:
+                layer.reset_parameters()
+            elif layer is not self.out_proj:
+                nn.init.normal_(layer.weight, std=(1.0 / layer.in_features) ** 0.5)
             if self.bias:
                 nn.init.constant_(layer.bias, 0.0)
 
@@ -371,19 +357,7 @@ class EdgeAttention(nn.Module):
         Returns ``(out [B, L_q, D], edge_out [B, L_q, L_kv, E])``.
         """
         b, s, d = x.shape
-        q, k, v = projection_packed(x, kv, self.in_proj_weight, self.in_proj_bias)
-
-        shape = (b, -1, self.num_heads, self.head_dim)
-        q, k, v = (t.view(shape).transpose(1, 2).contiguous() for t in (q, k, v))
-
-        if self.do_qk_norm:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-        if self.do_v_norm:
-            v = self.v_norm(v)
-
-        s_mask = mask if kv is None else kv_mask  # who is sending, x or kv
-        mask = merge_masks(s_mask, attn_mask, q.shape)
+        q, k, v, merged = _qkv_heads(self, x, b, kv, mask, kv_mask, attn_mask)
         e = self.linear_e(edge_x)  # (B, L_q, L_kv, num_heads)
         g = functional.sigmoid(self.linear_g(edge_x))  # (B, L_q, L_kv, num_heads)
 
@@ -400,8 +374,8 @@ class EdgeAttention(nn.Module):
             )
         # Compute attention weights
         masked_scores = (
-            torch.masked_fill(attn_scores, ~mask, float("-inf"))
-            if mask is not None
+            torch.masked_fill(attn_scores, ~merged, float("-inf"))
+            if merged is not None
             else attn_scores
         )
         attn_weights = torch.softmax(masked_scores, dim=-1)  # (B, num_heads, L_q, L_kv)

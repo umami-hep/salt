@@ -143,20 +143,16 @@ def load_schema(path: str | Path) -> Schema:
             raise SchemaError(
                 f"schema file {path}: group {gname!r} must declare a 'fields' mapping"
             )
-        for fld in fields:
-            if KEY_SEP in str(fld):
-                raise SchemaError(
-                    f"schema file {path}: group {gname!r} field {fld!r} contains {KEY_SEP!r} — "
-                    "field names must be single dotted-key components; "
-                    "regenerate the artifact with salt schema dump"
-                )
+        if bad := [fld for fld in fields if KEY_SEP in str(fld)]:
+            raise SchemaError(
+                f"schema file {path}: group {gname!r} field {bad[0]!r} contains {KEY_SEP!r} — "
+                "field names must be single dotted-key components; "
+                "regenerate the artifact with salt schema dump"
+            )
         attrs = node.get("attrs", {})
         if not isinstance(attrs, dict):
             raise SchemaError(f"schema file {path}: group {gname!r} 'attrs' must be a mapping")
-        groups[gname] = GroupSchema(
-            fields={str(k): str(v) for k, v in fields.items()},
-            attrs=dict(attrs),
-        )
+        groups[gname] = GroupSchema({str(k): str(v) for k, v in fields.items()}, dict(attrs))
     attrs = raw.get("attrs", {})
     if not isinstance(attrs, dict):
         raise SchemaError(f"schema file {path}: top-level 'attrs' must be a mapping")
@@ -224,17 +220,13 @@ def dump_schema(h5_path: str | Path) -> Schema:
                     f"{KEY_SEP!r} cannot be addressed as bundle keys"
                 )
                 continue
-            fields: dict[str, str] = {}
-            for fname in node.dtype.names:
-                if KEY_SEP in fname:
-                    _LOG.warning(
-                        f"skipping field {name}/{fname!r} in {h5_path}: names "
-                        f"containing {KEY_SEP!r} cannot be addressed as bundle keys"
-                    )
-                    continue
-                fields[fname] = _dtype_name(node.dtype[fname])
-            attrs = {key: _plain(value) for key, value in node.attrs.items()}
-            groups[name] = GroupSchema(fields=fields, attrs=attrs)
+            for fname in (f for f in node.dtype.names if KEY_SEP in f):
+                _LOG.warning(
+                    f"skipping field {name}/{fname!r} in {h5_path}: names "
+                    f"containing {KEY_SEP!r} cannot be addressed as bundle keys"
+                )
+            fields = {f: _dtype_name(node.dtype[f]) for f in node.dtype.names if KEY_SEP not in f}
+            groups[name] = GroupSchema(fields, {k: _plain(v) for k, v in node.attrs.items()})
         global_attrs = {key: _plain(value) for key, value in h5file.attrs.items()}
     return Schema(groups=groups, attrs=global_attrs)
 
@@ -243,9 +235,7 @@ def _dtype_name(dtype: np.dtype) -> str:
     """Human-readable, reconstructible dtype name: subarray fields fall back to
     ``str(dtype)``, others use ``dtype.name``.
     """
-    if dtype.subdtype is not None:
-        return str(dtype)
-    return dtype.name
+    return str(dtype) if dtype.subdtype is not None else dtype.name
 
 
 def _plain(value: Any) -> Any:

@@ -70,9 +70,7 @@ def check_output_key(key: str, who: str, *, min_parts: int = 2) -> None:
 
 def coerce[T](cls: type[T], obj: T | Mapping[str, Any]) -> T:
     """Build a `cls` config dataclass from an instance (returned as-is) or a plain mapping."""
-    if isinstance(obj, cls):
-        return obj
-    return cls(**dict(obj))
+    return obj if isinstance(obj, cls) else cls(**dict(obj))
 
 
 @dataclass(frozen=True)
@@ -215,12 +213,10 @@ def group_columns(
     for key, fld in fields:
         if (suffix := suffix_of(fld)) is not None:
             by_key.setdefault(key, []).append((suffix, fld))
-    columns: list[OutputColumn] = []
-    for key, pairs in by_key.items():
-        first = pairs[0][1]
-        suffixes = [s for s, _ in pairs]
-        columns.append(OutputColumn(key, suffixes, dtype=first.dtype, prefix=first.prefix))
-    return columns
+    return [
+        OutputColumn(key, [s for s, _ in pairs], dtype=pairs[0][1].dtype, prefix=pairs[0][1].prefix)
+        for key, pairs in by_key.items()
+    ]
 
 
 _VALID_KINDS = ("data", "label", "pad_mask")
@@ -292,9 +288,7 @@ class ObjectGroupField:
 
     def resolved_dtype(self, half_precision: bool) -> str:
         """The H5 dtype, float demoted to ``f2`` under half precision."""
-        if half_precision and self.dtype in _FLOAT_DTYPES:
-            return "f2"
-        return self.dtype
+        return "f2" if half_precision and self.dtype in _FLOAT_DTYPES else self.dtype
 
     def np_dtype(self, run_name: str, half_precision: bool) -> np.dtype:
         """The structured numpy dtype this field contributes to its group."""

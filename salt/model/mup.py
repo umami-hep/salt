@@ -95,9 +95,8 @@ def validate_mup_routing(
                 f"({type(modules[raw]).__name__}), which has no 'mup' init_arg — only modules "
                 "that accept mup (StreamEmbed, TransformerEncoder) can be muP-routed"
             )
-    applied = set(apply_to)
     for name, module in modules.items():
-        if name not in applied and bool(getattr(module, "mup", False)):
+        if name not in apply_to and bool(getattr(module, "mup", False)):
             warnings.warn(
                 f"module {name!r} has mup: true but is NOT in model.init_args.mup.apply_to — its "
                 "base shapes / MuAdamW grouping are skipped by the routing stage, so its training "
@@ -164,8 +163,7 @@ def _width_overrides(model: Any, width: int) -> list[str]:
     overrides: list[str] = []
     for name in cfg["apply_to"]:
         module = model.net[name]
-        width_arg = getattr(module, "MUP_WIDTH_ARG", None)
-        if width_arg is None:
+        if (width_arg := getattr(module, "MUP_WIDTH_ARG", None)) is None:
             raise ConfigError(
                 f"module {name!r} ({type(module).__name__}) is in mup.apply_to but declares no "
                 "MUP_WIDTH_ARG — the shape-generation tooling cannot sweep its width "
@@ -179,8 +177,7 @@ def _require_mup_cfg(model: Any) -> dict[str, Any]:
     """The model's validated mup config; raises `ConfigError` when the config
     declares no ``model.init_args.mup`` block.
     """
-    cfg = getattr(model, "mup_cfg", None)
-    if cfg is None:
+    if (cfg := getattr(model, "mup_cfg", None)) is None:
         raise ConfigError(
             "config declares no model.init_args.mup block — muP tooling needs "
             "mup: {apply_to: [...], shape_path: ...}"
@@ -281,17 +278,12 @@ def _model_boundary_sources(cli: Any) -> Any:
     flat: dict[str, TensorSpec] = {}
     for stream, names in features.variables.items():
         is_global = bool(getattr(reader.groups.get(stream), "global_object", False))
-        n_fields = len(names)
-        if is_global:
-            flat[f"inputs.{stream}"] = TensorSpec(
-                shape=("B", n_fields), dtype="float32", fields=tuple(names)
-            )
-        else:
-            t_dim = sym_dim("T", stream)
-            flat[f"inputs.{stream}"] = TensorSpec(
-                shape=("B", t_dim, n_fields), dtype="float32", fields=tuple(names)
-            )
-            flat[f"masks.{stream}"] = TensorSpec(shape=("B", t_dim), dtype="bool", kind="pad_mask")
+        dims = ("B",) if is_global else ("B", sym_dim("T", stream))
+        flat[f"inputs.{stream}"] = TensorSpec(
+            shape=(*dims, len(names)), dtype="float32", fields=tuple(names)
+        )
+        if not is_global:
+            flat[f"masks.{stream}"] = TensorSpec(shape=dims, dtype="bool", kind="pad_mask")
     # label demand (FIT): labels.<stream>.<label> is per-token [B, T] for a
     # sequence stream, per-jet [B] for a global-object stream
     for key in model.sink_demand().get(Mode.FIT, []):
@@ -312,8 +304,7 @@ def _combined_graph(cli: Any) -> dict[str, Any]:
     from salt.data.processors.labels import Labels
 
     model, dm = cli.model, cli.datamodule
-    data_modules = dm.modules
-    reader = dm.reader
+    data_modules, reader = dm.modules, dm.reader
     for module in data_modules.values():
         if isinstance(module, Labels):
             module.bind_streams(reader.streams)
@@ -417,14 +408,11 @@ def _record_l1_hook(records: list[dict[str, Any]], width: int, name: str, step: 
                 tensors = [o for o in output if isinstance(o, torch.Tensor)]
             elif isinstance(output, dict):
                 tensors = [o for o in output.values() if isinstance(o, torch.Tensor)]
-            for tensor in tensors:
-                if tensor.is_floating_point():
-                    records.append({  # noqa: PERF401 - hook accumulates into a shared records list
-                        "width": width,
-                        "module": name,
-                        "t": step,
-                        "l1": float(tensor.abs().mean().item()),
-                    })
+            records.extend(
+                {"width": width, "module": name, "t": step, "l1": float(t.abs().mean().item())}
+                for t in tensors
+                if t.is_floating_point()
+            )
 
     return hook
 
@@ -514,8 +502,7 @@ def coord_check(
                     handles = _attach_apply_to_hooks(
                         model, cfg["apply_to"], records, width, step=step
                     )
-                    out = Executor(coord_plan).run(_clone_batch(fixed))
-                    loss = out.get("loss.total")
+                    loss = Executor(coord_plan).run(_clone_batch(fixed)).get("loss.total")
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
@@ -554,11 +541,7 @@ def _resolve_coord_shape_file(
 
     out = Path(tempfile.mkdtemp(prefix="salt_coord_shapes_")) / "coord_check.bsh"
     generate_shapes(
-        configs,
-        save_path=out,
-        base_width=base_w,
-        delta_width=delta_w,
-        set_overrides=set_overrides,
+        configs, save_path=out, base_width=base_w, delta_width=delta_w, set_overrides=set_overrides
     )
     console(
         f"salt mup-coord-check: generated SHARED base/delta infshapes (base_width={base_w}, "
@@ -576,9 +559,8 @@ def _attach_apply_to_hooks(
     """
     handles: list[Any] = []
     for name in apply_to:
-        root = model.net[name]
-        for sub_name, submodule in root.named_modules():
-            label = name if not sub_name else f"{name}.{sub_name}"
+        for sub_name, submodule in model.net[name].named_modules():
+            label = f"{name}.{sub_name}" if sub_name else name
             handles.append(
                 submodule.register_forward_hook(_record_l1_hook(records, width, label, step))
             )

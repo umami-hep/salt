@@ -39,17 +39,9 @@ class RandomBatchSampler(Sampler):
         return int(self.n_batches) + int(not self.drop_last and self.nonzero_last_batch)
 
     def __iter__(self):
-        if self.shuffle:
-            self.batch_ids = torch.randperm(int(self.n_batches))
-        else:
-            self.batch_ids = torch.arange(int(self.n_batches))
-        # yield full batches from the dataset
-        for batch_id in self.batch_ids:
-            start, stop = batch_id * self.batch_size, (batch_id + 1) * self.batch_size
-            yield np.s_[int(start) : int(stop)]
-
-        # in case the batch size is not a perfect multiple of the number of samples,
-        # yield the remaining samples
-        if not self.drop_last and self.nonzero_last_batch:
-            start, stop = int(self.n_batches) * self.batch_size, self.dataset_length
-            yield np.s_[int(start) : int(stop)]
+        n_full = int(self.n_batches)
+        self.batch_ids = torch.randperm(n_full) if self.shuffle else torch.arange(n_full)
+        for batch_id in self.batch_ids:  # full batches, in (shuffled) batch order
+            yield np.s_[int(batch_id * self.batch_size) : int((batch_id + 1) * self.batch_size)]
+        if not self.drop_last and self.nonzero_last_batch:  # the ragged remainder, last
+            yield np.s_[int(n_full * self.batch_size) : int(self.dataset_length)]

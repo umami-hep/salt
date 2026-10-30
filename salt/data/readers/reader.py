@@ -12,7 +12,6 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from difflib import get_close_matches
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,10 +20,10 @@ import numpy as np
 from filelock import FileLock, Timeout
 from ftag.vds import create_virtual_file
 
-from salt.data.base import Reader, WorkerCtx
+from salt.data.base import Reader, WorkerCtx, _nearest_hint
 from salt.data.dtypes import get_dtype
-from salt.data.readers.stream import LOCK_TIMEOUT_S, StreamConfig
-from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, SchemaError
+from salt.data.readers.stream import LOCK_TIMEOUT_S
+from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema, load_schema
 
@@ -134,11 +133,8 @@ def _create_vds(pattern: Path, out_fname: Path | None = None) -> Path:
         created_path = Path(create_virtual_file(pattern=pattern, out_fname=tmp_out))
 
         # ensure atomic publish from tmp_out
-        if (
-            created_path.resolve() != tmp_out.resolve()
-            and created_path.exists()
-            and not tmp_out.exists()
-        ):
+        moved = created_path.resolve() != tmp_out.resolve() and created_path.exists()
+        if moved and not tmp_out.exists():
             created_path.replace(tmp_out)
         tmp_out.replace(out_fname)
 
@@ -256,11 +252,9 @@ class H5StructuredReader(Reader):
         ]
         self._transform_fields: dict[str, list[str]] = {}
         for transform in self.transforms:
-            used = getattr(transform, "used_fields", None)
-            if used is None:
-                continue
-            for stream in self.groups:
-                self._transform_fields.setdefault(stream, []).extend(used(stream))
+            if (used := getattr(transform, "used_fields", None)) is not None:
+                for stream in self.groups:
+                    self._transform_fields.setdefault(stream, []).extend(used(stream))
         self._validate_against_schema()
         # transient per-process state (never pickled, see __getstate__)
         self._resolved: Path | None = None
@@ -277,9 +271,7 @@ class H5StructuredReader(Reader):
         """Normalise one group config entry to a `GroupConfig` (dataset defaults to stream name)."""
         if isinstance(cfg, GroupConfig):
             if cfg.dataset is None:
-                return GroupConfig(
-                    dataset=stream, pad_max=cfg.pad_max, global_object=cfg.global_object
-                )
+                return GroupConfig(stream, cfg.pad_max, cfg.global_object)
             return cfg
         cfg = dict(cfg or {})
         unknown = set(cfg) - {"dataset", "pad_max", "global_object"}
@@ -289,9 +281,7 @@ class H5StructuredReader(Reader):
                 "dataset/pad_max/global_object"
             )
         return GroupConfig(
-            dataset=str(cfg.get("dataset", stream)),
-            pad_max=cfg.get("pad_max"),
-            global_object=cfg.get("global_object"),
+            str(cfg.get("dataset", stream)), cfg.get("pad_max"), cfg.get("global_object")
         )
 
     def _validate_against_schema(self) -> None:
@@ -300,10 +290,7 @@ class H5StructuredReader(Reader):
         for stream, cfg in self.groups.items():
             gschema = self.schema.groups.get(cfg.dataset) if self.schema is not None else None
             if self.schema is not None and gschema is None:
-                near = get_close_matches(
-                    cfg.dataset, sorted(self.schema.groups), n=3, cutoff=SUGGESTION_CUTOFF
-                )
-                hint = f"; nearest: {', '.join(near)}" if near else ""
+                hint = _nearest_hint(cfg.dataset, self.schema.groups)
                 raise SchemaError(
                     f"group {stream!r}: dataset {cfg.dataset!r} not in the schema artifact{hint}"
                 )
@@ -324,13 +311,9 @@ class H5StructuredReader(Reader):
                 )
             resolved[stream] = GroupConfig(cfg.dataset, cfg.pad_max, global_object)
             if gschema is not None:
-                config_fields = self._transform_fields.get(stream, [])
-                for field in config_fields:
+                for field in self._transform_fields.get(stream, []):
                     if field not in gschema.fields:
-                        near = get_close_matches(
-                            field, sorted(gschema.fields), n=3, cutoff=SUGGESTION_CUTOFF
-                        )
-                        hint = f"; nearest: {', '.join(near)}" if near else ""
+                        hint = _nearest_hint(field, gschema.fields)
                         raise SchemaError(
                             f"transform field {field!r} for stream "
                             f"{stream!r} not present in schema group {cfg.dataset!r}{hint}"
@@ -352,12 +335,8 @@ class H5StructuredReader(Reader):
         """The schema artifact's group for one served stream, looked up via its ``dataset``
         name; None when no schema is configured or the stream is unknown.
         """
-        if self.schema is None:
-            return None
         cfg = self.groups.get(stream)
-        if cfg is None:
-            return None
-        return self.schema.groups.get(cfg.dataset)
+        return None if self.schema is None or cfg is None else self.schema.groups.get(cfg.dataset)
 
     def label_universe(self) -> tuple[str, ...] | None:
         """The ``labels.<stream>.<field>`` universe for wildcard narrowing; None
@@ -371,13 +350,6 @@ class H5StructuredReader(Reader):
             for field in self.schema.groups[cfg.dataset].fields
         )
 
-    def _stream_config(self, stream: str) -> StreamConfig | None:
-        """The StreamConfig for a stream with pad_max set, else None."""
-        cfg = self.groups[stream]
-        if cfg.pad_max is None:
-            return None
-        return StreamConfig(pad_max=cfg.pad_max, jagged=not cfg.global_object)
-
     def with_source(
         self,
         filename: str | Path,
@@ -387,15 +359,16 @@ class H5StructuredReader(Reader):
         """Clone onto another source file (config-only: schema, group configs, row
         cuts, transforms and `vds_path` are shared).
         """
+        stage = stage if stage is not None else self.stage
         clone = H5StructuredReader(
-            groups=self.groups,
-            schema=self.schema,
-            filename=filename,
-            num=num,
-            cuts=self.cuts,
-            stage=stage if stage is not None else self.stage,
-            transforms=self.transforms,
-            vds_path=self.vds_path,
+            self.groups,
+            self.schema,
+            filename,
+            num,
+            self.cuts,
+            stage,
+            self.transforms,
+            self.vds_path,
         )
         clone.name = self.name
         return clone
@@ -532,10 +505,7 @@ class H5StructuredReader(Reader):
             file_fields = ds.dtype.names or ()
             for field, who in demanded.items():
                 if field not in file_fields:
-                    near = get_close_matches(
-                        field, sorted(file_fields), n=1, cutoff=SUGGESTION_CUTOFF
-                    )
-                    hint = f"; nearest: {near[0]}" if near else ""
+                    hint = _nearest_hint(field, file_fields, n=1)
                     raise SchemaError(
                         f"field {field!r} demanded by {who!r} not present in h5 "
                         f"group {cfg.dataset!r}{hint}"
@@ -565,17 +535,14 @@ class H5StructuredReader(Reader):
             ds = self._dss[stream]
             buf = self._buffers[stream]
             if file_rows is None:
-                shape = (rows.stop - rows.start, *ds.shape[1:])
-                buf.resize(shape, refcheck=False)
+                buf.resize((rows.stop - rows.start, *ds.shape[1:]), refcheck=False)
                 if buf.dtype.names:
                     ds.read_direct(buf, rows)
                 batch = buf
             else:
                 batch = self._read_kept(ds, buf.dtype, file_rows)
-            # None for scalar/untruncated streams -> no-op
-            stream_cfg = self._stream_config(stream)
-            if stream_cfg is not None:
-                batch = batch[:, : stream_cfg.pad_max]
+            if cfg.pad_max is not None:  # truncate to the configured width
+                batch = batch[:, : cfg.pad_max]
             if mode == Mode.FIT:
                 for transform, wants_rng in zip(
                     self.transforms, self._transform_wants_rng, strict=True

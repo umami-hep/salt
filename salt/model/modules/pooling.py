@@ -47,26 +47,20 @@ class GlobalAttentionPooling(SaltModelModule):
         """Declare input + masks -> the pooled vector (width symbol shared with the input)."""
         del mode
         width = sym_dim("D", self.name)
-        return IO(
-            requires=unflatten_spec({
-                self.input_key: TensorSpec(
-                    shape=("B", sym_dim("L", self.name), width), dtype="float32"
-                ),
-                "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
-                # OPTIONAL: produced by `TransformerEncoder` on the WITH-encoder path,
-                # ABSENT on the encoder-less path — the planner drops it when no
-                # module produces it, so encoder-less configs still plan-compile.
-                "masks.registers": TensorSpec(
-                    shape=("B", sym_dim("R", "registers")),
-                    dtype="bool",
-                    kind="pad_mask",
-                    optional=True,
-                ),
-            }),
-            produces=unflatten_spec({
-                self.out_key: TensorSpec(shape=("B", width), dtype="float32"),
-            }),
-        )
+        requires = {
+            self.input_key: TensorSpec(
+                shape=("B", sym_dim("L", self.name), width), dtype="float32"
+            ),
+            "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
+            # OPTIONAL: produced by `TransformerEncoder` on the WITH-encoder path,
+            # ABSENT on the encoder-less path — the planner drops it when no
+            # module produces it, so encoder-less configs still plan-compile.
+            "masks.registers": TensorSpec(
+                shape=("B", sym_dim("R", "registers")), dtype="bool", kind="pad_mask", optional=True
+            ),
+        }
+        produces = {self.out_key: TensorSpec(shape=("B", width), dtype="float32")}
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Build the gate layer with the inferred input width."""
@@ -102,11 +96,10 @@ class GlobalAttentionPooling(SaltModelModule):
         """Pool the sequence with the (optionally register-augmented) mask dict."""
         del mode
         assert self.gate_nn is not None, "forward before bind()"
-        x = {"seq": b.get(self.input_key)}
         # streams-then-REGISTERS dict order is numerics-critical: pooling cats
         # mask values in dict order. The encoder-less path has no register row,
         # so the pad dict is just {"seq": seq.mask}.
         pad = {"seq": b.get("seq.mask")}
         if "masks.registers" in b:
             pad["REGISTERS"] = b.get("masks.registers")
-        return {self.out_key: self.pool(x, pad_mask=pad)}
+        return {self.out_key: self.pool({"seq": b.get(self.input_key)}, pad_mask=pad)}

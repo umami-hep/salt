@@ -47,11 +47,8 @@ class MuonParamPolicy:
         Applies the selection order documented on the class: 2D/trainable gate,
         then the broad ``exclude_name_patterns`` defaults.
         """
-        if not param.requires_grad:
+        if not param.requires_grad or param.ndim != 2:
             return False
-        if param.ndim != 2:
-            return False
-
         lname = name.lower()
         return all(not re.search(pat, lname) for pat in self.exclude_name_patterns)
 
@@ -151,14 +148,10 @@ class HybridMuonAdamW(Optimizer):
         self._adamw_names: list[str] = []
 
         for name, p in items:
-            if not p.requires_grad:
-                continue
-            if self.policy.is_muon_param(name, p):
-                muon_params.append(p)
-                self._muon_names.append(name)
-            else:
-                adamw_params.append(p)
-                self._adamw_names.append(name)
+            if p.requires_grad:
+                is_muon = self.policy.is_muon_param(name, p)
+                (muon_params if is_muon else adamw_params).append(p)
+                (self._muon_names if is_muon else self._adamw_names).append(name)
 
         if len(muon_params) == 0:
             raise ValueError(
@@ -182,16 +175,8 @@ class HybridMuonAdamW(Optimizer):
         self._lr_ratio_adamw = lr_adamw / lr
 
         # Initialize as a normal Optimizer over all params so Lightning sees one optimizer
-        super().__init__(
-            [
-                {
-                    "params": muon_params + adamw_params,
-                    "lr": lr,
-                    "weight_decay": weight_decay,
-                }
-            ],
-            defaults={"lr": lr, "weight_decay": weight_decay},
-        )
+        defaults = {"lr": lr, "weight_decay": weight_decay}
+        super().__init__([{"params": muon_params + adamw_params, **defaults}], defaults=defaults)
 
         self.muon = torch.optim.Muon(
             muon_params,
@@ -206,11 +191,7 @@ class HybridMuonAdamW(Optimizer):
         )
 
         self.adamw = torch.optim.AdamW(
-            adamw_params,
-            lr=lr_adamw,
-            weight_decay=adamw_weight_decay,
-            betas=betas,
-            eps=adamw_eps,
+            adamw_params, lr=lr_adamw, weight_decay=adamw_weight_decay, betas=betas, eps=adamw_eps
         )
 
         # Ensure internal optimizers start consistent with the wrappers base LR.
@@ -222,13 +203,9 @@ class HybridMuonAdamW(Optimizer):
         fixed ratio so schedulers like OneCycleLR work unchanged.
         """
         base_lr = float(self.param_groups[0]["lr"])
-        lr_muon = base_lr * self._lr_ratio_muon
-        lr_adamw = base_lr * self._lr_ratio_adamw
-
-        for group in self.muon.param_groups:
-            group["lr"] = lr_muon
-        for group in self.adamw.param_groups:
-            group["lr"] = lr_adamw
+        for opt, ratio in ((self.muon, self._lr_ratio_muon), (self.adamw, self._lr_ratio_adamw)):
+            for group in opt.param_groups:
+                group["lr"] = base_lr * ratio
 
     @torch.no_grad()
     def step(self, closure: Callable[[], Any] | None = None) -> Any:
@@ -347,8 +324,7 @@ class Lion(Optimizer):
             raise ValueError(f"Lion needs lr > 0, got {lr}")
         if not all(0.0 <= beta <= 1.0 for beta in betas):
             raise ValueError(f"Lion needs both betas in [0, 1], got {betas}")
-        missing = [name for name in self._FOREACH_OPS if not hasattr(torch, name)]
-        if missing:
+        if missing := [name for name in self._FOREACH_OPS if not hasattr(torch, name)]:
             raise ValueError(
                 f"this torch build ({torch.__version__}) lacks {', '.join(missing)} — "
                 "use optimizer: lion-pytorch for the per-parameter reference implementation"
@@ -385,20 +361,14 @@ class Lion(Optimizer):
             if self.decoupled_wd:
                 weight_decay = weight_decay / self._init_lr
 
-            params: list[torch.Tensor] = []
-            grads: list[torch.Tensor] = []
-            exp_avgs: list[torch.Tensor] = []
-            for param in group["params"]:
-                if param.grad is None:
-                    continue
-                state = self.state[param]
-                if len(state) == 0:
-                    state["exp_avg"] = torch.zeros_like(param)
-                params.append(param)
-                grads.append(param.grad)
-                exp_avgs.append(state["exp_avg"])
+            params = [p for p in group["params"] if p.grad is not None]
             if not params:
                 continue
+            for param in params:  # lazy state, in parameter order
+                if len(self.state[param]) == 0:
+                    self.state[param]["exp_avg"] = torch.zeros_like(param)
+            grads = [param.grad for param in params]
+            exp_avgs = [self.state[param]["exp_avg"] for param in params]
 
             # p *= 1 - lr * wd   (unconditional, as the reference: at wd == 0 the
             # factor is exactly 1.0 and the multiply is a no-op on every finite value)
@@ -518,14 +488,9 @@ def build_optimizer(
     by name internally); every other optimizer receives the bare parameter
     list.
     """
-    optimizer_kwargs = {
-        "lr": lrs["initial"],
-        "weight_decay": lrs.get("weight_decay", 1e-5),
-    }
-    if optimizer_class is HybridMuonAdamW:
-        params: Any = named_trainable
-    else:
-        params = [p for _, p in named_trainable]
+    optimizer_kwargs = {"lr": lrs["initial"], "weight_decay": lrs.get("weight_decay", 1e-5)}
+    hybrid = optimizer_class is HybridMuonAdamW
+    params: Any = named_trainable if hybrid else [p for _, p in named_trainable]
     return optimizer_class(params, **optimizer_kwargs)
 
 
@@ -572,10 +537,9 @@ def build_stage_lr_scheduler(opt: Optimizer, cfg: LRSchedulerConfig) -> dict[str
         "interval": cfg.interval,
         "frequency": cfg.frequency,
     }
-    if is_metric_driven_scheduler(cls):
+    if metric_driven := is_metric_driven_scheduler(cls):
         entry["reduce_on_plateau"] = True
-        entry["monitor"] = cfg.monitor
-    elif cfg.monitor is not None:
+    if metric_driven or cfg.monitor is not None:
         entry["monitor"] = cfg.monitor
     return entry
 
@@ -589,8 +553,7 @@ def preflight_lr_schedulers(schedule: TrainingSchedule) -> None:
     if not schedule.has_lr_scheduler:
         return
     for stage in schedule.stages:
-        cfg = stage.lr_scheduler
-        if cfg is None:
+        if (cfg := stage.lr_scheduler) is None:
             continue
         cls = resolve_lr_scheduler_class(cfg.class_path)
         if is_metric_driven_scheduler(cls) and not cfg.monitor:

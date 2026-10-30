@@ -154,10 +154,8 @@ class xAODReader(UprootReader):  # noqa: N801
     def _group_kwargs(cls, cfg: dict[str, Any]) -> dict[str, Any]:
         """Add the five link/join keys to the base branches/prefix/jagged/pad_max kwargs."""
         kw = super()._group_kwargs(cfg)
-        kw["link_branch"] = cfg.get("link_branch")
-        kw["target_prefix"] = cfg.get("target_prefix")
-        kw["join_branch"] = cfg.get("join_branch")
-        kw["join_prefix"] = cfg.get("join_prefix")
+        keys = ("link_branch", "target_prefix", "join_branch", "join_prefix")
+        kw |= {k: cfg.get(k) for k in keys}
         kw["join_branches"] = {
             str(k): str(v) for k, v in dict(cfg.get("join_branches") or {}).items()
         }
@@ -174,11 +172,8 @@ class xAODReader(UprootReader):  # noqa: N801
         # A join reads one link per element of the group's OWN axis, so a jagged
         # group under an unroll nests it a third level down — one the by-index
         # gather has no per-entry offset for.
-        deep = [
-            s
-            for s, c in self.groups.items()
-            if c.is_joined and c.jagged and self.unroll is not None
-        ]
+        unrolled = self.unroll is not None
+        deep = [s for s, c in self.groups.items() if c.is_joined and c.jagged and unrolled]
         if deep:
             raise ConfigError(
                 f"joined groups {deep} (join_branch/join_prefix) are jagged while unroll="
@@ -223,16 +218,10 @@ class xAODReader(UprootReader):  # noqa: N801
                     f"group {stream!r}: link branch {link!r} not in {path.name!r} "
                     "(ElementLink dereference needs the row link vector)"
                 )
-            fdtypes: dict[str, str] = {}
-            for fieldname, bare in cfg.branches.items():
-                branch = self._target_branch(cfg, bare)
-                if branch not in avail:
-                    raise SchemaError(
-                        f"group {stream!r}: target branch {branch!r} (field {fieldname!r}) not "
-                        f"in {path.name!r}; ElementLink target fields live under "
-                        f"{cfg.target_prefix!r}"
-                    )
-                fdtypes[fieldname] = self._branch_dtype(t, branch, n_events)  # [entry][obj]
+            on_disk = {f: self._target_branch(cfg, bare) for f, bare in cfg.branches.items()}
+            head = f"group {stream!r}: target branch"
+            tail = f"{path.name!r}; ElementLink target fields live under {cfg.target_prefix!r}"
+            fdtypes = self._present_dtypes(t, avail, on_disk, n_events, head, tail)  # [entry][obj]
             fdtypes["valid"] = "bool"
             return fdtypes
         fd = super()._stream_dtypes(t, avail, path, stream, cfg, n_events)
@@ -266,16 +255,10 @@ class xAODReader(UprootReader):  # noqa: N801
                 f"group {stream!r}: join link branch {link!r} not in {path.name!r} "
                 f"(the 1:1 join needs one ElementLink per {stream!r} element)"
             )
-        fdtypes: dict[str, str] = {}
-        for fieldname, bare in cfg.join_branches.items():
-            branch = self._join_branch(cfg, bare)
-            if branch not in avail:
-                raise SchemaError(
-                    f"group {stream!r}: join target branch {branch!r} (field {fieldname!r}) "
-                    f"not in {path.name!r}; joined fields live under {cfg.join_prefix!r}"
-                )
-            fdtypes[fieldname] = self._branch_dtype(t, branch, n_events)
-        return fdtypes
+        on_disk = {f: self._join_branch(cfg, bare) for f, bare in cfg.join_branches.items()}
+        head = f"group {stream!r}: join target branch"
+        tail = f"{path.name!r}; joined fields live under {cfg.join_prefix!r}"
+        return self._present_dtypes(t, avail, on_disk, n_events, head, tail)
 
     def _stream_max_mult(self, t: Any, stream: str, kept: np.ndarray) -> int:
         """Linked arm: per-row NON-NULL link count off the link vector; else defer to base."""
@@ -285,10 +268,7 @@ class xAODReader(UprootReader):  # noqa: N801
 
         import awkward as ak
 
-        branch = self._link_branch(cfg)
-        arr = t[branch].array(library="ak")
-        if self.unroll is not None:
-            arr = ak.flatten(arr, axis=1)  # [entry][obj][...] -> [row][...]
+        arr = self._to_rows(t[self._link_branch(cfg)].array(library="ak"))  # -> [row][...]
         pkey = _pers_key(arr)
         arr = arr if pkey is None else _pers_index(arr)[pkey != 0]
         counts = ak.to_numpy(ak.num(arr, axis=1))
@@ -380,8 +360,7 @@ class xAODReader(UprootReader):  # noqa: N801
                 )
             starts = np.concatenate([[0], np.cumsum(counts)])[:-1]
             gathered = np.asarray(ak.flatten(tgt, axis=1))[idx_flat + np.repeat(starts, per_elem)]
-            arr = ak.unflatten(gathered, per_elem)  # [entry][elem]
-            block[f] = ak.flatten(arr, axis=1) if self.unroll is not None else arr
+            block[f] = self._to_rows(ak.unflatten(gathered, per_elem))  # [entry][elem] -> rows
         return block
 
     def _read_linked_block(

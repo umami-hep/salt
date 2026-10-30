@@ -114,43 +114,31 @@ class MaskDecoder(SaltModelModule):
             config missing ``n_heads``.
         """
         super().__init__()
-        if embed_dim < 1:
-            raise ConfigError(f"MaskDecoder: embed_dim must be >= 1, got {embed_dim}")
-        if num_queries < 1:
-            raise ConfigError(f"MaskDecoder: num_queries must be >= 1, got {num_queries}")
-        if num_layers < 1:
-            raise ConfigError(f"MaskDecoder: num_layers must be >= 1, got {num_layers}")
-
-        class_cfg = dict(class_net)
-        if "input_size" in class_cfg:
-            raise ConfigError(
-                "MaskDecoder: class_net.input_size is inferred from embed_dim — remove it"
-            )
+        dims = {"embed_dim": embed_dim, "num_queries": num_queries, "num_layers": num_layers}
+        for arg, value in dims.items():
+            if value < 1:
+                raise ConfigError(f"MaskDecoder: {arg} must be >= 1, got {value}")
+        class_cfg, mask_cfg, md_cfg = dict(class_net), dict(mask_net or {}), dict(md or {})
+        for arg, cfg in (("class_net", class_cfg), ("mask_net", mask_cfg)):
+            if "input_size" in cfg:
+                raise ConfigError(f"MaskDecoder: {arg}.input_size is inferred from embed_dim")
         n_classes = class_cfg.pop("output_size", None)
         if n_classes is None or n_classes < 1:
             raise ConfigError(
                 "MaskDecoder: class_net.output_size is required and >= 1 (the object class "
-                "count C, last class = null; v1 maskformer.py:48-49)"
+                "count C, last class = null)"
             )
-        mask_cfg = dict(mask_net or {})
-        if "input_size" in mask_cfg:
-            raise ConfigError(
-                "MaskDecoder: mask_net.input_size is inferred from embed_dim — remove it"
-            )
-        md_cfg = dict(md or {})
         if "n_heads" not in md_cfg:
-            raise ConfigError(
-                "MaskDecoder: md.n_heads is required (the per-layer attention head count; "
-                "v1 MaskDecoderLayer, maskformer.py:375-382)"
-            )
+            raise ConfigError("MaskDecoder: md.n_heads (per-layer attention heads) is required")
 
         self.embed_dim = embed_dim
         self.num_queries = num_queries
         self.num_classes = n_classes - 1  # last class is the null/no-object category
         self.input_key = input
         self.out_stream = out_stream
-        stream = self._input_stream()
-        self.pad_key: str = "seq.mask" if stream == "seq" else f"masks.{stream}"
+        # the constituent stream the masks span: `input` after its dotted prefix
+        self._stream = input.split(".")[1] if "." in input else input
+        self.pad_key: str = "seq.mask" if self._stream == "seq" else f"masks.{self._stream}"
 
         self.inital_q = nn.Parameter(torch.empty((num_queries, embed_dim)))
         nn.init.normal_(self.inital_q)
@@ -167,69 +155,40 @@ class MaskDecoder(SaltModelModule):
             MaskDecoderLayer(embed_dim, mask_net=self.mask_net, **md_cfg) for _ in range(num_layers)
         ])
 
-    def _input_stream(self) -> str:
-        """The constituent stream name the masks span (``input`` after the dotted prefix)."""
-        parts = self.input_key.split(".")
-        return parts[1] if len(parts) > 1 else parts[0]
-
     def declare_io(self, mode: Mode) -> IO:
         """Declare `input` + its pad mask (`seq.mask` for the concatenated
         `encoded.seq`, `masks.<stream>` for a `Split` slice `encoded.<stream>`) ->
         the four objects.* keys (all modes).
         """
         del mode
-        stream = self._input_stream()
-        tok = _stream_len(stream)
-        emb = sym_dim("E", self.name)
-        n_classes = self.num_classes + 1
+        tok, emb, n_cls = _stream_len(self._stream), sym_dim("E", self.name), self.num_classes + 1
+        o, m = self.out_stream, self.num_queries
         return IO(
             requires=unflatten_spec({
                 self.input_key: TensorSpec(shape=("B", tok, emb), dtype="float32"),
                 self.pad_key: TensorSpec(shape=("B", tok), dtype="bool", kind="pad_mask"),
             }),
             produces=unflatten_spec({
-                f"{self.out_stream}.embed": TensorSpec(
-                    shape=("B", self.num_queries, emb), dtype="float32"
-                ),
-                f"{self.out_stream}.class_logits": TensorSpec(
-                    shape=("B", self.num_queries, n_classes), dtype="float32"
-                ),
-                f"{self.out_stream}.class_probs": TensorSpec(
-                    shape=("B", self.num_queries, n_classes), dtype="float32"
-                ),
-                f"{self.out_stream}.masks": TensorSpec(
-                    shape=("B", self.num_queries, tok), dtype="float32"
-                ),
+                f"{o}.embed": TensorSpec(shape=("B", m, emb), dtype="float32"),
+                f"{o}.class_logits": TensorSpec(shape=("B", m, n_cls), dtype="float32"),
+                f"{o}.class_probs": TensorSpec(shape=("B", m, n_cls), dtype="float32"),
+                f"{o}.masks": TensorSpec(shape=("B", m, tok), dtype="float32"),
             }),
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Validate the resolved input width equals ``embed_dim`` (all submodules are pre-sized)."""
-        width = schema.width(self.input_key)
-        if width != self.embed_dim:
+        if (width := schema.width(self.input_key)) != self.embed_dim:
             raise ConfigError(
                 f"MaskDecoder {self.name!r}: input {self.input_key!r} resolves to width {width} "
-                f"but embed_dim is {self.embed_dim} — they must match (the queries attend to the "
-                f"encoded sequence; v1 maskformer.py:48,172)"
+                f"but embed_dim is {self.embed_dim} — they must match"
             )
 
     def set_export_mode(self) -> None:
         """Force the deterministic ``torch-math`` attention backend for export/test."""
         for module in self.modules():
-            backend = getattr(module, "set_backend", None)
-            if callable(backend):
+            if callable(backend := getattr(module, "set_backend", None)):
                 backend("torch-math")
-
-    def _get_preds(self, q: Tensor, x: Tensor, pad_mask: Tensor | None) -> dict[str, Tensor]:
-        """Class logits/probs + mask logits from queries; ``output_size==1`` sigmoid-expands."""
-        class_logits = self.class_net(q)
-        if class_logits.shape[-1] == 1:
-            class_probs = class_logits.sigmoid()
-            class_probs = torch.cat([1 - class_probs, class_probs], dim=-1)
-        else:
-            class_probs = class_logits.softmax(-1)
-        pred_masks = get_masks(x, q, self.mask_net, pad_mask)
-        return {"class_logits": class_logits, "class_probs": class_probs, "masks": pred_masks}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Refine the queries against the encoded sequence; produce the object predictions."""
@@ -249,14 +208,20 @@ class MaskDecoder(SaltModelModule):
 
         for layer in self.layers:
             q, x = layer(q, x, kv_mask=pad_mask)
-        preds = self._get_preds(q, x, pad_mask)
 
+        # class logits/probs + mask logits from the queries; output_size==1 sigmoid-expands
+        class_logits = self.class_net(q)
+        if class_logits.shape[-1] == 1:
+            class_probs = class_logits.sigmoid()
+            class_probs = torch.cat([1 - class_probs, class_probs], dim=-1)
+        else:
+            class_probs = class_logits.softmax(-1)
         # un-pad: drop the dummy token appended above from the mask logits
-        masks = preds["masks"][:, :, :-1]
+        masks = get_masks(x, q, self.mask_net, pad_mask)[:, :, :-1]
         return {
             f"{self.out_stream}.embed": q,
-            f"{self.out_stream}.class_logits": preds["class_logits"],
-            f"{self.out_stream}.class_probs": preds["class_probs"],
+            f"{self.out_stream}.class_logits": class_logits,
+            f"{self.out_stream}.class_probs": class_probs,
             f"{self.out_stream}.masks": masks,
         }
 
@@ -305,35 +270,26 @@ class MaskDecoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(
-        self,
-        q: Tensor,
-        kv: Tensor,
-        kv_mask: Tensor | None = None,
+        self, q: Tensor, kv: Tensor, kv_mask: Tensor | None = None
     ) -> tuple[Tensor, Tensor]:
         """Apply one decoder layer step (cross-attn, self-attn, GLU, optional bidirectional CA)."""
         attn_mask = None
         if self.mask_attention:
             # True = attend, False = masked (transformers-2 SDPA convention)
-            attn_mask = get_masks(kv, q, self.mask_net, kv_mask).sigmoid()
-            attn_mask = (attn_mask > 0.9).detach()
+            attn_mask = (get_masks(kv, q, self.mask_net, kv_mask).sigmoid() > 0.9).detach()
             # a query with every position masked would get an all-False attention
             # row (NaN softmax) — force those rows fully open instead
             newmask = torch.all(attn_mask == 0, dim=-1, keepdim=True).expand(attn_mask.shape)
-
             attn_mask = attn_mask | newmask
 
         q = q + self.q_ca(q, kv=kv, kv_mask=kv_mask, attn_mask=attn_mask)
         q = q + self.q_sa(q)
         q = q + self.q_dense(q)
-
         if self.bidirectional_ca:
             if attn_mask is not None:
                 attn_mask = attn_mask.transpose(1, 2)
                 newmask = torch.all(attn_mask == 1, dim=-1, keepdim=True).expand(attn_mask.shape)
                 attn_mask = attn_mask | ~newmask.bool()
-
             kv = kv + self.kv_ca(kv, q, attn_mask=attn_mask)
             kv = kv + self.kv_dense(kv)
-        q = self.norm1(q)
-        kv = self.norm2(kv)
-        return q, kv
+        return self.norm1(q), self.norm2(kv)

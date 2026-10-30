@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 from torch import Tensor, nn
 
@@ -54,9 +56,7 @@ class FeaturewiseTransformation(nn.Module):
                 "FeaturewiseTransformation", cfg, ("input_size", "output_size", "context_size")
             )
         # a net is built iff its dense config is truthy — None or {} builds nothing
-        build_scale = bool(dense_config_scale)
-        build_bias = bool(dense_config_bias)
-        if not build_scale and not build_bias:
+        if not scale_cfg and not bias_cfg:
             raise ConfigError(
                 "FeaturewiseTransformation: specify at least one (non-empty) dense_config_scale "
                 "or dense_config_bias (v1 featurewise.py:63-66)"
@@ -64,35 +64,14 @@ class FeaturewiseTransformation(nn.Module):
         self.layer = layer
         self.num_params = int(num_params)
         self.num_features = int(num_features)
-        self._build_scale = build_scale
-        self._build_bias = build_bias
-        self.scale_cfg = scale_cfg
-        self.bias_cfg = bias_cfg
         self.apply_norm = bool(apply_norm)
-        self.scale_net: nn.Module | None = None
-        self.bias_net: nn.Module | None = None
-        self.norm: nn.Module | None = None
-        self._built = False
-
-    def build(self) -> None:
-        """Construct the scale/bias `Dense` nets + optional norm (idempotent)."""
-        if self._built:
-            return
-        if self._build_scale:
-            self.scale_net = Dense(
-                input_size=self.num_params, output_size=self.num_features, **self.scale_cfg
-            )
-        if self._build_bias:
-            self.bias_net = Dense(
-                input_size=self.num_params, output_size=self.num_features, **self.bias_cfg
-            )
-        if self.apply_norm:
-            self.norm = nn.LayerNorm(self.num_features)
-        self._built = True
+        dense = partial(Dense, input_size=self.num_params, output_size=self.num_features)
+        self.scale_net: nn.Module | None = dense(**scale_cfg) if scale_cfg else None
+        self.bias_net: nn.Module | None = dense(**bias_cfg) if bias_cfg else None
+        self.norm: nn.Module | None = nn.LayerNorm(self.num_features) if self.apply_norm else None
 
     def forward(self, params: Tensor, features: Tensor) -> Tensor:
         """Apply the FiLM scale/bias (and optional norm) to ``features``."""
-        assert self._built, "FeaturewiseTransformation.forward before build()"
         if self.scale_net is not None:
             features = self.scale_net(params).unsqueeze(1) * features
         if self.bias_net is not None:

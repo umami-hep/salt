@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -28,6 +30,7 @@ from salt.model.sink_prep import (
 )
 from salt.outputs import (
     H5OutputSink,
+    InputCopyWriter,
     OnnxExportSink,
     OutputColumn,
     OutputField,
@@ -62,17 +65,27 @@ class _ColumnProducer:
         return list(self._fields) if mode & Mode.TEST else []
 
 
-def _seed_columns(sink: H5OutputSink, columns: list[OutputColumn]) -> H5OutputSink:
-    """Bind an ``outputs:`` section whose producer mints `columns` (survives manifest rebinds)."""
-    sink.bind_output_section({"run_tasks": _ColumnProducer(columns)})
+def _seed_columns(
+    sink: H5OutputSink, columns: list[OutputColumn], extra: Mapping[str, Any] | None = None
+) -> H5OutputSink:
+    """Bind an ``outputs:`` section whose producer mints `columns` (survives manifest rebinds).
+
+    `extra` section writers (e.g. copy/mask writers) bind in the SAME section, ahead of the
+    producer, so the bind does not reset the copy/mask state they set.
+    """
+    sink.bind_output_section({**(extra or {}), "run_tasks": _ColumnProducer(columns)})
     return sink
 
 
 def _h5_sink() -> H5OutputSink:
-    """A real H5 persistence sink, seeded with one resolved column."""
+    """A real H5 persistence sink, seeded with one resolved column + copy/mask writers."""
     sink = _seed_columns(
-        H5OutputSink(copy_inputs={"jets": [], "tracks": []}, write_pad_mask=["tracks"]),
+        H5OutputSink(),
         [OutputColumn(key="outputs.jets.jets_classification", suffixes=["pb", "pc", "pu"])],
+        extra={
+            "inputs_copy": InputCopyWriter(streams=["jets", "tracks"]),
+            "pad_mask": PadMaskWriter(streams=["tracks"]),
+        },
     )
     if sink.name != "h5_output":
         sink.name = "h5_output"

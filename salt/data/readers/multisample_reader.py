@@ -15,6 +15,7 @@ import numpy as np
 
 from salt.data.base import Reader, RowBlock, WorkerCtx
 from salt.data.readers.stream import pad_fill
+from salt.data.sharding import interleave_plan
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import PlanStep
 from salt.graph.spec import IO, Mode, flatten_spec, unflatten_spec
@@ -210,24 +211,11 @@ class MultiSampleReader(Reader):
     def _build_index(self) -> None:
         """Deterministic largest-remainder round-robin interleave over sub-reader lengths."""
         lens = self._lens = [len(s.reader) for s in self.samples]
-        n = self._num_rows = sum(lens)
-        sample_of, local_of = np.empty(n, dtype=np.int64), np.empty(n, dtype=np.int64)
-        emitted, cursor = [0] * len(lens), [0] * len(lens)
-        j = 0
-        while j < n:
-            best_id, best_deficit = -1, -np.inf
-            for i, n_i in enumerate(lens):
-                if emitted[i] >= n_i:
-                    continue
-                deficit = (j + 1) * (n_i / n) - emitted[i]
-                if deficit > best_deficit:
-                    best_id, best_deficit = i, deficit
-            take = min(self.interleave_block, lens[best_id] - emitted[best_id], n - j)
-            sample_of[j : j + take] = best_id
-            local_of[j : j + take] = np.arange(cursor[best_id], cursor[best_id] + take)
-            cursor[best_id] += take
-            emitted[best_id] += take
-            j += take
+        self._num_rows = sum(lens)
+        sample_of = interleave_plan(dict(enumerate(lens)), self.interleave_block)
+        local_of = np.empty(sample_of.size, dtype=np.int64)
+        for i, n_i in enumerate(lens):  # each sample is emitted in ascending local order
+            local_of[sample_of == i] = np.arange(n_i, dtype=np.int64)
         self._sample_of, self._local_of = sample_of, local_of
 
     def __len__(self) -> int:
@@ -235,9 +223,8 @@ class MultiSampleReader(Reader):
         return int(self._num_rows)  # type: ignore[arg-type]
 
     def schema_group(self, stream: str) -> GroupSchema | None:
-        if self.schema is None:
-            self.prepare()
-        return self.schema.groups.get(stream) if self.schema is not None else None
+        schema = self._prepared_schema()
+        return schema.groups.get(stream) if schema is not None else None
 
     def config_fingerprint(self) -> dict[str, Any]:
         ls, lf, ib = self.label_stream, self.label_field, self.interleave_block
@@ -253,11 +240,9 @@ class MultiSampleReader(Reader):
         return {"label_stream": ls, "label_field": lf, "interleave_block": ib, "samples": samples}
 
     def label_universe(self) -> tuple[str, ...] | None:
-        if self.schema is None:
-            self.prepare()
-        if self.schema is None:
+        if (schema := self._prepared_schema()) is None:
             return None
-        groups = self.schema.groups.items()
+        groups = schema.groups.items()
         return tuple(f"labels.{s}.{f}" for s, gs in groups for f in gs.fields if f != "valid")
 
     def with_source(

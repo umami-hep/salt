@@ -37,28 +37,28 @@ class TestParse:
     def test_single_stage_defaults(self):
         sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
         assert not sched.is_multi_stage
-        assert sched.initial_stage.name == "fit"
-        assert sched.frozen_names(sched.initial_stage) == set()  # default frozen=()
+        assert sched.stages[0].name == "fit"
+        assert sched.frozen_names(sched.stages[0]) == set()  # default frozen=()
 
     def test_frozen_resolves_directly(self):
         sched = TrainingSchedule.from_config(
             {"stages": {"fit": {"frozen": ["norm", "encoder"]}}}, MODULE_NAMES
         )
-        assert sched.frozen_names(sched.initial_stage) == {"norm", "encoder"}
+        assert sched.frozen_names(sched.stages[0]) == {"norm", "encoder"}
 
     def test_trainable_resolves_to_complement(self):
         sched = TrainingSchedule.from_config(
             {"stages": {"fit": {"trainable": ["jets_classification"]}}}, MODULE_NAMES
         )
         expect = set(MODULE_NAMES) - {"jets_classification"}
-        assert sched.frozen_names(sched.initial_stage) == expect
+        assert sched.frozen_names(sched.stages[0]) == expect
 
     def test_per_stage_optimizer_and_lrs_captured(self):
         sched = TrainingSchedule.from_config(
             {"stages": {"fit": {"optimizer": "lion", "lrs": {"max": 5e-4}}}}, MODULE_NAMES
         )
-        assert sched.initial_stage.optimizer == "lion"
-        assert sched.initial_stage.lrs == {"max": 5e-4}
+        assert sched.stages[0].optimizer == "lion"
+        assert sched.stages[0].lrs == {"max": 5e-4}
 
     def test_declaration_order_preserved(self):
         sched = TrainingSchedule.from_config(
@@ -193,8 +193,8 @@ class TestDesugarLegacy:
         sched = TrainingSchedule.desugar_legacy(MODULE_NAMES)
         assert not sched.is_multi_stage
         assert not sched.has_freezing
-        assert sched.initial_stage == StageConfig(name="fit")
-        assert sched.frozen_names(sched.initial_stage) == set()
+        assert sched.stages[0] == StageConfig(name="fit")
+        assert sched.frozen_names(sched.stages[0]) == set()
 
 
 class TestStepAllocation:
@@ -273,9 +273,9 @@ class TestSaltModuleInstantiation:
         sched = model.training_controller.schedule
         assert sched is not None
         assert not sched.is_multi_stage
-        assert sched.initial_stage.name == "fit"
+        assert sched.stages[0].name == "fit"
         assert not sched.has_freezing
-        assert sched.frozen_names(sched.initial_stage) == set()
+        assert sched.frozen_names(sched.stages[0]) == set()
         assert model.training_controller.frozen_module_names == set()
         assert model.training_controller.current_stage_index == 0
 
@@ -304,7 +304,7 @@ class TestSaltModuleInstantiation:
             training_schedule={"stages": {"fit": {"frozen": ["concat", "split"]}}},
         )
         sched = model.training_controller.schedule
-        assert sched.frozen_names(sched.initial_stage) == {"concat", "split"}
+        assert sched.frozen_names(sched.stages[0]) == {"concat", "split"}
 
 
 def test_stageconfig_is_frozen_dataclass():
@@ -319,14 +319,14 @@ def test_stageconfig_is_frozen_dataclass():
 class TestEarlyStopParse:
     def test_absent_by_default(self):
         sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
-        assert sched.initial_stage.early_stop is None
+        assert sched.stages[0].early_stop is None
         assert not sched.has_early_stop
 
     def test_minimal_defaults(self):
         sched = TrainingSchedule.from_config(
             {"stages": {"fit": {"early_stop": {"monitor": "val/loss"}}}}, MODULE_NAMES
         )
-        es = sched.initial_stage.early_stop
+        es = sched.stages[0].early_stop
         assert es == EarlyStopConfig(monitor="val/loss", mode="min", patience=3, min_delta=0.0)
         assert es.check_finite is True
         assert sched.has_early_stop
@@ -345,7 +345,7 @@ class TestEarlyStopParse:
             },
             MODULE_NAMES,
         )
-        es = sched.initial_stage.early_stop
+        es = sched.stages[0].early_stop
         assert (es.monitor, es.mode, es.patience, es.min_delta, es.check_finite) == (
             "val/acc", "max", 5, 0.01, False
         )
@@ -496,7 +496,7 @@ class TestBoundaryRecord:
 class TestStageCallbacksParse:
     def test_absent_by_default(self):
         sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
-        assert sched.initial_stage.callbacks is None
+        assert sched.stages[0].callbacks is None
         assert not sched.has_stage_callbacks
 
     def test_parsed_specs(self):
@@ -514,7 +514,7 @@ class TestStageCallbacksParse:
             MODULE_NAMES,
         )
         assert sched.has_stage_callbacks
-        specs = sched.initial_stage.callbacks
+        specs = sched.stages[0].callbacks
         assert len(specs) == 2
         assert specs[0]["class_path"] == "pkg.A"
         assert specs[1]["init_args"] == {"x": 1}
@@ -568,7 +568,7 @@ _PLATEAU = "torch.optim.lr_scheduler.ReduceLROnPlateau"
 class TestLRSchedulerParse:
     def test_absent_by_default(self):
         sched = TrainingSchedule.from_config({"stages": {"fit": {}}}, MODULE_NAMES)
-        assert sched.initial_stage.lr_scheduler is None
+        assert sched.stages[0].lr_scheduler is None
         assert not sched.has_lr_scheduler
 
     def test_minimal_defaults(self):
@@ -576,7 +576,7 @@ class TestLRSchedulerParse:
         sched = TrainingSchedule.from_config(
             {"stages": {"fit": {"lr_scheduler": spec}}}, MODULE_NAMES
         )
-        cfg = sched.initial_stage.lr_scheduler
+        cfg = sched.stages[0].lr_scheduler
         assert isinstance(cfg, LRSchedulerConfig)
         assert cfg.class_path == _COSINE
         assert cfg.init_args == {"T_max": 5}
@@ -602,7 +602,7 @@ class TestLRSchedulerParse:
             },
             MODULE_NAMES,
         )
-        cfg = sched.initial_stage.lr_scheduler
+        cfg = sched.stages[0].lr_scheduler
         assert (cfg.interval, cfg.frequency, cfg.monitor) == ("epoch", 2, "val/loss")
 
     def test_has_lr_scheduler_true_if_any_stage(self):
@@ -667,4 +667,4 @@ class TestLRSchedulerParse:
             {"stages": {"fit": {"lr_scheduler": {"class_path": _COSINE},
              "lrs": {"initial": 1e-4, "weight_decay": 1e-5}}}}, MODULE_NAMES,
         )
-        assert sched.initial_stage.lr_scheduler.class_path == _COSINE
+        assert sched.stages[0].lr_scheduler.class_path == _COSINE

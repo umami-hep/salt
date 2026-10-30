@@ -24,9 +24,7 @@ _MODULE_DICT_NULL = re.compile(
 )
 
 
-def _extract_schedule_cli_overrides(
-    args: list[Any],
-) -> tuple[list[Any], list[tuple[str, Any]]]:
+def _extract_schedule_cli_overrides(args: list[Any]) -> tuple[list[Any], list[tuple[str, Any]]]:
     """Split ``--training_schedule.<dotted.path>[=<value>]`` (or the two-token
     ``--training_schedule.<path> <value>``) CLI args out of `args`.
 
@@ -44,22 +42,18 @@ def _extract_schedule_cli_overrides(
     overrides: list[tuple[str, Any]] = []
     i = 0
     while i < len(args):
-        arg = args[i]
-        if isinstance(arg, str) and arg.startswith(prefix):
-            body = arg[len(prefix) :]
-            if "=" in body:
-                path, value = body.split("=", 1)
-                overrides.append((path, value))
-                i += 1
-            elif i + 1 < len(args) and not str(args[i + 1]).startswith("--"):
-                overrides.append((body, args[i + 1]))
-                i += 2
-            else:  # a bare --training_schedule.key with no value: treat as null
-                overrides.append((body, None))
-                i += 1
-        else:
+        arg, i = args[i], i + 1
+        if not (isinstance(arg, str) and arg.startswith(prefix)):
             kept.append(arg)
+            continue
+        path, eq, value = arg[len(prefix) :].partition("=")
+        if eq:
+            overrides.append((path, value))
+        elif i < len(args) and not str(args[i]).startswith("--"):
+            overrides.append((path, args[i]))
             i += 1
+        else:  # a bare --training_schedule.key with no value: treat as null
+            overrides.append((path, None))
     return kept, overrides
 
 
@@ -73,18 +67,14 @@ def _expand_config_includes(args: list[Any]) -> list[Any]:
     out: list[Any] = []
     expect_value = False
     for arg in args:
-        if expect_value and isinstance(arg, str):
+        value_slot, expect_value = expect_value, False
+        if isinstance(arg, str) and value_slot:
             out.append(expand_includes(arg))
-            expect_value = False
-            continue
-        expect_value = False
-        if isinstance(arg, str):
-            if arg in {"--config", "-c"}:
-                expect_value = True
-            elif arg.startswith("--config="):
-                out.append("--config=" + expand_includes(arg.split("=", 1)[1]))
-                continue
-        out.append(arg)
+        elif isinstance(arg, str) and arg.startswith("--config="):
+            out.append("--config=" + expand_includes(arg.split("=", 1)[1]))
+        else:
+            expect_value = isinstance(arg, str) and arg in {"--config", "-c"}
+            out.append(arg)
     return out
 
 
@@ -112,10 +102,7 @@ class DeepMergeParser(LightningArgumentParser):
         override per-stage-by-name rather than replacing the whole schedule.
         """
         for key, val_from in list(cfg_from.items()):
-            if not isinstance(val_from, dict):
-                continue
-            val_to = cfg_to.get(key)
-            if isinstance(val_to, dict):
+            if isinstance(val_from, dict) and isinstance(val_to := cfg_to.get(key), dict):
                 # training_schedule's nested {stages: {name: {...}}} needs a
                 # RECURSIVE merge — a shallow union would replace `stages` wholesale
                 cfg_from[key] = (
@@ -151,12 +138,10 @@ class DeepMergeParser(LightningArgumentParser):
             args, schedule_overrides = _extract_schedule_cli_overrides(list(args))
             normalised: list[Any] = []
             for arg in args:
-                if isinstance(arg, str) and (
-                    arg == "--print_config" or arg.startswith("--print_config=")
-                ):
-                    # capture + strip so the deferred print_config dump does not
-                    # fire inside super().parse_args before the fan-out lands
-                    print_config_flags = arg.split("=", 1)[1] if "=" in arg else ""
+                # capture + strip `--print_config[=<flags>]` so its deferred dump does not
+                # fire inside super().parse_args before the fan-out lands
+                if isinstance(arg, str) and arg.partition("=")[0] == "--print_config":
+                    print_config_flags = arg.partition("=")[2]
                     continue
                 normalised.append(_normalise_module_null(arg) if isinstance(arg, str) else arg)
             args = normalised

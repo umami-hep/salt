@@ -33,13 +33,7 @@ def copy_file(in_path: Path, out_path: Path) -> None:
     shutil.copyfile(in_path, out_path)
 
 
-def download_S3(
-    session: Any,
-    bucket: str,
-    file_to_load: str,
-    store_path: Path,
-    count: int,
-) -> None:
+def download_S3(session: Any, bucket: str, file_to_load: str, store_path: Path, count: int) -> None:
     """Download a single S3 object to a local path with a progress bar.
 
     ``session`` is duck-typed: it must support ``head_object`` and
@@ -61,11 +55,7 @@ def download_S3(
 
 
 def download_script_S3(
-    bucket: str,
-    local_path: Path | str,
-    key: str,
-    file: str,
-    count: int,
+    bucket: str, local_path: Path | str, key: str, file: str, count: int
 ) -> tuple[str, str]:
     """Download an S3 object if not present locally, returning ``(key, local_file_path)``.
 
@@ -80,8 +70,7 @@ def download_script_S3(
     if _boto3:
         target_path = Path(local_path, file.rsplit("/", maxsplit=1)[-1])
         if not target_path.is_file():
-            session = _boto3.client("s3")
-            download_S3(session, bucket, file, target_path, count)
+            download_S3(_boto3.client("s3"), bucket, file, target_path, count)
         else:
             _LOG.info(f'- "{file}" found locally and not downloaded.')
         return key, str(target_path)

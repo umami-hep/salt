@@ -56,6 +56,7 @@ __all__ = [
 
 SOURCES = "<sources>"  # edge producer sentinel: key provided a priori by the framework
 SINKS = "<sinks>"  # edge consumer sentinel: key demanded by a sink
+_PRIMARY_NAMES = "/".join(m.name for m in PRIMARY_MODES)  # "FIT/VAL/TEST/ONNX" in error texts
 
 Sinks: TypeAlias = "Iterable[str] | Mapping[Mode, Iterable[str]] | None"
 """Sink keys: flat iterable (compiled mode only) or per-mode mapping."""
@@ -177,9 +178,7 @@ def compile_plan(
     `CycleError`/`AllModesDeadError` (all `GraphError` subclasses) per the
     respective validation failure.
     """
-    _check_primary_mode(mode)
-    if sinks is not None and not isinstance(sinks, Mapping):
-        sinks = list(sinks)
+    sinks = _checked_mode_sinks(mode, sinks)
     res = _resolve(modules, mode, sources, schema, _sinks_for(sinks, mode, mode), sink_origins)
     _check_all_modes_dead(modules, mode, sources, sinks, res)
     return _assemble_plan(res)
@@ -192,29 +191,20 @@ def _assemble_plan(res: _Resolution) -> Plan:
     `PlanStep`/`Edge` views, and the structural `plan_hash` (each `TensorSpec`
     serialised via `_spec_payload`).
     """
-    order = _topo_order(res)
     steps = tuple(
         PlanStep(
-            name=name,
-            module=res.alive[name].module,
-            requires=MappingProxyType(dict(res.alive[name].bound)),
-            produces=MappingProxyType({
-                **res.alive[name].all_produces(),
-                **res.alive[name].rewrites,
-            }),
-            rewrites=MappingProxyType(dict(res.alive[name].rewrites)),
+            name=node.name,
+            module=node.module,
+            requires=MappingProxyType(dict(node.bound)),
+            produces=MappingProxyType({**node.all_produces(), **node.rewrites}),
+            rewrites=MappingProxyType(dict(node.rewrites)),
         )
-        for name in order
+        for node in (res.alive[name] for name in _topo_order(res))
     )
     edges = tuple(sorted(res.edges))
     sources_out: Mapping[str, Any] = MappingProxyType(dict(res.sources))
-    return Plan(
-        mode=res.mode,
-        steps=steps,
-        edges=edges,
-        sources=sources_out,
-        plan_hash=_plan_hash(steps, edges, sources_out),
-    )
+    plan_hash = _plan_hash(steps, edges, sources_out)
+    return Plan(mode=res.mode, steps=steps, edges=edges, sources=sources_out, plan_hash=plan_hash)
 
 
 def deadcode(
@@ -237,66 +227,44 @@ def deadcode(
     its module (warning) rather than hitting the TEST error. Returns
     deterministically ordered findings; empty when everything is consumed.
     """
-    _check_primary_mode(mode)
-    if sinks is not None and not isinstance(sinks, Mapping):
-        sinks = list(sinks)
+    sinks = _checked_mode_sinks(mode, sinks)
     res = _resolve(modules, mode, sources, schema, _sinks_for(sinks, mode, mode))
-    consumed: dict[str, set[str]] = {}
-    for edge in res.edges:
-        consumed.setdefault(edge.producer, set()).add(edge.key)
+    consumed = _consumed_keys(res.edges)
     # ONNX export surface is writer-declared and may legitimately be
     # narrower than eval — info-level, never promoted by --strict
-    pruned_suffix = (
-        " (narrowed out of the writer-declared export surface — legitimate)"
-        if mode == Mode.ONNX
-        else ""
-    )
-    # a conversion producer (salt.outputs node) pruned in a non-ONNX mode is
-    # by design (its export sink is inactive there) — demote to info so
-    # configs carrying ONNX nodes still pass --strict --mode test
-
-    def _is_conversion_producer(name: str) -> bool:
-        return isinstance(getattr(modules.get(name), "output_key", None), str)
-
-    out: list[DeadOutput] = [
-        DeadOutput(
-            name,
-            "*",
-            f"module pruned in mode {mode.name}: {res.pruned[name]}{pruned_suffix}",
-            severity=(
-                "info" if (mode == Mode.ONNX or _is_conversion_producer(name)) else "warning"
-            ),
-        )
-        for name in sorted(res.pruned)
-    ]
+    pruned_suffix = ""
+    if mode == Mode.ONNX:
+        pruned_suffix = " (narrowed out of the writer-declared export surface — legitimate)"
+    out: list[DeadOutput] = []
+    for name in sorted(res.pruned):
+        # a conversion producer (salt.outputs node) pruned in a non-ONNX mode is
+        # by design (its export sink is inactive there) — demote to info so
+        # configs carrying ONNX nodes still pass --strict --mode test
+        info = mode == Mode.ONNX or isinstance(getattr(modules.get(name), "output_key", None), str)
+        reason = f"module pruned in mode {mode.name}: {res.pruned[name]}{pruned_suffix}"
+        out.append(DeadOutput(name, "*", reason, severity="info" if info else "warning"))
     unconsumed_reason = f"produced but never consumed in mode {mode.name}"
     preds_in_test_reason = (
-        f"produced but never consumed in mode {mode.name} — an unconsumed preds.* port in "
-        "TEST means a computed prediction is never persisted; wire a writer or drop the "
-        "port"
+        f"{unconsumed_reason} — an unconsumed preds.* port in TEST means a computed prediction "
+        "is never persisted; wire a writer or drop the port"
     )
     preds_in_training_reason = (
-        f"produced but never consumed in mode {mode.name} "
-        "(normal: no configured metric callback consumes this prediction)"
+        f"{unconsumed_reason} (normal: no configured metric callback consumes this prediction)"
     )
     for name, node in res.alive.items():
         used = consumed.get(name, set())
         for key in {**node.all_produces(), **node.rewrites}:
             if key in used:
                 continue
-            is_preds = key.partition(KEY_SEP)[0] == "preds"
-            if is_preds and mode == Mode.TEST:
-                out.append(DeadOutput(name, key, preds_in_test_reason, severity="error"))
-            elif is_preds:
-                out.append(DeadOutput(name, key, preds_in_training_reason, severity="info"))
-            else:
+            if key.partition(KEY_SEP)[0] != "preds":
                 out.append(DeadOutput(name, key, unconsumed_reason))
-    src_used = consumed.get(SOURCES, set())
-    out.extend(
-        DeadOutput(SOURCES, key, f"source never consumed in mode {mode.name}")
-        for key in res.sources
-        if key not in src_used
-    )
+            elif mode == Mode.TEST:
+                out.append(DeadOutput(name, key, preds_in_test_reason, severity="error"))
+            else:
+                out.append(DeadOutput(name, key, preds_in_training_reason, severity="info"))
+    source_reason = f"source never consumed in mode {mode.name}"
+    used = consumed.get(SOURCES, set())
+    out.extend(DeadOutput(SOURCES, key, source_reason) for key in res.sources if key not in used)
     return out
 
 
@@ -348,24 +316,17 @@ def _resolve(
     sink_origins: Mapping[str, str] | None = None,
 ) -> _Resolution:
     """Resolve one mode's graph: narrow wildcards, build edges, check, prune."""
-    src = _active_sources(sources, mode)
+    src, wildcard = _concrete_active(sources, mode)
+    if wildcard is not None:
+        raise ConfigError(
+            f"source key {wildcard!r} may not contain wildcards — sources are concrete"
+        )
     nodes = _collect_nodes(modules, mode)
     producer_of = _concrete_producers(src, nodes, mode)
     sink_list = _checked_sink_keys(sink_keys)
-    demand = _collect_demand(nodes, sink_list or [])
-    _narrow_wildcards(nodes, producer_of, demand, schema, mode, sink_origins)
-    rewriter_of = _rewriters(nodes, producer_of, mode)
-    edges = _build_edges(
-        nodes,
-        producer_of,
-        src,
-        sink_list or [],
-        mode,
-        modules,
-        sources,
-        sink_origins,
-        rewriter_of,
-    )
+    sinks = sink_list or []
+    _narrow_wildcards(nodes, producer_of, _collect_demand(nodes, sinks), schema, mode, sink_origins)
+    edges = _build_edges(nodes, producer_of, src, sinks, mode, modules, sources, sink_origins)
     _check_wildcard_self_feed(nodes, edges, mode)
     if sink_list is None:
         alive, pruned = dict(nodes), {}
@@ -374,36 +335,20 @@ def _resolve(
         reason = f"outputs reach no sink in mode {mode.name}"
         pruned = {name: reason for name in nodes if name not in needed}
         alive = {name: node for name, node in nodes.items() if name in needed}
-        edges = [
-            edge
-            for edge in edges
-            if (edge.producer == SOURCES or edge.producer in alive)
-            and (edge.consumer == SINKS or edge.consumer in alive)
-        ]
+        # SOURCES only ever produces and SINKS only ever consumes
+        kept = {*alive, SOURCES, SINKS}
+        edges = [edge for edge in edges if edge.producer in kept and edge.consumer in kept]
         _drop_unconsumed_narrowed(alive, edges)
-    return _Resolution(
-        mode=mode,
-        sources=src,
-        alive=alive,
-        edges=sorted(edges),
-        pruned=pruned,
-    )
+    return _Resolution(mode=mode, sources=src, alive=alive, edges=sorted(edges), pruned=pruned)
 
 
-def _active_sources(sources: NestedSpec, mode: Mode) -> dict[str, TensorSpec]:
-    """Flatten the source boundary and keep mode-active leaves.
-
-    Raises `ConfigError` if a source key contains a wildcard component.
+def _concrete_active(nested: NestedSpec, mode: Mode) -> tuple[dict[str, TensorSpec], str | None]:
+    """Flatten `nested` to its `mode`-active leaves; also return its first wildcard key
+    (in flatten order, active or not — the caller rejects it), or None.
     """
-    src: dict[str, TensorSpec] = {}
-    for key, spec in flatten_spec(sources).items():
-        if _has_wildcard(key):
-            raise ConfigError(
-                f"source key {key!r} may not contain wildcards — sources are concrete"
-            )
-        if spec.active_in(mode):
-            src[key] = spec
-    return src
+    flat = flatten_spec(nested)
+    wildcard = next((key for key in flat if _has_wildcard(key)), None)
+    return {key: spec for key, spec in flat.items() if spec.active_in(mode)}, wildcard
 
 
 def _collect_nodes(modules: dict[str, GraphModule], mode: Mode) -> dict[str, _Node]:
@@ -434,38 +379,26 @@ def _collect_nodes(modules: dict[str, GraphModule], mode: Mode) -> dict[str, _No
         # framework-internal seam, not user API. TODO: bind the capability to
         # shipped code so user classes cannot grant it to themselves.
         allow_wildcards = bool(getattr(module, "allow_wildcards", False))
-        requires: dict[str, Any] = {}
-        produces: dict[str, Any] = {}
-        patterns: dict[str, Any] = {}
-        rewrites: dict[str, Any] = {}
-        for key, spec in flatten_spec(io.requires).items():
-            if _has_wildcard(key):
-                raise ConfigError(
-                    f"module {name!r} declares wildcard require {key!r} — only framework "
-                    "producers may declare patterns, and only in produces"
-                )
-            if spec.active_in(mode):
-                requires[key] = spec
-        for key, spec in flatten_spec(io.produces).items():
-            if not spec.active_in(mode):
-                continue
-            if _has_wildcard(key):
-                if not allow_wildcards:
-                    raise ConfigError(
-                        f"module {name!r} declares wildcard produces {key!r} but is not a "
-                        "framework wildcard producer (allow_wildcards is not set) — user "
-                        "modules may not declare wildcards"
-                    )
-                patterns[key] = spec
-            else:
-                produces[key] = spec
-        for key, spec in flatten_spec(getattr(io, "rewrites", {})).items():
-            if _has_wildcard(key):
-                raise ConfigError(
-                    f"module {name!r} declares wildcard rewrite {key!r} — rewrites are concrete"
-                )
-            if spec.active_in(mode):
-                rewrites[key] = spec
+        requires, wildcard = _concrete_active(io.requires, mode)
+        if wildcard is not None:
+            raise ConfigError(
+                f"module {name!r} declares wildcard require {wildcard!r} — only framework "
+                "producers may declare patterns, and only in produces"
+            )
+        active = {k: s for k, s in flatten_spec(io.produces).items() if s.active_in(mode)}
+        patterns = {key: spec for key, spec in active.items() if _has_wildcard(key)}
+        produces = {key: spec for key, spec in active.items() if key not in patterns}
+        if patterns and not allow_wildcards:  # the first mode-active wildcard produce
+            raise ConfigError(
+                f"module {name!r} declares wildcard produces {next(iter(patterns))!r} but is "
+                "not a framework wildcard producer (allow_wildcards is not set) — user "
+                "modules may not declare wildcards"
+            )
+        rewrites, wildcard = _concrete_active(getattr(io, "rewrites", {}), mode)
+        if wildcard is not None:
+            raise ConfigError(
+                f"module {name!r} declares wildcard rewrite {wildcard!r} — rewrites are concrete"
+            )
         for key in rewrites:
             if key not in requires:
                 raise ConfigError(
@@ -477,9 +410,8 @@ def _collect_nodes(modules: dict[str, GraphModule], mode: Mode) -> dict[str, _No
                     f"module {name!r} both produces and rewrites {key!r} — a key is produced "
                     "OR rewritten, never both"
                 )
-        if not (requires or produces or patterns or rewrites):
-            continue
-        nodes[name] = _Node(name, rank, module, requires, produces, patterns, rewrites=rewrites)
+        if requires or produces or patterns or rewrites:
+            nodes[name] = _Node(name, rank, module, requires, produces, patterns, rewrites=rewrites)
     return nodes
 
 
@@ -508,9 +440,7 @@ def _checked_sink_keys(sink_keys: list[str] | None) -> list[str] | None:
 
     Raises `ConfigError` if a sink key contains a wildcard component.
     """
-    if sink_keys is None:
-        return None
-    for key in sink_keys:
+    for key in sink_keys or ():
         split_key(key)
         if _has_wildcard(key):
             raise ConfigError(f"sink key {key!r} may not contain wildcards — sinks are concrete")
@@ -538,9 +468,7 @@ def _describe_consumer(consumer: str, key: str, sink_origins: Mapping[str, str] 
     """
     if consumer != SINKS:
         return repr(consumer)
-    if sink_origins and key in sink_origins:
-        return sink_origins[key]
-    return "the configured sinks"
+    return (sink_origins or {}).get(key, "the configured sinks")
 
 
 def _narrow_wildcards(
@@ -561,8 +489,7 @@ def _narrow_wildcards(
     """
     wildcard_owner: dict[str, str] = {}
     for name, node in nodes.items():
-        for pattern in sorted(node.patterns):
-            spec = node.patterns[pattern]
+        for pattern, spec in sorted(node.patterns.items()):
             for key in sorted(demand):
                 if key in producer_of or not _pattern_matches(pattern, key):
                     continue
@@ -590,8 +517,7 @@ def _narrow_wildcards(
                 wildcard_owner[key] = name
                 node.narrowed[key] = spec
     for name, node in nodes.items():
-        for key in node.narrowed:
-            producer_of[key] = name
+        producer_of.update(dict.fromkeys(node.narrowed, name))
 
 
 def _rewriters(nodes: dict[str, _Node], producer_of: dict[str, str], mode: Mode) -> dict[str, str]:
@@ -632,7 +558,6 @@ def _build_edges(
     modules: dict[str, GraphModule],
     sources: NestedSpec,
     sink_origins: Mapping[str, str] | None = None,
-    rewriter_of: dict[str, str] | None = None,
 ) -> list[Edge]:
     """Bind every require/sink to its producer; check kinds and unify shapes.
 
@@ -642,13 +567,13 @@ def _build_edges(
     `KindError`. Returns the resolved edges (pre-prune); optional-but-absent
     requires bind no edge, and bound requires are recorded on each node.
 
-    `rewriter_of` (key -> rewriter module name) redirects any consumer OTHER
-    than the rewriter itself to bind the rewriter instead of the original
-    producer — the rewriter's own require edge still binds the original
-    producer (it reads the key it replaces). A rewriter's rewrite spec may
-    narrow but never widen a concrete dim of the producer's spec (`ShapeError`).
+    Rewriters are resolved first (`_rewriters`, key -> rewriter module name):
+    any consumer OTHER than the rewriter itself binds the rewriter instead of
+    the original producer — the rewriter's own require edge still binds the
+    original producer (it reads the key it replaces). A rewriter's rewrite spec
+    may narrow but never widen a concrete dim of the producer's spec (`ShapeError`).
     """
-    rewriter_of = rewriter_of or {}
+    rewriter_of = _rewriters(nodes, producer_of, mode)
     dims = DimTable(mode)
     edges: list[Edge] = []
     for name, node in nodes.items():
@@ -662,16 +587,13 @@ def _build_edges(
             if rewriter is not None and rewriter != name:
                 producer = rewriter
             node.bound[key] = spec
-            edges.append(Edge(producer, key, name))
+            edge = Edge(producer, key, name)
+            edges.append(edge)
             pspec = src[key] if producer == SOURCES else _produced_spec(nodes[producer], key)
             if rewriter == name:  # the rewriter binds the original producer:
                 # a rewrite may narrow, never widen
                 rspec = node.rewrites[key]
-                if (
-                    pspec.shape is not None
-                    and rspec.shape is not None
-                    and len(pspec.shape) == len(rspec.shape)
-                ):
+                if pspec.shape and rspec.shape and len(pspec.shape) == len(rspec.shape):
                     for i, (pdim, rdim) in enumerate(zip(pspec.shape, rspec.shape, strict=True)):
                         if isinstance(pdim, int) and isinstance(rdim, int) and rdim > pdim:
                             raise ShapeError(
@@ -687,15 +609,12 @@ def _build_edges(
                     f"kind={spec.kind!r} but producer {producer!r} provides "
                     f"kind={pspec.kind!r}"
                 )
-            _unify_edge(key, producer, name, pspec, spec, dims, mode)
+            _unify_edge(edge, pspec, spec, dims, mode)
     for key in sink_keys:
         producer = producer_of.get(key)
         if producer is None:
             _raise_missing_producer(SINKS, key, mode, producer_of, modules, sources, sink_origins)
-        rewriter = rewriter_of.get(key)
-        if rewriter is not None:
-            producer = rewriter
-        edges.append(Edge(producer, key, SINKS))
+        edges.append(Edge(rewriter_of.get(key, producer), key, SINKS))
     return edges
 
 
@@ -707,15 +626,19 @@ def _drop_unconsumed_narrowed(alive: dict[str, _Node], edges: list[Edge]) -> Non
     (`Bundle.merge` enforces the frozen key set exactly). Keys with any
     surviving edge are kept.
     """
-    consumed: dict[str, set[str]] = {}
-    for edge in edges:
-        consumed.setdefault(edge.producer, set()).add(edge.key)
+    consumed = _consumed_keys(edges)
     for name, node in alive.items():
-        if not node.narrowed:
-            continue
         used = consumed.get(name, set())
         for key in [key for key in node.narrowed if key not in used]:
             del node.narrowed[key]
+
+
+def _consumed_keys(edges: Iterable[Edge]) -> dict[str, set[str]]:
+    """Map each edge producer (module name or `SOURCES`) to the keys it serves."""
+    consumed: dict[str, set[str]] = {}
+    for edge in edges:
+        consumed.setdefault(edge.producer, set()).add(edge.key)
+    return consumed
 
 
 def _is_terminal_consumer(module: GraphModule) -> bool:
@@ -797,11 +720,8 @@ def _check_wildcard_self_feed(nodes: dict[str, _Node], edges: list[Edge], mode: 
     for name, node in nodes.items():
         if not node.narrowed:
             continue
-        starts = [
-            (edge.consumer, edge.key)
-            for edge in edges
-            if edge.producer == name and edge.key in node.narrowed and edge.consumer in nodes
-        ]
+        fed = [edge for edge in edges if edge.producer == name and edge.consumer in nodes]
+        starts = [(edge.consumer, edge.key) for edge in fed if edge.key in node.narrowed]
         path = _path_back(adj, starts, name)
         if path is not None:
             chain = name + "".join(f" -({key})-> {module}" for key, module in path)
@@ -846,26 +766,23 @@ def _topo_order(res: _Resolution) -> list[str]:
     key-level chain, if the graph has a cycle.
     """
     alive = res.alive
-    deps: dict[str, set[str]] = {name: set() for name in alive}
-    rdeps: dict[str, set[str]] = {name: set() for name in alive}
-    for edge in res.edges:
-        if edge.producer in alive and edge.consumer in alive:
-            deps[edge.consumer].add(edge.producer)
-            rdeps[edge.producer].add(edge.consumer)
-    indegree = {name: len(parents) for name, parents in deps.items()}
+    adj = _module_adjacency(res.edges, alive)  # adj[producer][consumer], distinct pairs
+    indegree = dict.fromkeys(alive, 0)
+    for consumers in adj.values():
+        for consumer in consumers:
+            indegree[consumer] += 1
     heap = [(alive[name].rank, name) for name, count in indegree.items() if count == 0]
     heapq.heapify(heap)
     order: list[str] = []
     while heap:
         _, name = heapq.heappop(heap)
         order.append(name)
-        for consumer in sorted(rdeps[name]):
+        for consumer in sorted(adj.get(name, {})):
             indegree[consumer] -= 1
             if indegree[consumer] == 0:
                 heapq.heappush(heap, (alive[consumer].rank, consumer))
     if len(order) != len(alive):
-        residual = {name for name in alive if name not in set(order)}
-        chain = _find_cycle(residual, _module_adjacency(res.edges, res.alive))
+        chain = _find_cycle(set(alive) - set(order), adj)
         raise CycleError(
             f"[mode={res.mode.name}] dependency cycle: {chain} — a module's outputs may not "
             "feed its own inputs; cycles are always a config error"
@@ -895,11 +812,9 @@ def _find_cycle(residual: set[str], adj: dict[str, dict[str, str]]) -> str:
                 continue
             if state[nxt] == 1:
                 names = [name for name, _ in stack]
-                cycle_nodes = names[names.index(nxt) :]
-                chain = cycle_nodes[0]
-                for a, b in pairwise(cycle_nodes):
-                    chain += f" -({adj[a][b]})-> {b}"
-                return chain + f" -({key})-> {nxt}"
+                cycle = names[names.index(nxt) :]
+                links = "".join(f" -({adj[a][b]})-> {b}" for a, b in pairwise(cycle))
+                return f"{cycle[0]}{links} -({key})-> {nxt}"
             if state[nxt] == 0:
                 state[nxt] = 1
                 stack.append((nxt, iter(sorted(adj.get(nxt, {}).items()))))
@@ -969,17 +884,12 @@ class DimTable:
 
 
 def _unify_edge(
-    key: str,
-    producer: str,
-    consumer: str,
-    pspec: TensorSpec,
-    cspec: TensorSpec,
-    dims: DimTable,
-    mode: Mode,
+    edge: Edge, pspec: TensorSpec, cspec: TensorSpec, dims: DimTable, mode: Mode
 ) -> None:
     """Unify one edge's producer/consumer specs (shape rank, dims, dtype);
     raises `ShapeError` on rank, size, symbolic-binding, or dtype conflict.
     """
+    key, producer, consumer = edge.key, edge.producer, edge.consumer
     if pspec.dtype is not None and cspec.dtype is not None and pspec.dtype != cspec.dtype:
         raise ShapeError(
             f"[mode={mode.name}] dtype mismatch on {key!r}: producer {producer!r} declares "
@@ -1028,9 +938,8 @@ def _raise_missing_producer(
     which the key would exist, and a concrete fix.
     """
     if consumer == SINKS:
-        demander = (
-            f" (demanded by {sink_origins[key]})" if sink_origins and key in sink_origins else ""
-        )
+        origins = sink_origins or {}
+        demander = f" (demanded by {origins[key]})" if key in origins else ""
         head = f"[mode={mode.name}] sink key {key!r}{demander} — no module or source produces it."
         fix = f"fix: correct the sink key, or add a module producing {key!r}"
     else:
@@ -1060,9 +969,7 @@ def _other_mode_producers(
     mode; returns human-readable notes, deterministically ordered.
     """
     candidates: dict[str, list[str]] = {}
-    for other in PRIMARY_MODES:
-        if other == mode:
-            continue
+    for other in (m for m in PRIMARY_MODES if m != mode):
         for name in sorted(modules):
             io = modules[name].declare_io(other)
             for pkey, spec in iter_spec_leaves(io.produces):
@@ -1089,17 +996,18 @@ def _other_mode_producers(
 # ---------------------------------------------------------------------------
 
 
-def _check_primary_mode(mode: Mode) -> None:
-    """Reject composite modes — one plan is compiled per primary mode.
+def _checked_mode_sinks(mode: Mode, sinks: Sinks) -> Sinks:
+    """Reject composite modes (one plan per primary mode), then materialise a flat
+    `sinks` iterable as a list (a per-mode mapping and None pass through).
 
     Raises `ConfigError` if `mode` is not one of `PRIMARY_MODES`.
     """
     if mode not in PRIMARY_MODES:
-        names = "/".join(m.name for m in PRIMARY_MODES)
         raise ConfigError(
-            f"plans are compiled per primary mode ({names}); got {mode!r} — compile one plan "
-            "per mode"
+            f"plans are compiled per primary mode ({_PRIMARY_NAMES}); got {mode!r} — compile one "
+            "plan per mode"
         )
+    return list(sinks) if sinks is not None and not isinstance(sinks, Mapping) else sinks
 
 
 def _sinks_for(sinks: Sinks, mode: Mode, compiled_mode: Mode) -> list[str] | None:
@@ -1111,23 +1019,15 @@ def _sinks_for(sinks: Sinks, mode: Mode, compiled_mode: Mode) -> list[str] | Non
     they are never demand-pruned, keeping the all-modes-dead check lenient.
     Returns sorted sink keys for `mode`, or None when demand is unknown.
     """
-    if sinks is None:
-        return None
     if isinstance(sinks, Mapping):
         if not any(mode_key & mode for mode_key in sinks):
             return None
         return sorted({key for mode_key, keys in sinks.items() if mode_key & mode for key in keys})
-    if mode != compiled_mode:
-        return None
-    return sorted(set(sinks))
+    return None if sinks is None or mode != compiled_mode else sorted(set(sinks))
 
 
 def _check_all_modes_dead(
-    modules: dict[str, GraphModule],
-    mode: Mode,
-    sources: NestedSpec,
-    sinks: Sinks,
-    res: _Resolution,
+    modules: dict[str, GraphModule], mode: Mode, sources: NestedSpec, sinks: Sinks, res: _Resolution
 ) -> None:
     """Raise `AllModesDeadError` if any configured module is dead in every
     primary mode.
@@ -1143,10 +1043,9 @@ def _check_all_modes_dead(
             for other in PRIMARY_MODES
         )
         if not alive_somewhere:
-            module = modules[name]
-            names = "/".join(m.name for m in PRIMARY_MODES)
             raise AllModesDeadError(
-                f"module {name!r} ({type(module).__name__}) is dead in every mode ({names}): "
+                f"module {name!r} ({type(modules[name]).__name__}) is dead in every mode "
+                f"({_PRIMARY_NAMES}): "
                 "no port is active, or its outputs reach no sink in any mode — a configured "
                 "module must do something; remove it or wire a consumer"
             )
@@ -1188,10 +1087,13 @@ def _spec_payload(spec: TensorSpec) -> dict[str, Any]:
     }
 
 
+def _specs_payload(specs: Mapping[str, TensorSpec]) -> dict[str, Any]:
+    """`_spec_payload` over a flat ``{dotted_key: spec}`` mapping."""
+    return {k: _spec_payload(v) for k, v in specs.items()}
+
+
 def _plan_hash(
-    steps: tuple[PlanStep, ...],
-    edges: tuple[Edge, ...],
-    sources: Mapping[str, TensorSpec],
+    steps: tuple[PlanStep, ...], edges: tuple[Edge, ...], sources: Mapping[str, TensorSpec]
 ) -> str:
     """sha256 over a canonical plan serialisation (structural, not mode-tagged).
 
@@ -1204,18 +1106,14 @@ def _plan_hash(
         "steps": [
             {
                 "name": step.name,
-                "requires": {k: _spec_payload(v) for k, v in step.requires.items()},
-                "produces": {k: _spec_payload(v) for k, v in step.produces.items()},
-                **(
-                    {"rewrites": {k: _spec_payload(v) for k, v in step.rewrites.items()}}
-                    if step.rewrites
-                    else {}
-                ),
+                "requires": _specs_payload(step.requires),
+                "produces": _specs_payload(step.produces),
+                **({"rewrites": _specs_payload(step.rewrites)} if step.rewrites else {}),
             }
             for step in steps
         ],
         "edges": [[edge.producer, edge.key, edge.consumer] for edge in edges],
-        "sources": {k: _spec_payload(v) for k, v in sources.items()},
+        "sources": _specs_payload(sources),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

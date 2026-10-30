@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 import yaml
@@ -21,6 +22,75 @@ from salt.graph.spec import (
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
 from salt.model.modules.stream_embed import _stream_len
+
+
+def _checked_streams(streams: Sequence[str], who: str, what: str = "streams") -> tuple[str, ...]:
+    """``tuple(streams)``; `ConfigError` ``"<who>: ..."`` when empty or duplicated."""
+    if not streams:
+        raise ConfigError(f"{who}: {what} must be a non-empty sequence")
+    if len(set(streams)) != len(tuple(streams)):
+        raise ConfigError(f"{who}: duplicate {what} in {tuple(streams)}")
+    return tuple(streams)
+
+
+def _norm_specs(
+    prefix: str, name: str, streams: Sequence[str], global_object: str | None
+) -> dict[str, TensorSpec]:
+    """``{<prefix>.<stream>: spec}``: global ``(B, F)`` or sequence ``(B, T, F)``.
+
+    The last dim is the instance-scoped symbol ``F:<name>.<stream>`` on both
+    ``inputs`` and ``normed``, so the dataset-declared width unifies onto ``normed``.
+    """
+    specs: dict[str, TensorSpec] = {}
+    for s in streams:
+        width = sym_dim("F", f"{name}.{s}")
+        specs[f"{prefix}.{s}"] = TensorSpec(
+            shape=("B", width) if s == global_object else ("B", _stream_len(s), width),
+            dtype="float32",
+        )
+    return specs
+
+
+def _via(stream: str, key: str) -> str:
+    """``" (stream '<stream>')"`` when the dataset key differs from the stream, else ``""``."""
+    return f" (stream {stream!r})" if key != stream else ""
+
+
+def _norm_entries(
+    table: Mapping[str, Any], path: Path, stream: str, key: str, variables: Sequence[str], who: str
+) -> tuple[Tensor, Tensor]:
+    """Checked float32 ``(means, stds)`` of `variables` from ``norm_dict[key]`` (`ConfigError`).
+
+    Finiteness and zero-std are checked on the float32 values the buffers
+    hold, so a std that underflows float32 is a zero std.
+    """
+    if missing := set(variables) - set(table):
+        raise ConfigError(
+            f"{who}: missing variables {sorted(missing)} for {key!r}{_via(stream, key)} in "
+            f"{path}. Choose from {sorted(table)}.\n"
+            f"  fix: add mean/std entries for {sorted(missing)} to {path}, or remove them from "
+            f"the features variable list "
+            f"(config: data.modules.features.init_args.variables.{stream})"
+        )
+    pairs: list[tuple[float, float]] = []
+    for variable in variables:
+        entry = table[variable]
+        try:
+            pairs.append((float(entry["mean"]), float(entry["std"])))
+        except (KeyError, TypeError, ValueError):
+            raise ConfigError(
+                f"{who}: entry for {stream}.{variable} in {path} must be a "
+                f"{{mean, std}} mapping, got {entry!r}"
+            ) from None
+    mean_t, std_t = (torch.as_tensor([p[i] for p in pairs], dtype=torch.float32) for i in (0, 1))
+    for bad, what in (
+        (~(torch.isfinite(mean_t) & torch.isfinite(std_t)), "non-finite normalisation parameters"),
+        (std_t == 0, "zero standard deviation"),
+    ):
+        if bad.any():
+            names = [v for v, b in zip(variables, bad.tolist(), strict=True) if b]
+            raise ConfigError(f"{who}: {what} for {stream} variables {names} in {path}.")
+    return mean_t, std_t
 
 
 class Normaliser(SaltModelModule):
@@ -64,16 +134,12 @@ class Normaliser(SaltModelModule):
             is not one of them.
         """
         super().__init__()
-        if not streams:
-            raise ConfigError("Normaliser: streams must be a non-empty sequence")
-        if len(set(streams)) != len(tuple(streams)):
-            raise ConfigError(f"Normaliser: duplicate streams in {tuple(streams)}")
+        self.streams = _checked_streams(streams, "Normaliser")
         if global_object is not None and global_object not in streams:
             raise ConfigError(
-                f"Normaliser: global_object {global_object!r} is not in streams {tuple(streams)}"
+                f"Normaliser: global_object {global_object!r} is not in streams {self.streams}"
             )
         self.norm_dict_path = Path(norm_dict)
-        self.streams = tuple(streams)
         self.global_object = global_object
         self._fields: dict[str, tuple[str, ...]] = {}
         self._datasets: dict[str, str] = {}
@@ -85,20 +151,13 @@ class Normaliser(SaltModelModule):
         # `_load_from_state_dict` — the only three places the buffer changes.
         self._materialised_flag = False
 
-    def _spec(self, stream: str) -> TensorSpec:
-        """Shared spec for ``inputs``/``normed``: global ``(B, F)`` or sequence ``(B, T, F)``."""
-        width = sym_dim("F", f"{self.name}.{stream}")
-        shape: tuple[int | str, ...] = (
-            ("B", width) if stream == self.global_object else ("B", _stream_len(stream), width)
-        )
-        return TensorSpec(shape=shape, dtype="float32")
-
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``inputs.<stream>`` -> ``normed.<stream>`` for every stream."""
         del mode
+        args = (self.name, self.streams, self.global_object)
         return IO(
-            requires=unflatten_spec({f"inputs.{s}": self._spec(s) for s in self.streams}),
-            produces=unflatten_spec({f"normed.{s}": self._spec(s) for s in self.streams}),
+            requires=unflatten_spec(_norm_specs("inputs", *args)),
+            produces=unflatten_spec(_norm_specs("normed", *args)),
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
@@ -123,18 +182,14 @@ class Normaliser(SaltModelModule):
         if flag is not None:
             self._materialised_flag = bool(flag)
 
-    @staticmethod
-    def _via(stream: str, key: str) -> str:
-        """``" (stream '<stream>')"`` when the dataset key differs from the stream, else ``""``."""
-        return f" (stream {stream!r})" if key != stream else ""
-
     def preflight(self, datasets: Mapping[str, str] | None = None) -> None:
         """Fail-fast, data-free norm-dict validation.
 
         Reads ONLY the norm-dict YAML: the file must exist, parse, and carry
         every configured stream; when already bound, per-variable mean/std
-        entries are checked too. Called by `SaltModule.setup` on fresh fits
-        (hard error) and by ``salt graph validate`` (warning).
+        entries are checked too, in the float32 `materialise` stores. Called
+        by `SaltModule.setup` on fresh fits (hard error) and by ``salt graph
+        validate`` (warning).
 
         Parameters
         ----------
@@ -146,112 +201,61 @@ class Normaliser(SaltModelModule):
         ------
         ConfigError
             On a missing/unparsable norm dict, a missing stream, or (when
-            bound) missing/non-finite/zero-std variable entries.
+            bound) missing/malformed/non-finite/zero-std variable entries.
         """
-        path = self.norm_dict_path
-        prefix = f"Normaliser {self.name!r} preflight"
+        path, who = self.norm_dict_path, f"Normaliser {self.name!r} preflight"
         fix = (
             f"  fix: point model.modules.{self.name}.init_args.norm_dict at the "
             "preprocessing norm_dict.yaml for this sample"
         )
         if not path.is_file():
-            raise ConfigError(f"{prefix}: norm dict not found: {path}\n{fix}")
+            raise ConfigError(f"{who}: norm dict not found: {path}\n{fix}")
         try:
             with open(path) as fh:
                 norm_dict = yaml.safe_load(fh)
         except yaml.YAMLError as err:
-            raise ConfigError(
-                f"{prefix}: norm dict {path} is not valid YAML: {err}\n{fix}"
-            ) from err
+            raise ConfigError(f"{who}: norm dict {path} is not valid YAML: {err}\n{fix}") from err
         if not isinstance(norm_dict, dict):
-            raise ConfigError(f"{prefix}: norm dict {path} must be a mapping\n{fix}")
-        lookup = datasets if datasets is not None else self._datasets
+            raise ConfigError(f"{who}: norm dict {path} must be a mapping\n{fix}")
+        lookup = self._datasets if datasets is None else datasets
         for stream in self.streams:
             key = lookup.get(stream, stream)
-            via = self._via(stream, key)
             if key not in norm_dict:
                 raise ConfigError(
-                    f"{prefix}: missing input type {key!r}{via} in {path}. "
+                    f"{who}: missing input type {key!r}{_via(stream, key)} in {path}. "
                     f"Choose from {sorted(norm_dict)}."
                 )
-            if not self._fields:
-                continue  # unbound (the data-free `salt graph validate` path)
-            variables = self._fields[stream]
-            if missing := set(variables) - set(norm_dict[key]):
-                raise ConfigError(
-                    f"{prefix}: missing variables {sorted(missing)} for {key!r}{via} in {path}. "
-                    f"Choose from {sorted(norm_dict[key])}.\n"
-                    f"  fix: add mean/std entries for {sorted(missing)} to {path}, or remove "
-                    f"them from the features variable list "
-                    f"(config: data.modules.features.init_args.variables.{stream})"
-                )
-            for variable in variables:
-                entry = norm_dict[key][variable]
-                try:
-                    mean, std = float(entry["mean"]), float(entry["std"])
-                except (KeyError, TypeError, ValueError):
-                    raise ConfigError(
-                        f"{prefix}: entry for {stream}.{variable} in {path} must be a "
-                        f"{{mean, std}} mapping, got {entry!r}"
-                    ) from None
-                if not (torch.isfinite(torch.tensor(mean)) and torch.isfinite(torch.tensor(std))):
-                    raise ConfigError(
-                        f"{prefix}: non-finite normalisation parameters for "
-                        f"{stream}.{variable} in {path}."
-                    )
-                if std == 0:
-                    raise ConfigError(
-                        f"{prefix}: zero standard deviation for {stream}.{variable} in {path}."
-                    )
+            if self._fields:  # bound; the unbound `salt graph validate` path checks streams only
+                _norm_entries(norm_dict[key], path, stream, key, self._fields[stream], who)
 
     def materialise(self) -> None:
         """Fill the buffers from the norm dict (the only file I/O this module does).
 
-        Missing streams/variables, non-finite values, and zero stds are errors.
+        Per-variable entries are parsed and checked as in `preflight`
+        (`ConfigError`), stream by stream.
 
         Raises
         ------
         RuntimeError
             If called before `bind`.
         ValueError
-            If the norm dict is missing this module's streams or variables,
-            or contains non-finite means/stds or zero stds.
+            If the norm dict is missing one of this module's streams.
         """
         if not self._bound:
             raise RuntimeError(f"Normaliser {self.name!r}: materialise() before bind()")
-        with open(self.norm_dict_path) as fh:
+        path, who = self.norm_dict_path, f"Normaliser {self.name!r} materialise"
+        with open(path) as fh:
             norm_dict = yaml.safe_load(fh)
         for stream in self.streams:
             key = self._datasets.get(stream, stream)
-            via = self._via(stream, key)
             if key not in norm_dict:
                 raise ValueError(
-                    f"Missing input type {key!r}{via} in {self.norm_dict_path}. "
+                    f"Missing input type {key!r}{_via(stream, key)} in {path}. "
                     f"Choose from {sorted(norm_dict)}."
                 )
-            variables = self._fields[stream]
-            if missing := set(variables) - set(norm_dict[key]):
-                raise ValueError(
-                    f"Missing variables {sorted(missing)} for {key!r}{via} in "
-                    f"{self.norm_dict_path}. Choose from {sorted(norm_dict[key])}.\n"
-                    f"  fix: add mean/std entries for {sorted(missing)} to "
-                    f"{self.norm_dict_path}, or remove them from the features variable "
-                    f"list (config: data.modules.features.init_args.variables.{stream})"
-                )
-            means = torch.as_tensor(
-                [float(norm_dict[key][v]["mean"]) for v in variables], dtype=torch.float32
+            means, stds = _norm_entries(
+                norm_dict[key], path, stream, key, self._fields[stream], who
             )
-            stds = torch.as_tensor(
-                [float(norm_dict[key][v]["std"]) for v in variables], dtype=torch.float32
-            )
-            if not torch.isfinite(means).all() or not torch.isfinite(stds).all():
-                raise ValueError(
-                    f"Non-finite normalisation parameters for {stream!r} in {self.norm_dict_path}."
-                )
-            if (stds == 0).any():
-                raise ValueError(
-                    f"Zero standard deviation for {stream!r} in {self.norm_dict_path}."
-                )
             with torch.no_grad():
                 getattr(self, f"means_{stream}").copy_(means)
                 getattr(self, f"stds_{stream}").copy_(stds)
@@ -301,14 +305,11 @@ class MaskedInputNormaliser(SaltModelModule):
         ``momentum=None`` gives a cumulative moving average instead of an EMA.
         """
         super().__init__()
-        if not streams:
-            raise ConfigError("MaskedInputNormaliser: streams must be a non-empty sequence")
-        if len(set(streams)) != len(tuple(streams)):
-            raise ConfigError(f"MaskedInputNormaliser: duplicate streams in {tuple(streams)}")
+        self.streams = _checked_streams(streams, "MaskedInputNormaliser")
         if global_object is not None and global_object not in streams:
             raise ConfigError(
                 f"MaskedInputNormaliser: global_object {global_object!r} is not in "
-                f"streams {tuple(streams)}"
+                f"streams {self.streams}"
             )
         if momentum is not None and not 0.0 <= momentum <= 1.0:
             raise ConfigError(
@@ -316,41 +317,28 @@ class MaskedInputNormaliser(SaltModelModule):
             )
         if eps <= 0.0:
             raise ConfigError(f"MaskedInputNormaliser: eps must be positive, got {eps}")
-        self.streams = tuple(streams)
         self.global_object = global_object
         self.momentum = None if momentum is None else float(momentum)
         self.eps = float(eps)
         self._bound = False
 
-    def _spec(self, stream: str) -> TensorSpec:
-        """Shared spec for ``inputs``/``normed``: global ``(B, F)`` or sequence ``(B, T, F)``.
-
-        The last dim is the instance-scoped symbol ``F:<name>.<stream>`` on
-        both sides, so the dataset-declared width unifies onto ``normed``.
-        """
-        width = sym_dim("F", f"{self.name}.{stream}")
-        shape: tuple[int | str, ...] = (
-            ("B", width) if stream == self.global_object else ("B", _stream_len(stream), width)
-        )
-        return TensorSpec(shape=shape, dtype="float32")
-
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``inputs.<stream>`` (+ optional TRAINING-only ``masks``) -> ``normed``."""
         del mode
-        requires: dict[str, TensorSpec] = {f"inputs.{s}": self._spec(s) for s in self.streams}
+        args = (self.name, self.streams, self.global_object)
+        requires = _norm_specs("inputs", *args)
         for stream in self.streams:
-            if stream == self.global_object:
-                continue
-            requires[f"masks.{stream}"] = TensorSpec(
-                shape=("B", _stream_len(stream)),
-                dtype="bool",
-                kind="pad_mask",
-                modes=Mode.TRAINING,
-                optional=True,
-            )
+            if stream != self.global_object:
+                requires[f"masks.{stream}"] = TensorSpec(
+                    shape=("B", _stream_len(stream)),
+                    dtype="bool",
+                    kind="pad_mask",
+                    modes=Mode.TRAINING,
+                    optional=True,
+                )
         return IO(
             requires=unflatten_spec(requires),
-            produces=unflatten_spec({f"normed.{s}": self._spec(s) for s in self.streams}),
+            produces=unflatten_spec(_norm_specs("normed", *args)),
         )
 
     def bind(self, schema: ResolvedSchema) -> None:
@@ -366,24 +354,17 @@ class MaskedInputNormaliser(SaltModelModule):
             self.register_buffer(f"num_objects_seen_{stream}", torch.zeros((), dtype=torch.long))
         self._bound = True
 
-    @staticmethod
-    def _masked_moments(x: Tensor, valid: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
-        """Per-feature ``(sum, sumsq, count)`` over valid objects (``valid=None`` -> all rows)."""
-        # valid is None for the global object (all rows valid); otherwise gather
-        # the valid (non-padded) rows of the sequence stream.
-        flat = x.reshape(-1, x.shape[-1]) if valid is None else x[valid]
-        count = torch.tensor(flat.shape[0], dtype=x.dtype, device=x.device)
-        return flat.sum(0), (flat * flat).sum(0), count
-
     @torch.no_grad()
     def _update_running_stats(self, stream: str, x: Tensor, valid: Tensor | None) -> None:
-        """Update the running stats for one stream from masked batch moments.
+        """Update one stream's running stats from masked batch moments.
 
-        All-reduces sum/sumsq/count across DDP ranks before deriving batch
-        mean/var (never averages per-rank mean/var directly). No-op if the
-        stream is all-padded (count 0) for this batch.
+        ``valid=None`` treats every row as valid. All-reduces sum/sumsq/count
+        across DDP ranks before deriving batch mean/var (never averages
+        per-rank mean/var directly). No-op when nothing is valid (count 0).
         """
-        s_sum, s_sumsq, count = self._masked_moments(x, valid)
+        flat = x.reshape(-1, x.shape[-1]) if valid is None else x[valid]
+        count = torch.tensor(flat.shape[0], dtype=x.dtype, device=x.device)
+        s_sum, s_sumsq = flat.sum(0), (flat * flat).sum(0)
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             packed = torch.cat([s_sum, s_sumsq, count.reshape(1)])
             torch.distributed.all_reduce(packed, op=torch.distributed.ReduceOp.SUM)
@@ -405,39 +386,27 @@ class MaskedInputNormaliser(SaltModelModule):
             n_old = seen.to(batch_mean.dtype)
             n_new = n_old + count
             delta = batch_mean - running_mean
-            new_mean = running_mean + delta * (count / n_new)
-            m_old = running_var * n_old
-            m_new = batch_var * count
-            new_var = (m_old + m_new + delta * delta * (n_old * count / n_new)) / n_new
-            running_mean.copy_(new_mean)
-            running_var.copy_(new_var)
+            running_mean.copy_(running_mean + delta * (count / n_new))
+            m_old, m_new = running_var * n_old, batch_var * count
+            running_var.copy_((m_old + m_new + delta * delta * (n_old * count / n_new)) / n_new)
             seen.add_(count.long())
         else:
-            mom = self.momentum
-            running_mean.mul_(1 - mom).add_(batch_mean, alpha=mom)
-            running_var.mul_(1 - mom).add_(batch_var, alpha=mom)
+            running_mean.mul_(1 - self.momentum).add_(batch_mean, alpha=self.momentum)
+            running_var.mul_(1 - self.momentum).add_(batch_var, alpha=self.momentum)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Apply frozen running-stat normalisation; updates stats only when training (untraced)."""
-        updating = self.training and bool(mode & Mode.TRAINING) and not torch.jit.is_tracing()
-        if updating:
+        if self.training and bool(mode & Mode.TRAINING) and not torch.jit.is_tracing():
             for stream in self.streams:
-                x = b.get(f"inputs.{stream}")
-                # global object has no pad mask; a sequence stream with a pad
-                # mask gathers valid rows via ~pad_mask (mask True == padded);
-                # a mask-less stream (optional port with no producer) treats
-                # every object as valid (valid=None).
+                # the global object and a mask-less stream (optional port with
+                # no producer) count every row valid; otherwise ~pad_mask
+                # (mask True == padded) selects the valid rows
                 mask_key = f"masks.{stream}"
-                if stream == self.global_object or mask_key not in b:
-                    valid = None
-                else:
-                    valid = ~b.get(mask_key)
-                self._update_running_stats(stream, x, valid)
-        out: dict[str, Tensor] = {}
-        for stream in self.streams:
-            mean = getattr(self, f"running_mean_{stream}")
-            var = getattr(self, f"running_var_{stream}")
-            out[f"normed.{stream}"] = (b.get(f"inputs.{stream}") - mean) / torch.sqrt(
-                var + self.eps
-            )
-        return out
+                no_mask = stream == self.global_object or mask_key not in b
+                valid = None if no_mask else ~b.get(mask_key)
+                self._update_running_stats(stream, b.get(f"inputs.{stream}"), valid)
+        return {
+            f"normed.{s}": (b.get(f"inputs.{s}") - getattr(self, f"running_mean_{s}"))
+            / torch.sqrt(getattr(self, f"running_var_{s}") + self.eps)
+            for s in self.streams
+        }

@@ -245,14 +245,10 @@ class SaltModule(lightning.LightningModule):
         # model-side modules before the section folds in — RunTaskOutput
         # resolves its tasks against these.
         model_modules = dict(self._graph_modules)
-        graph_writers = {
-            key: w
-            for key, w in writers.items()
-            if not (callable(getattr(w, "is_manifest_only", None)) and w.is_manifest_only())
-        }
-        for key, w in graph_writers.items():
-            self.net[key] = w  # ride the ModuleDict (params-free, state_dict unchanged)
-            self._graph_modules[key] = w
+        for key, w in writers.items():
+            if not (callable(getattr(w, "is_manifest_only", None)) and w.is_manifest_only()):
+                self.net[key] = w  # ride the ModuleDict (params-free, state_dict unchanged)
+                self._graph_modules[key] = w
         self._output_section = dict(writers)
         self._section_sinks = list(sinks.values())
         for w in writers.values():
@@ -274,12 +270,7 @@ class SaltModule(lightning.LightningModule):
         dict[Mode, list[str]]
             ``{mode: [dotted keys]}`` for FIT/VAL/TEST, in declaration order.
         """
-        return {
-            mode: demand
-            for mode, (demand, _) in boundary_demand(
-                self._graph_modules, self._sink_prep(())
-            ).items()
-        }
+        return {mode: demand for mode, (demand, _) in self._boundary_demand().items()}
 
     def sink_origins(self) -> dict[Mode, dict[str, str]]:
         """Per-mode demanded-key -> demanding-module description.
@@ -295,12 +286,11 @@ class SaltModule(lightning.LightningModule):
             "'jets_classification' (config:
             model.modules.jets_classification)"}}``.
         """
-        return {
-            mode: origins
-            for mode, (_demand, origins) in boundary_demand(
-                self._graph_modules, self._sink_prep(())
-            ).items()
-        }
+        return {mode: origins for mode, (_, origins) in self._boundary_demand().items()}
+
+    def _boundary_demand(self) -> dict[Mode, tuple[list[str], dict[str, str]]]:
+        """`boundary_demand` over the graph modules + the current sink selection (per call)."""
+        return boundary_demand(self._graph_modules, self._sink_prep(()))
 
     def _reachable_sinks(self) -> list[Any]:
         """Every sink this model can reach: the trainer registry plus its own section
@@ -329,7 +319,7 @@ class SaltModule(lightning.LightningModule):
             self._reachable_sinks(),
             output_section=self._output_section,
             reader=getattr(getattr(trainer, "datamodule", None), "reader", None),
-            callbacks=getattr(trainer, "callbacks", None) if trainer is not None else None,
+            callbacks=getattr(trainer, "callbacks", None),
             modes=modes,
             writer_demand=writer_demand,
         )
@@ -418,23 +408,21 @@ class SaltModule(lightning.LightningModule):
         # resolved shapes) and BEFORE optimizer construction / the first step
         # (both are strictly later in the Lightning fit sequence). Fit-only —
         # `test` never warm-starts.
-        if stage == "fit" and self._init_from is not None:
-            result = warm_start_from_checkpoint(
-                self,
-                self._init_from,
-                config_modules=self._graph_modules,
-                plans=self.plans,
-                payload_key=CKPT_KEY,
-            )
-            self._init_warm_started = True
-            self._init_loaded_modules = set(result.loaded)
-        # training_schedule: reset to stage 0 and apply its freeze mask AFTER any
-        # warm start (freeze composes on top of the loaded weights) and BEFORE
-        # optimizer construction, so the initial `configure_optimizers` (built by
-        # Lightning's strategy.setup, after this) sees stage 0's requires_grad
-        # mask. Later stage boundaries are driven by the
-        # `TrainingScheduleCallback`. Fit-only.
         if stage == "fit":
+            if self._init_from is not None:
+                result = warm_start_from_checkpoint(
+                    self,
+                    self._init_from,
+                    config_modules=self._graph_modules,
+                    plans=self.plans,
+                    payload_key=CKPT_KEY,
+                )
+                self._init_warm_started = True
+                self._init_loaded_modules = set(result.loaded)
+            # training_schedule: reset to stage 0 and apply its freeze mask AFTER any warm
+            # start (freeze composes on the loaded weights) and BEFORE Lightning's
+            # strategy.setup builds the optimizer, so it sees stage 0's requires_grad mask.
+            # Later stages are driven by `TrainingScheduleCallback`. Fit-only.
             self.training_controller.preflight(self._trainer)
             preflight_lr_schedulers(self.training_controller.schedule)
             self.training_controller.start_fit(self._trainer)
@@ -486,8 +474,7 @@ class SaltModule(lightning.LightningModule):
         validate`` passes the reader map explicitly because it never binds.
         """
         for module in (self._graph_modules if modules is None else modules).values():
-            preflight = getattr(module, "preflight", None)
-            if callable(preflight):
+            if callable(preflight := getattr(module, "preflight", None)):
                 preflight()
 
     def _assert_fit_val_identical(self) -> None:
@@ -508,7 +495,7 @@ class SaltModule(lightning.LightningModule):
         """The attached `SaltDataModule` (model plans need its boundary); raises
         `ConfigError` when none is attached or it is not a `SaltDataModule`.
         """
-        dm = getattr(self._trainer, "datamodule", None) if self._trainer is not None else None
+        dm = getattr(self._trainer, "datamodule", None)
         if not isinstance(dm, SaltDataModule):
             raise ConfigError(
                 "SaltModule compiles its plans against a SaltDataModule's dataset boundary — "
@@ -571,11 +558,7 @@ class SaltModule(lightning.LightningModule):
             return
         targets = self._graph_modules
         if self._init_warm_started:
-            targets = {
-                name: module
-                for name, module in self._graph_modules.items()
-                if name not in self._init_loaded_modules
-            }
+            targets = {n: m for n, m in targets.items() if n not in self._init_loaded_modules}
         self._run_preflights(targets)
         materialise_all(targets)
         self.materialised = True
@@ -588,10 +571,8 @@ class SaltModule(lightning.LightningModule):
         epoch boundaries. No-op when nothing is frozen.
         """
         super().train(mode)
-        frozen = self.training_controller.frozen_module_names
-        if mode and frozen:
-            for name in frozen:
-                self.net[name].eval()
+        for name in self.training_controller.frozen_module_names if mode else ():
+            self.net[name].eval()
         return self
 
     def on_after_backward(self) -> None:
@@ -754,12 +735,9 @@ class SaltModule(lightning.LightningModule):
             self._verify_ckpt_hash(mode, plan)
         if not self.bound:
             stored = payload["schema"]
-            self._bind(
-                ResolvedSchema(
-                    widths=dict(stored["widths"]),
-                    fields={key: tuple(val) for key, val in stored.get("fields", {}).items()},
-                )
-            )
+            widths = dict(stored["widths"])
+            fields = {key: tuple(val) for key, val in stored.get("fields", {}).items()}
+            self._bind(ResolvedSchema(widths=widths, fields=fields))
         # Re-establish the saved stage + freeze mask while the model is bound but
         # the optimizer is NOT yet built (Lightning restore order: setup("fit") ->
         # on_load_checkpoint -> configure_optimizers -> restore_optimizers), so

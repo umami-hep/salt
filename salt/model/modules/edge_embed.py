@@ -24,12 +24,20 @@ from salt.graph.spec import (
 )
 from salt.model.base import SaltModelModule
 from salt.model.bind import ResolvedSchema
+from salt.model.modules.norm import _checked_streams
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.nn.dense import Dense, _reject_width_keys
 
-_EDGE_FEATURES = ("dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass")
-"""Recognised edge-feature names. EdgeFeatures rejects anything outside this
-set at config time."""
+_EDGE_FEATURES: dict[str, tuple[str, ...]] = {
+    "dR": ("eta", "phi"),
+    "z": ("pt",),
+    "kt": ("eta", "phi", "pt"),
+    "subjetIndex": ("subjetIndex",),
+    "isSelfLoop": (),
+    "mass": ("pt", "eta", "phi", "energy"),
+}
+"""Recognised edge-feature names -> the input variables each needs. EdgeFeatures
+rejects anything outside this set at config time."""
 
 
 def check_edge_config(
@@ -37,24 +45,10 @@ def check_edge_config(
     available_vars: list[str],
 ) -> None:
     """Check the requested edge features are recognized and have the required input variables."""
-    req_vars: list[str] = []
     for variable in edge_features:
-        if variable == "dR":
-            req_vars.extend(["eta", "phi"])
-        elif variable == "z":
-            req_vars.extend(["pt"])
-        elif variable == "kt":
-            req_vars.extend(["eta", "phi", "pt"])
-        elif variable == "isSelfLoop":
-            continue
-        elif variable == "subjetIndex":
-            req_vars.extend(["subjetIndex"])
-        elif variable == "mass":
-            req_vars.extend(["pt", "eta", "phi", "energy"])
-        else:
+        if variable not in _EDGE_FEATURES:
             raise ValueError(f"Edge feature {variable} not recognized")
-
-    missing = set(req_vars) - set(available_vars)
+    missing = {v for f in edge_features for v in _EDGE_FEATURES[f]} - set(available_vars)
     if missing:
         raise ValueError(
             f"Indices of {missing} required for edge features calculation were not specified."
@@ -73,25 +67,24 @@ def calculate_edge_features(
         device=batch.device,
     )
 
+    def var(name: str) -> Tensor:
+        return batch[:, :, indices_map[name]]
+
+    def row(v: Tensor) -> Tensor:  # [B, N] -> [B, N, N], v[b, j] at [b, i, j]
+        return v.unsqueeze(1).expand(-1, batch.shape[1], -1)
+
+    def col(v: Tensor) -> Tensor:  # [B, N] -> [B, N, N], v[b, i] at [b, i, j]
+        return v.unsqueeze(2).expand(-1, -1, batch.shape[1])
+
     # intermediate quantities
     if "dR" in variables or "kt" in variables:
-        dphi = batch[:, :, indices_map["phi"]].unsqueeze(1).expand(-1, batch.shape[1], -1) - batch[
-            :, :, indices_map["phi"]
-        ].unsqueeze(2).expand(-1, -1, batch.shape[1])
+        dphi = row(var("phi")) - col(var("phi"))
         dphi -= (dphi > math.pi).type_as(dphi) * 2 * math.pi
-        deta = batch[:, :, indices_map["eta"]].unsqueeze(1).expand(-1, batch.shape[1], -1) - batch[
-            :, :, indices_map["eta"]
-        ].unsqueeze(2).expand(-1, -1, batch.shape[1])
+        deta = row(var("eta")) - col(var("eta"))
     if "kt" in variables or "z" in variables:
-        pt_min = torch.minimum(
-            batch[:, :, indices_map["pt"]].unsqueeze(1).expand(-1, batch.shape[1], -1),
-            batch[:, :, indices_map["pt"]].unsqueeze(2).expand(-1, -1, batch.shape[1]),
-        )
+        pt_min = torch.minimum(row(var("pt")), col(var("pt")))
     if "mass" in variables:
-        pt = batch[:, :, indices_map["pt"]]
-        eta = batch[:, :, indices_map["eta"]]
-        phi = batch[:, :, indices_map["phi"]]
-        energy = batch[:, :, indices_map["energy"]]
+        pt, eta, phi, energy = (var(v) for v in ("pt", "eta", "phi", "energy"))
         px = pt * torch.cos(phi)
         py = pt * torch.sin(phi)
         pz = pt * (torch.exp(eta) - torch.exp(-eta)) / 2
@@ -105,10 +98,7 @@ def calculate_edge_features(
                 pt_min * torch.sqrt(torch.square(deta) + torch.square(dphi))
             )
         elif variable == "z":
-            pt_sum = batch[:, :, indices_map["pt"]].unsqueeze(1).expand(
-                -1, batch.shape[1], -1
-            ) + batch[:, :, indices_map["pt"]].unsqueeze(2).expand(-1, -1, batch.shape[1])
-            ebatch[:, :, :, i] = torch.log(pt_min / pt_sum)
+            ebatch[:, :, :, i] = torch.log(pt_min / (row(var("pt")) + col(var("pt"))))
         elif variable == "isSelfLoop":
             ebatch[:, :, :, i] = (
                 torch.eye(batch.shape[1], dtype=ebatch.dtype, device=batch.device)
@@ -116,29 +106,15 @@ def calculate_edge_features(
                 .expand(batch.shape[0], -1, -1)
             )
         elif variable == "subjetIndex":
-            sji1 = (
-                batch[:, :, indices_map["subjetIndex"]].unsqueeze(1).expand(-1, batch.shape[1], -1)
-            )
-            sji2 = (
-                batch[:, :, indices_map["subjetIndex"]].unsqueeze(2).expand(-1, -1, batch.shape[1])
-            )
+            sji1, sji2 = row(var("subjetIndex")), col(var("subjetIndex"))
             ebatch[:, :, :, i] = torch.logical_and(torch.eq(sji1, sji2), sji1 >= 0)
         elif variable == "mass":
-            e1 = energy.unsqueeze(1).expand(-1, batch.shape[1], -1)
-            e2 = energy.unsqueeze(2).expand(-1, -1, batch.shape[1])
-            px1 = px.unsqueeze(1).expand(-1, batch.shape[1], -1)
-            px2 = px.unsqueeze(2).expand(-1, -1, batch.shape[1])
-            py1 = py.unsqueeze(1).expand(-1, batch.shape[1], -1)
-            py2 = py.unsqueeze(2).expand(-1, -1, batch.shape[1])
-            pz1 = pz.unsqueeze(1).expand(-1, batch.shape[1], -1)
-            pz2 = pz.unsqueeze(2).expand(-1, -1, batch.shape[1])
-            e_sum = e1 + e2
-            px_sum = px1 + px2
-            py_sum = py1 + py2
-            pz_sum = pz1 + pz2
+            e1, e2, px1, px2, py1, py2, pz1, pz2 = (
+                f(v) for v in (energy, px, py, pz) for f in (row, col)
+            )
+            e_sum, px_sum, py_sum, pz_sum = e1 + e2, px1 + px2, py1 + py2, pz1 + pz2
             mass2 = e_sum**2 - px_sum**2 - py_sum**2 - pz_sum**2
-            mass2 = torch.clamp_min(mass2, 1e-8)
-            ebatch[:, :, :, i] = 0.5 * torch.log(mass2)
+            ebatch[:, :, :, i] = 0.5 * torch.log(torch.clamp_min(mass2, 1e-8))
 
     return torch.nan_to_num(ebatch, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -185,22 +161,17 @@ class EdgeFeatures(SaltModelModule):
         Raises
         ------
         ConfigError
-            If `features` is empty, has duplicates, or names an unrecognised
-            edge feature.
+            If `features` names an unrecognised edge feature (empty or
+            duplicated `features` are rejected the same way).
         """
         super().__init__()
-        if not features:
-            raise ConfigError("EdgeFeatures: features must be a non-empty sequence")
-        if len(set(features)) != len(tuple(features)):
-            raise ConfigError(f"EdgeFeatures: duplicate features in {tuple(features)}")
-        unknown = [f for f in features if f not in _EDGE_FEATURES]
-        if unknown:
+        self.features = _checked_streams(features, "EdgeFeatures", "features")
+        if unknown := [f for f in features if f not in _EDGE_FEATURES]:
             raise ConfigError(
                 f"EdgeFeatures: unrecognised edge feature(s) {unknown} — choose from "
                 f"{sorted(_EDGE_FEATURES)}"
             )
         self.stream = stream
-        self.features = tuple(features)
         self.out_key = out if out is not None else f"edges.{stream}"
         self.input_key = input if input is not None else f"inputs.{stream}"
         self.indices_map: dict[str, int] | None = None
@@ -209,7 +180,6 @@ class EdgeFeatures(SaltModelModule):
         """Declare raw ``inputs``/``masks.<stream>`` -> ``edges.<stream>`` ``[B,T,T,E]``."""
         del mode
         tlen = _stream_len(self.stream)
-        edge_dim = len(self.features)
         return IO(
             requires=unflatten_spec({
                 self.input_key: TensorSpec(
@@ -220,7 +190,9 @@ class EdgeFeatures(SaltModelModule):
                 ),
             }),
             produces=unflatten_spec({
-                self.out_key: TensorSpec(shape=("B", tlen, tlen, edge_dim), dtype="float32"),
+                self.out_key: TensorSpec(
+                    shape=("B", tlen, tlen, len(self.features)), dtype="float32"
+                ),
             }),
         )
 
@@ -235,8 +207,7 @@ class EdgeFeatures(SaltModelModule):
         del mode
         assert self.indices_map is not None, "forward before bind()"
         x = b.get(self.input_key)
-        edges = calculate_edge_features(x, self.indices_map, list(self.features))
-        return {self.out_key: edges}
+        return {self.out_key: calculate_edge_features(x, self.indices_map, list(self.features))}
 
 
 class EdgeEmbed(SaltModelModule):

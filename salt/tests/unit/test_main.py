@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import os
 import re
@@ -15,7 +16,8 @@ import pytest
 import torch
 import yaml
 from lightning.pytorch import Callback
-from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, ModelSummary
+from lightning.pytorch.loggers import CometLogger
 
 from salt.callbacks import Checkpoint, ProgressBar
 from salt.data import SaltDataModule
@@ -26,6 +28,7 @@ from salt.main import (
     SALT_AUTO_RESUME_ENV,
     SaltCLI,
     _best_checkpoint,  # noqa: PLC2701 - the fallback glob under test
+    _resolve_class_path,  # noqa: PLC2701 - resolves the saved (shortened) logger class_path
     latest_checkpoint,
     main,
     run_dir_path,
@@ -609,6 +612,116 @@ class TestFitRetryLoop:
         assert run_dirs == [run_dir]
 
 
+_LOGGED_FIT_TRAINERS: list = []
+"""Trainers recorded by `LoggedFitProbe`; reset at the start of each `TestLoggedFit` test."""
+
+_COMET_ENV = (
+    "COMET_API_KEY",
+    "COMET_EXPERIMENT_NAME",
+    "COMET_OFFLINE_DIRECTORY",
+    "COMET_DISABLE_AUTO_LOGGING",
+)
+_COMET_LOGGER_PATHS = {
+    "lightning.pytorch.loggers.CometLogger",
+    "lightning.pytorch.loggers.comet.CometLogger",
+}
+
+
+class LoggedFitProbe(Callback):
+    """Records the fit trainer so a test can inspect its assembled callbacks and logger.
+
+    Referenced by class_path ``salt.tests.unit.test_main.LoggedFitProbe``
+    (precedent: `StageCallbackProbe`, below).
+    """
+
+    def on_fit_start(self, trainer, pl_module) -> None:
+        _LOGGED_FIT_TRAINERS.append(trainer)
+
+
+def _offline_comet_env(monkeypatch, tmp_path: Path) -> None:
+    """Offline Comet env for a logged fit, restored on teardown.
+
+    ``setenv`` first records each original value (even when unset) so teardown
+    restores it; `_wire_experiment_logger` mutates ``COMET_EXPERIMENT_NAME`` and
+    ``COMET_OFFLINE_DIRECTORY``. No ``COMET_API_KEY`` makes salt force ``online=false``.
+    """
+    for name in _COMET_ENV:
+        monkeypatch.setenv(name, "x")
+    monkeypatch.delenv("COMET_API_KEY")
+    monkeypatch.delenv("COMET_EXPERIMENT_NAME")
+    monkeypatch.setenv("COMET_OFFLINE_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("COMET_DISABLE_AUTO_LOGGING", "1")
+
+
+def _logged_fit_args(data, root: Path, *extra: str) -> list[str]:
+    """A tiny CPU fit with the base.yaml CometLogger left ON and NO
+    ``fast_dev_run`` (Lightning skips SaveConfigCallback under it).
+    """
+    return [
+        "fit",
+        "--config",
+        str(DUMMY_CFG),
+        *required_overrides(data),
+        f"--trainer.default_root_dir={root}",
+        "--trainer.accelerator=cpu",
+        "--trainer.max_epochs=1",
+        "--trainer.limit_train_batches=2",
+        "--trainer.limit_val_batches=2",
+        "--trainer.num_sanity_val_steps=0",
+        "--trainer.log_every_n_steps=1",
+        "--callbacks.progress=null",
+        "--callbacks.logged_probe.class_path=salt.tests.unit.test_main.LoggedFitProbe",
+        *extra,
+    ]
+
+
+def _logged_fit_trainers() -> list:
+    """`_LOGGED_FIT_TRAINERS` on the module the CLI imports for `LoggedFitProbe`.
+
+    Under pytest this file can be imported as ``unit.test_main`` while the
+    class_path imports ``salt.tests.unit.test_main`` fresh, giving a distinct
+    module object with its own list (cf. `StageCallbackProbe`).
+    """
+    return importlib.import_module("salt.tests.unit.test_main")._LOGGED_FIT_TRAINERS
+
+
+def _saved_config(root: Path) -> dict:
+    configs = list(root.rglob("config.yaml"))
+    assert len(configs) == 1, configs
+    return yaml.safe_load(configs[0].read_text())
+
+
+class TestLoggedFit:
+    def test_logged_fit_keeps_lr_monitor_and_saves_logger(self, data, tmp_path, monkeypatch):
+        trainers = _logged_fit_trainers()
+        trainers.clear()
+        _offline_comet_env(monkeypatch, tmp_path)
+        assert main(_logged_fit_args(data, tmp_path)) == 0
+        assert len(trainers) == 1
+        trainer = trainers[0]
+        assert any(isinstance(cb, LearningRateMonitor) for cb in trainer.callbacks)
+        assert isinstance(trainer.logger, CometLogger)
+        logger = _saved_config(tmp_path)["trainer"]["logger"]
+        # jsonargparse may shorten the class_path on dump; either spelling must
+        # resolve to the same class
+        assert logger["class_path"] in _COMET_LOGGER_PATHS, logger
+        assert _resolve_class_path(logger["class_path"]) is CometLogger
+        assert logger["init_args"]["project"] == "salt"
+        assert logger["init_args"]["online"] is False
+
+    def test_logger_off_fit_drops_lr_monitor_and_saves_false(self, data, tmp_path, monkeypatch):
+        # unchanged-behaviour control
+        trainers = _logged_fit_trainers()
+        trainers.clear()
+        _offline_comet_env(monkeypatch, tmp_path)
+        assert main(_logged_fit_args(data, tmp_path, "--trainer.logger=false")) == 0
+        assert len(trainers) == 1
+        trainer = trainers[0]
+        assert not any(isinstance(cb, LearningRateMonitor) for cb in trainer.callbacks)
+        assert trainer.logger is None
+        assert _saved_config(tmp_path)["trainer"]["logger"] is False
+
+
 class TestGraphFitConfigAdapter:
     """``salt graph`` over the REAL trainer configs."""
 
@@ -1176,7 +1289,7 @@ class TestTopLevelTrainingSchedule:
         cli = make_cli(data)
         sched = cli.model.training_controller.schedule
         assert not sched.is_multi_stage
-        assert sched.initial_stage.name == "fit"
+        assert sched.stages[0].name == "fit"
         assert getattr(cli.config.model.init_args, "training_schedule", None) is None
 
 

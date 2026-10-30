@@ -64,11 +64,7 @@ class GraphArtifacts(Callback):
     # -- internals -----------------------------------------------------------
 
     def _write(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        stage: str,
-        mode_names: tuple[str, ...],
+        self, trainer: Trainer, pl_module: LightningModule, stage: str, mode_names: tuple[str, ...]
     ) -> None:
         """Write all artifacts for one stage (rank zero, never raising)."""
         if not trainer.is_global_zero:
@@ -97,12 +93,8 @@ class GraphArtifacts(Callback):
         self._render(plan, modules, pruned, out_dir / f"graph_{stage}")
         dataset = self._stage_dataset(trainer, stage)
         if dataset is not None:
-            self._render(
-                dataset.plan,
-                dataset.modules,
-                sorted(set(dataset.modules) - set(dataset.plan.module_names)),
-                out_dir / f"graph_{stage}_dataset",
-            )
+            pruned = sorted(set(dataset.modules) - set(dataset.plan.module_names))
+            self._render(dataset.plan, dataset.modules, pruned, out_dir / f"graph_{stage}_dataset")
         _LOG.info(f"wrote graph/plan artifacts to {out_dir}")
 
     @staticmethod
@@ -142,12 +134,7 @@ class GraphArtifacts(Callback):
             plan = plans.get(Mode[mode_name.upper()])
             if plan is None:
                 continue
-            model_io = _plan_io(plan)
-            section: dict[str, Any] = {
-                "plan_hash": plan.plan_hash,
-                "sources": model_io["sources"],
-                "modules": model_io["modules"],
-            }
+            section: dict[str, Any] = {"plan_hash": plan.plan_hash, **_plan_io(plan)}
             dataset = self._stage_dataset(trainer, mode_name)
             if dataset is not None:
                 section["dataset_modules"] = _plan_io(dataset.plan)["modules"]
@@ -155,11 +142,7 @@ class GraphArtifacts(Callback):
         return yaml.safe_dump(payload, sort_keys=False)
 
     def _render(
-        self,
-        plan: Plan,
-        modules: Mapping[str, Any],
-        pruned: list[str],
-        base: Path,
+        self, plan: Plan, modules: Mapping[str, Any], pruned: list[str], base: Path
     ) -> None:
         """Write DOT + image for one plan via the `dot` binary; a missing/failing ``dot``
         degrades to a DOT-only hint (never crashes the run).
@@ -172,12 +155,8 @@ class GraphArtifacts(Callback):
         if dot_bin is None:
             _LOG.warning(f"graphviz `dot` not on PATH — wrote {dot_path} only; {hint}")
             return
-        result = subprocess.run(
-            [dot_bin, f"-T{self.image_format}", str(dot_path), "-o", str(img_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        cmd = [dot_bin, f"-T{self.image_format}", str(dot_path), "-o", str(img_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             _LOG.warning(
                 f"`dot` failed to render {img_path} (exit {result.returncode}): "
@@ -199,11 +178,8 @@ def _spec_dict(spec: TensorSpec) -> dict[str, Any]:
     """A `TensorSpec` as plain YAML-able data: ``shape``/``dtype``/``kind`` always,
     ``fields`` when declared.
     """
-    out: dict[str, Any] = {
-        "shape": list(spec.shape) if spec.shape is not None else None,
-        "dtype": spec.dtype,
-        "kind": spec.kind,
-    }
+    shape = list(spec.shape) if spec.shape is not None else None
+    out: dict[str, Any] = {"shape": shape, "dtype": spec.dtype, "kind": spec.kind}
     if spec.fields is not None:
         out["fields"] = list(spec.fields)
     return out

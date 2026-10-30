@@ -71,17 +71,14 @@ def parse_modes(modes: Sequence[str | Mode], owner: str) -> frozenset[Mode]:
         )
     parsed: set[Mode] = set()
     for entry in modes:
-        if isinstance(entry, Mode):
-            parsed.add(entry)
-            continue
-        key = str(entry).strip().lower()
-        if key not in _MODE_BY_NAME:
+        mode = entry if isinstance(entry, Mode) else _MODE_BY_NAME.get(str(entry).strip().lower())
+        if mode is None:
             raise ConfigError(
                 f"{owner}: {entry!r} is not a mode — `modes:` takes the planner's own mode "
                 f"names {_fmt_modes(ALL_MODES)}. (`salt inference` drives a sink directly, "
                 "outside the planner's modes, and is not selectable here.)"
             )
-        parsed.add(_MODE_BY_NAME[key])
+        parsed.add(mode)
     return frozenset(parsed)
 
 
@@ -96,10 +93,8 @@ def collect_manifest_fields(sources: Iterable[Any], mode: Mode) -> list[tuple[st
     """
     out: list[tuple[str, OutputField]] = []
     for source in sources:
-        manifest = getattr(source, "manifest_fields", None)
-        if not callable(manifest):
-            continue
-        out.extend((key, field) for key, field in manifest(mode) if field.final)
+        if callable(manifest := getattr(source, "manifest_fields", None)):
+            out.extend((key, field) for key, field in manifest(mode) if field.final)
     return out
 
 
@@ -375,13 +370,11 @@ class Node:
         groups: list[list[Any]] = []
         seen: set[int] = {id(self)}
         for bound in (self._output_section, self._manifest_modules):
-            group: list[Any] = []
+            groups.append([])
             for entry in (bound or {}).values():
-                if id(entry) in seen:
-                    continue
-                seen.add(id(entry))
-                group.append(entry)
-            groups.append(group)
+                if id(entry) not in seen:
+                    seen.add(id(entry))
+                    groups[-1].append(entry)
         return groups
 
     def _manifest_sources(self) -> list[Any]:
@@ -416,11 +409,7 @@ class Node:
                     f"{type(self).__name__}: `consumes:` pattern {pattern!r} matches none of "
                     f"the declared output leaves — available leaf keys are {available}"
                 )
-        return [
-            (key, field)
-            for key, field in fields
-            if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
-        ]
+        return [kf for kf in fields if any(fnmatch.fnmatchcase(kf[0], p) for p in patterns)]
 
     def is_sink(self) -> bool:
         """Mark this module a terminal sink, excluded from the executor forward loop."""

@@ -18,57 +18,22 @@ from salt.utils.tensor_utils import (
 
 try:
     from mup import MuReadout as _MuReadout
-
 except ImportError:
     _MuReadout = None
 
 
-class LayerScale(nn.Module):
-    """Applies the LayerScale operation from CaiT (stabilizes deep transformers).
-
-    Reference: https://arxiv.org/abs/2103.17239
-    """
-
-    def __init__(self, dim: int, init_value: float = 1e-3) -> None:
-        super().__init__()
-        self.gamma = nn.Parameter(init_value * torch.ones(dim))
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Scale the input by a learnable vector ``gamma``."""
-        return x * self.gamma
-
-
-class DropPath(nn.Module):
-    """Stochastic depth / drop-path regularization."""
-
-    def __init__(self, drop_prob: float = 0.0):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Randomly drop residual paths (no-op outside training)."""
-        if self.drop_prob == 0.0 or not self.training:
-            return x
-        keep_prob = 1 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-        random_tensor.floor_()  # binarize
-        return x.div(keep_prob) * random_tensor
-
-
 class NormResidual(nn.Module):
-    """Residual wrapper (PostNorm/PreNorm/NoNorm) around ``fn``, with LayerScale/DropPath.
+    """Residual wrapper around ``fn`` (PreNorm/PostNorm/NoNorm by ``norm_type``).
 
-    ``ls_init=None`` disables LayerScale; ``embed_dim=0`` falls back to
-    ``fn.embed_dim``; forwards edge features through for `EdgeAttention`.
+    ``pre``: ``x + fn(norm(x))``; ``post``: ``norm(x + fn(x))``; anything else (``none``):
+    ``x + fn(x)``. ``embed_dim=0`` falls back to ``fn.embed_dim``; forwards edge features
+    through for `EdgeAttention`.
     """
 
     def __init__(
         self,
         fn: GLU | Attention | EdgeAttention,
         norm: str = "LayerNorm",
-        ls_init: float | None = None,
-        drop_path: float = 0.0,
         embed_dim: int = 0,
         norm_type: str = "pre",
     ) -> None:
@@ -78,35 +43,17 @@ class NormResidual(nn.Module):
         assert dim > 0, "Could not determine embed_dim from fn"
         self.fn = fn
         if self.norm_type != "none":
-            self.norm = getattr(_LAYERNORMS, norm)(dim)
-        self.ls = LayerScale(dim, ls_init) if ls_init is not None else nn.Identity()
-        self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
-
-        self.edges = bool(isinstance(fn, EdgeAttention))
-
-    def _forward_edges(self, x: Tensor, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]:
-        """Residual wrapper around an ``fn`` that also returns edge features."""
-        if self.norm_type == "pre":
-            fn_out, edge_out = self.fn(self.norm(x), *args, **kwargs)
-            res_out = x + self.drop_path(self.ls(fn_out))
-            return res_out, edge_out
-        if self.norm_type == "post":
-            fn_out, edge_out = self.fn(x, *args, **kwargs)
-            res_out = self.norm(x + self.drop_path(self.ls(fn_out)))
-            return res_out, edge_out
-        fn_out, edge_out = self.fn(x, *args, **kwargs)
-        res_out = x + self.drop_path(self.ls(fn_out))
-        return res_out, edge_out
+            self.norm = _LAYERNORMS[norm](dim)
+        self.edges = isinstance(fn, EdgeAttention)
 
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, Tensor]:
-        """Apply the residual wrapper; dispatches to the edge-returning path for `EdgeAttention`."""
-        if self.edges:
-            return self._forward_edges(x, *args, **kwargs)
-        if self.norm_type == "pre":
-            return x + self.drop_path(self.ls(self.fn(self.norm(x), *args, **kwargs)))
+        """Apply the residual wrapper; returns ``(out, edge_out)`` for an `EdgeAttention` ``fn``."""
+        out = self.fn(self.norm(x) if self.norm_type == "pre" else x, *args, **kwargs)
+        fn_out, edge_out = out if self.edges else (out, None)
+        res = x + fn_out
         if self.norm_type == "post":
-            return self.norm(x + self.drop_path(self.ls(self.fn(x, *args, **kwargs))))
-        return x + self.drop_path(self.ls(self.fn(x, *args, **kwargs)))
+            res = self.norm(res)
+        return (res, edge_out) if self.edges else res
 
 
 @final
@@ -114,16 +61,13 @@ class EncoderLayer(nn.Module):
     """Transformer encoder layer: self-attention + feed-forward.
 
     ``edge_embed_dim > 0`` swaps `Attention` for `EdgeAttention`;
-    ``norm_type="hybrid"`` forces qk/v norm and a pre-FFN norm; ``num_dense``
-    stacks that many `GLU` blocks in the feed-forward.
+    ``norm_type="hybrid"`` forces qk/v norm and a pre-FFN norm.
     """
 
     def __init__(
         self,
         embed_dim: int,
         norm: str = "LayerNorm",
-        ls_init: float | None = None,
-        drop_path: float = 0.0,
         depth: int = 1,
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
@@ -131,79 +75,58 @@ class EncoderLayer(nn.Module):
         edge_embed_dim: int = 0,
         update_edges: bool = False,
         mup: bool = False,
-        num_dense: int = 1,
     ) -> None:
         super().__init__()
         self.mup = mup
-        self.num_dense = num_dense
-
-        assert num_dense >= 1, "num_dense must be at least 1"
         self.update_edges = update_edges
-
-        if attn_kwargs is None:
-            attn_kwargs = {}
-        if dense_kwargs is None:
-            dense_kwargs = {}
-
         self.embed_dim = embed_dim
         self.norm_type = norm_type
+        attn_kwargs = dict(attn_kwargs or {})
+        dense_kwargs = dict(dense_kwargs or {})
+
+        residual_norm_type = norm_type
         if norm_type == "hybrid":
-            attn_kwargs["do_qk_norm"] = True
-            attn_kwargs["do_v_norm"] = True
+            # layer 0 keeps pre-norm residuals; deeper layers use plain residuals + a pre-FFN norm
+            attn_kwargs |= {"do_qk_norm": True, "do_v_norm": True}
             residual_norm_type = "pre" if depth == 0 else "none"
-            self.norm = (
-                nn.Identity(embed_dim) if depth == 0 else getattr(_LAYERNORMS, norm)(embed_dim)
-            )
-        else:
-            residual_norm_type = norm_type
-
+            self.norm = nn.Identity(embed_dim) if depth == 0 else _LAYERNORMS[norm](embed_dim)
         if self.mup:
-            attn_kwargs["mup"] = True
-            dense_kwargs["mup"] = True
+            attn_kwargs["mup"] = dense_kwargs["mup"] = True
 
-        attn_class: type[Attention | EdgeAttention]
+        attn_class: type[Attention | EdgeAttention] = Attention
         if edge_embed_dim > 0:
             attn_class = EdgeAttention
-            attn_kwargs["edge_embed_dim"] = edge_embed_dim
-            attn_kwargs["update_edges"] = update_edges
-
-            self.edge_prenorm = getattr(_LAYERNORMS, norm)(edge_embed_dim)
+            attn_kwargs |= {"edge_embed_dim": edge_embed_dim, "update_edges": update_edges}
+            self.edge_prenorm = _LAYERNORMS[norm](edge_embed_dim)
             if self.update_edges:
-                self.edge_postnorm = getattr(_LAYERNORMS, norm)(edge_embed_dim)
-        else:
-            attn_class = Attention
+                self.edge_postnorm = _LAYERNORMS[norm](edge_embed_dim)
 
-        residual = partial(
-            NormResidual,
-            norm=norm,
-            ls_init=ls_init,
-            drop_path=drop_path,
-            norm_type=residual_norm_type,
-        )
+        residual = partial(NormResidual, norm=norm, norm_type=residual_norm_type)
         self.attn = residual(attn_class(embed_dim, **attn_kwargs))
-        if num_dense == 1:
-            self.dense = residual(GLU(embed_dim, **dense_kwargs))
-        else:
-            self.dense = nn.Sequential(*[
-                residual(GLU(embed_dim, **dense_kwargs)) for _ in range(num_dense)
-            ])
+        self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
     def forward(
         self, x: Tensor, edge_x: Tensor | None = None, **kwargs: Any
     ) -> Tensor | tuple[Tensor, Tensor]:
         """Self-attention + feed-forward; returns updated edges too when ``edge_x`` is given."""
-        if edge_x is not None:
+        if edge_x is None:
+            x = self.attn(x, **kwargs)
+        else:
             x, edge_x = self.attn(x, edge_x=edge_x, **kwargs)
             if self.update_edges:
                 edge_x = edge_x + self.edge_postnorm(edge_x)
-        else:
-            x = self.attn(x, **kwargs)
+        x = self.dense(self.norm(x) if self.norm_type == "hybrid" else x)
+        return x if edge_x is None else (x, edge_x)
 
-        x = self.dense(self.norm(x)) if self.norm_type == "hybrid" else self.dense(x)
 
-        if edge_x is not None:
-            return x, edge_x
-        return x
+def _append_registers(
+    seq: Tensor | dict[str, Tensor], reg: Tensor, dim: int
+) -> Tensor | dict[str, Tensor]:
+    """Append ``reg`` as a ``"REGISTERS"`` entry of a dict (in place), else concat on ``dim``."""
+    if isinstance(seq, dict):
+        seq["REGISTERS"] = reg
+        return seq
+    return torch.cat([seq, reg], dim=dim)
 
 
 @final
@@ -281,12 +204,11 @@ class Transformer(nn.Module):
 
         if self.update_edges:
             assert edge_embed_dim > 0, "Cannot update edges with edge_embed_dim=0"
-
         if self.mup:
             assert _MuReadout is not None, "mup is not installed!"
             assert self.do_out_proj, (
-                "Need the out_dim layer for muP, \
-                as this is the last layer of the muP-part of the model"
+                "Need the out_dim layer for muP, as this is the last layer of the muP-part of "
+                "the model"
             )
 
         # attn_type is meaningless for EdgeAttention (edge_embed_dim > 0): it has no
@@ -311,18 +233,18 @@ class Transformer(nn.Module):
             self.set_backend(self.attn_type)
 
         if self.do_out_proj:
+            # the plain Linear is always built first: its init draws from the RNG either way
             self.out_proj = nn.Linear(self.embed_dim, self.out_dim)
-            if self.mup and _MuReadout is not None:
+            if self.mup:
                 self.out_proj = _MuReadout(embed_dim, self.out_dim)
                 self.out_proj.bias.data.zero_()
                 self.out_proj.weight.data.zero_()
         if self.do_final_norm:
-            self.out_norm = getattr(_LAYERNORMS, norm)(self.out_dim)
-        if self.num_registers:
-            self.registers = nn.Parameter(
-                torch.normal(torch.zeros((self.num_registers, self.embed_dim)), std=1e-4)
-            )
-            self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
+            self.out_norm = _LAYERNORMS[norm](self.out_dim)
+        self.registers = nn.Parameter(
+            torch.normal(torch.zeros((self.num_registers, self.embed_dim)), std=1e-4)
+        )
+        self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
         self.featurewise = nn.ModuleList()
 
     def set_backend(self, attn_type: str) -> None:
@@ -340,9 +262,7 @@ class Transformer(nn.Module):
         **kwargs: Any,
     ) -> tuple[Tensor, BoolTensor | dict[str, BoolTensor]]:
         """Run the encoder stack; returns ``(encoded [B, L, D_out], pad_mask)``."""
-        if self.num_registers:
-            x, pad_mask = self._add_registers(x, pad_mask)
-
+        x, pad_mask = self._add_registers(x, pad_mask)
         if isinstance(x, dict):
             x = torch.cat(list(x.values()), dim=1)
         mask = torch.cat(list(pad_mask.values()), dim=1) if isinstance(pad_mask, dict) else pad_mask
@@ -350,36 +270,10 @@ class Transformer(nn.Module):
         # zero-pad edges to the register-augmented sequence length (registers attend
         # to each other/tokens with no edge features, so they contribute zero bias)
         if edge_x is not None:
-            edge_x = torch.cat(
-                [
-                    edge_x,
-                    torch.zeros(
-                        (
-                            edge_x.shape[0],
-                            x.shape[1] - edge_x.shape[1],
-                            edge_x.shape[2],
-                            edge_x.shape[3],
-                        ),
-                        device=edge_x.device,
-                    ),
-                ],
-                dim=1,
-            )
-            edge_x = torch.cat(
-                [
-                    edge_x,
-                    torch.zeros(
-                        (
-                            edge_x.shape[0],
-                            edge_x.shape[1],
-                            x.shape[1] - edge_x.shape[2],
-                            edge_x.shape[3],
-                        ),
-                        device=edge_x.device,
-                    ),
-                ],
-                dim=2,
-            )
+            pad = (edge_x.shape[0], x.shape[1] - edge_x.shape[1], edge_x.shape[2], edge_x.shape[3])
+            edge_x = torch.cat([edge_x, torch.zeros(pad, device=edge_x.device)], dim=1)
+            pad = (edge_x.shape[0], edge_x.shape[1], x.shape[1] - edge_x.shape[2], edge_x.shape[3])
+            edge_x = torch.cat([edge_x, torch.zeros(pad, device=edge_x.device)], dim=2)
 
         if self.attn_type == "flash-varlen":
             x, kwargs["culens"], kwargs["maxlen"] = undo_padding(x, mask)
@@ -387,10 +281,10 @@ class Transformer(nn.Module):
         for i, layer in enumerate(self.layers):
             if len(self.featurewise) > 0:
                 x = self.featurewise[i](inputs, x)
-            if edge_x is not None:
-                x, edge_x = layer(x, edge_x=edge_x, mask=mask, **kwargs)
-            else:
+            if edge_x is None:
                 x = layer(x, mask=mask, **kwargs)
+            else:
+                x, edge_x = layer(x, edge_x=edge_x, mask=mask, **kwargs)
 
         if self.do_out_proj:
             x = self.out_proj(x)
@@ -414,18 +308,9 @@ class Transformer(nn.Module):
     ) -> tuple[Tensor | dict[str, Tensor], BoolTensor | dict[str, BoolTensor] | None]:
         """Append the learnable registers to the input sequence (and mask)."""
         batch_size = next(iter(x.values())).size(0) if isinstance(x, dict) else x.size(0)
-
-        reg = self.registers.expand(batch_size, -1, -1)
-        if isinstance(x, dict):
-            x["REGISTERS"] = reg
-        else:
-            x = torch.cat([x, reg], dim=1)
-
+        x = _append_registers(x, self.registers.expand(batch_size, -1, -1), dim=1)
         if pad_mask is not None:
-            reg_mask = self.register_mask.expand(batch_size, -1)
-            if isinstance(pad_mask, dict):
-                pad_mask["REGISTERS"] = reg_mask
-            else:
-                pad_mask = torch.cat([pad_mask, reg_mask], dim=-1)
-
+            pad_mask = _append_registers(
+                pad_mask, self.register_mask.expand(batch_size, -1), dim=-1
+            )
         return x, pad_mask

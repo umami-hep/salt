@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import operator
 import os
@@ -54,7 +55,9 @@ def _patch_jsonargparse_sys_modules_race() -> None:
     threads (e.g. Comet's upload threads mutating ``sys.modules`` mid-walk
     raises ``RuntimeError: ... changed size during iteration``): retries the
     enrichment on that race signature. No-op if jsonargparse renames the
-    private helper; idempotent via the ``_salt_race_safe`` marker.
+    private helper; idempotent via the ``_salt_race_safe`` marker. This is the
+    sole race defence for `CometLogger` construction inside
+    ``parser.instantiate_classes`` (pinned by ``salt/tests/unit/test_main_comet_race.py``).
     """
     from jsonargparse import _postponed_annotations as _pa  # noqa: PLC2701 - patch site
 
@@ -168,12 +171,8 @@ def run_root(root: str | os.PathLike[str] | None, name: str, log_suffix: str | N
     if not root:
         return Path("logs")
     root = Path(root)
-    tail = root.name.rsplit("_", 1)[-1]
-    try:
-        datetime.strptime(tail, RUN_DIR_TIMESTAMP_FORMAT)
-    except ValueError:
-        pass
-    else:
+    with contextlib.suppress(ValueError):
+        datetime.strptime(root.name.rsplit("_", 1)[-1], RUN_DIR_TIMESTAMP_FORMAT)
         return root.parent
     if log_suffix and root.name == f"{name}_{log_suffix}":
         return root.parent
@@ -229,26 +228,15 @@ def latest_checkpoint(root: str | os.PathLike[str], name: str) -> Path | None:
     Path | None
         The winning checkpoint path, or ``None`` when nothing qualifies.
     """
-    root = Path(root)
-    candidates: list[tuple[int, int, int, str, Path]] = []
-    for subdir in ("ckpts", "checkpoints"):
-        for ckpt in root.glob(f"{name}_*/{subdir}/*.ckpt"):
-            if not ckpt.is_file():
-                continue
-            epoch_m = _CKPT_EPOCH_RE.search(ckpt.name)
-            step_m = _CKPT_STEP_RE.search(ckpt.name)
-            if not epoch_m or not step_m:
-                continue
-            candidates.append((
-                int(epoch_m.group(1)),
-                int(step_m.group(1)),
-                ckpt.stat().st_mtime_ns,
-                ckpt.name,
-                ckpt,
-            ))
-    if not candidates:
-        return None
-    return max(candidates, key=operator.itemgetter(slice(4)))[4]
+    candidates = [
+        (int(epoch_m.group(1)), int(step_m.group(1)), ckpt.stat().st_mtime_ns, ckpt.name, ckpt)
+        for subdir in ("ckpts", "checkpoints")
+        for ckpt in Path(root).glob(f"{name}_*/{subdir}/*.ckpt")
+        if ckpt.is_file()
+        and (epoch_m := _CKPT_EPOCH_RE.search(ckpt.name))
+        and (step_m := _CKPT_STEP_RE.search(ckpt.name))
+    ]
+    return max(candidates, key=operator.itemgetter(slice(4)))[4] if candidates else None
 
 
 def auto_resume_requested(cfg: Any) -> bool:
@@ -288,28 +276,6 @@ def _resolve_class_path(class_path: str) -> type:
     return getattr(module, attr)
 
 
-def _instantiate_class_config(cfg: Any) -> Any:
-    """Instantiate a jsonargparse ``class_path``/``init_args`` config block.
-
-    Mirrors jsonargparse's default subclass instantiation (`class_type(**init_args)`)
-    for the deferred fit logger (`SaltCLI._reattach_fit_logger`) — a leaf ``cfg``
-    (already a fully-parsed value, not a subclass block) is returned unchanged, and
-    nested ``class_path``/``init_args`` init args are instantiated recursively so an
-    arbitrary user logger block round-trips, not just the scalar-arg `CometLogger`.
-    """
-    if not isinstance(cfg, Namespace):
-        return cfg
-    class_path = cfg.get("class_path")
-    if class_path is None:
-        return cfg
-    cls = _resolve_class_path(class_path)
-    init_args = cfg.get("init_args")
-    kwargs: dict[str, Any] = {}
-    if init_args is not None:
-        kwargs = {key: _instantiate_class_config(val) for key, val in vars(init_args).items()}
-    return cls(**kwargs)
-
-
 def _is_persistence_sink(class_path: str) -> bool:
     """Whether a callback ``class_path`` names a TEST persistence sink: an
     `H5OutputSink` (or subclass, or any callback exposing duck-typed
@@ -330,9 +296,7 @@ def _is_persistence_sink(class_path: str) -> bool:
         cls = getattr(importlib.import_module(module_path), attr, None)
     except Exception:  # noqa: BLE001 - an unresolvable class_path is simply not a sink
         return False
-    if not isinstance(cls, type):
-        return False
-    if issubclass(cls, OnnxExportSink):  # ONNX-only sink: no TEST persistence
+    if not isinstance(cls, type) or issubclass(cls, OnnxExportSink):  # ONNX-only: no TEST sink
         return False
     return issubclass(cls, H5OutputSink) or callable(getattr(cls, "writer_demand", None))
 
@@ -343,11 +307,8 @@ def _has_callback_persistence_sink(callbacks: Any) -> bool:
     by the ``salt test`` writer-less check.
     """
     items = (callbacks or {}).items() if hasattr(callbacks, "items") else ()
-    for entry in (val for _, val in items if val is not None):
-        class_path = _entry_get(entry, "class_path") or ""
-        if class_path and _is_persistence_sink(class_path):
-            return True
-    return False
+    paths = (_entry_get(entry, "class_path") or "" for _, entry in items if entry is not None)
+    return any(path and _is_persistence_sink(path) for path in paths)
 
 
 def _fan_out_artifacts(cfg: Any) -> Any:
@@ -365,28 +326,19 @@ def _fan_out_artifacts(cfg: Any) -> Any:
 
     for scope, model in _iter_model_blocks(cfg):
         class_dict = scope.get("class_dict")
-        if not class_dict:
+        modules = getattr(getattr(model, "init_args", None), "modules", None)
+        if not class_dict or not isinstance(modules, dict):
             continue
-        init_args = getattr(model, "init_args", None)
-        modules = getattr(init_args, "modules", None) if init_args is not None else None
-        if not isinstance(modules, dict):
-            continue
-        for entry in modules.values():
-            if entry is None:  # null = deleted at assembly
-                continue
+        for entry in (e for e in modules.values() if e is not None):  # null = deleted
             class_path = _entry_get(entry, "class_path") or ""
             module_args = _entry_get(entry, "init_args")
-            if module_args is None:
-                continue
             if (
-                class_path.endswith("ClassificationTaskModule")
+                module_args is not None
+                and class_path.endswith("ClassificationTaskModule")
                 and _entry_get(module_args, "weight_source") is None
             ):
-                _entry_set(
-                    module_args,
-                    "weight_source",
-                    _checked_weight_source({"from_class_dict": str(class_dict)}),
-                )
+                weight_source = _checked_weight_source({"from_class_dict": str(class_dict)})
+                _entry_set(module_args, "weight_source", weight_source)
     return cfg
 
 
@@ -402,9 +354,7 @@ def _plain(value: Any) -> Any:
         value = value.as_dict()
     if isinstance(value, dict):
         return {key: _plain(val) for key, val in value.items()}
-    if isinstance(value, list):
-        return [_plain(val) for val in value]
-    return value
+    return [_plain(val) for val in value] if isinstance(value, list) else value
 
 
 def _schedule_overrides_to_tree(overrides: Sequence[tuple[str, Any]]) -> dict[str, Any]:
@@ -418,15 +368,13 @@ def _schedule_overrides_to_tree(overrides: Sequence[tuple[str, Any]]) -> dict[st
 
     tree: dict[str, Any] = {}
     for path, raw in overrides:
-        keys = path.split(".")
+        *parents, leaf = path.split(".")
         node = tree
-        for key in keys[:-1]:
-            nxt = node.get(key)
-            if not isinstance(nxt, dict):
-                nxt = {}
-                node[key] = nxt
-            node = nxt
-        node[keys[-1]] = yaml.safe_load(raw) if isinstance(raw, str) else raw
+        for key in parents:
+            if not isinstance(node.get(key), dict):
+                node[key] = {}
+            node = node[key]
+        node[leaf] = yaml.safe_load(raw) if isinstance(raw, str) else raw
     return tree
 
 
@@ -444,16 +392,14 @@ def _relocate_training_schedule(cfg: Any, overrides: Sequence[tuple[str, Any]] =
     from salt.utils.config_utils import _deep_merge_dicts
 
     for scope, model in _iter_model_blocks(cfg):
-        init_args = getattr(model, "init_args", None)
-        if init_args is None:
+        if (init_args := getattr(model, "init_args", None)) is None:
             continue
         top_level = scope.get(_TRAINING_SCHEDULE_ARG)
-        nested = _entry_get(init_args, _TRAINING_SCHEDULE_ARG)
         resolved = _plain(top_level) if top_level is not None else None
         if override_tree:
             resolved = _deep_merge_dicts(resolved or {}, override_tree)
         if resolved is None:
-            if nested is not None:
+            if _entry_get(init_args, _TRAINING_SCHEDULE_ARG) is not None:
                 raise ConfigError(
                     "training_schedule is now a TOP-LEVEL config key (peer of trainer:/"
                     "data:/model:), not a model field — move it out of "
@@ -493,27 +439,16 @@ def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     """
     from salt.graph.spec import Mode
 
-    for writer in section.values():
-        is_rto = getattr(writer, "is_run_task_output", None)
-        if callable(is_rto) and is_rto() and writer.runs_in_mode(Mode.ONNX):
-            return True
-    return False
+    rtos = (w for w in section.values() if callable(getattr(w, "is_run_task_output", None)))
+    return any(w.is_run_task_output() and w.runs_in_mode(Mode.ONNX) for w in rtos)
 
 
 def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
     """Pair each ``model`` namespace with the scope its ``--class_dict`` lives in
     — top-level on the run-free surface, subcommand-scoped on a trainer run.
     """
-    blocks: list[tuple[Any, Any]] = []
-    direct = cfg.get("model")
-    if direct is not None:
-        blocks.append((cfg, direct))
-    for sub in SaltCLI.subcommands():
-        sub_cfg = cfg.get(sub)
-        sub_model = sub_cfg.get("model") if sub_cfg is not None else None
-        if sub_model is not None:
-            blocks.append((sub_cfg, sub_model))
-    return blocks
+    scopes = [cfg, *(cfg.get(sub) for sub in SaltCLI.subcommands())]
+    return [(s, model) for s in scopes if s is not None and (model := s.get("model")) is not None]
 
 
 class SaltCLI(LightningCLI):
@@ -542,14 +477,10 @@ class SaltCLI(LightningCLI):
         # before super().__init__: before_instantiate_classes runs inside it
         # and may resolve an auto-resume checkpoint onto this
         self._resume_ckpt_path: str | None = None
-        default_config = [str(CONFIG_DIR / "base.yaml")]
-        parser_kwargs: dict[str, Any] = {"default_env": True}
-        if run:
-            parser_kwargs.update({
-                sub: {"default_config_files": default_config} for sub in self.subcommands()
-            })
-        else:
-            parser_kwargs["default_config_files"] = default_config
+        defaults = {"default_config_files": [str(CONFIG_DIR / "base.yaml")]}
+        # a trainer run takes the defaults per subcommand; the run-free parse at top level
+        per_parser = {sub: dict(defaults) for sub in self.subcommands()} if run else defaults
+        parser_kwargs: dict[str, Any] = {"default_env": True, **per_parser}
         # overwrite a stale config.yaml from a previous run: fit writes into
         # the timestamped run dir (see run_dir_path), and a --log_suffix
         # re-run lands in the SAME dir on purpose — a leftover config.yaml
@@ -726,8 +657,8 @@ class SaltCLI(LightningCLI):
         """
         callbacks_dict = self._get(self.config_init, "callbacks") or {}
         has_logger = bool(self._get(self.config_init, "trainer.logger"))
-        live = [(key, cb) for key, cb in callbacks_dict.items() if cb is not None]
-        assembled = [cb for _key, cb in live if has_logger or not _needs_logger(cb)]
+        live = [cb for cb in callbacks_dict.values() if cb is not None]
+        assembled = [cb for cb in live if has_logger or not _needs_logger(cb)]
         stock = self._get(self.config_init, "trainer.callbacks") or []
         assembled = self._maybe_add_schedule_callback(assembled, stock)
         if assembled:
@@ -755,14 +686,12 @@ class SaltCLI(LightningCLI):
         schedule = self.model.training_controller.schedule
         result = list(assembled)
         needs_driver = schedule.is_multi_stage or schedule.has_freezing or schedule.has_early_stop
-        if needs_driver and not any(
-            isinstance(cb, TrainingScheduleCallback) for cb in (*result, *stock)
+        for driver, needed in (
+            (TrainingScheduleCallback, needs_driver),
+            (StageScopedCallbacks, schedule.has_stage_callbacks),
         ):
-            result.append(TrainingScheduleCallback())
-        if schedule.has_stage_callbacks and not any(
-            isinstance(cb, StageScopedCallbacks) for cb in (*result, *stock)
-        ):
-            result.append(StageScopedCallbacks())
+            if needed and not any(isinstance(cb, driver) for cb in (*result, *stock)):
+                result.append(driver())
         return result
 
     def instantiate_classes(self) -> None:
@@ -771,15 +700,7 @@ class SaltCLI(LightningCLI):
         here rather than via ``link_arguments`` since a subclass-mode model
         link target grabs the whole namespace.
         """
-        # Defer the fit-stage logger past the racy validation pass: jsonargparse
-        # walks sys.modules to resolve forward refs in the same pass that
-        # CometLogger.__init__ starts background threads mutating sys.modules —
-        # racing into "dictionary changed size during iteration". Stash the
-        # logger config, build the trainer logger-less, re-attach after
-        # validation. Test/graph/export never carry a live logger here.
-        deferred_logger_cfg = self._detach_fit_logger()
         super().instantiate_classes()
-        self._reattach_fit_logger(deferred_logger_cfg)
         section = self._get(self.config_init, "outputs")
         model = getattr(self, "model", None)
         # hand the --init_from path to the instantiated model — its setup("fit")
@@ -787,7 +708,7 @@ class SaltCLI(LightningCLI):
         init_from = self._get(self.config_init, _INIT_FROM_ARG)
         if init_from and model is not None and getattr(self.config, "subcommand", None) == "fit":
             model._init_from = str(init_from)  # noqa: SLF001 - same-package wiring
-        composer = getattr(model, "compose_output_section", None) if model is not None else None
+        composer = getattr(model, "compose_output_section", None)
         writers: Any = None
         if section and callable(composer):
             live_section = {k: w for k, w in section.items() if w is not None}
@@ -822,11 +743,9 @@ class SaltCLI(LightningCLI):
         """
         from salt.callbacks.sink_adapter import attach_runtime_sink
 
-        trainer = getattr(self, "trainer", None)
-        if trainer is None:
-            return
-        for sink in getattr(model, "_section_sinks", ()):
-            attach_runtime_sink(trainer, sink)
+        if (trainer := getattr(self, "trainer", None)) is not None:
+            for sink in getattr(model, "_section_sinks", ()):
+                attach_runtime_sink(trainer, sink)
 
     def _validate_wired_sinks(self, model: Any) -> None:
         """Validate the fully wired sink set; raises `ConfigError` on either breach.
@@ -844,14 +763,10 @@ class SaltCLI(LightningCLI):
         from salt.outputs import is_test_persistence_sink, iter_sinks
         from salt.outputs.sinks.sink import RuntimeSink
 
-        trainer = getattr(self, "trainer", None)
-        if trainer is None:
+        if (trainer := getattr(self, "trainer", None)) is None:
             return
-        persistence = [
-            sink
-            for sink in iter_sinks(trainer)
-            if callable(getattr(sink, "writer_demand", None)) and is_test_persistence_sink(sink)
-        ]
+        demanders = (s for s in iter_sinks(trainer) if callable(getattr(s, "writer_demand", None)))
+        persistence = [sink for sink in demanders if is_test_persistence_sink(sink)]
         if len(persistence) > 1:
             names = ", ".join(repr(getattr(s, "name", type(s).__name__)) for s in persistence)
             raise ConfigError(
@@ -861,11 +776,8 @@ class SaltCLI(LightningCLI):
                 "salt.outputs.JSONLOutputSink and docs/outputs.md)."
             )
         for sink in getattr(model, "_section_sinks", ()):
-            if (
-                isinstance(sink, RuntimeSink)
-                and not is_test_persistence_sink(sink)
-                and not sink.modes_configured
-            ):
+            auxiliary = isinstance(sink, RuntimeSink) and not is_test_persistence_sink(sink)
+            if auxiliary and not sink.modes_configured:
                 raise ConfigError(
                     f"auxiliary sink {getattr(sink, 'name', type(sink).__name__)!r} "
                     f"({type(sink).__name__}) is declared in the `outputs:` section without a "
@@ -900,55 +812,24 @@ class SaltCLI(LightningCLI):
         )
 
         subcommand = getattr(self.config, "subcommand", None)
-        if subcommand == "fit":
-            return
         trainer = getattr(self, "trainer", None)
-        if trainer is None:
+        if subcommand == "fit" or trainer is None:
             return
         registered = iter_sinks(trainer)
 
-        def _present(cls: type) -> bool:
-            return any(isinstance(sink, cls) for sink in registered)
+        def _attach(cls: type[Any], name: str) -> None:  # unless one is already registered
+            if not any(isinstance(sink, cls) for sink in registered):
+                implicit = cls()
+                implicit.name = name
+                attach_runtime_sink(trainer, implicit)
 
         # H5 sink: any command that persists TEST predictions (test or run-free)
-        if _section_runs_mode(section, Mode.TEST) and not _present(H5OutputSink):
-            h5 = H5OutputSink()
-            h5.name = "h5_output"
-            attach_runtime_sink(trainer, h5)
+        if _section_runs_mode(section, Mode.TEST):
+            _attach(H5OutputSink, "h5_output")
         # ONNX sink: only the run-free parses assemble the ONNX tuple, and only
         # when a RunTaskOutput opts into export (a test-only section mints none).
-        if subcommand is None and _section_produces_onnx(section) and not _present(OnnxExportSink):
-            onnx = OnnxExportSink()
-            onnx.name = "onnx_export"
-            attach_runtime_sink(trainer, onnx)
-
-    def _detach_fit_logger(self) -> Any:
-        """Stash + null the fit-stage ``trainer.logger`` ahead of the parser pass,
-        so `instantiate_classes` builds a logger-less trainer and keeps the
-        eager comet-thread `CometLogger.__init__` out of the racy validation
-        window. Returns the un-instantiated logger config, or None outside
-        ``fit``/with no logger configured.
-        """
-        if getattr(self.config, "subcommand", None) != "fit":
-            return None
-        cfg = self.config["fit"]
-        logger = getattr(cfg.trainer, "logger", None)
-        if not logger:  # False / None — nothing to defer
-            return None
-        cfg.trainer.logger = False
-        return logger
-
-    def _reattach_fit_logger(self, logger_cfg: Any) -> None:
-        """Instantiate the deferred logger and attach it to the trainer, after
-        the racy ``sys.modules`` walk in ``super().instantiate_classes()`` is
-        done.
-        """
-        if logger_cfg is None:
-            return
-        trainer = getattr(self, "trainer", None)
-        if trainer is None:
-            return
-        trainer.logger = _instantiate_class_config(logger_cfg)
+        if subcommand is None and _section_produces_onnx(section):
+            _attach(OnnxExportSink, "onnx_export")
 
     def before_instantiate_classes(self) -> None:
         """Per-stage config patches. On ``fit``: rewrites
@@ -1000,15 +881,11 @@ class SaltCLI(LightningCLI):
                     self._resume_ckpt_path = str(found)
                     override = f" (overriding --ckpt_path {ckpt_path})" if ckpt_path else ""
                     console(f"auto-resume: resuming run {name!r} from {found}{override}")
-                elif ckpt_path:
-                    console(
-                        f"auto-resume: no checkpoint of run {name!r} under {base} — "
-                        f"falling back to --ckpt_path {ckpt_path}"
-                    )
                 else:
-                    console(
-                        f"auto-resume: no checkpoint of run {name!r} under {base} — starting fresh"
-                    )
+                    outcome = f"falling back to --ckpt_path {ckpt_path}"
+                    if not ckpt_path:
+                        outcome = "starting fresh"
+                    console(f"auto-resume: no checkpoint of run {name!r} under {base} — {outcome}")
             # ALWAYS rewritten (resumed or not): the run-dir layout is restored
             # regardless of auto-resume, and the resolver above needed the base
             # root intact to see the sibling run dirs.
@@ -1023,9 +900,7 @@ class SaltCLI(LightningCLI):
         # the H5 persistence sink is implicit (wired in instantiate_classes), so
         # the guard checks for the outputs: section, not a declared sink; a
         # config MAY still declare its own sink, which is left alone.
-        has_callback_sink = _has_callback_persistence_sink(cfg.get("callbacks"))
-        has_outputs_section = bool(cfg.get("outputs"))
-        if not has_callback_sink and not has_outputs_section:
+        if not _has_callback_persistence_sink(cfg.get("callbacks")) and not cfg.get("outputs"):
             raise ConfigError(
                 "salt test needs an `outputs:` section to persist predictions — the "
                 "command wires the H5 sink over it. Supply a top-level "
@@ -1044,10 +919,9 @@ class SaltCLI(LightningCLI):
             cfg.ckpt_path = _best_checkpoint(Path(str(configs[0])))
         devices = cfg.trainer.devices
         if isinstance(devices, str | int):
-            try:
+            n_devices: int | None = None  # "auto" — single-device eval contract
+            with contextlib.suppress(ValueError):
                 n_devices = int(devices)
-            except ValueError:
-                n_devices = None  # "auto" — single-device eval contract
             if n_devices is not None and n_devices > 1:
                 _LOG.info("salt test: forcing --trainer.devices=1 (single-device eval)")
                 cfg.trainer.devices = "1"
@@ -1100,11 +974,8 @@ class SaltCLI(LightningCLI):
         ckpt_dir = getattr(self.trainer.checkpoint_callback, "dirpath", None)
         console(f"salt fit run dir: {self.trainer.default_root_dir}")
         console(f"salt fit artifacts: config.yaml in {log_dir}")
-        console(
-            f"salt fit artifacts: checkpoints in {ckpt_dir}"
-            if ckpt_dir
-            else "salt fit artifacts: no checkpoint callback configured"
-        )
+        where = f"checkpoints in {ckpt_dir}" if ckpt_dir else "no checkpoint callback configured"
+        console(f"salt fit artifacts: {where}")
 
 
 def main(args: Sequence[str] | None = None) -> int:
@@ -1160,7 +1031,7 @@ def main(args: Sequence[str] | None = None) -> int:
         if help_requested:
             console(
                 "\nsee also: 'salt graph --help' (static graph tooling: validate/plan/plot/"
-                "why/deadcode/resolve), 'salt schema --help' (schema artifacts), "
+                "why/deadcode), 'salt schema --help' (schema artifacts), "
                 "'salt mup-shapes --help' / 'salt mup-coord-check --help' (muP base/"
                 "delta infshapes + coord-check), 'salt export --help' (ONNX "
                 "export; --manifest prints the writer-derived output manifest), "

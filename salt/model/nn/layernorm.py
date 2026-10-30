@@ -29,11 +29,5 @@ class RMSNorm(torch.nn.Module):
         return output * self.weight
 
 
-class _Layernorms:
-    """Namespace exposing `LayerNorm`/`RMSNorm` by name for ``getattr(_LAYERNORMS, norm)``."""
-
-    LayerNorm = LayerNorm
-    RMSNorm = RMSNorm
-
-
-_LAYERNORMS = _Layernorms()
+_LAYERNORMS: dict[str, type[nn.Module]] = {"LayerNorm": LayerNorm, "RMSNorm": RMSNorm}
+"""The norm layers selectable by name (``_LAYERNORMS[norm]``)."""

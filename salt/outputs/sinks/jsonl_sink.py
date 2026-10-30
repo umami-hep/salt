@@ -32,9 +32,7 @@ def _jsonable(value: Any) -> Any:
     dumps with ``allow_nan=False`` so any leak is a loud error, not silent
     corruption.
     """
-    if isinstance(value, np.ndarray):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (np.ndarray, list, tuple)):
         return [_jsonable(v) for v in value]
     if isinstance(value, np.generic):
         value = value.item()
@@ -213,9 +211,8 @@ class JSONLOutputSink(RuntimeSink):
                 f"available columns are {sorted(known)}"
             )
 
-    def _selected(self, col: OutputColumn, name: str, suffix: str) -> bool:
+    def _selected(self, name: str, suffix: str) -> bool:
         """Whether one flat column name survives the `columns` filter."""
-        del col
         return self.columns is None or name in self.columns or suffix in self.columns
 
     # -- graph node surface ------------------------------------------------
@@ -269,9 +266,8 @@ class JSONLOutputSink(RuntimeSink):
             # per-token) whose last axis is not the channel axis.
             channelled = values.ndim >= 2 and values.shape[-1] == len(names)
             for idx, (name, suffix) in enumerate(zip(names, col.suffixes, strict=True)):
-                if not self._selected(col, name, str(suffix)):
-                    continue
-                per_column[name] = values[..., idx] if channelled else values
+                if self._selected(name, str(suffix)):
+                    per_column[name] = values[..., idx] if channelled else values
         for row in range(n):
             record = {name: _jsonable(arr[row]) for name, arr in per_column.items()}
             self._handle.write(json.dumps(record, allow_nan=False) + "\n")
@@ -281,8 +277,7 @@ class JSONLOutputSink(RuntimeSink):
         """Close the file and report where it landed."""
         if self._handle is None:
             return
-        self._handle.close()
-        self._handle = None
+        self.close_if_open()
         console(f"Wrote {self._rows_written:,} JSONL rows to {self.output_path}")
 
     def close_if_open(self) -> None:

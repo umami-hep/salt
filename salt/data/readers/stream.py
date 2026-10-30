@@ -1,6 +1,6 @@
 """Shared `Reader`-base stream-assembly helpers: `StreamConfig`, `_truncate_pad`
-(truncate -> pad + valid), `OffsetIndex` (cumulative file offsets for contiguous
-global slices), and `stage_file` (the multi-process-safe file-staging primitive).
+(truncate -> pad + valid), `covering_range` (derived-index -> covering coarse range),
+and `stage_file` (the multi-process-safe file-staging primitive).
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 __all__ = [
     "INT_PAD_SENTINEL",
     "LOCK_TIMEOUT_S",
-    "OffsetIndex",
     "StreamConfig",
+    "covering_range",
     "pad_fill",
     "stage_file",
 ]
@@ -206,96 +206,29 @@ def _truncate_pad(
     return raw, valid
 
 
-@dataclass
-class OffsetIndex:
-    """Cumulative row offsets across a file list + covering-range mapping.
+def covering_range(cum: np.ndarray, lo: int, hi: int) -> tuple[int, int, int]:
+    """Map a derived-index range ``[lo, hi)`` to a covering coarse range.
 
-    The simple flavour (``offsets`` only) maps a contiguous global row slice to
-    the ``(file_index, local_start, local_stop)`` runs that cover it. The
-    covering flavour (a per-entry cumulative array) maps a contiguous slice
-    over a filtered / derived index back to a covering range over an
-    underlying coarser index (kept-row -> covering-entry).
+    Given a cumulative-count array ``cum`` (length ``n_coarse + 1``, where
+    ``cum[k]`` is the number of derived rows in the first ``k`` coarse units
+    — e.g. the per-event cumulative kept-jet counts), return the smallest
+    coarse range ``[c0, c1)`` whose derived rows include ``[lo, hi)``, plus
+    the offset of ``lo`` within ``c0``'s first derived row.
 
     Parameters
     ----------
-    counts : list[int]
-        The per-file served row counts, in deterministic (sorted) file order.
+    cum : np.ndarray
+        Cumulative derived-row counts, ``cum[0] == 0``, length ``n_coarse + 1``.
+    lo, hi : int
+        The derived-index range (e.g. local kept-jet ``[jlo, jhi)``).
 
-    Attributes
-    ----------
-    offsets : list[int]
-        Cumulative offsets ``[0, counts[0], counts[0]+counts[1], ...]`` (length
-        ``len(counts) + 1``); ``offsets[i]`` is the global index of file ``i``'s
-        first row, ``offsets[-1]`` is the total.
+    Returns
+    -------
+    tuple[int, int, int]
+        ``(c0, c1, offset_in_block)``: coarse start/stop and the offset of ``lo``
+        within the ``[c0, c1)`` derived block.
     """
-
-    counts: list[int]
-    offsets: list[int] = field(init=False)
-
-    def __post_init__(self) -> None:
-        acc = [0]
-        for n in self.counts:
-            acc.append(acc[-1] + int(n))
-        self.offsets = acc
-
-    @property
-    def total(self) -> int:
-        """The total served row count = sum of per-file counts."""
-        return self.offsets[-1]
-
-    def file_starts(self) -> list[int]:
-        """The global start offset of each file (``offsets[:-1]``)."""
-        return self.offsets[:-1]
-
-    def runs(self, rows: slice) -> list[tuple[int, int, int]]:
-        """Decompose a global row slice into per-file ``(file_index, lo, hi)`` runs.
-
-        Each run is the local ``[lo, hi)`` row range within file ``file_index``
-        that the global slice ``[rows.start, rows.stop)`` covers — exactly the
-        ``entry_start``/``entry_stop`` per-file reads a multi-file reader
-        stitches. Files with no overlap are skipped; the runs are returned in
-        file order.
-
-        Returns
-        -------
-        list[tuple[int, int, int]]
-            ``(file_index, local_lo, local_hi)`` for each overlapping file.
-        """
-        start, stop = rows.start, rows.stop
-        out: list[tuple[int, int, int]] = []
-        for i, n in enumerate(self.counts):
-            f_start = self.offsets[i]
-            lo = max(start, f_start)
-            hi = min(stop, f_start + n)
-            if lo >= hi:
-                continue
-            out.append((i, lo - f_start, hi - f_start))
-        return out
-
-    @staticmethod
-    def covering_range(cum: np.ndarray, lo: int, hi: int) -> tuple[int, int, int]:
-        """Map a derived-index range ``[lo, hi)`` to a covering coarse range.
-
-        Given a cumulative-count array ``cum`` (length ``n_coarse + 1``, where
-        ``cum[k]`` is the number of derived rows in the first ``k`` coarse units
-        — e.g. the per-event cumulative kept-jet counts), return the smallest
-        coarse range ``[c0, c1)`` whose derived rows include ``[lo, hi)``, plus
-        the offset of ``lo`` within ``c0``'s first derived row.
-
-        Parameters
-        ----------
-        cum : np.ndarray
-            Cumulative derived-row counts, ``cum[0] == 0``, length ``n_coarse + 1``.
-        lo, hi : int
-            The derived-index range (e.g. local kept-jet ``[jlo, jhi)``).
-
-        Returns
-        -------
-        tuple[int, int, int]
-            ``(c0, c1, offset_in_block)``: coarse start/stop and the offset of ``lo``
-            within the ``[c0, c1)`` derived block.
-        """
-        c0 = int(np.searchsorted(cum, lo, side="right") - 1)
-        c1 = int(np.searchsorted(cum, hi, side="left"))
-        offset_in_block = lo - int(cum[c0])
-        return c0, c1, offset_in_block
+    c0 = int(np.searchsorted(cum, lo, side="right") - 1)
+    c1 = int(np.searchsorted(cum, hi, side="left"))
+    offset_in_block = lo - int(cum[c0])
+    return c0, c1, offset_in_block

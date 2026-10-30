@@ -12,7 +12,7 @@ from torch import Tensor
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.spec import IO, Mode, TensorSpec, split_key, unflatten_spec
+from salt.graph.spec import IO, Mode, NestedSpec, TensorSpec, split_key, unflatten_spec
 from salt.model.base import SaltModelModule
 from salt.outputs.output_schema import OutputField
 
@@ -20,6 +20,14 @@ from salt.outputs.output_schema import OutputField
 # shared math seam); this node reuses that exact copy so the two can never drift.
 from salt.outputs.sinks.onnx.reduces import get_maskformer_outputs
 from salt.utils.mask_utils import indices_from_mask
+
+
+def _specs(dtypes: Mapping[str, str], modes: Mode) -> NestedSpec:
+    """``{key: dtype}`` -> the nested mode-gated spec (a ``bool`` leaf is the pad mask)."""
+    return unflatten_spec({
+        k: TensorSpec(shape=None, dtype=d, kind="pad_mask" if d == "bool" else "data", modes=modes)
+        for k, d in dtypes.items()
+    })
 
 
 class MaskFormerObjects(SaltModelModule):
@@ -116,18 +124,12 @@ class MaskFormerObjects(SaltModelModule):
                 f"MaskFormerObjects: n_reg must be a positive int (the leading-object regression "
                 f"target count R, matching the export leading names), got {n_reg!r}"
             )
-        self.stream = stream
-        self.constituent_stream = constituent_stream
-        self.regression_task = regression_task
-        self.leading_name = leading_name
-        self.index_name = index_name
-        self.n_reg = n_reg
-        self.class_probs_key = f"{stream}.class_probs"
-        self.masks_key = f"{stream}.masks"
+        self.stream, self.constituent_stream = stream, constituent_stream
+        self.regression_task, self.n_reg = regression_task, n_reg
+        self.leading_name, self.index_name = leading_name, index_name
+        self.class_probs_key, self.masks_key = f"{stream}.class_probs", f"{stream}.masks"
         self.reg_key = f"preds.{stream}.{regression_task}"
-        # the constituent pad mask the TEST index reconstruction reads (padded
-        # constituents -> -1).
-        self.pad_key = f"masks.{constituent_stream}"
+        self.pad_key = f"masks.{constituent_stream}"  # TEST index: padded constituents -> -1
         # the GLOBAL leading-regression leaf is written under the OBJECT stream; the
         # PER-TOKEN index leaf under the CONSTITUENT stream (its dynamic axis source)
         self.leading_key = f"outputs.{stream}.{leading_name}"
@@ -161,62 +163,36 @@ class MaskFormerObjects(SaltModelModule):
         """
         if not (mode & Mode.ONNX):
             return []
-        fields: list[tuple[str, OutputField]] = [
-            (
-                self.leading_key,
-                OutputField(
-                    h5_name=None,
-                    onnx_name=f"{self.leading_name}s_{target}",
-                    dtype="f4",
-                    axis="global",
-                    final=True,
-                    nan_ok=True,
-                ),
-            )
-            for target in self._resolved_targets()
+        prefix = f"{self.leading_name}s_"
+        fields = [
+            (self.leading_key, OutputField(h5_name=None, onnx_name=f"{prefix}{t}", nan_ok=True))
+            for t in self._resolved_targets()
         ]
         fields.append((
             self.index_key,
-            OutputField(
-                h5_name=None,
-                onnx_name=self.index_name,
-                dtype="i1",
-                axis="per_token",
-                final=True,
-            ),
+            OutputField(h5_name=None, onnx_name=self.index_name, dtype="i1", axis="per_token"),
         ))
         fields.extend(
-            (
-                key,
-                OutputField(
-                    h5_name=None,
-                    onnx_name=split_key(key)[-1],
-                    dtype="f4",
-                    axis="global",
-                    final=False,
-                ),
-            )
+            (key, OutputField(h5_name=None, onnx_name=split_key(key)[-1], final=False))
             for key in (self.vertices_class_probs_key, self.vertices_regression_key)
         )
         return fields
 
     def _resolved_targets(self) -> tuple[str, ...]:
         """The regression task's targets — one leading-object ONNX name each."""
-        who = f"MaskFormerObjects {self.name!r}"
-        if self._model_modules is None:
+        who, modules = f"MaskFormerObjects {self.name!r}", self._model_modules
+        if modules is None:
             raise ConfigError(
                 f"{who} has no model modules bound — the leading-object ONNX names derive from "
                 f"regression task {self.regression_task!r}'s targets; ensure the node is composed "
                 "with the model (bind_model_modules is called at compile)"
             )
-        task = self._model_modules.get(self.regression_task)
-        if task is None:
+        if (task := modules.get(self.regression_task)) is None:
             raise ConfigError(
                 f"{who}: regression task {self.regression_task!r} is not a model module — "
-                f"candidates are {sorted(self._model_modules)}"
+                f"candidates are {sorted(modules)}"
             )
-        targets = tuple(getattr(task, "targets", ()) or ())
-        if not targets:
+        if not (targets := tuple(getattr(task, "targets", ()) or ())):
             raise ConfigError(
                 f"{who}: regression task {self.regression_task!r} ({type(task).__name__}) "
                 "exposes no `targets` — the leading-object ONNX names are one per regression "
@@ -234,65 +210,30 @@ class MaskFormerObjects(SaltModelModule):
         """Mode-branched: TEST -> raw-mask index + reordered vertex leaves; ONNX -> the reorder
         leaves; else empty.
 
-        FIT/VAL declare nothing (the node never enters those plans, so their
-        plan hashes are unaffected); the ONNX ports are byte-unchanged.
+        FIT/VAL declare nothing (the node never enters those plans, so their plan hashes are
+        unaffected). TEST requires the RAW masks + constituent pad mask + the object
+        class_probs/regression (for the shared reorder helper). The ONNX ports are gated to
+        Mode.ONNX: the null-suppression + pT-reorder chain is shaped for the traced export
+        batch, so a config that wires the node for export alongside an object-regression head
+        opted out of TEST eval does not trip the planner's pre-prune connectivity check.
         """
+        vertices = dict.fromkeys(
+            (self.vertices_class_probs_key, self.vertices_regression_key), "float32"
+        )
         if mode & Mode.TEST:
-            return self._test_io()
-        if mode & Mode.ONNX:
-            return self._onnx_io()
-        return IO(requires={}, produces={})
-
-    def _test_io(self) -> IO:
-        """TEST: require the RAW masks + constituent pad mask + the object class_probs/regression
-        (for the shared reorder helper); produce ``object_index`` [B, T] plus the reordered
-        ``vertices_class_probs`` / ``vertices_regression`` leaves.
-        """
-        requires = {
-            self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
-            self.pad_key: TensorSpec(shape=None, dtype="bool", kind="pad_mask", modes=Mode.TEST),
-            self.class_probs_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.TEST
-            ),
-            self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.TEST),
-        }
-        produces = {
-            self.index_key: TensorSpec(shape=None, dtype="int64", kind="data", modes=Mode.TEST),
-            self.vertices_class_probs_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.TEST
-            ),
-            self.vertices_regression_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.TEST
-            ),
-        }
-        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
-
-    def _onnx_io(self) -> IO:
-        """ONNX ports (Mode.ONNX gate): the null-suppression + pT-reorder
-        chain is shaped for the traced export batch, so this node is inactive in FIT/VAL/TEST
-        for these leaves — a config that wires it for ONNX export alongside an object-regression
-        head opted out of TEST eval does not trip the planner's pre-prune connectivity check.
-        """
-        requires = {
-            self.class_probs_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
-            ),
-            self.masks_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
-            self.reg_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
-        }
-        produces = {
-            self.leading_key: TensorSpec(shape=None, dtype="float32", kind="data", modes=Mode.ONNX),
-            self.index_key: TensorSpec(shape=None, dtype="int8", kind="data", modes=Mode.ONNX),
-            # the exposed reordered per-vertex outputs the MFLeadVertexDecorator reads
-            # (a node->node edge — the decorator's demand keeps this node alive)
-            self.vertices_class_probs_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
-            ),
-            self.vertices_regression_key: TensorSpec(
-                shape=None, dtype="float32", kind="data", modes=Mode.ONNX
-            ),
-        }
-        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+            gate = Mode.TEST
+            requires = {self.masks_key: "float32", self.pad_key: "bool"}
+            requires |= dict.fromkeys((self.class_probs_key, self.reg_key), "float32")
+            produces = {self.index_key: "int64", **vertices}
+        elif mode & Mode.ONNX:
+            gate = Mode.ONNX
+            requires = dict.fromkeys(
+                (self.class_probs_key, self.masks_key, self.reg_key), "float32"
+            )
+            produces = {self.leading_key: "float32", self.index_key: "int8", **vertices}
+        else:
+            return IO(requires={}, produces={})
+        return IO(requires=_specs(requires, gate), produces=_specs(produces, gate))
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Width-resolve the leaves: index collapses to 1, leading + vertex regression
@@ -313,50 +254,30 @@ class MaskFormerObjects(SaltModelModule):
         Both TEST and ONNX call this ONE helper, so they see identical
         reordered per-vertex tensors.
         """
-        objects = {
-            "class_probs": b.get(self.class_probs_key).clone(),
-            "masks": b.get(self.masks_key).clone(),
-            "regression": b.get(self.reg_key).clone(),
-        }
+        names = ("class_probs", "masks", "regression")
+        keys = (self.class_probs_key, self.masks_key, self.reg_key)
+        objects = {n: b.get(k).clone() for n, k in zip(names, keys, strict=True)}
         return get_maskformer_outputs(objects)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """TEST -> raw-mask ``object_index`` + the reordered vertex leaves; ONNX -> the reorder
-        leaves + the leading-object scalars.
+        """TEST -> the eval-H5 ``HadronIndex`` + the reordered vertex leaves; ONNX -> the
+        leading-object scalars + the reordered int8 index + the vertex leaves.
+
+        The TEST per-constituent owning-object index comes from the RAW decoder masks
+        (``indices_from_mask(sigmoid > 0.5)`` -> -2 where no object claims a constituent),
+        with padded constituents forced to -1 — no reordering / null-suppression.
+        ``leading_object`` stays ONNX-only (TEST has no per-jet "leading object" H5 column).
+        Both modes take the ``vertices_*`` leaves from the ONE `_reordered` call (passed
+        through verbatim), so `MFLeadVertexDecorator` sees identical per-vertex tensors.
         """
-        if mode & Mode.TEST:
-            return self._forward_test(b)
         leading_reg, indices, vertices_class_probs, vertices_regression = self._reordered(b)
+        if mode & Mode.TEST:
+            idx = indices_from_mask(b.get(self.masks_key).sigmoid() > 0.5)  # [B, T] int64
+            out = {self.index_key: torch.where(b.get(self.pad_key), torch.full_like(idx, -1), idx)}
+        else:
+            out = {self.leading_key: leading_reg, self.index_key: indices.reshape(-1).char()}
         return {
-            self.leading_key: leading_reg,
-            self.index_key: indices.reshape(-1).char(),
-            # the reordered (null-suppressed + pT-ordered) per-vertex outputs — passed
-            # through verbatim as get_maskformer_outputs returns them (the decorator
-            # does the lead-vertex selection; all heavy lifting is here, cloned above)
-            self.vertices_class_probs_key: vertices_class_probs,
-            self.vertices_regression_key: vertices_regression,
-        }
-
-    def _forward_test(self, b: Bundle) -> dict[str, Tensor]:
-        """The eval-H5 ``HadronIndex`` reconstruction, plus the reordered vertex leaves.
-
-        The per-constituent owning-object index comes from the RAW decoder
-        masks (``indices_from_mask(sigmoid > 0.5)`` -> -2 where no object
-        claims a constituent), with padded constituents forced to -1 — no
-        reordering / null-suppression, byte-unchanged from before this node
-        also fed the decorator. The two ``vertices_*`` leaves come from the
-        SAME `_reordered` helper the ONNX path uses, so
-        `MFLeadVertexDecorator` sees identical per-vertex tensors in either
-        mode (``leading_object`` stays ONNX-only: TEST has no per-jet
-        "leading object" H5 column).
-        """
-        masks = b.get(self.masks_key)  # [B, M, T] raw logits
-        pad = b.get(self.pad_key)  # [B, T] bool, True = padded
-        idx = indices_from_mask(masks.sigmoid() > 0.5)  # [B, T] int64, -2 = no object
-        idx = torch.where(pad, torch.full_like(idx, -1), idx)  # padded constituents -> -1
-        _, _, vertices_class_probs, vertices_regression = self._reordered(b)
-        return {
-            self.index_key: idx,
+            **out,
             self.vertices_class_probs_key: vertices_class_probs,
             self.vertices_regression_key: vertices_regression,
         }

@@ -261,9 +261,7 @@ class SaltDataModule(lightning.LightningDataModule):
         self._wire_input_samples(modules)
         # InputSamples is a config holder: keep it out of per-batch dataset copies so
         # the dead-module check and SaltDataset's single-Reader guard don't miscount it.
-        self._batch_modules = {
-            name: m for name, m in modules.items() if not isinstance(m, InputSamples)
-        }
+        self._batch_modules = {n: m for n, m in modules.items() if not isinstance(m, InputSamples)}
         self._modules = modules
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -326,15 +324,8 @@ class SaltDataModule(lightning.LightningDataModule):
                 "Reader's source chain"
             )
         if not existing:
-            files = {
-                stage: f
-                for stage, f in (
-                    ("train", self.train_file),
-                    ("val", self.val_file),
-                    ("test", self.test_file),
-                )
-                if f is not None
-            }
+            legacy = (("train", self.train_file), ("val", self.val_file), ("test", self.test_file))
+            files = {stage: f for stage, f in legacy if f is not None}
             if files:
                 num = {"train": self.num_train, "val": self.num_val, "test": self.num_test}
                 implicit = InputSamples(files=files, num={s: num[s] for s in files})
@@ -443,13 +434,8 @@ class SaltDataModule(lightning.LightningDataModule):
             name: (reader if name == self._reader_name else deepcopy(module))
             for name, module in self._batch_modules.items()
         }
-        common = {
-            "mode": mode,
-            "sinks": self._sinks,
-            "seed": self.seed,
-            "debug": self.debug,
-            "sink_origins": (self._sink_origins or {}).get(mode),
-        }
+        common = {"mode": mode, "sinks": self._sinks, "seed": self.seed, "debug": self.debug}
+        common["sink_origins"] = (self._sink_origins or {}).get(mode)
         if not self.iterable:
             return SaltDataset(modules, **common)
         # Streaming: shuffle and drop-last are FIT-only. Val/test stream in

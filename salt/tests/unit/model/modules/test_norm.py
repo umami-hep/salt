@@ -120,7 +120,7 @@ class TestNormaliser:
             yaml.dump(nd, fh)
         modules = build_gn2v2_modules(bad)
         bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
-        with pytest.raises(ValueError, match="d0"):
+        with pytest.raises(ConfigError, match="d0"):
             modules["norm"].materialise()
 
 

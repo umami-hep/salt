@@ -43,11 +43,7 @@ class TaskOutput(SaltModelModule):
     """
 
     def __init__(
-        self,
-        task: str,
-        stream: str,
-        name: str | None = None,
-        op: ConversionOp | None = None,
+        self, task: str, stream: str, name: str | None = None, op: ConversionOp | None = None
     ) -> None:
         super().__init__()
         self.task = task
@@ -106,14 +102,10 @@ class TaskOutput(SaltModelModule):
     def declare_io(self, mode: Mode) -> IO:
         """Requires ``preds.<stream>.<task>`` (+ op extras); produces the ``outputs.*`` leaf."""
         del mode
-        pred_spec = TensorSpec(shape=None, dtype="float32")
-        out_spec = TensorSpec(shape=None, dtype="float32")
-        requires: dict[str, TensorSpec] = {self.pred_key: pred_spec}
-        requires.update(self.op.extra_requires(self.stream))
-        return IO(
-            requires=unflatten_spec(requires),
-            produces=unflatten_spec({self.output_key: out_spec}),
-        )
+        spec = TensorSpec(shape=None, dtype="float32")
+        requires = {self.pred_key: spec, **self.op.extra_requires(self.stream)}
+        produces = unflatten_spec({self.output_key: spec})
+        return IO(requires=unflatten_spec(requires), produces=produces)
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Map the bound input prediction width through the op onto the output.
@@ -151,11 +143,5 @@ class ClassProbs(TaskOutput):
         ``CrossEntropyLoss`` (softmax), by default False.
     """
 
-    def __init__(
-        self,
-        task: str,
-        stream: str,
-        name: str | None = None,
-        bce: bool = False,
-    ) -> None:
+    def __init__(self, task: str, stream: str, name: str | None = None, bce: bool = False) -> None:
         super().__init__(task=task, stream=stream, name=name, op=ClassProbsOp(bce=bce))

@@ -590,7 +590,6 @@ only those eleven belong under `data.modules` in a config.
 | `salt.data.SampleConfig` | one `MultiSampleReader` sample's sub-reader configuration | no, config dataclass (nested inside `samples:`) |
 | `salt.data.Cut` | one cut expression string | no, config dataclass |
 | `salt.data.GlobalObjectCuts` | sample-axis row eligibility, evaluated once in `prepare` | no, config dataclass |
-| `salt.data.OffsetIndex` | a reader's cached row-to-file offset index | no, runtime dataclass |
 | `salt.data.ManifestEntry` | one shard entry inside a `CorpusManifest` | no, runtime dataclass |
 | `salt.data.CorpusManifest` | the streaming-mode shard-planning artifact | no, runtime dataclass; passed via `manifest:`, not `data.modules` |
 | `salt.data.DEFAULT_BLOCK_ROWS` | the default `block_rows` value for streaming | no, constant |

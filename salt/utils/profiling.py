@@ -271,9 +271,7 @@ class TorchProfilerCallback(Callback):
     def on_after_backward(self, trainer: Any, pl_module: Any) -> None:
         """Close the backward scope."""
         del trainer, pl_module
-        if self._backward_scope is not None:
-            self._backward_scope.__exit__(None, None, None)
-            self._backward_scope = None
+        self._close("_backward_scope")
 
     def on_train_batch_end(
         self, trainer: Any, pl_module: Any, outputs: Any, batch: Any, batch_idx: int
@@ -282,12 +280,8 @@ class TorchProfilerCallback(Callback):
         del trainer, pl_module, outputs, batch, batch_idx
         if self._prof is None:
             return
-        if self._backward_scope is not None:  # unpaired hook (defensive)
-            self._backward_scope.__exit__(None, None, None)
-            self._backward_scope = None
-        if self._batch_scope is not None:
-            self._batch_scope.__exit__(None, None, None)
-            self._batch_scope = None
+        self._close("_backward_scope")  # unpaired hook (defensive)
+        self._close("_batch_scope")
         self._seen += 1
         if self._seen == self.total_steps:
             if torch.cuda.is_available():
@@ -303,11 +297,15 @@ class TorchProfilerCallback(Callback):
         del trainer, pl_module
         self._teardown()
 
+    def _close(self, attr: str) -> None:
+        """Exit and clear the context manager held in attribute `attr` (no-op when unset)."""
+        if (scope := getattr(self, attr)) is not None:
+            scope.__exit__(None, None, None)
+            setattr(self, attr, None)
+
     def _teardown(self) -> None:
         """Stop the profiler and leave the step scopes (idempotent)."""
-        if self._scope is not None:
-            self._scope.__exit__(None, None, None)
-            self._scope = None
+        self._close("_scope")
         if self._prof is not None:
             with contextlib.suppress(Exception):
                 self._prof.stop()
@@ -323,16 +321,18 @@ class TorchProfilerCallback(Callback):
         sort_key = _first_supported_sort_key(
             events, ("self_device_time_total", "self_cuda_time_total", "self_cpu_time_total")
         )
-        table_kwargs: dict[str, Any] = {"row_limit": self.row_limit}
-        if sort_key is not None:
-            table_kwargs["sort_by"] = sort_key
-        (self.dirpath / f"{self.tag}_key_averages.txt").write_text(events.table(**table_kwargs))
+        (self.dirpath / f"{self.tag}_key_averages.txt").write_text(self._table(events, sort_key))
         stacks = self._write_stacks(prof, events, sort_key) if self.with_stack else False
         self._write_trace(prof)
         summary = self._summarise(events, sort_key)
         summary["stacks_available"] = stacks
         (self.dirpath / f"{self.tag}_summary.json").write_text(json.dumps(summary, indent=2))
         console(f"[TorchProfilerCallback] wrote {self.tag}_* artifacts to {self.dirpath}")
+
+    def _table(self, events: Any, sort_key: str | None) -> str:
+        """``events.table`` at `row_limit`, sorted by `sort_key` when one is supported."""
+        extra = {} if sort_key is None else {"sort_by": sort_key}
+        return events.table(row_limit=self.row_limit, **extra)
 
     def _write_stacks(self, prof: Any, events: Any, sort_key: str | None) -> bool:
         """Write the stack-grouped table and flamegraph file; False when the build
@@ -355,10 +355,7 @@ class TorchProfilerCallback(Callback):
             return False
         with contextlib.suppress(Exception):
             grouped = prof.key_averages(group_by_stack_n=self.stack_depth)
-            kwargs: dict[str, Any] = {"row_limit": self.row_limit}
-            if sort_key is not None:
-                kwargs["sort_by"] = sort_key
-            (self.dirpath / f"{self.tag}_stacks.txt").write_text(grouped.table(**kwargs))
+            (self.dirpath / f"{self.tag}_stacks.txt").write_text(self._table(grouped, sort_key))
         # torch renamed the CUDA metrics to device_*; try the modern spelling
         # first and keep going until one writes something (an accepted-but-empty
         # metric name silently produces a 0-byte file).
@@ -382,8 +379,7 @@ class TorchProfilerCallback(Callback):
     def _summarise(self, events: Any, sort_key: str | None) -> dict[str, Any]:
         """Aggregate the window into forward-per-step / backward / optimizer buckets."""
         steps: dict[str, dict[str, float]] = {}
-        backward_us = optimizer_us = batch_us = autograd_us = 0.0
-        total_self_device = 0.0
+        backward_us = optimizer_us = batch_us = autograd_us = total_self_device = 0.0
         for event in events:
             key = str(event.key)
             device_total = _device_total(event)
@@ -405,16 +401,13 @@ class TorchProfilerCallback(Callback):
                 optimizer_us += device_total
         ranked = sorted(events, key=_self_device_total, reverse=True)[: self.row_limit]
         forward_us = sum(entry["device_us"] for entry in steps.values())
+        wall = self._window_wall
         return {
             "tag": self.tag,
             "schedule": {"wait": self.wait, "warmup": self.warmup, "active": self.active},
             "sort_key": sort_key,
-            "window_wall_s": self._window_wall,
-            "profiled_it_s": (
-                self.active / self._window_wall
-                if self._window_wall and self._window_wall > 0
-                else None
-            ),
+            "window_wall_s": wall,
+            "profiled_it_s": self.active / wall if wall and wall > 0 else None,
             "totals_us": {
                 "batch_scope_device": batch_us,
                 "forward_steps_device": forward_us,
@@ -598,9 +591,8 @@ def profile_model(
     # everything that can be rejected without touching the filesystem, first —
     # a bad flag should not cost a config parse (or a confusing FileNotFoundError)
     schedule = resolve_schedule(steps, wait=wait, warmup=warmup, active=active)
-    for entry in overrides:
-        if "=" not in entry:
-            raise ValueError(f"--set entries must be KEY=VALUE, got {entry!r}")
+    if (malformed := next((e for e in overrides if "=" not in e), None)) is not None:
+        raise ValueError(f"--set entries must be KEY=VALUE, got {malformed!r}")
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -659,26 +651,30 @@ def _print_model_report(
     totals = dict(summary.get("totals_us") or {})
     steps = dict(summary.get("forward_steps_us") or {})
     active = int((summary.get("schedule") or {}).get("active") or 0) or 1
-    denominator = sum(
-        totals.get(key, 0.0)
-        for key in ("forward_steps_device", "autograd_engine_device", "optimizer_device")
-    )
+    buckets = {  # label -> device total; also the forward/backward/optimizer denominator, in order
+        "forward (sum of plan steps)": "forward_steps_device",
+        "backward (autograd engine)": "autograd_engine_device",
+        "optimizer": "optimizer_device",
+    }
+    denominator = sum(totals.get(key, 0.0) for key in buckets.values())
     # A CPU-only run records no device time at all, and printing a table of
     # zeroes is worse than printing nothing. Fall back to the wall time of the
     # same scopes and SAY which one is on screen.
     on_device = denominator > 0
     axis = "device" if on_device else "CPU wall"
-    step_key, bucket_suffix = ("device_us", "device") if on_device else ("cpu_us", "cpu")
+    step_key = "device_us" if on_device else "cpu_us"
     if not on_device:
         denominator = sum(entry.get("cpu_us", 0.0) for entry in steps.values())
+
+    def row(label: str, value: float) -> None:
+        share = 100.0 * value / denominator if denominator else 0.0
+        console(f"{label:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
 
     console(f"=== {tag}: per-plan-step {axis} time (ms/step over {active} steps) ===")
     ranked = sorted(steps.items(), key=lambda item: item[1].get(step_key, 0.0), reverse=True)
     console(f"{'module':<32}{'ms/step':>12}{'% of fwd':>12}")
     for name, entry in ranked[:row_limit]:
-        value = entry.get(step_key, 0.0)
-        share = 100.0 * value / denominator if denominator else 0.0
-        console(f"{name:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
+        row(name, entry.get(step_key, 0.0))
 
     if not on_device:
         console(
@@ -690,15 +686,8 @@ def _print_model_report(
         return
 
     console(f"\n=== {tag}: step buckets (ms/step) ===")
-    buckets = (
-        ("forward (sum of plan steps)", f"forward_steps_{bucket_suffix}"),
-        ("backward (autograd engine)", f"autograd_engine_{bucket_suffix}"),
-        ("optimizer", f"optimizer_{bucket_suffix}"),
-    )
-    for label, key in buckets:
-        value = totals.get(key, 0.0)
-        share = 100.0 * value / denominator if denominator else 0.0
-        console(f"{label:<32}{value / active / 1e3:>12.3f}{share:>11.1f}%")
+    for label, key in buckets.items():  # only reached on device (a CPU-only run returned above)
+        row(label, totals.get(key, 0.0))
     profiled = summary.get("profiled_it_s")
     if profiled:
         console(
@@ -722,12 +711,10 @@ def _resolve_target(dotted: str) -> tuple[Any, str, Any]:
     """
     parts = dotted.split(".")
     module = None
-    index = len(parts)
-    while index > 0:
+    for index in range(len(parts), 0, -1):  # longest importable prefix first
         with contextlib.suppress(ImportError):
             module = import_module(".".join(parts[:index]))
             break
-        index -= 1
     if module is None:
         raise ValueError(f"cannot import any module prefix of {dotted!r}")
     owner: Any = module
@@ -766,10 +753,8 @@ def _build_datamodule(configs: Sequence[Path], overrides: Sequence[str]) -> tupl
 
     forced = ["trainer.accelerator=cpu", "trainer.devices=1", "trainer.precision=32-true"]
     cli = _parse_trainer_cli(list(configs), [*forced, *overrides])
-    datamodule = cli.datamodule
-    model = cli.model
-    demand = getattr(model, "sink_demand", None)
-    if callable(demand):
+    datamodule, model = cli.datamodule, cli.model
+    if callable(demand := getattr(model, "sink_demand", None)):
         datamodule.set_sinks(demand())
     # the profiled code must run in THIS process: no worker forks, no prefetch
     datamodule.num_workers = 0
@@ -849,14 +834,12 @@ def profile_dataset(
         except (ValueError, AttributeError) as err:
             skipped[dotted] = str(err)
             continue
-        target = function.__func__ if hasattr(function, "__func__") else function
-        setattr(owner, attr, profiler(target))
+        setattr(owner, attr, profiler(getattr(function, "__func__", function)))
         patched.append((owner, attr, function))
         wrapped.append(dotted)
 
     started = time.perf_counter()
-    seen = 0
-    passes = 0
+    seen = passes = 0
     first_profiled: Any = None
     try:
         loader = datamodule.train_dataloader()
@@ -908,11 +891,7 @@ def profile_dataset(
 
 
 def _dataset_summary(
-    stats: Any,
-    wrapped: Sequence[str],
-    skipped: Mapping[str, str],
-    batches: int,
-    elapsed: float,
+    stats: Any, wrapped: Sequence[str], skipped: Mapping[str, str], batches: int, elapsed: float
 ) -> dict[str, Any]:
     """Fold `line_profiler` stats into per-function totals and a ranked hot-line list."""
     unit = float(getattr(stats, "unit", 1e-6))
@@ -956,8 +935,8 @@ def _dataset_summary(
 # --------------------------------------------------------------------------- #
 
 
-def _add_config_args(parser: argparse.ArgumentParser) -> None:
-    """Add the shared ``--config`` stack and ``--set`` override arguments."""
+def _add_config_args(parser: argparse.ArgumentParser, steps_help: str, tag: str) -> None:
+    """Add the shared ``--config``/``--set``/``--steps``/``--out``/``--tag`` arguments."""
     parser.add_argument(
         "--config",
         action="append",
@@ -966,6 +945,9 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
         help="training config; repeat to stack (deep-merged left-to-right, as salt fit)",
     )
     parser.add_argument("--set", action="append", default=[], help="KEY=VALUE config override")
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS, help=steps_help)
+    parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
+    parser.add_argument("--tag", default=tag, help="output filename prefix")
 
 
 def _dataset_parser() -> argparse.ArgumentParser:
@@ -978,15 +960,7 @@ def _dataset_parser() -> argparse.ArgumentParser:
             "the annotated per-line report."
         ),
     )
-    _add_config_args(parser)
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=DEFAULT_STEPS,
-        help=f"batches to profile (default {DEFAULT_STEPS})",
-    )
-    parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
-    parser.add_argument("--tag", default="dataset", help="output filename prefix")
+    _add_config_args(parser, f"batches to profile (default {DEFAULT_STEPS})", "dataset")
     parser.add_argument(
         "--functions",
         default=None,
@@ -1010,15 +984,11 @@ def _model_parser() -> argparse.ArgumentParser:
             "the per-op table and the per-plan-step / backward / optimizer split."
         ),
     )
-    _add_config_args(parser)
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=DEFAULT_STEPS,
-        help=f"train batches to run (default {DEFAULT_STEPS}); the capture is their tail",
+    _add_config_args(
+        parser,
+        f"train batches to run (default {DEFAULT_STEPS}); the capture is their tail",
+        "model",
     )
-    parser.add_argument("--out", type=Path, default=Path("profile"), help="output directory")
-    parser.add_argument("--tag", default="model", help="output filename prefix")
     parser.add_argument("--wait", type=int, default=None, help="steps skipped (default: derived)")
     parser.add_argument(
         "--warmup", type=int, default=None, help="steps traced then discarded (default: derived)"
@@ -1118,10 +1088,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args or args[0] in {"-h", "--help"}:
         console(_USAGE)
         return 0 if args else 1
-    if args[0] == "dataset":
-        return _run_dataset(args[1:])
-    if args[0] == "model":
-        return _run_model(args[1:])
+    if (run := {"dataset": _run_dataset, "model": _run_model}.get(args[0])) is not None:
+        return run(args[1:])
     console(
         f"salt profile: unknown subcommand {args[0]!r} (expected 'dataset' or 'model')",
         file=sys.stderr,
