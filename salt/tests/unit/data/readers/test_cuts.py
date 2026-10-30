@@ -478,3 +478,77 @@ def test_shipped_event_reductions_are_pinned() -> None:
     rows[agg4.key], rows[agg2.key] = agg4.evaluate(cols), agg2.evaluate(cols)
     np.testing.assert_array_equal(four.mask(rows), [True, False, False, True])
     np.testing.assert_array_equal(two.mask(rows), [False, False, True, True])
+
+
+# --------------------------------------------------------------------------- #
+# modulo operator (the eventNumber % 10 train/val/test split)
+# --------------------------------------------------------------------------- #
+
+
+def test_modulo_parses_as_a_general_binop() -> None:
+    """``%`` composes like the other binops; its left operand is a BinOp, not a Name."""
+    cut = Cut(expr="eventNumber % 10 < 8")
+    assert cut.fields == ("eventNumber",)
+    assert cut.aggregations == ()
+
+
+def test_modulo_evaluate_and_partition() -> None:
+    """The three residue-class masks used for the train/val/test split are an exact partition."""
+    cols = {"eventNumber": np.arange(0, 30, dtype=np.uint64)}
+    train = Cut(expr="eventNumber % 10 < 8").mask(cols)
+    val = Cut(expr="eventNumber % 10 == 8").mask(cols)
+    test = Cut(expr="eventNumber % 10 == 9").mask(cols)
+    np.testing.assert_array_equal(train, (cols["eventNumber"] % 10) < 8)
+    np.testing.assert_array_equal(val, (cols["eventNumber"] % 10) == 8)
+    np.testing.assert_array_equal(test, (cols["eventNumber"] % 10) == 9)
+    assert not np.any(train & val)
+    assert not np.any(train & test)
+    assert not np.any(val & test)
+    assert np.all(train | val | test)
+
+
+def test_modulo_composes_with_the_existing_grammar() -> None:
+    cols = {"eventNumber": np.arange(0, 30, dtype=np.uint64)}
+    got = Cut(expr="(eventNumber + 1) % 10 >= 8").mask(cols)
+    want = ((cols["eventNumber"] + 1) % 10) >= 8
+    np.testing.assert_array_equal(got, want)
+
+
+# --------------------------------------------------------------------------- #
+# GlobalObjectCuts.per_split: stage-selected cuts on top of the global ones
+# --------------------------------------------------------------------------- #
+
+
+def _split_cuts() -> GlobalObjectCuts:
+    return GlobalObjectCuts(
+        global_cuts=("pt >= 20.0",),
+        per_split={
+            "train": ("eventNumber % 10 < 8",),
+            "val": ("eventNumber % 10 == 8",),
+            "test": ("eventNumber % 10 == 9",),
+        },
+    )
+
+
+def test_per_split_adds_to_global_for_the_bound_stage() -> None:
+    rows = np.empty(4, dtype=[("pt", "f4"), ("eventNumber", "u8")])
+    rows["pt"] = [30.0, 30.0, 10.0, 30.0]
+    rows["eventNumber"] = [7, 8, 8, 19]
+    cuts = _split_cuts()
+    np.testing.assert_array_equal(cuts.eligible(rows, "train"), [True, False, False, False])
+    np.testing.assert_array_equal(cuts.eligible(rows, "val"), [False, True, False, False])
+    np.testing.assert_array_equal(cuts.eligible(rows, "test"), [False, False, False, True])
+    np.testing.assert_array_equal(cuts.eligible(rows), [True, True, False, True])
+    assert len(cuts.for_split("train")) == 2
+    assert len(cuts.for_split(None)) == 1
+
+
+def test_per_split_fields_are_read_for_every_stage() -> None:
+    assert _split_cuts().fields() == ("pt", "eventNumber")
+
+
+def test_per_split_rejects_an_unknown_stage() -> None:
+    with pytest.raises(ConfigError, match="unknown stage keys"):
+        GlobalObjectCuts(per_split={"validation": ("pt > 0",)})
+    with pytest.raises(ConfigError, match=r"per_split\['train'\]"):
+        GlobalObjectCuts(per_split={"train": (42,)})  # type: ignore[dict-item]

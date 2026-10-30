@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import pickle
 from collections import Counter
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from salt.data.base import Reader, RowBlock, WorkerCtx
-from salt.data.datamodule import AUTO_PREFETCH_CAP, auto_prefetch_factor
+from salt.data.datamodule import AUTO_PREFETCH_CAP, SaltDataModule, auto_prefetch_factor
 from salt.data.iterable_dataset import IterableSaltDataset
 from salt.data.manifest import CorpusManifest, ManifestEntry, build_manifest
 from salt.data.processors.features import Features, _all_finite
@@ -580,6 +581,208 @@ def test_rejects_impossible_configuration(kwargs: dict) -> None:
             **kwargs,
         )
         dataset.shard()
+
+
+# --------------------------------------------------------------------------- #
+# rank propagation into DataLoader workers (worker context stubbed, one process)
+# --------------------------------------------------------------------------- #
+
+
+def _in_worker(monkeypatch, wid: int = 0, n: int = 2, group=None) -> None:  # noqa: ANN001
+    """Pretend to be DataLoader worker `wid` of `n` that inherited process group `group`."""
+    info = SimpleNamespace(id=wid, num_workers=n)
+    monkeypatch.setattr("salt.data.iterable_dataset.get_worker_info", lambda: info)
+    monkeypatch.setattr(IterableSaltDataset, "_process_group", staticmethod(lambda: group))
+
+
+def test_worker_without_injected_rank_raises(monkeypatch) -> None:  # noqa: ANN001
+    """A worker cannot detect its rank (spawn/forkserver inherit no group): never (1, 0)."""
+    _in_worker(monkeypatch)
+    with pytest.raises(ConfigError, match="injected by the main process"):
+        _dataset(BlockStubReader(n=40)).shard()
+
+
+def test_worker_rank_disagreeing_with_inherited_group_raises(monkeypatch) -> None:  # noqa: ANN001
+    """Injected (2, 0) against an inherited (2, 1) group is inconsistent state."""
+    _in_worker(monkeypatch, group=(2, 1))
+    with pytest.raises(ConfigError, match="disagrees"):
+        _dataset(BlockStubReader(n=40), world_size=2, rank=0).shard()
+
+
+def test_worker_rank_matching_inherited_group_is_accepted(monkeypatch) -> None:  # noqa: ANN001
+    """A fork-inherited group that agrees with the injected pair is fine."""
+    _in_worker(monkeypatch, wid=1, group=(2, 0))
+    assert _dataset(BlockStubReader(n=40), world_size=2, rank=0, num_workers=2).shard() == (4, 1)
+
+
+def test_worker_num_workers_mismatch_raises(monkeypatch) -> None:  # noqa: ANN001
+    """An injected num_workers the DataLoader does not run is a config error."""
+    _in_worker(monkeypatch, n=2)
+    with pytest.raises(ConfigError, match="num_workers=3"):
+        _dataset(BlockStubReader(n=40), world_size=2, rank=0, num_workers=3).shard()
+
+
+def test_worker_injected_worker_id_raises(monkeypatch) -> None:  # noqa: ANN001
+    """Inside a real worker the DataLoader owns the worker id; an injected one is an error."""
+    _in_worker(monkeypatch)
+    with pytest.raises(ConfigError, match="worker_id=0"):
+        _dataset(
+            BlockStubReader(n=40), world_size=2, rank=0, num_workers=2, worker_id=0
+        ).shard()
+
+
+def test_worker_honours_the_real_worker_id(monkeypatch) -> None:  # noqa: ANN001
+    """With a matching num_workers injected, the worker's own id and count decide the shard."""
+    _in_worker(monkeypatch, wid=1, n=2)
+    dataset = _dataset(BlockStubReader(n=40), world_size=2, rank=1, num_workers=2)
+    assert dataset.shard() == (4, 3)
+    assert len(dataset) == dataset.n_batches()
+
+
+@pytest.mark.parametrize("drop_last", [False, True])
+def test_main_process_handle_sums_its_workers(drop_last: bool) -> None:
+    """The main-process handle of a 2-worker rank is no shard; its len is both workers'."""
+    kw = {"batch_size": 4, "drop_last": drop_last, "world_size": 2, "rank": 1, "num_workers": 2}
+    handle = _dataset(BlockStubReader(n=41, n_blocks=3), **kw)
+    with pytest.raises(ConfigError, match="not a shard"):
+        handle.shard()
+    per_worker = [
+        _dataset(BlockStubReader(n=41, n_blocks=3), worker_id=w, **kw).n_batches()
+        for w in range(2)
+    ]
+    assert min(per_worker) > 0
+    assert len(handle) == sum(per_worker)
+
+
+def test_main_process_without_injection_or_group_is_one_shard(monkeypatch) -> None:  # noqa: ANN001
+    """No injection, no worker, no process group -> (1, 0)."""
+    monkeypatch.setattr(IterableSaltDataset, "_process_group", staticmethod(lambda: None))
+    dataset = _dataset(BlockStubReader(n=40))
+    assert dataset._rank_worker() == (1, 0, 1, 0)
+    assert dataset.shard() == (1, 0)
+
+
+def test_main_process_without_injection_uses_the_process_group(monkeypatch) -> None:  # noqa: ANN001
+    """In the main process an initialised group is still detected."""
+    monkeypatch.setattr(IterableSaltDataset, "_process_group", staticmethod(lambda: (2, 1)))
+    assert _dataset(BlockStubReader(n=40)).shard() == (2, 1)
+
+
+# --------------------------------------------------------------------------- #
+# datamodule: shard context resolved in the main process, injected into the dataset
+# --------------------------------------------------------------------------- #
+
+
+def _stream_dm(  # noqa: ANN001
+    tmp_path, reader: Reader | None = None, num_workers: int = 2
+) -> SaltDataModule:
+    """A streaming datamodule over a stub reader, planning from per-stage manifests."""
+    return SaltDataModule(
+        modules={
+            "reader": BlockStubReader(n=60, n_blocks=3) if reader is None else reader,
+            "feats": Features(variables={"event": ["val"]}),
+        },
+        train_file=str(tmp_path / "unused"),
+        val_file=str(tmp_path / "unused"),
+        batch_size=4,
+        num_workers=num_workers,
+        iterable=True,
+        block_rows=None,
+        manifest={"train": str(tmp_path / "train.json"), "val": str(tmp_path / "val.json")},
+        sinks={Mode.FIT: ["inputs.event"], Mode.VAL: ["inputs.event"]},
+    )
+
+
+def _fake_dist(monkeypatch, group) -> None:  # noqa: ANN001
+    """Make `salt.data.datamodule.dist` report `group` (``None`` = not initialised)."""
+    monkeypatch.setattr(
+        "salt.data.datamodule.dist",
+        SimpleNamespace(
+            is_available=lambda: True,
+            is_initialized=lambda: group is not None,
+            get_world_size=lambda: group[0],
+            get_rank=lambda: group[1],
+        ),
+    )
+
+
+def test_shard_context_multi_rank_trainer_without_group_raises(  # noqa: ANN001
+    tmp_path, monkeypatch
+) -> None:
+    """A 2-rank trainer with no process group must not silently shard as (1, 0)."""
+    _fake_dist(monkeypatch, None)
+    dm = _stream_dm(tmp_path)
+    dm.trainer = SimpleNamespace(world_size=2, global_rank=1)
+    with pytest.raises(ConfigError, match="no torch.distributed process"):
+        dm._resolve_shard_context()
+
+
+def test_shard_context_group_disagreeing_with_trainer_raises(  # noqa: ANN001
+    tmp_path, monkeypatch
+) -> None:
+    """Group (2, 1) against trainer (2, 0) is inconsistent state."""
+    _fake_dist(monkeypatch, (2, 1))
+    dm = _stream_dm(tmp_path)
+    dm.trainer = SimpleNamespace(world_size=2, global_rank=0)
+    with pytest.raises(ConfigError, match="inconsistent"):
+        dm._resolve_shard_context()
+
+
+def test_shard_context_consistent_group_and_trainer(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """Agreeing group and trainer -> the group's pair."""
+    _fake_dist(monkeypatch, (2, 1))
+    dm = _stream_dm(tmp_path)
+    dm.trainer = SimpleNamespace(world_size=2, global_rank=1)
+    assert dm._resolve_shard_context() == (2, 1)
+
+
+def test_shard_context_without_trainer_or_group(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """No trainer and no group -> (1, 0)."""
+    _fake_dist(monkeypatch, None)
+    assert _stream_dm(tmp_path)._resolve_shard_context() == (1, 0)
+
+
+def test_shard_context_single_rank_trainer(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """A single-rank trainer with no group is a single process."""
+    _fake_dist(monkeypatch, None)
+    dm = _stream_dm(tmp_path)
+    dm.trainer = SimpleNamespace(world_size=1, global_rank=0)
+    assert dm._resolve_shard_context() == (1, 0)
+
+
+def test_make_dataset_injects_the_shard_context(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """The streaming datasets are built with world_size/rank/num_workers already pinned."""
+    _fake_dist(monkeypatch, (2, 1))
+    dm = _stream_dm(tmp_path, num_workers=2)
+    assert type(dm._make_dataset(Mode.FIT)) is IterableSaltDataset
+    dm.setup("fit")
+    for dataset in (dm.train_dset, dm.val_dset):
+        assert type(dataset) is IterableSaltDataset
+        assert (dataset._world_size, dataset._rank, dataset._num_workers) == (2, 1, 2)
+        assert dataset._worker_id is None
+    # rank 1 of 2 with 2 workers owns shards 2 and 3 of 4
+    for dataset in (dm.train_dset, dm.val_dset):
+        assert len(dataset) == sum(dataset._shard_batches(4, 2 + w) for w in range(2)) > 0
+
+
+class _TaggedDataset(IterableSaltDataset):
+    """A trivial subclass, to prove the reader's `iterable_dataset_class` is honoured."""
+
+
+class _TaggedReader(BlockStubReader):
+    """A stub reader that names its own streaming dataset class."""
+
+    iterable_dataset_class = _TaggedDataset
+
+
+def test_make_dataset_builds_the_readers_dataset_class(  # noqa: ANN001
+    tmp_path, monkeypatch
+) -> None:
+    """A reader's `iterable_dataset_class` is what `_make_dataset` builds, injected the same."""
+    _fake_dist(monkeypatch, None)
+    dataset = _stream_dm(tmp_path, reader=_TaggedReader(n=60, n_blocks=3))._make_dataset(Mode.FIT)
+    assert type(dataset) is _TaggedDataset
+    assert (dataset._world_size, dataset._rank, dataset._num_workers) == (1, 0, 2)
 
 
 # --------------------------------------------------------------------------- #

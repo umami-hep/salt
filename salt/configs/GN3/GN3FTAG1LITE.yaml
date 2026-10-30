@@ -1,0 +1,268 @@
+# GN3 on DAOD_FTAG1LITE small-R jets: a two-stage kinematic-reweighting MECHANISM example
+# (flavour head only - NOT the all-tasks joint production model).
+# Stage `priors`: fits P(flavour | pT, eta, subcampaign/shower/FullSim-AF3 one-hots) on
+# `frac_samples: 0.1` of one epoch, everything else frozen, class-balanced by `class_weight`.
+# Stage `main`: trains the flavour head with sample_weight w_kin x w_cls (KinematicWeight nn +
+# balanced_prior, ClassWeight); prior and normaliser frozen. `kinematic_reweighting.n_iterations`
+# iterates the prior (N=1 shipped; docs/training.md#iterated-nn-reweighting).
+# Usage (train/val files are the DAOD_FTAG1LITE container-directory globs):
+#   salt fit --config salt/configs/GN3/GN3FTAG1LITE.yaml \
+#            --data.train_file '/path/to/corpus/*/*.root*' --data.val_file '/path/to/corpus/*/*.root*' \
+#            --data.manifest '{train: /path/to/train_manifest.json, val: /path/to/val_manifest.json}'
+
+include:
+  - readers/ftag1lite.yaml
+
+name: GN3FTAG1LITE
+
+data:
+  batch_size: 1000
+  num_workers: 8
+  modules:
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              lifetimeSignedD0Significance,
+              lifetimeSignedZ0SinThetaSignificance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+              leptonID,
+              muon_quality,
+              muon_qOverPratio,
+              muon_momentumBalanceSignificance,
+              muon_scatteringNeighbourSignificance,
+            ]
+          flows: [pt, energy, deta, dphi, isCharged]
+    labels:
+      class_path: salt.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+    flavour_labeller:
+      # Six-class indices derived from HadronGhostTruthLabelID/PartonTruthLabelID; the
+      # reader's raw `flavour_label` branch is the ConeExcl id, not a class index.
+      class_path: salt.data.FtagLabeller
+      init_args:
+        stream: jets
+        label: flavour_label
+        class_names: &gn3_flavour
+          [ghostbjets, ghostcjets, ghostsjets, ghostudjets, ghostgjets, ghosttaujets]
+        require_labels: true
+    container_onehot:
+      # MC subcampaign (x7) + parton shower (x4) + simulation type (x2) one-hot from the container
+      # directory name. A prior-only input, never a tagger input; 0/1 columns, not normalised.
+      class_path: salt.data.ContainerOneHot
+      init_args: {stream: jets, out: container_onehot, include_sim_type: true}
+
+model:
+  class_path: salt.model.SaltModule
+  init_args:
+    # stage-1 (prior head) schedule; the `main` stage overrides lrs + optimizer
+    lrs: {initial: 1.0e-4, max: 2.0e-3, end: 1.0e-5, pct_start: 0.05, weight_decay: 0.0}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.model.modules.MaskedInputNormaliser
+        init_args: {streams: [jets, tracks, flows], global_object: jets, momentum: 0.1}
+      track_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets]
+          out_dim: &embed_dim 256
+          dense: {hidden_layers: [256], activation: SiLU}
+      flow_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: flows
+          context: [normed.jets]
+          out_dim: *embed_dim  # equal embed width is a Concat constraint
+          dense: {hidden_layers: [256], activation: SiLU}
+      concat:
+        class_path: salt.model.modules.Concat
+        init_args: {streams: [tracks, flows]}
+      encoder:
+        class_path: salt.model.modules.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: 128
+          num_layers: 4
+          num_registers: 8
+          attention: {num_heads: 8, attn_type: torch-math}
+          dense: {activation: SiLU, gated: true}
+      # no Split: no per-token task in this example
+      pool:
+        class_path: salt.model.modules.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      # prior input = normalised (pT, eta) + the container one-hot
+      prior_kin:
+        class_path: salt.model.modules.SelectFields
+        init_args: {input: normed.jets, fields: [pt, eta], out: prior_kin.jets}
+      prior_input:
+        class_path: salt.model.modules.VectorConcat
+        init_args: {inputs: [prior_kin.jets, inputs.container_onehot], out: prior_input.jets}
+      class_weight:
+        # Running flavour class weight 1/(K q_f), jet-mean 1; q_f accumulates over the priors
+        # stage and freezes at the boundary. Feeds the prior AND the main head (sample_weight).
+        class_path: salt.model.modules.ClassWeight
+        init_args: {stream: jets, label: flavour_label, n_classes: 6, out: flavour_class_weight}
+      kinematic_reweighting:
+        # Module GROUP expanded by SaltModule into n_iterations (prior, weight) pairs. N=1 is exactly
+        # kinematic_prior + kinematic_weight; N>1 adds kinematic_prior_k / kinematic_weight_k (k<N) whose
+        # cumulative weight nn_kinematic_weight_iter_k feeds head k+1 and the last pair's nn_kinematic_weight.
+        # Joint vs sequential = the training_schedule (docs/training.md); main's frozen list must name every head.
+        class_path: salt.model.modules.IterativeReweighting
+        init_args:
+          n_iterations: 1
+          eta: 1.0
+          avg_last: 1
+          prior:
+            # Bypasses the encoder. Class-balanced CE (sample_weight flavour_class_weight) learns
+            # P(f|x) / q_f; kinematic_weight recovers P(f|x) via balanced_prior.
+            # Exposed in every mode so `salt test` binds without a fit-time schema.
+            stream: jets
+            input: prior_input.jets
+            label: flavour_label
+            class_names: *gn3_flavour
+            weight_source: null
+            dense: {hidden_layers: [128, 128, 128], activation: SiLU}
+            sample_weight: flavour_class_weight
+            loss: {class_path: torch.nn.CrossEntropyLoss, init_args: {reduction: none}}
+          weight:
+            # w = clip(t / clip(P(y|x), p_floor, 1), 0, w_max) (t set by `target`) -> labels.jets.nn_kinematic_weight;
+            # also publishes labels.jets.nn_kinematic_weight_{pt,eta,subcampaign,shower,sim_type} for the plotter.
+            # q_f: null + n_classes accumulates q_f over the priors stage, frozen at the boundary.
+            # Flipping `mode` renames the produced fields: edit jets_classification's `sample_weight` too.
+            task_name: kinematic_prior
+            mode: nn
+            stream: jets
+            label: flavour_label
+            q_f: null
+            n_classes: 6
+            target: inclusive  # alternatives: mean / harmonic / harmonic_equal
+            balanced_prior: true  # the prior is class-balanced: recover P(f|x) = q_f P_bal / sum_g q_g P_bal
+            p_floor: 1.0e-4
+            w_max: 50
+            # nn mode: published only, not binned; categorical codes decode from inputs.container_onehot (ContainerOneHot's `out`)
+            variables:
+              # Infinity is spelled `.inf` (leading dot): a bare `inf` parses as a string.
+              pt: {edges: [0.0, 20.0, 30.0, 40.0, 60.0, 85.0, 110.0, 175.0, 250.0, 400.0, 600.0, 1000.0, .inf], scale: 1.0e-3}
+              eta: {edges: [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, .inf], abs: true}
+              subcampaign: {categories: [mc20a, mc20d, mc20e, mc23a, mc23c, mc23d, mc23e]}
+              shower: {categories: [Pythia8, Herwig7, Sherpa, other]}
+              sim_type: {categories: [FullSim, AF3]}
+      jets_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: flavour_label
+          class_names: *gn3_flavour
+          weight_source: null
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+          # per-jet weight = w_kin x w_cls = 1/(K P(f|x)) (requires loss reduction: none)
+          sample_weight: [nn_kinematic_weight, flavour_class_weight]
+          loss:
+            class_path: torch.nn.CrossEntropyLoss
+            init_args:
+              reduction: none
+              # Literal per-class weights MULTIPLY the per-jet sample weight
+              # (sum(w*c*l) / sum(w*c)); edit per class, all 1.0 = no class weighting.
+              weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      loss:
+        class_path: salt.model.modules.LossSum
+
+outputs:
+  inputs_copy:
+    class_path: salt.outputs.InputCopyWriter
+    init_args: {streams: [jets]}
+  run_tasks:
+    # Both heads are listed so the prior's TEST preds are consumed (no dead preds).
+    # test-only: no ONNX export - a graph with the container one-hot input is a follow-up.
+    class_path: salt.outputs.RunTaskOutput
+    init_args: {tasks: [jets_classification, kinematic_prior], modes: [test]}
+  h5_output:
+    # Both heads share class names, so their flat eval columns would collide; the eval
+    # file keeps the tagger head's columns only.
+    class_path: salt.outputs.H5OutputSink
+    init_args: {consumes: ["outputs.jets.jets_classification.*"]}
+
+callbacks:
+  # Validation spectra read from kinematic_weight's weight and published variables.
+  reweight_plots:
+    class_path: salt.callbacks.KinematicReweightPlotter
+    init_args:
+      weight_module: kinematic_weight
+      plots:
+        # fine log-pT binning overrides the coarse spec edges; |eta| plot edges reach 5.0 so the
+        # forward jets (|eta| > 2.5, ~half of validation) are inside the plotted range
+        - x: pt
+          edges: &plot_pt_edges
+            [10.0, 11.435298, 13.076605, 14.953488, 17.099759, 19.554085, 22.36068,
+             25.570104, 29.240177, 33.437015, 38.236225, 43.724264, 50.0, 57.176492,
+             65.383024, 74.767439, 85.498797, 97.770426, 111.803399, 127.850522,
+             146.200887, 167.185076, 191.181123, 218.621318, 250.0,
+             300.0, 400.0, 550.0, 750.0, 1000.0, 1500.0, 3000.0]
+        - x: eta
+          edges: &plot_eta_edges [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75, 4.0, 4.25, 4.5, 4.75, 5.0]
+        - {x: pt, split_by: subcampaign, edges: *plot_pt_edges}
+        - {x: pt, split_by: shower, edges: *plot_pt_edges}
+        - {x: eta, split_by: subcampaign, edges: *plot_eta_edges}
+        - {x: eta, split_by: shower, edges: *plot_eta_edges}
+        - {x: pt, split_by: sim_type, edges: *plot_pt_edges}
+        - {x: eta, split_by: sim_type, edges: *plot_eta_edges}
+        - x: subcampaign
+        - x: shower
+        - x: sim_type
+  prior_closure:
+    # Per prior head on validation jets: macro one-vs-rest AUC -> 0.5 and CE -> H(q) read closure.
+    class_path: salt.callbacks.PriorClosureMetrics
+  # Raw input histograms with the normaliser's standardised scale on the top axis (31 figures):
+  # the total overlaid with one unit-area line per jets_classification flavour class.
+  input_norm_plots:
+    class_path: salt.callbacks.InputNormalisationPlotter
+    init_args:
+      normaliser: norm
+      class_task: jets_classification
+
+training_schedule:
+  # To end the fit after the priors stage (writes stop_after=priors-step=NNNNNN.ckpt):
+  # stop_after: priors
+  # Resume with the same config WITHOUT stop_after; the fit resumes at the next epoch:
+  #   salt fit --config <run>/config.yaml \
+  #            --ckpt_path <run>/ckpts/stop_after=priors-step=NNNNNN.ckpt
+  stages:
+    priors:
+      # a sample stage: ceil(0.1 * steps per epoch) optimizer steps, no epochs
+      frac_samples: 0.1
+      frozen: [track_embed, flow_embed, concat, encoder, pool, jets_classification]
+      # the encoder chain, main head and its loss are not executed here; weights kept
+      skip_losses: [jets_classification]
+    main:
+      # final stage: the remaining max_epochs
+      frozen: [kinematic_prior, norm]
+      # the prior CE is not trained here; the prior net still runs for kinematic_weight / prior_closure
+      skip_losses: [kinematic_prior]
+      lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
+      optimizer: lion
+
+trainer:
+  max_epochs: 10
+  precision: 32-true

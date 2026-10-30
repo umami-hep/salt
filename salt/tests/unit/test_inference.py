@@ -162,6 +162,18 @@ class TestInferenceDemand:
         assert demand == ["inputs.jets", "inputs.tracks", "masks.tracks", "meta.rows"]
         assert not any(key.startswith("labels.") for key in demand)
 
+    def test_copy_leaves_demand_exactly_the_listed_labels(self):
+        """One `labels.<stream>.<var>` per copy leaf, inserted before ``meta.rows``,
+        and nothing else label-shaped (the truth-label demand guarantee).
+        """
+        export = ExportConfig(
+            model_name="M",
+            inputs=[ExportInput(port="inputs.jets", name="jet_features")],
+        )
+        demand = inference_demand(export, copy_leaves=[("jets", "pt_btagJes")])
+        assert demand == ["inputs.jets", "labels.jets.pt_btagJes", "meta.rows"]
+        assert [k for k in demand if k.startswith("labels.")] == ["labels.jets.pt_btagJes"]
+
 
 def _section(tmp_path, copy_modes=None, mask_modes=None) -> dict:
     """A gn2v2 outputs: section (full task family) over real bound-free modules."""  # noqa: DOC201
@@ -171,7 +183,9 @@ def _section(tmp_path, copy_modes=None, mask_modes=None) -> dict:
     rt = RunTaskOutput(tasks=["jets_classification", "track_origin", "track_vertexing"])
     rt.name = "run_tasks"
     rt.bind_model_modules(modules)
-    icw = InputCopyWriter(streams=["jets", "tracks"], modes=copy_modes)
+    icw = InputCopyWriter(
+        variables={"jets": ["pt_btagJes", "eta_btagJes"], "tracks": ["d0"]}, modes=copy_modes
+    )
     pmw = PadMaskWriter(streams=["tracks"], modes=mask_modes)
     return {"inputs_copy": icw, "run_tasks": rt, "pad_mask": pmw}
 
@@ -180,21 +194,33 @@ class TestExportSelectionSink:
     """build_inference_sink: the H5 columns ARE the export selection, 1:1 with the ONNX tuple."""
 
     def test_columns_are_one_to_one_with_onnx_leaves(self, tmp_path):
-        """Same leaf keys, single suffixes == resolved ONNX names, same count/order rule."""
+        """Task columns are 1:1 with the ONNX leaves; copy columns are the
+        bundle-dtype extras with no ONNX counterpart (skipped by the ONNX sink).
+        """
         section = _section(tmp_path)
         sink = build_inference_sink(section)
         onnx = OnnxExportSink()
         onnx.bind_output_section(section)
         onnx.model_name = "M"
         columns = sink._resolve_columns("run")  # noqa: SLF001 - resolution under test
-        assert {c.key for c in columns} == {leaf.key for leaf in onnx.leaves}
-        assert all(len(c.suffixes) == 1 for c in columns)
+        copies = [c for c in columns if c.dtype is None]
+        tasks = [c for c in columns if c.dtype is not None]
+        assert {c.key for c in tasks} == {leaf.key for leaf in onnx.leaves}
+        assert all(len(c.suffixes) == 1 for c in tasks)
         by_key = {leaf.key: leaf for leaf in onnx.leaves}
-        for col in columns:
+        for col in tasks:
             assert list(col.suffixes) == list(by_key[col.key].suffixes)
-        # the gn2v2 export contract: 3 global probs + 2 per-token int8 leaves
+        assert len(tasks) == 5
+        # the gn2v2 export contract: 3 global probs + 2 per-token int8 leaves —
+        # the ONNX tuple never widens to include the input copies
         assert onnx.output_names() == ["M_pb", "M_pc", "M_pu", "M_TrackOrigin", "M_VertexIndex"]
-        assert len(columns) == 5
+        assert [c.key for c in copies] == [
+            "outputs.jets.pt_btagJes",
+            "outputs.jets.eta_btagJes",
+            "outputs.tracks.d0",
+        ]
+        assert all(c.prefix is False for c in copies)
+        assert all(len(c.suffixes) == 1 for c in copies)
 
     def test_no_label_columns_in_export_selection(self, tmp_path):
         """The export selection carries no target_* column and demands no label."""
@@ -217,10 +243,16 @@ class TestExportSelectionSink:
     def test_copy_and_mask_writers_gated_by_export_mode(self, tmp_path):
         """test-only copy/mask writers are SKIPPED under inference; default (both) run."""
         gated = build_inference_sink(_section(tmp_path, copy_modes=["test"], mask_modes=["test"]))
-        assert gated.copy_inputs == {}
+        gated_cols = gated._resolve_columns("run")  # noqa: SLF001 - resolution under test
+        assert not any(c.dtype is None for c in gated_cols)  # no copy columns resolved
         assert gated.write_pad_mask is False
         default = build_inference_sink(_section(tmp_path))
-        assert default.copy_inputs == {"jets": [], "tracks": []}
+        default_cols = default._resolve_columns("run")  # noqa: SLF001 - resolution under test
+        assert [c.key for c in default_cols if c.dtype is None] == [
+            "outputs.jets.pt_btagJes",
+            "outputs.jets.eta_btagJes",
+            "outputs.tracks.d0",
+        ]
         assert default.write_pad_mask == ("tracks",)
 
     def test_test_sink_keeps_test_only_writers(self, tmp_path):
@@ -230,7 +262,12 @@ class TestExportSelectionSink:
         section = _section(tmp_path, copy_modes=["test"], mask_modes=["test"])
         test_sink = H5OutputSink()
         test_sink.bind_output_section(section)
-        assert test_sink.copy_inputs == {"jets": [], "tracks": []}
+        cols = test_sink._resolve_columns("run")  # noqa: SLF001 - resolution under test
+        assert [c.key for c in cols if c.dtype is None] == [
+            "outputs.jets.pt_btagJes",
+            "outputs.jets.eta_btagJes",
+            "outputs.tracks.d0",
+        ]
         assert test_sink.write_pad_mask == ("tracks",)
 
     def test_empty_section_is_refused(self):
@@ -243,6 +280,22 @@ class TestExportSelectionSink:
         sink = build_inference_sink(_section(tmp_path))
         assert sink.output == INFERENCE_OUTPUT
         assert "__inference_" in sink.output
+
+    def test_column_plan_separates_copies_from_onnx_leaves(self, tmp_path):
+        """`_column_plan` returns (task plan, copy columns) — 5 task leaves, 3 copies."""
+        section = _section(tmp_path)
+        sink = build_inference_sink(section)
+        export_sink = OnnxExportSink()
+        export_sink.bind_output_section(section)
+        export_sink.model_name = "M"
+        sink._resolve_columns("M")  # noqa: SLF001 - resolve before the plan is built
+        plan, copy_columns = _column_plan(sink, export_sink)
+        assert len(plan) == 5
+        assert [c.key for c in copy_columns] == [
+            "outputs.jets.pt_btagJes",
+            "outputs.jets.eta_btagJes",
+            "outputs.tracks.d0",
+        ]
 
 
 class TestInferenceCoreLoop:
@@ -289,6 +342,7 @@ class TestInferenceCoreLoop:
         write_dummy_file(h5_path, nd)
         schema = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5_path), schema)
+        copy_leaves = section["inputs_copy"].copy_leaves(Mode.ONNX)
         dset = SaltDataset(
             modules={
                 "reader": H5StructuredReader(
@@ -299,7 +353,7 @@ class TestInferenceCoreLoop:
                 "labels": Labels(),
             },
             mode=Mode.TEST,
-            sinks=inference_demand(resolved),
+            sinks=inference_demand(resolved, copy_leaves),
         )
         sink = build_inference_sink(section, output=str(tmp_path / "inference.h5"))
         ctx = SinkContext(
@@ -308,10 +362,12 @@ class TestInferenceCoreLoop:
             ckpt_path="unused.ckpt",
         )
         sink.open_schema(ctx)
-        column_plan = _column_plan(sink, export_sink)
+        column_plan, copy_columns = _column_plan(sink, export_sink)
         assert {col.key for col, _, _ in column_plan} == set(export_sink.outputs)
         for start in range(0, self.N, 60):
-            _consume_batch(sink, adapter, column_plan, dset[np.s_[start : start + 60]])
+            _consume_batch(
+                sink, adapter, column_plan, copy_columns, dset[np.s_[start : start + 60]]
+            )
         sink.flush()
         with h5py.File(tmp_path / "inference.h5") as f:
             jets, tracks = f["jets"][:], f["tracks"][:]
@@ -346,7 +402,7 @@ class TestInferenceCoreLoop:
         assert int((~bad_mask[0]).sum()) >= 2, "fixture sanity: need >=2 valid tokens"
         bad_mask[0, 0] = True  # first token padded, later tokens still valid
         with pytest.raises(ConfigError, match="leading rows"):
-            _consume_batch(sink, adapter, column_plan, bad)
+            _consume_batch(sink, adapter, column_plan, copy_columns, bad)
 
 
 class TestLeadingValidGuard:

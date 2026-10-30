@@ -64,6 +64,15 @@ independent of the toy model's actual val loss. All DataLoaders use
 ``num_workers=0``.
 """
 
+# Guarantee -> test (sample stages + stop_after):
+#   an epoch-cap stop_after ckpt resumes (stop_after dropped) identically to the uninterrupted
+#   run, owns the stage-1 trainable set, and never re-stops      -> TestResumeFromStopAfter
+#   a sample stage's OneCycle = its N steps, the rest the remainder -> TestSampleStageSizing
+#   a sample stop_after ckpt (-step=000005) resumes into `full` at the next epoch, with or
+#   without stop_after kept                                       -> TestResumeFromSampleStopAfter
+#   payload carries stop_after / stage_start_step blocks          -> TestLegacyPayloadParity
+#   accumulators frozen at every boundary                         -> TestFreezeAccumulatorsSeam
+
 from __future__ import annotations
 
 import copy
@@ -100,7 +109,12 @@ WARMUP_FULL = {
         "full": {"frozen": [], "lrs": {"max": 1e-3}},
     }
 }
+WARMUP_FULL_STOP = {**WARMUP_FULL, "stop_after": "warmup"}
 MONITOR = "injected/metric"
+# sample stage: warmup targets 500 rows (batch 100, world 1 -> N=5 = one epoch of 5 steps)
+SAMPLE_STAGE = {
+    "stages": {"warmup": {"num_samples": 500, "frozen": [FROZEN]}, "full": {"frozen": []}}
+}
 
 
 # --- fixtures / builders -----------------------------------------------------
@@ -483,6 +497,73 @@ class TestResumeAtBoundary:
         _assert_moments_equal(ref["opt_state"], got["opt_state"], "hybrid boundary moments")
 
 
+# --- resume from a `training_schedule.stop_after` checkpoint ------------
+
+
+class TestResumeFromStopAfter:
+    """Leg 1 trains WARMUP_FULL_STOP to its `stop_after=warmup-epoch=001.ckpt`; leg 2
+    resumes from it dropping `stop_after` (equivalent to the uninterrupted run) or
+    keeping it (continues into `full` without re-stopping)."""
+
+    @staticmethod
+    def _leg1(data, tmp_path) -> Path:
+        seed_everything(SEED, workers=True)
+        model = build_model(data, schedule=WARMUP_FULL_STOP)
+        make_trainer(
+            max_epochs=4, callbacks=[TrainingScheduleCallback()],
+            default_root_dir=str(tmp_path / "stop"),
+        ).fit(model, build_dm(data))
+        ckpt = tmp_path / "stop" / "stop_after=warmup-epoch=001.ckpt"
+        assert ckpt.exists()
+        assert model.trainer.current_epoch == 2
+        return ckpt
+
+    def test_resume_without_stop_after_equals_uninterrupted(self, data, tmp_path):
+        ckpt = self._leg1(data, tmp_path)
+        ref = _run_uninterrupted(data, schedule=WARMUP_FULL, max_epochs=4)
+        seed_everything(SEED, workers=True)
+        m2 = build_model(data, schedule=WARMUP_FULL)
+        tracer, counter = _Tracer(), _RebuildCounter()
+        make_trainer(max_epochs=4, callbacks=[counter, tracer]).fit(
+            m2, build_dm(data), ckpt_path=str(ckpt)
+        )
+        got = _snapshot(m2, tracer)
+        assert tracer.first_epoch == 2  # resumed exactly at the boundary epoch
+        assert counter.rebuild_epochs == [2]  # exactly one rebuild, into `full`
+        assert m2.trainer.current_epoch == 4
+        assert m2.training_controller.current_stage_index == 1
+        _assert_state_dicts_equal(ref["state_dict"], got["state_dict"], "stop_after resume")
+        _assert_moments_equal(ref["opt_state"], got["opt_state"], "stop_after resume moments")
+        _assert_lr_tail_matches(ref["lr"], tracer.lr, "stop_after resume LR trace")
+
+    def test_resume_stage1_optimizer_owns_stage1_trainable_set(self, data, tmp_path):
+        ckpt = self._leg1(data, tmp_path)
+        seed_everything(SEED, workers=True)
+        m2 = build_model(data, schedule=WARMUP_FULL)
+        make_trainer(max_epochs=4, callbacks=[TrainingScheduleCallback()]).fit(
+            m2, build_dm(data), ckpt_path=str(ckpt)
+        )
+        opt_ids = {
+            id(p) for group in m2.trainer.optimizers[0].param_groups for p in group["params"]
+        }
+        assert opt_ids == {id(p) for p in m2.parameters() if p.requires_grad}
+        assert _module_param_ids(m2, FROZEN) <= opt_ids  # incl. the now-unfrozen encoder
+
+    def test_resume_keeping_stop_after_does_not_restop(self, data, tmp_path):
+        ckpt = self._leg1(data, tmp_path)
+        seed_everything(SEED, workers=True)
+        m2 = build_model(data, schedule=WARMUP_FULL_STOP)
+        counter, resume_dir = _RebuildCounter(), tmp_path / "resume"
+        make_trainer(
+            max_epochs=4, callbacks=[counter], default_root_dir=str(resume_dir)
+        ).fit(m2, build_dm(data), ckpt_path=str(ckpt))
+        assert counter.rebuild_epochs == [2]  # advanced into `full`
+        assert m2.trainer.current_epoch == 4
+        assert m2.training_controller.current_stage_index == 1
+        assert m2.training_controller.stop_after_record is None  # stop_after never re-fired
+        assert not list(resume_dir.glob("stop_after=*.ckpt"))
+
+
 # --- resume mid-stage-1 (after the boundary) ----------------------------
 
 
@@ -565,11 +646,16 @@ class MetricInjector(Callback):
 
 class StageRecorder(Callback):
     """Per-train-batch trace of the active stage, epoch, LR, OneCycle total_steps,
-    and `trainer.should_stop`.
+    and `trainer.should_stop`; `lr_before` is the LR entering the step (read before a
+    mid-batch stage advance can rebuild the optimizer).
     """
 
     def __init__(self) -> None:
         self.trace: list[dict] = []
+        self._lr_before: list[float] = []
+
+    def on_train_batch_start(self, trainer, module, batch, batch_idx) -> None:
+        self._lr_before.append(trainer.optimizers[0].param_groups[0]["lr"])
 
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx) -> None:
         sched = trainer.lr_scheduler_configs[0].scheduler
@@ -578,6 +664,7 @@ class StageRecorder(Callback):
             "epoch": trainer.current_epoch,
             "stage": module.training_controller.current_stage_index,
             "lr": trainer.optimizers[0].param_groups[0]["lr"],
+            "lr_before": self._lr_before[-1],
             "total_steps": sched.total_steps,
             "should_stop": trainer.should_stop,
         })
@@ -600,10 +687,16 @@ class TrackerCapture(Callback):
 
 
 class TestLegacyPayloadParity:
-    def _saved_schedule_payload(self, data, tmp_path, schedule, *, max_epochs: int = 1) -> dict:
+    def _saved_schedule_payload(
+        self, data, tmp_path, schedule, *, max_epochs: int = 1,
+        save_on_train_epoch_end: bool | None = None,
+    ) -> dict:
         seed_everything(SEED, workers=True)
         model = build_model(data, schedule=schedule)
-        mc = ModelCheckpoint(dirpath=str(tmp_path), filename="{epoch}", save_top_k=-1)
+        mc = ModelCheckpoint(
+            dirpath=str(tmp_path), filename="{epoch}", save_top_k=-1,
+            save_on_train_epoch_end=save_on_train_epoch_end,
+        )
         cbs: list = [mc]
         if schedule is not None:
             cbs.insert(0, TrainingScheduleCallback())
@@ -625,6 +718,28 @@ class TestLegacyPayloadParity:
         schedule = {"stages": {"a": {"epochs": 1, "frozen": [FROZEN]}, "b": {"frozen": []}}}
         payload = self._saved_schedule_payload(data, tmp_path, schedule, max_epochs=2)
         assert set(payload) == {"stage_index", "stage_name"}
+
+    def test_multi_stage_with_stop_after_payload_carries_stop_after_block(self, data, tmp_path):
+        # save_on_train_epoch_end=False saves at on_validation_end, BEFORE the
+        # on_train_epoch_end stop_after action of that epoch -> "not yet reached".
+        schedule = {
+            "stages": {"a": {"epochs": 1, "frozen": [FROZEN]}, "b": {"frozen": []}},
+            "stop_after": "a",
+        }
+        payload = self._saved_schedule_payload(
+            data, tmp_path, schedule, max_epochs=2, save_on_train_epoch_end=False
+        )
+        assert set(payload) == {"stage_index", "stage_name", "stop_after"}
+        assert payload["stop_after"] == {"stage": "a", "reached": False, "boundary": None}
+
+    def test_sample_schedule_payload_carries_stage_start_step(self, data, tmp_path):
+        # epoch-0 checkpoint after the N=5 boundary fired at the epoch's last batch
+        payload = self._saved_schedule_payload(data, tmp_path, SAMPLE_STAGE, max_epochs=2)
+        assert set(payload) == {
+            "stage_index", "stage_name", "stage_start_step", "stage_start_epoch", "boundaries",
+        }
+        assert (payload["stage_index"], payload["stage_start_step"]) == (1, 5)
+        assert [b["reason"] for b in payload["boundaries"]] == ["steps"]
 
     def test_early_stop_payload_carries_state_keys(self, data, tmp_path):
         schedule = {"stages": {"fit": {"early_stop": {"monitor": MONITOR, "patience": 5}}}}
@@ -840,3 +955,173 @@ class TestEarlyStopResume:
             make_trainer(max_epochs=8, callbacks=[TrainingScheduleCallback()]).fit(
                 m2, build_dm(data), ckpt_path=str(ckpt)
             )
+
+
+# =====================================================================
+# sample stage (`num_samples`) — step-count OneCycle sizing + resume
+# =====================================================================
+
+
+class TestSampleStageSizing:
+    """A sample stage's OneCycle envelope is its converted step count N
+    (`ceil(num_samples / (batch_size * world_size))`), the rest takes the remainder."""
+
+    @staticmethod
+    def _assert_rises_then_falls(lrs: list[float], ctx: str) -> None:
+        peak = lrs.index(max(lrs))
+        assert 0 < peak < len(lrs) - 1, f"{ctx}: LR peak not interior (rise-then-fall): {lrs}"
+        assert lrs[0] < lrs[peak] and lrs[-1] < lrs[peak], f"{ctx}: no rise-then-fall: {lrs}"
+
+    def test_sample_stage_total_steps_and_batch_counts(self, data):
+        seed_everything(SEED, workers=True)
+        model = build_model(data, schedule=SAMPLE_STAGE)
+        rec = StageRecorder()
+        make_trainer(max_epochs=3, callbacks=[TrainingScheduleCallback(), rec]).fit(
+            model, build_dm(data)
+        )
+        stage0 = [t for t in rec.trace if t["stage"] == 0]
+        stage1 = [t for t in rec.trace if t["stage"] == 1]
+        # N=5, but the boundary-crossing 5th batch is tagged stage 1 (the schedule
+        # callback advances before the recorder's on_train_batch_end) -> 4 left.
+        assert len(stage0) == 4
+        assert all(t["total_steps"] == 5 for t in stage0)
+        assert len(stage1) == 11  # 15 total steps (3 epochs x 5) - 4 tagged stage 0
+        assert all(t["total_steps"] == 10 for t in stage1)
+        # lr_before is pre-step, so the 5th sample is still stage 0's LR
+        self._assert_rises_then_falls([t["lr_before"] for t in rec.trace[:5]], "warmup")
+        self._assert_rises_then_falls([t["lr"] for t in stage1], "full")
+
+    def test_no_sample_stage_control_keeps_proportional_split(self, data):
+        # the same shape with an epoch budget: has_sample_stages is False, so the
+        # existing whole-run proportional split applies unchanged.
+        no_sample = {
+            "stages": {"warmup": {"epochs": 2, "frozen": [FROZEN]}, "full": {"frozen": []}}
+        }
+        seed_everything(SEED, workers=True)
+        model = build_model(data, schedule=no_sample)
+        rec = StageRecorder()
+        make_trainer(max_epochs=4, callbacks=[TrainingScheduleCallback(), rec]).fit(
+            model, build_dm(data)
+        )
+        for stage in (0, 1):
+            entries = [t for t in rec.trace if t["stage"] == stage]
+            assert entries and all(t["total_steps"] == 10 for t in entries)
+
+
+class TestResumeFromSampleStopAfter:
+    """Resume from the `stop_after=warmup-step=000005.ckpt` a sample stage writes at
+    train-epoch end: the run resumes at the NEXT epoch and the epoch-start seam
+    advances into `full`, whether `stop_after` is dropped or kept."""
+
+    @staticmethod
+    def _leg1(data, tmp_path) -> Path:
+        seed_everything(SEED, workers=True)
+        model = build_model(data, schedule={**SAMPLE_STAGE, "stop_after": "warmup"})
+        make_trainer(
+            max_epochs=2, callbacks=[TrainingScheduleCallback()],
+            default_root_dir=str(tmp_path / "stop"),
+        ).fit(model, build_dm(data))
+        ckpt = tmp_path / "stop" / "stop_after=warmup-step=000005.ckpt"
+        assert ckpt.exists()
+        rec = model.training_controller.stop_after_record
+        assert rec is not None and rec["reason"] == "stop_after"
+        assert (rec["epoch"], rec["global_step"]) == (0, 5)  # stopped DURING epoch 0 at N=5
+        return ckpt
+
+    def test_resume_without_stop_after_advances_into_full(self, data, tmp_path):
+        ckpt = self._leg1(data, tmp_path)
+        seed_everything(SEED, workers=True)
+        m2 = build_model(data, schedule=SAMPLE_STAGE)
+        counter, tracer, rec = _RebuildCounter(), _Tracer(), StageRecorder()
+        make_trainer(max_epochs=2, callbacks=[counter, tracer, rec]).fit(
+            m2, build_dm(data), ckpt_path=str(ckpt)
+        )
+        # epoch-end ckpt -> resumes at epoch 1, where the seam advances at once
+        # (global_step 5, restored stage_start_step 0 -> already past N)
+        assert tracer.first_epoch == 1
+        assert counter.rebuild_epochs == [1]
+        controller = m2.training_controller
+        assert (controller.current_stage_index, controller.stage_start_step) == (1, 5)
+        assert controller.boundary_records[-1]["reason"] == "steps"
+        assert m2.trainer.current_epoch == 2
+        assert rec.trace and all(t["stage"] == 1 and t["global_step"] >= 5 for t in rec.trace)
+        assert all(t["total_steps"] == 5 for t in rec.trace)  # 10 total - 5
+
+    def test_resume_keeping_stop_after_does_not_restop(self, data, tmp_path):
+        ckpt = self._leg1(data, tmp_path)
+        seed_everything(SEED, workers=True)
+        m2 = build_model(data, schedule={**SAMPLE_STAGE, "stop_after": "warmup"})
+        counter, resume_dir = _RebuildCounter(), tmp_path / "resume"
+        make_trainer(
+            max_epochs=2, callbacks=[counter], default_root_dir=str(resume_dir)
+        ).fit(m2, build_dm(data), ckpt_path=str(ckpt))
+        assert counter.rebuild_epochs == [1]  # advanced via the resume seam
+        assert m2.training_controller.current_stage_index == 1
+        assert m2.training_controller.stop_after_record is None  # stop_after never re-fired
+        assert not list(resume_dir.glob("stop_after=*.ckpt"))
+
+
+class TestSampleStageEarlyStopStopAfter:
+    """A sample `stop_after` stage whose `early_stop` fires before N (=15, 3 epochs) still
+    stops + writes its `-step=` ckpt, and the resume advances into `full` at once."""
+
+    def test_early_stop_before_n_stops_then_resume_advances(self, data, tmp_path):
+        warmup = {"num_samples": 1500, "frozen": [FROZEN],
+                  "early_stop": {"monitor": MONITOR, "mode": "min", "patience": 1}}
+        schedule = {"stages": {"warmup": warmup, "full": {"frozen": []}}}
+        seed_everything(SEED, workers=True)
+        rec = StageRecorder()
+        trainer = make_trainer(
+            max_epochs=4, callbacks=[MetricInjector([1.0] * 4), TrainingScheduleCallback(), rec],
+            default_root_dir=str(tmp_path / "stop"),
+        )
+        stop = {**schedule, "stop_after": "warmup"}
+        trainer.fit(build_model(data, schedule=stop), build_dm(data))
+        assert trainer.should_stop and all(t["stage"] == 0 for t in rec.trace)
+        (ckpt,) = (tmp_path / "stop").glob("stop_after=warmup-step=*.ckpt")
+        blk = torch.load(str(ckpt), weights_only=False)[CKPT_KEY]["schedule"]["stop_after"]
+        assert blk["reached"] is True and blk["boundary"]["global_step"] < 15
+        assert ckpt.name == f"stop_after=warmup-step={blk['boundary']['global_step']:06d}.ckpt"
+
+        seed_everything(SEED, workers=True)
+        m2, tracer, rec2 = build_model(data, schedule=schedule), _Tracer(), StageRecorder()
+        make_trainer(max_epochs=4, callbacks=[TrainingScheduleCallback(), tracer, rec2]).fit(
+            m2, build_dm(data), ckpt_path=str(ckpt)
+        )
+        resume_epoch = blk["boundary"]["epoch"] + 1  # the epoch-end ckpt resumes one later
+        assert tracer.first_epoch == resume_epoch
+        assert m2.training_controller.boundary_records[-1]["reason"] == "early_stop"
+        assert rec2.trace and all(t["stage"] == 1 for t in rec2.trace)
+        assert all(t["total_steps"] == 5 * (4 - resume_epoch) for t in rec2.trace)
+
+
+class TestFreezeAccumulatorsSeam:
+    """`advance_to_stage` calls `freeze_accumulators(global_step, epoch)` on every
+    duck-typed accumulator module and refuses an unfrozen one (no Trainer involved)."""
+
+    class _Acc(torch.nn.Module):
+        def __init__(self, *, freezes: bool = True) -> None:
+            super().__init__()
+            self.freezes, self.calls, self.accumulators_frozen = freezes, [], False
+
+        def freeze_accumulators(self, global_step: int, epoch: int) -> None:
+            self.calls.append((global_step, epoch))
+            self.accumulators_frozen = self.freezes
+
+    def test_freeze_accumulators_called_with_boundary_args(self, data):
+        model = build_model(data, schedule=WARMUP_FULL)
+        model.net["acc"] = acc = self._Acc()
+        model.training_controller.advance_to_stage(1, 10, 2, "epochs")
+        assert acc.calls == [(10, 2)]
+        assert model.training_controller.current_stage_index == 1
+
+    def test_unfrozen_accumulator_after_freeze_call_raises(self, data):
+        model = build_model(data, schedule=WARMUP_FULL)
+        model.net["acc"] = self._Acc(freezes=False)
+        with pytest.raises(RuntimeError, match="unfrozen accumulators"):
+            model.training_controller.advance_to_stage(1, 10, 2, "epochs")
+
+    def test_no_accumulator_module_is_a_no_op(self, data):
+        model = build_model(data, schedule=WARMUP_FULL)  # no module defines freeze_accumulators
+        model.training_controller.advance_to_stage(1, 10, 2, "epochs")  # must not raise
+        assert model.training_controller.current_stage_index == 1

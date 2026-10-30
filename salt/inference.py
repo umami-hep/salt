@@ -17,6 +17,7 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, GraphError
 from salt.graph.spec import Mode
+from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
@@ -47,21 +48,35 @@ INFERENCE_OUTPUT = "{ckpt_dir}/{ckpt_stem}__inference_{sample}.h5"
 # `salt inference` == Athena semantics by construction, at check_onnx tolerance.
 
 
-def inference_demand(export: ExportConfig) -> list[str]:
+def inference_demand(
+    export: ExportConfig, copy_leaves: Sequence[tuple[str, str]] = ()
+) -> list[str]:
     """The dataset-boundary demand of an inference run.
 
     The export block's positional input ports (+ each sequence stream's pad
-    mask) + the ``meta.rows`` row anchor. Alias pseudo-inputs are synthesised
-    by the adapter from their source port and consume nothing. Label-free by
-    construction: no ``labels.*`` key can appear here, so `Labels` narrows to
-    nothing and a label-stripped file reads fine.
+    mask) + one ``labels.<stream>.<var>`` demand per `copy_leaves` entry (an
+    export-mode `InputCopyWriter`'s copied fields) + the ``meta.rows`` row
+    anchor. Alias pseudo-inputs are synthesised by the adapter from their
+    source port and consume nothing. Label-free stays a TRUTH-LABEL demand
+    guarantee: copies demand exactly the listed file fields (which a
+    label-stripped file still carries), nothing else label-shaped.
     """
     demand: list[str] = []
     for entry in (e for e in export.inputs if e.alias is None):
         demand.append(entry.port)
         if entry.sequence:
             demand.append(f"masks.{stream_of_input_port(entry.port)}")
+    for stream, var in copy_leaves:
+        key = f"labels.{stream}.{var}"
+        if key not in demand:
+            demand.append(key)
     return [*demand, "meta.rows"]
+
+
+def _copy_leaves(section: Any) -> list[tuple[str, str]]:
+    """The ONNX-mode ``(stream, var)`` copy leaves of the section's `InputCopyWriter`s, in order."""
+    writers = (w for w in (section or {}).values() if isinstance(w, InputCopyWriter))
+    return [leaf for w in writers for leaf in w.copy_leaves(Mode.ONNX)]
 
 
 def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
@@ -71,7 +86,9 @@ def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
     (`use_export_selection`): its columns resolve from
     ``manifest_fields(Mode.ONNX)`` — one single-suffix column per ONNX leaf —
     and the section's `InputCopyWriter`/`PadMaskWriter` contribute their
-    copy/mask columns only when their ``modes:`` include ``export``.
+    copy/mask columns only when their ``modes:`` include ``export``. Copy
+    columns come from the writer's ``manifest_fields(Mode.ONNX)`` the same
+    way, just with ``dtype=None`` (bundle-dtype, no ONNX leaf).
     Raises `ConfigError` on an empty/missing section (no WHAT to write).
     """
     from salt.outputs import H5OutputSink
@@ -127,17 +144,25 @@ def _check_leading_valid(mask: Any, stream: str) -> None:
         )
 
 
-def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
+def _column_plan(sink: Any, export_sink: Any) -> tuple[list[tuple[Any, str, bool]], list[Any]]:
     """Pair each resolved H5 column with its ONNX tuple name and axis.
 
     Both the export-selection sink columns and the `OnnxExportSink` leaves
     derive from the SAME section ``manifest_fields(Mode.ONNX)`` walk, so they
     are 1:1 by leaf key; a mismatch raises `ConfigError` (never a silent drop).
+    A column with ``dtype is None`` is a copy column (an `InputCopyWriter`
+    field) — it has no ONNX leaf by design, so it is skipped from the 1:1
+    check and returned separately for `_consume_batch` to fill from
+    ``labels.*`` instead of the adapter.
     """
     prefix = export_sink.resolved_model_name()
     leaves = {leaf.key: leaf for leaf in export_sink.leaves}
     plan: list[tuple[Any, str, bool]] = []
+    copy_columns: list[Any] = []
     for col in sink.columns:
+        if col.dtype is None:
+            copy_columns.append(col)
+            continue
         leaf = leaves.get(col.key)
         if leaf is None or len(col.suffixes) != 1:
             raise ConfigError(
@@ -146,13 +171,14 @@ def _column_plan(sink: Any, export_sink: Any) -> list[tuple[Any, str, bool]]:
                 "selection)"
             )
         plan.append((col, f"{prefix}_{leaf.suffixes[0]}", bool(leaf.per_token)))
-    return plan
+    return plan, copy_columns
 
 
 def _consume_batch(
     sink: Any,
     adapter: OnnxAdapter,
     column_plan: list[tuple[Any, str, bool]],
+    copy_columns: list[Any],
     batch: dict[str, Any],
 ) -> None:
     """Run the adapter per jet over one dataset batch and feed the sink.
@@ -162,7 +188,11 @@ def _consume_batch(
     into a zero-padded ``[B, L]`` block (the sink re-expands to the file
     length — padded positions read 0, with the pad-mask column marking them).
     Leading placement is checked, not assumed: `_check_leading_valid` rejects
-    any batch whose valid tokens are not the leading rows.
+    any batch whose valid tokens are not the leading rows. Each `copy_columns`
+    entry is filled straight from ``labels.<stream>.<var>`` — the dataset TEST
+    plan serves it because it is in the demand (`inference_demand`); a
+    per-token copy on a sequence stream arrives as ``[B, T]`` at the file
+    width, so the sink's ``_pad_to`` is a no-op.
     """
     bundle_in = Bundle(dict(batch))
     positional = adapter._positional  # noqa: SLF001 - same-package (check.py precedent)
@@ -192,6 +222,9 @@ def _consume_batch(
             out.set(col.key, torch.stack([v.reshape(()) for v in vals]))
     for stream in sink._mask_streams:  # noqa: SLF001 - same-package sink drive
         out.set(f"outputs.{stream}.mask", bundle_in.get(f"masks.{stream}"))
+    for col in copy_columns:
+        var = col.key.split(".")[2]
+        out.set(col.key, bundle_in.get(f"labels.{col.stream}.{var}"))
     sink.consume(out)
 
 
@@ -222,10 +255,11 @@ def run_inference(
         Checkpoint to load (required — inference names its output after it).
     test_file : str | Path
         The H5 to run over. May be LABEL-FREE: the dataset demand is derived
-        from ``export.inputs`` only, so no label dataset is demanded — a
-        label-stripped file runs green. Demand-free is not redaction: an
-        export-mode ``InputCopyWriter`` copies the source fields it selects
-        verbatim, labels included when the file carries them.
+        from ``export.inputs`` plus any export-mode `InputCopyWriter`'s
+        listed fields, so only those file fields are demanded — a
+        label-stripped file runs green as long as it carries the listed copy
+        fields. Copies demand only the listed input fields, never "every
+        label".
     output : str | Path | None, optional
         Output H5 path; default `INFERENCE_OUTPUT` next to the checkpoint.
     set_overrides : Sequence[str], optional
@@ -270,11 +304,13 @@ def run_inference(
     model, modules = _load_folded_modules(cli, ckpt_path, export_sink)
     _cross_check_schema(model, resolved, variables)
     _, adapter = _build_adapter(modules, resolved, variables)
+    copies = _copy_leaves(cli.model._output_section)  # noqa: SLF001 - section home
     # the dataset: the CLI datamodule with the INFERENCE demand — export input
-    # ports + pad masks + meta.rows, never labels (Labels narrows to nothing,
-    # so a label-stripped file binds and reads green).
+    # ports + pad masks + copy fields + meta.rows, never labels beyond the
+    # listed copy fields (Labels narrows to nothing else, so a label-stripped
+    # file binds and reads green as long as it carries the copy fields).
     dm = cli.datamodule
-    dm.set_sinks({Mode.TEST: inference_demand(resolved)})
+    dm.set_sinks({Mode.TEST: inference_demand(resolved, copies)})
     dm.setup("test")
     dset = dm.test_dset
     sink = build_inference_sink(cli.model._output_section, output)  # noqa: SLF001 - section home
@@ -287,14 +323,14 @@ def run_inference(
     )
     sink.open_schema(ctx)
     try:
-        column_plan = _column_plan(sink, export_sink)
+        column_plan, copy_columns = _column_plan(sink, export_sink)
         total = len(dset)
         step = batch_size or dm.batch_size
         console("-" * 100)
         console(f"salt inference: {total:,} rows from {test_file} (export selection, eager)")
         for start in range(0, total, step):
             stop = min(start + step, total)
-            _consume_batch(sink, adapter, column_plan, dset[np.s_[start:stop]])
+            _consume_batch(sink, adapter, column_plan, copy_columns, dset[np.s_[start:stop]])
         sink.flush()
     finally:
         sink.close_if_open()
@@ -307,9 +343,10 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="salt inference",
         description=(
-            "Label-free inference (labels are never demanded, so label-stripped files "
-            "run green; export-mode InputCopyWriter columns still pass source fields "
-            "through verbatim, labels included): write the EXPORT output set to H5. "
+            "Label-free inference (labels beyond any export-mode InputCopyWriter's listed "
+            "fields are never demanded, so a label-stripped file runs green as long as it "
+            "carries the listed copy fields — copies demand only the listed input fields, "
+            "never every label): write the EXPORT output set to H5. "
             "Compiles the same Mode.ONNX selection as salt export and "
             "executes it eagerly per jet — offline inference == Athena semantics by "
             "construction."
@@ -331,7 +368,10 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         dest="test_file",
         type=Path,
         required=True,
-        help="H5 file to run over — labelled or label-free (labels are never demanded)",
+        help=(
+            "H5 file to run over — labelled or label-free (labels beyond any listed "
+            "InputCopyWriter fields are never demanded)"
+        ),
     )
     parser.add_argument(
         "--data.num_test",

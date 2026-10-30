@@ -467,6 +467,57 @@ def test_open_trees_are_dropped_on_pickle(ej_file) -> None:
     assert revived._open_trees == {}
 
 
+def test_close_tree_closes_the_file_and_drops_the_cache(ej_file) -> None:
+    """`close_tree` is a real uproot close of the ROOT file, not just a cache drop."""
+    path, _ = ej_file
+    reader = _cache_reader(path)
+    reader.prepare()
+    reader.read(slice(0, 2), Mode.FIT)
+    assert len(reader._open_trees) == 1
+    tree = next(iter(reader._open_trees.values()))
+    assert not tree.closed
+
+    reader.close_tree(path)
+    assert reader._open_trees == {}
+    assert tree.closed
+    assert tree.file.closed
+
+
+def test_read_after_close_reopens_transparently(ej_file) -> None:
+    """A read after a close reopens lazily: correctness never depends on the closing schedule."""
+    path, _ = ej_file
+    reader = _cache_reader(path)
+    n = len(reader)
+    first = reader.read(slice(0, n), Mode.FIT)
+    reader.close_tree(str(path))
+    assert reader._open_trees == {}
+
+    again = reader.read(slice(0, n), Mode.FIT)
+    assert len(reader._open_trees) == 1
+    np.testing.assert_array_equal(
+        again["raw.event"]["eventNumber"], first["raw.event"]["eventNumber"]
+    )
+    np.testing.assert_array_equal(again["raw.jets"]["pt"], first["raw.jets"]["pt"])
+    np.testing.assert_array_equal(again["raw.jets"]["valid"], first["raw.jets"]["valid"])
+
+
+def test_close_all_is_idempotent_and_unknown_path_is_a_noop(ej_file) -> None:
+    """Closing a never-opened path, an empty cache, or twice in a row is a silent no-op."""
+    path, _ = ej_file
+    reader = _cache_reader(path)
+    reader.close_tree("/nowhere/missing.root")
+    assert reader._open_trees == {}
+    reader.close_all()
+
+    reader.read(slice(0, 2), Mode.FIT)
+    assert len(reader._open_trees) == 1
+    reader.close_all()
+    assert reader._open_trees == {}
+    reader.close_all()
+    assert reader._open_trees == {}
+    reader.close_tree(path)
+
+
 # --------------------------------------------------------------------------- #
 # 9. prepare() probes the schema from metadata, once, on the first file
 # --------------------------------------------------------------------------- #
@@ -770,3 +821,320 @@ def test_clone_keeps_the_base_class(tmp_path, ej_file) -> None:
     path, _ = ej_file
     assert _cache_reader(path).with_source(path, num=3, stage="val").__class__ is UprootReader
     assert _cache_reader(path).restage(tmp_path).__class__ is UprootReader
+
+
+# --------------------------------------------------------------------------- #
+# broadcast — an entry-axis (EVENT) scalar repeated onto the unrolled row axis
+# --------------------------------------------------------------------------- #
+
+
+def _broadcast_reader(source, **kwargs) -> UprootReader:
+    """``jets`` (unroll carrier) + a broadcast ``event`` group serving ``eventNumber``."""
+    return UprootReader(
+        groups={
+            "jets": {"branches": dict(_JET), "jagged": False},
+            "event": {
+                "branches": {"eventNumber": "eventNumber"},
+                "jagged": False,
+                "broadcast": True,
+            },
+        },
+        filename=source,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+        **kwargs,
+    )
+
+
+def test_broadcast_event_field_matches_repeated_ground_truth(ej_file) -> None:
+    path, arrays = ej_file
+    reader = _broadcast_reader(path)
+    njets = np.array(arrays["njets"])
+    n = len(reader)
+    assert n == int(njets.sum())
+    expected = np.repeat(arrays["eventNumber"], njets)
+    served = reader.read(slice(0, n), Mode.FIT)["raw.event"]["eventNumber"]
+    np.testing.assert_array_equal(served, expected)
+    # the 0-jet event (_NJETS[3] == 0) contributes nothing to the served rows
+    assert arrays["eventNumber"][3] not in served
+
+
+def test_broadcast_event_field_matches_at_several_batch_offsets(ej_file) -> None:
+    path, arrays = ej_file
+    reader = _broadcast_reader(path)
+    njets = np.array(arrays["njets"])
+    n = len(reader)
+    expected = np.repeat(arrays["eventNumber"], njets)
+    for lo, width in ((0, 1), (0, 4), (1, 5), (3, 2), (7, 6), (n - 2, 5)):
+        hi = min(lo + width, n)
+        if lo >= hi:
+            continue
+        served = reader.read(slice(lo, hi), Mode.FIT)["raw.event"]["eventNumber"]
+        np.testing.assert_array_equal(served, expected[lo:hi])
+
+
+def test_broadcast_event_field_agrees_across_a_file_boundary(tmp_path) -> None:
+    """A batch straddling the two-file boundary must agree with the same ground truth."""
+    directory = _two_files(tmp_path)  # seeds 99 then 7, per `_two_files`
+    reader = _broadcast_reader(directory)
+    expected = np.concatenate([
+        np.repeat(a["eventNumber"], np.array(a["njets"]))
+        for a in (build_fixture_arrays(seed=99), build_fixture_arrays(seed=7))
+    ])
+    n = len(reader)
+    assert n == expected.size
+    boundary = int(np.sum(build_fixture_arrays(seed=99)["njets"]))
+    window = reader.read(slice(boundary - 4, boundary + 4), Mode.FIT)["raw.event"]["eventNumber"]
+    np.testing.assert_array_equal(window, expected[boundary - 4 : boundary + 4])
+    full = reader.read(slice(0, n), Mode.FIT)["raw.event"]["eventNumber"]
+    np.testing.assert_array_equal(full, expected)
+
+
+def _residue_arrays(seed: int = 55) -> dict:
+    """10 events, one per ``eventNumber % 10`` residue (0..9), each with a few jets."""
+    rng = np.random.default_rng(seed)
+    njets = [2, 3, 1, 4, 2, 3, 1, 2, 3, 2]
+    pt = [rng.uniform(20_000, 300_000, size=k).astype(np.float32) for k in njets]
+    return {
+        "n_events": len(njets),
+        "njets": njets,
+        "recojet_antikt4PFlow_pt_NOSYS": pt,
+        "eventNumber": np.arange(2000, 2000 + len(njets), dtype=np.uint64),
+    }
+
+
+def _split_reader(path, stage: str) -> UprootReader:
+    from salt.data import GlobalObjectCuts
+
+    return UprootReader(
+        groups={
+            "jets": {"branches": {"pt": "recojet_antikt4PFlow_pt_NOSYS"}, "jagged": False},
+            "event": {
+                "branches": {"eventNumber": "eventNumber"},
+                "jagged": False,
+                "broadcast": True,
+            },
+        },
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+        stage=stage,
+        cuts=GlobalObjectCuts(
+            per_split={
+                "train": ("eventNumber % 10 < 8",),
+                "val": ("eventNumber % 10 == 8",),
+                "test": ("eventNumber % 10 == 9",),
+            }
+        ),
+    )
+
+
+def test_broadcast_partition_train_val_test_is_disjoint_and_covers_everything(
+    tmp_path,
+) -> None:
+    from collections import Counter
+
+    arrays = _residue_arrays()
+    path = write_minitree(tmp_path / "residue.root", arrays)
+    njets = np.array(arrays["njets"])
+    event_numbers = arrays["eventNumber"]
+    residues = event_numbers.astype(np.int64) % 10
+    total_jets = int(njets.sum())
+
+    readers = {stage: _split_reader(path, stage) for stage in ("train", "val", "test")}
+    lens = {stage: len(r) for stage, r in readers.items()}
+    assert sum(lens.values()) == total_jets
+
+    masks = {"train": residues < 8, "val": residues == 8, "test": residues == 9}
+    for stage, mask in masks.items():
+        assert lens[stage] == int(njets[mask].sum())
+        served = readers[stage].read(slice(0, lens[stage]), Mode.FIT)["raw.event"]["eventNumber"]
+        served_residues = served.astype(np.int64) % 10
+        if stage == "train":
+            assert np.all(served_residues < 8)
+        elif stage == "val":
+            assert np.all(served_residues == 8)
+        else:
+            assert np.all(served_residues == 9)
+
+        # no partial leakage: each source event contributes exactly njets rows when
+        # its residue selects this split, and zero otherwise.
+        counts = Counter(served.tolist())
+        triples = zip(event_numbers.tolist(), njets.tolist(), mask.tolist(), strict=True)
+        for ev, njet, keep in triples:
+            assert counts[ev] == (njet if keep else 0)
+
+
+def test_restage_preserves_stage_split_membership_and_num(tmp_path) -> None:
+    """A restaged split reader keeps its stage (per-split cut) and its row cap."""
+    arrays = _residue_arrays()
+    path = write_minitree(tmp_path / "residue.root", arrays)
+    staged_root = (tmp_path / "staged").resolve()
+
+    for stage in ("train", "val", "test"):
+        r = _split_reader(path, stage)
+        s = r.restage(tmp_path / "staged")
+        assert s.stage == stage
+        assert s.sources()
+        assert all(Path(p).resolve().is_relative_to(staged_root) for p in s.sources())
+        assert len(s) == len(r)
+        assert np.array_equal(
+            s.read(slice(0, len(s)), Mode.FIT)["raw.event"]["eventNumber"],
+            r.read(slice(0, len(r)), Mode.FIT)["raw.event"]["eventNumber"],
+        )
+
+    capped = _split_reader(path, "train").with_source(path, num=3, stage="train")
+    assert capped.restage(tmp_path / "staged2").num == 3
+    assert len(capped.restage(tmp_path / "staged2")) == 3
+
+
+# --------------------------------------------------------------------------- #
+# broadcast — config-validation error surface
+# --------------------------------------------------------------------------- #
+
+
+def test_broadcast_shape_mismatch_raises() -> None:
+    with pytest.raises(SchemaError):
+        UprootReader._broadcast_repeat(awkward.Array([1, 2, 3]), np.array([1, 2]), "x")
+
+
+def test_broadcast_irregular_jagged_branch_raises_on_read(ej_file) -> None:
+    """A broadcast group on a per-jet branch prepares, then the read is a SchemaError."""
+    path, _ = ej_file
+    reader = UprootReader(
+        groups={
+            "jets": {"branches": dict(_JET), "jagged": False},
+            "event": {
+                "branches": {"eventNumber": "recojet_antikt4PFlow_phi"},
+                "jagged": False,
+                "broadcast": True,
+            },
+        },
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+    )
+    reader.prepare()
+    with pytest.raises(SchemaError):
+        reader.read(slice(0, 4), Mode.FIT)
+
+
+def test_broadcast_branch_claimed_by_two_groups_raises(ej_file) -> None:
+    path, _ = ej_file
+    with pytest.raises(ConfigError, match="both a broadcast and a non-broadcast"):
+        UprootReader(
+            groups={
+                "jets": {"branches": dict(_JET), "jagged": False},
+                "event": {
+                    "branches": {"eventNumber": "eventNumber"},
+                    "jagged": False,
+                    "broadcast": True,
+                },
+                "event2": {"branches": {"eventNumber2": "eventNumber"}, "jagged": False},
+            },
+            filename=path,
+            tree="AnalysisMiniTree",
+            unroll="jets",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# broadcast — fingerprint/cache + clone propagation
+# --------------------------------------------------------------------------- #
+
+
+def test_broadcast_flag_changes_fingerprint(ej_file) -> None:
+    path, _ = ej_file
+    plain = UprootReader(
+        groups={
+            "jets": {"branches": dict(_JET), "jagged": False},
+            "event": {"branches": {"eventNumber": "eventNumber"}, "jagged": False},
+        },
+        filename=path,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+    )
+    broadcast = _broadcast_reader(path)
+    assert plain.config_fingerprint() != broadcast.config_fingerprint()
+
+
+def test_broadcast_reader_round_trips_through_pickle(ej_file) -> None:
+    """A spawn-pickled broadcast reader re-prepares and serves the same repeated values."""
+    import pickle
+
+    path, arrays = ej_file
+    cold = _broadcast_reader(path)
+    n_cold = len(cold)
+    served_cold = cold.read(slice(0, n_cold), Mode.FIT)["raw.event"]["eventNumber"]
+
+    warm = pickle.loads(pickle.dumps(cold))  # noqa: S301 - own object round-trip
+    assert len(warm) == n_cold
+    served_warm = warm.read(slice(0, len(warm)), Mode.FIT)["raw.event"]["eventNumber"]
+    np.testing.assert_array_equal(served_warm, served_cold)
+    expected = np.repeat(arrays["eventNumber"], np.array(arrays["njets"]))
+    np.testing.assert_array_equal(served_cold, expected)
+
+
+def test_broadcast_flag_preserved_through_with_source(ej_file) -> None:
+    path, _ = ej_file
+    reader = _broadcast_reader(path)
+    clone = reader.with_source(filename=path)
+    assert clone.groups["event"].broadcast is True
+    assert clone.groups["jets"].broadcast is False
+
+
+def test_broadcast_flag_preserved_through_restage(ej_file, tmp_path) -> None:
+    path, _ = ej_file
+    reader = _broadcast_reader(path)
+    staged = reader.restage(tmp_path / "staged")
+    assert staged.groups["event"].broadcast is True
+
+
+# --------------------------------------------------------------------------- #
+# entry_rows — per-entry served-row counts (pre-`num`), incl. a trailing zero-row entry
+# --------------------------------------------------------------------------- #
+
+
+def test_trailing_zero_row_entry_keeps_per_entry_counts(tmp_path) -> None:
+    """A cut file whose LAST entry has no rows gets a 0 kept count (no reduceat IndexError)."""
+    from salt.data import GlobalObjectCuts
+
+    pt = [np.array([50_000.0, 150_000.0]), np.array([200_000.0]), np.array([])]
+    arrays = {
+        "n_events": 3,
+        "njets": [2, 1, 0],
+        "recojet_antikt4PFlow_pt_NOSYS": pt,
+        "eventNumber": np.arange(3, dtype=np.uint64),
+    }
+    path_written = write_minitree(tmp_path / "trailing.root", arrays)
+    reader = UprootReader(
+        groups={"jets": {"branches": {"pt": _JET["pt"]}, "jagged": False}},
+        filename=path_written,
+        tree="AnalysisMiniTree",
+        unroll="jets",
+        cuts=GlobalObjectCuts(global_cuts=("pt > 100000.0",)),
+    )
+    assert len(reader) == 2
+    ((path, counts),) = reader.entry_rows()
+    np.testing.assert_array_equal(counts, [1, 1, 0])
+    assert path == Path(path_written)
+    served = reader.read(slice(0, 2), Mode.FIT)["raw.jets"]["pt"]
+    np.testing.assert_array_equal(served, [150_000.0, 200_000.0])
+
+
+def test_entry_rows_sum_to_len_only_when_uncapped(tmp_path) -> None:
+    """`entry_rows` is pre-cap: a ``num``-capped clone returns the same per-entry arrays."""
+    d = _two_files(tmp_path)
+    reader = _broadcast_reader(d)
+    rows = reader.entry_rows()
+    assert [p for p, _ in rows] == reader._resolve_files()
+    n_events = [build_fixture_arrays(seed=s)["n_events"] for s in (99, 7)]
+    assert [c.size for _, c in rows] == n_events
+    assert sum(int(c.sum()) for _, c in rows) == len(reader)
+
+    capped = reader.with_source(d, num=4)
+    capped_rows = capped.entry_rows()
+    assert len(capped) == 4
+    assert [p for p, _ in capped_rows] == [p for p, _ in rows]
+    for (_, got), (_, want) in zip(capped_rows, rows, strict=True):
+        np.testing.assert_array_equal(got, want)

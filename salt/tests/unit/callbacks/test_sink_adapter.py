@@ -22,7 +22,6 @@ from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode
 from salt.outputs import (
     H5OutputSink,
-    InputCopyWriter,
     Node,
     OnnxExportSink,
     PadMaskWriter,
@@ -336,10 +335,7 @@ def _opened_h5_sink(tmp_path: Path) -> H5OutputSink:
     _source_file(src)
     sink = H5OutputSink(output=str(tmp_path / "crashed.h5"))
     # bind BEFORE seeding: binding resets the resolved column table
-    sink.bind_output_section({
-        "inputs_copy": InputCopyWriter(streams=["jets"], variables={"jets": ["pt", "n_trks"]}),
-        "pad_mask": PadMaskWriter(streams=["tracks"]),
-    })
+    sink.bind_output_section({"pad_mask": PadMaskWriter(streams=["tracks"])})
     _seed_columns(sink)
     sink.open_schema(
         SinkContext(
@@ -383,6 +379,10 @@ def test_close_if_open_is_idempotent(tmp_path):
         ckpt_path=str(tmp_path / "e0-loss=0.1.ckpt"),
     )
     sink.open_schema(ctx)
+    # the writer is created LAZILY (dynamic append) — consume once so there is
+    # a real open handle for teardown to release, not just a no-op on None
+    sink.consume(_bundle())
+    assert sink._h5 is not None  # noqa: SLF001 - precondition: the handle IS open
     adapter = SinkAdapter(sink)
     adapter.teardown(None, None, "test")
     adapter.teardown(None, None, "test")

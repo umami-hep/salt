@@ -305,11 +305,11 @@ class DoubledPt(Processor):
 
 ## Shipped data modules
 
-`salt/data/__init__.py`'s `__all__` holds 32 names. Eleven of them are legal
+`salt/data/__init__.py`'s `__all__` holds 34 names. Thirteen of them are legal
 `data.modules` entries; everything else is a base class, the datamodule
 itself, a config or runtime dataclass, a constant, a function, or an
 internal runtime object. The [Reference](#reference) table below classifies
-every one. This section catalogues the eleven real entries: `class_path`,
+every one. This section catalogues the thirteen real entries: `class_path`,
 source line, `init_args`, the bundle keys each requires and produces, and
 which hooks it defines.
 
@@ -448,16 +448,32 @@ needs). `_parse_targets` (`:121-138`) raises `ConfigError` for a narrowed
 key that does not split into exactly `labels.<stream>.<label>` (`:126-130`)
 and for a stream outside the resolved set (`:132-136`).
 
-### Compact reference: the remaining six
+### Compact reference: the remaining eight
 
 | `class_path` | Source | `init_args` | Requires / produces / hooks |
 |---|---|---|---|
 | `salt.data.FtagLabeller` | `processors/ftag_labeller.py:17`, `__init__` `:70-77` | `stream: str = "jets"`; `label: str = "flavour_label"`; `class_names: Sequence[str] \| None = None` (empty or `None` raises `ConfigError`, `:87-91`); `require_labels: bool = True`; `dtype_policy = "int64-for-int"` | produces a **concrete** `labels.<stream>.<label>` (`:102-112`), which beats `Labels`' wildcard; `read_fields` overridden (`:114-122`) |
 | `salt.data.UprootReader` | `readers/uproot_reader.py:101`, `__init__` `:138-147` | `groups` (required); `filename=None`; `tree: str = "CollectionTree"`; `unroll: str \| None = None`; `num: int = -1`; `cuts=None`; `stage=None` | same produced key families as `H5StructuredReader` (`:224-235`); its `with_source` (`:305-309`) takes `(filename, num=-1, stage=None)` — no VDS surface, ROOT has none; ElementLink/PHYSLITE `link`/`join` groups need `salt.data.xAODReader` instead (see the section below) |
+| `salt.data.FTAG1LITEReader` | `readers/ftag1lite_reader.py:58`, `__init__` `:106-121` | `jets: str = "small_r"` (`small_r` / `large_r` / `both`); `small`, `large`: `Mapping` (`groups` + `cuts` only, one per active collection); `filename=None`; `tree="CollectionTree"`; `unroll="jets"`; `num=-1`; `stage=None`; `jet_type_field="jet_type"`; `small_type=0`; `large_type=1`; `shard_scope="per_rank"` (`per_rank` / `owner`, streaming only); `shuffle_pool_rows=100_000` (`null` = one batch; `owner` needs `null`) | one plain `UprootReader` per active collection over the same DAOD_FTAG1LITE files; `both` serves each event's small-R rows then its large-R rows with an int64 `jet_type` on the `unroll` stream, scalar streams as the union of both sides (float -> NaN / signed int -> -1 fill), jagged streams must agree on `pad_max` and fields, a one-sided jagged stream is all-padding; every jagged stream needs `pad_max`; `num` caps rows; in every `jets` mode injects int64 `subcampaign`/`shower`/`sim_type` code columns on the `unroll` stream (one constant per source file from its container directory name via `parse_container_categories`; `sim_type` is -1 without an a/s tag; served only when demanded and not in the schema; container names are parsed only when a code column is demanded — then an unparseable container is one `ConfigError` at `bind` listing every bad container; the codes are not part of `config_fingerprint`, so a manifest built before them stays valid) |
 | `salt.data.ConstituentSelection` | `processors/cut.py` | `streams: Mapping[str, {cuts, pad_max, sort}]` | requires `raw.<s>` (fields = cut fields + sort var) and `masks.<s>`, REWRITES both in place — cut (drop + re-pad) → optional sort → truncate to `pad_max` → re-pad; runs between the reader and every other `raw.*` consumer; row/event cuts stay on the reader's `cuts:` |
 | `salt.data.MultiSampleReader` | `readers/multisample_reader.py:64`, `__init__` `:91-97` | `samples: Sequence[SampleConfig \| Mapping]` (required); `label_stream: str = "event"`; `label_field: str = "process"`; `interleave_block: int = 1` | mirrors its sub-readers' `raw.*`/`masks.*`/`meta.rows`, extending the scalar `label_stream`'s field list with the injected `label_field` (`:140-155`); its `with_source` ignores `filename` and re-sources each sub-reader from its own per-stage `SampleConfig.sources` (`:263-278`) |
 | `salt.data.MultiTarget` | `processors/multi_target.py:26`, `__init__` `:77` | `replacements: Sequence[Mapping[str, Any]]` (required) | requires `labels.<stream>.{sel_label,source}` and produces `labels.<stream>.<output>` float32, all `modes=Mode.TRAINING` (`:138-164`) |
 | `salt.data.MaskFormerTargets` | `processors/maskformer_targets.py:35`, `__init__` `:134-149` | `object_class`, `object_id`, `constituent_id`, `class_map`, `object_stream`, `constituent_stream` (all required); then `regression_targets=None`, `cuts=None`, `sort_by=None`, `sort_descending=True`, `pv_class=0`, `max_objects=None`, `max_lxy_mm=None`, `lxy_field="Lxy"` | produces `labels.objects.object_class` (`[B,M]` int64), `labels.objects.masks` (`[B,M,T]` bool) and `labels.objects.<target>` per regression target (`:299-334`) |
+| `salt.data.ContainerOneHot` | `readers/ftag1lite_categories.py` | `stream: str = "jets"`; `out: str = "container_onehot"`; `include_sim_type: bool = False` | requires `raw.<stream>` (`read_fields` demands the reader's `subcampaign`/`shower`[/`sim_type`] code columns), produces `inputs.<out>` float32 `[B, 11]` (`[B, 13]` with sim) in every mode with named `fields` `subcampaign_*`/`shower_*`/`sim_type_*`; a kinematic-prior conditioning input only, never a tagger input; 0/1, not normalised; an out-of-vocabulary code (a -1 `sim_type` with the sim block) is a `ValueError` |
+
+`FTAG1LITEReader` has three `jets` modes: `small_r` (small-R EMPFlow jets only), `large_r`
+(large-R UFO jets only) and `both` (one row stream, per event its small-R rows then its
+large-R rows, `jets.jet_type` 0 / 1). Two configs ship: `readers/ftag1lite.yaml`
+(`jets: small_r`) and the self-contained `readers/ftag1lite_joint.yaml` (`jets: both`, full
+`small` and `large` blocks, no `include:`). `large_r` stays available by setting
+`jets: large_r` with the joint config's `large` block alone. Both read every FTAG1LITE
+collection — jets, tracks, flows, calo clusters, electrons, muons, towers (small-R only;
+all-padding on large-R rows in `both`) and the broadcast `event` group — and both stream
+with `shard_scope: owner` (see [streaming](../streaming.md)). A single FTAG1LITE corpus has
+no pre-split files, so each side splits it per bound stage with `cuts.per_split` on `eventNumber % 10`
+(`train: eventNumber % 10 < 8`, `val: == 8`, `test: == 9`); the cut reads `eventNumber`
+through a `broadcast: true` event group (`EventInfoAuxDyn.`, `jagged: false`), which
+repeats the per-event value onto every jet row.
 
 ### `salt.data.xAODReader`
 
@@ -557,10 +573,10 @@ target container).
 ## Reference
 
 Every name below is exported from `salt/data/__init__.py`'s `__all__`
-(32 names). The third column says what kind of thing it is, since a base
+(34 names). The third column says what kind of thing it is, since a base
 class, a config dataclass, a constant, a function and a runtime object all
-sit in the same namespace as the eleven real `data.modules` entries, and
-only those eleven belong under `data.modules` in a config.
+sit in the same namespace as the thirteen real `data.modules` entries, and
+only those thirteen belong under `data.modules` in a config.
 
 | Class | Role | Legal `data.modules` entry? |
 |---|---|---|
@@ -572,6 +588,7 @@ only those eleven belong under `data.modules` in a config.
 | `salt.data.RowBlock` | one contiguous sequential read unit, for streaming | no, runtime dataclass |
 | `salt.data.H5StructuredReader` | the structured-H5 reader | **yes** |
 | `salt.data.UprootReader` | the ROOT/uproot reader | **yes** |
+| `salt.data.FTAG1LITEReader` | DAOD_FTAG1LITE small-R / large-R / both reader built on `UprootReader` | **yes** |
 | `salt.data.xAODReader` | ElementLink-dereferencing `UprootReader` for xAOD POOL / DAOD_PHYSLITE | **yes** |
 | `salt.data.MultiSampleReader` | proportionally stratified multi-sample reader | **yes** |
 | `salt.data.InputSamples` | the per-stage file/row-cap config holder | **yes** |
@@ -581,6 +598,7 @@ only those eleven belong under `data.modules` in a config.
 | `salt.data.MultiTarget` | multiple regression targets from one stream | **yes** |
 | `salt.data.MaskFormerTargets` | MaskFormer object-selection targets | **yes** |
 | `salt.data.ConstituentSelection` | constituent cuts (+sort/truncate/pad) as a post-read processor rewriting raw.<s>/masks.<s> | **yes** |
+| `salt.data.ContainerOneHot` | FTAG1LITE container-category codes to a float32 one-hot (kinematic-prior conditioning) | **yes** |
 | `salt.data.SaltDataset` | the map-style dataset `SaltDataModule` builds internally | no, internal runtime object; see [Shipped data modules](#shipped-data-modules) |
 | `salt.data.IterableSaltDataset` | the streaming counterpart of `SaltDataset` | no, internal runtime object |
 | `salt.data.GroupConfig` | one `H5StructuredReader` stream's group configuration | no, config dataclass (nested inside `groups:`) |

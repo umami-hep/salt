@@ -52,7 +52,7 @@ class TestDumbH5SinkSectionResolution:
         # an empty section (no RunTaskOutput) -> no final H5 column
         from salt.outputs.input_copy_writer import InputCopyWriter
 
-        icw = InputCopyWriter(streams=["jets"])
+        icw = InputCopyWriter(variables={"jets": ["pt"]})
         icw.name = "inputs_copy"
         sink.bind_output_section({"inputs_copy": icw})
         with pytest.raises(ConfigError, match="no RunTaskOutput task with a final H5 column"):

@@ -1,5 +1,8 @@
 """Unit tests for `salt.optim` — HybridMuonAdamW + MuonParamPolicy."""
 
+# Guarantee -> test (sample-stage OneCycle): a short exact-N stage gets a 3-step warm-up floor
+#   that never raises and never lowers a longer warm-up -> TestBuildOnecycleScheduler.test_step_*
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -17,6 +20,7 @@ from salt.optim import (
     HybridMuonAdamW,
     Lion,
     MuonParamPolicy,
+    _step_stage_min_pct_start,
     build_onecycle_scheduler,
     build_optimizer,
     build_stage_lr_scheduler,
@@ -753,6 +757,39 @@ class TestBuildOnecycleScheduler:
         opt = HybridMuonAdamW(net.named_parameters(), lr=self.LRS["initial"], weight_decay=1e-5)
         result = build_onecycle_scheduler(opt, self.LRS, 100)
         assert result["scheduler"].cycle_momentum is False
+
+    def test_step_stage_widens_a_short_warmup_to_three_steps(self) -> None:
+        """After one step the plain 2-step clamp is at the peak; the step-stage one still rises."""
+        plain_opt = AdamW(LionNet().parameters(), lr=self.LRS["initial"])
+        step_opt = AdamW(LionNet().parameters(), lr=self.LRS["initial"])
+        plain = build_onecycle_scheduler(plain_opt, self.LRS, 5)["scheduler"]
+        step = build_onecycle_scheduler(step_opt, self.LRS, 5, step_stage=True)["scheduler"]
+        plain_opt.step()
+        step_opt.step()
+        plain.step()
+        step.step()
+        assert plain.get_last_lr()[0] == pytest.approx(self.LRS["max"])
+        assert self.LRS["initial"] < step.get_last_lr()[0] < self.LRS["max"]
+
+    @pytest.mark.parametrize("total_steps", [1, 2, 3, 4, 5, 10, 100])
+    def test_step_stage_schedule_never_raises(self, total_steps: int) -> None:
+        """Every short step-stage schedule builds and steps to completion."""
+        opt = AdamW(LionNet().parameters(), lr=self.LRS["initial"])
+        scheduler = build_onecycle_scheduler(opt, self.LRS, total_steps, step_stage=True)
+        for _ in range(total_steps):
+            opt.step()
+            scheduler["scheduler"].step()
+
+    def test_step_stage_floor_values(self) -> None:
+        """3 steps wide, legal below 4 steps, and never lowers a longer warmup."""
+        assert _step_stage_min_pct_start(10) == pytest.approx(0.3)
+        assert _step_stage_min_pct_start(3) == pytest.approx(0.75)
+        assert _step_stage_min_pct_start(0) == pytest.approx(0.75)
+        opt = AdamW(LionNet().parameters(), lr=self.LRS["initial"])
+        lrs = {**self.LRS, "pct_start": 0.5}
+        scheduler = build_onecycle_scheduler(opt, lrs, 1000, step_stage=True)["scheduler"]
+        reference = build_onecycle_scheduler(opt, lrs, 1000)["scheduler"]
+        assert scheduler._schedule_phases == reference._schedule_phases  # noqa: SLF001
 
 
 class TestBuildStageLrScheduler:

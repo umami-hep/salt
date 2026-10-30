@@ -69,8 +69,13 @@ class _DataModule:
         self.test_suff = None
 
 
-def _source_file(path: Path) -> None:
-    """A tiny source H5: float + int jets columns, per-token tracks group."""
+def _source_file(path: Path) -> np.ndarray:
+    """A tiny source H5: float + int jets columns, per-token tracks group.
+
+    Returns the jets structured array so the caller can seed matching
+    bundle-sourced copy columns (input copies flow through the bundle, never
+    indexed back out of the source file).
+    """  # noqa: DOC201 - test helper, extra return note above
     rng = np.random.default_rng(11)
     jets = np.zeros(_N, dtype=np.dtype([("pt", "f4"), ("n_trks", "i8")]))
     jets["pt"] = rng.random(_N).astype("f4") * 100
@@ -80,11 +85,16 @@ def _source_file(path: Path) -> None:
     with h5py.File(path, "w") as f:
         f.create_dataset("jets", data=jets)
         f.create_dataset("tracks", data=tracks)
+    return jets
 
 
 def _seed_columns(sink: H5OutputSink) -> None:
-    """One float prob column (jets) + one bare int column (tracks)."""
+    """Two bundle-sourced copy columns (pt, n_trks) + one float prob column
+    (jets) + one bare int column (tracks).
+    """
     sink._columns = (  # noqa: SLF001 - OutputColumn is the sink's internal value object; seeded directly for this white-box test
+        OutputColumn(key="outputs.jets.pt", suffixes=["pt"], dtype=None, prefix=False),
+        OutputColumn(key="outputs.jets.n_trks", suffixes=["n_trks"], dtype=None, prefix=False),
         OutputColumn(key="outputs.jets.cls", suffixes=["pb", "pc"]),
         OutputColumn(key="outputs.tracks.vtx", suffixes=["VertexIndex"], dtype="i8", prefix=False),
     )
@@ -102,12 +112,11 @@ def _section() -> dict[str, Any]:
 def _drive(sink: H5OutputSink, tmp_path: Path, section: dict[str, Any]) -> Path:
     """Bind `section`, seed columns, then drive open_schema -> consume -> flush."""  # noqa: DOC201 - test helper, no Returns block per docstring policy
     src = tmp_path / "src.h5"
-    _source_file(src)
+    jets_src = _source_file(src)
     out = Path(sink.output)
     # bind BEFORE seeding: binding resets the resolved column table
     sink.bind_output_section(section)
     _seed_columns(sink)
-    # num_test_batches None -> _expected_rows falls back to len(dset)
     ctx = SinkContext(
         run_name="salt",
         datamodule=_DataModule(_Reader(src)),
@@ -120,7 +129,12 @@ def _drive(sink: H5OutputSink, tmp_path: Path, section: dict[str, Any]) -> Path:
     bundle = Bundle({
         "meta": {"rows": torch.tensor([0, _N])},
         "outputs": {
-            "jets": {"cls": torch.rand(_N, 2)},
+            "jets": {
+                "cls": torch.rand(_N, 2),
+                # bundle-sourced input copies: equal to the source file's values
+                "pt": torch.from_numpy(jets_src["pt"].copy()),
+                "n_trks": torch.from_numpy(jets_src["n_trks"].copy()),
+            },
             # the vertexing leaf reaches the sink as the int-cast union-find
             # value (int32; -inf padding -> int32 min)
             "tracks": {

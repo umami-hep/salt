@@ -23,7 +23,7 @@ from salt.schema import GroupSchema, Schema
 
 __all__ = ["UprootGroupConfig", "UprootReader"]
 
-GROUP_KEYS = frozenset({"branches", "prefix", "jagged", "pad_max"})
+GROUP_KEYS = frozenset({"branches", "prefix", "jagged", "pad_max", "broadcast"})
 XAOD_GROUP_KEYS = frozenset({
     "link_branch",
     "target_prefix",
@@ -66,12 +66,15 @@ class UprootGroupConfig:
     pad_max : int | None, optional
         Keep the leading N constituents (pad/truncate); None (default) auto-resolves
         the file's max multiplicity in `prepare`.
+    broadcast : bool, optional
+        Entry-axis scalar repeated by the unroll group's per-entry count onto the row axis.
     """
 
     branches: dict[str, str]
     prefix: str = ""
     jagged: bool = True
     pad_max: int | None = None
+    broadcast: bool = False
 
     def __post_init__(self) -> None:
         if not self.branches:
@@ -166,6 +169,10 @@ class UprootReader(Reader):
                     "on-disk jaggedness is consumed by the unroll"
                 )
         self._validate_links()
+        cfgs = self.groups.values()
+        own = {(self._on_disk(c, b), c.broadcast) for c in cfgs for b in c.branches.values()}
+        if clash := sorted({b for b, _ in own if (b, True) in own and (b, False) in own}):
+            raise ConfigError(f"branches {clash} in both a broadcast and a non-broadcast group")
         self.schema: Schema | None = None
         self._table: list[_FileEntry] | None = None
         self._num_rows: int | None = None
@@ -211,6 +218,7 @@ class UprootReader(Reader):
             "prefix": str(cfg.get("prefix", "")),
             "jagged": bool(cfg.get("jagged", True)),
             "pad_max": cfg.get("pad_max"),
+            "broadcast": bool(cfg.get("broadcast")),
         }
 
     @staticmethod
@@ -256,7 +264,8 @@ class UprootReader(Reader):
         ).hexdigest()[:16]
         dest_dir = root / digest
         staged = [stage_file(src, dest_dir / src.name) for src in srcs]
-        return self.with_source(filename=staged[0] if len(staged) == 1 else dest_dir)
+        out = staged[0] if len(staged) == 1 else dest_dir
+        return self.with_source(filename=out, num=self.num, stage=self.stage)
 
     def _resolve_files(self) -> list[Path]:
         if self.filename is None:
@@ -423,6 +432,13 @@ class UprootReader(Reader):
             for fieldname, bare in cfg.branches.items():
                 arr = self._to_rows(t[self._on_disk(cfg, bare)].array(library="ak"))
                 row_scalars.setdefault(fieldname, ak.to_numpy(arr))
+        for cfg in (c for c in self.groups.values() if c.broadcast):
+            for fieldname, bare in cfg.branches.items():
+                if fieldname not in cut_fields or fieldname in row_scalars:
+                    continue
+                branch = self._on_disk(cfg, bare)
+                arr = t[branch].array(library="ak")
+                row_scalars[fieldname] = self._broadcast_repeat(arr, orig_counts, branch)
         for cf in cut_fields:
             if cf in row_scalars:
                 continue
@@ -447,14 +463,15 @@ class UprootReader(Reader):
                 cols[VALID_FIELD] = ak.full_like(cols[needed[0]], True, dtype=bool)
             row_scalars[agg.key] = agg.evaluate(cols)
         n_rows = int(orig_counts.sum())
-        if self.cuts is None or not self.cuts.global_cuts:
+        if self.cuts is None or not self.cuts.for_split(self.stage):
             return np.arange(n_rows, dtype=np.int64), orig_counts.copy(), orig_counts
         rec = self._row_record(row_scalars, n_rows)
         keep = self._apply_row_cuts(rec)
         kept = np.flatnonzero(keep).astype(np.int64)
-        bounds = np.concatenate([[0], np.cumsum(orig_counts)])
-        per_row_kept = np.add.reduceat(keep.astype(np.int64), bounds[:-1])
-        per_row_kept = np.where(orig_counts == 0, 0, per_row_kept).astype(np.int64)
+        # cumsum, not reduceat: safe on trailing zero-count entries
+        bounds = np.concatenate([[0], np.cumsum(orig_counts)]).astype(np.int64)
+        csum = np.concatenate([[0], np.cumsum(keep.astype(np.int64))])
+        per_row_kept = (csum[bounds[1:]] - csum[bounds[:-1]]).astype(np.int64)
         return kept, per_row_kept, orig_counts
 
     def _stream_max_mult(self, t: Any, stream: str, kept: np.ndarray) -> int:
@@ -500,6 +517,7 @@ class UprootReader(Reader):
         wanted = {s: self._served_fields(s) for s in self.groups}
         direct = {s: self._direct_branches(self.groups[s], fs) for s, fs in wanted.items()}
         union = [br for names in direct.values() for br in names.values()]
+        repeated = {b for s, d in direct.items() if self.groups[s].broadcast for b in d.values()}
         chunks: dict[str, dict[str, list[Any]]] = {
             s: {f: [] for f in fs} for s, fs in wanted.items()
         }
@@ -515,7 +533,9 @@ class UprootReader(Reader):
             sel = (window - orig_cum[e0])[row_off : row_off + (hi - lo)]
             t = self._tree(entry.path)
             raw = self._read_branches(t, union, e0, e1) if union else {}
-            shared = {br: self._to_rows(a) for br, a in raw.items()}
+            shared = {br: a if br in repeated else self._to_rows(a) for br, a in raw.items()}
+            cnt = entry.orig_counts[e0:e1]
+            shared |= {b: self._broadcast_repeat(raw[b], cnt, b) for b in repeated}
             for s, fields in wanted.items():
                 block = self._group_block(t, self.groups[s], fields, e0, e1, shared)
                 for f in fields:
@@ -560,14 +580,34 @@ class UprootReader(Reader):
                 break
         return blocks
 
+    def entry_rows(self) -> list[tuple[Path, np.ndarray]]:
+        """Per file, each entry's post-cut served-row count (pre-``num`` cap); borrowed arrays."""
+        self.prepare()
+        assert self._table is not None
+        return [(e.path, e.per_row_kept) for e in self._table]
+
     def _tree(self, path: str | Path) -> Any:
-        """The open TTree for `path`, cached per process — the HOT read path only."""
+        """The open TTree for `path`, cached per process until `close_tree` — the HOT read path.
+
+        FTAG1LITE streaming closes a file right after its last block; a later read reopens lazily.
+        """
         import uproot
 
         key = str(path)
         if (tree := self._open_trees.get(key)) is None:
             tree = self._open_trees[key] = uproot.open(f"{key}:{self.tree}")
         return tree
+
+    def close_tree(self, path: str | Path) -> None:
+        """Close `path`'s cached TTree (its ROOT file) and drop it; an unopened path is a no-op."""
+        tree = self._open_trees.pop(str(path), None)
+        if tree is not None:
+            tree.close()
+
+    def close_all(self) -> None:
+        """`close_tree` every cached tree; idempotent."""
+        for key in list(self._open_trees):
+            self.close_tree(key)
 
     def _to_rows(self, arr: Any) -> Any:
         """Flatten the entry axis away under ``unroll`` (``[entry][obj]`` -> ``[row]``)."""
@@ -584,6 +624,19 @@ class UprootReader(Reader):
         """Base: pure selection out of `shared` (on-disk-branch -> unrolled array)."""
         del t, e0, e1
         return {f: shared[self._on_disk(cfg, cfg.branches[f])] for f in fields}
+
+    @staticmethod
+    def _broadcast_repeat(arr: Any, counts: np.ndarray, branch: str) -> np.ndarray:
+        """Repeat one-value-per-entry `arr` by the unroll group's per-entry `counts`."""
+        import awkward as ak
+
+        try:
+            values = ak.to_numpy(arr)
+        except (ValueError, TypeError) as e:
+            raise SchemaError(f"broadcast branch {branch!r}: not one scalar per entry") from e
+        if values.shape != counts.shape:
+            raise SchemaError(f"broadcast branch {branch!r}: {values.shape} vs {counts.shape}")
+        return np.repeat(values, counts)
 
     def _read_branches(self, t: Any, branches: list[str], e0: int, e1: int) -> dict[str, Any]:
         """Read several branches over entry block ``[e0, e1)`` in ONE grouped call."""

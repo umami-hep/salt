@@ -9,7 +9,8 @@ import torch
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.spec import Mode, flatten_spec
+from salt.graph.planner import compile_plan
+from salt.graph.spec import IO, Mode, TensorSpec, flatten_spec, unflatten_spec
 from salt.model.modules import (
     LossGLS,
     LossSum,
@@ -197,3 +198,57 @@ class TestLossGLS:
         # int 1 (== 1.0) and a non-numeric weight both pass cleanly
         LossGLS.check_task_weights({"t": _IntWeightTask(1)})
         LossGLS.check_task_weights({"t": _IntWeightTask("not-a-number")})
+
+
+class _Toy:
+    """Static-IO toy graph module."""
+
+    def __init__(self, name, requires, produces):
+        self.name, self._io = name, IO(unflatten_spec(requires), unflatten_spec(produces))
+
+    def declare_io(self, mode):
+        return self._io
+
+
+def _toy_graph():
+    """`head_a` reads `shared`; `head_b` reads `only_b`; LossSum sums both."""
+    t, ls = TensorSpec(), TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)
+    loss = LossSum(losses=["a", "b"])
+    loss.name = "loss"
+    mods = {
+        "shared": _Toy("shared", {"inputs.x": t}, {"embed.x": t}),
+        "only_b": _Toy("only_b", {"embed.x": t}, {"embed.y": t}),
+        "head_a": _Toy("head_a", {"embed.x": t}, {"losses.a": ls}),
+        "head_b": _Toy("head_b", {"embed.y": t}, {"losses.b": ls}),
+        "loss": loss,
+    }
+    return mods, loss
+
+
+class TestActiveLosses:
+    def test_active_set_prunes_demand(self):
+        """Skipping `b` drops the modules that fed only it; `None` restores the full plan."""
+        mods, loss = _toy_graph()
+        src = unflatten_spec({"inputs.x": TensorSpec()})
+        full = compile_plan(mods, Mode.FIT, src, sinks=["loss.total"])
+        loss.set_active(loss.resolve_active(["b"]))
+        pruned = compile_plan(mods, Mode.FIT, src, sinks=["loss.total"])
+        assert set(pruned.module_names) == {"shared", "head_a", "loss"}
+        loss.set_active(None)
+        assert compile_plan(mods, Mode.FIT, src, sinks=["loss.total"]).plan_hash == full.plan_hash
+        with pytest.raises(ConfigError, match="unknown"):
+            loss.resolve_active(["c"])
+        with pytest.raises(ConfigError, match="every"):
+            loss.resolve_active(["a", "losses.b"])
+
+    def test_forward_uses_only_active_losses(self):
+        """Weighted sum and GLS combine only the active losses (GLS exponent = active count)."""
+        loss = LossSum(losses=["a", "b", "c"], weights={"b": 2.0})
+        gls = LossGLS(losses=["a", "b", "c"])
+        for module, (va, vb), expected in ((loss, (1.0, 3.0), 7.0), (gls, (4.0, 9.0), 6.0)):
+            module.name = "loss"
+            module.set_active(module.resolve_active(["c"]))
+            b = Bundle()  # the skipped `losses.c` is absent
+            b.set("losses.a", torch.tensor(va))
+            b.set("losses.b", torch.tensor(vb))
+            assert module(b, Mode.FIT)["loss.total"].item() == pytest.approx(expected)

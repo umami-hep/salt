@@ -245,9 +245,9 @@ class Reader(SaltDatasetModule):
         row must never be read. SAMPLE-AXIS ONLY — row cuts change `__len__`, so
         constituent filtering must not route through here.
         """
-        if self.cuts is None or not self.cuts.global_cuts:
+        if self.cuts is None or not self.cuts.for_split(self.stage):
             return np.ones(len(rows), dtype=bool)
-        return self.cuts.eligible(rows)
+        return self.cuts.eligible(rows, self.stage)
 
     def schema_group(self, stream: str) -> GroupSchema | None:
         """The schema for one served stream, when a schema artifact is configured.

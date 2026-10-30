@@ -15,6 +15,10 @@ canonical home of all six is `salt.model.base` / `salt.model.bind`; import
 from `salt.model.modules` unless you have a reason to import the narrower
 module directly.
 
+`salt.model.base.ModuleGroup` (beside `SaltModelModule`) marks a config-constructed factory that
+`SaltModule` expands into ordinary modules before any name assignment, schedule validation or plan
+compile; expanded names are the `frozen:`/checkpoint names and cannot be CLI-overridden individually.
+
 ## Lifecycle
 
 A model module goes through the same five phases every model in the plan
@@ -225,6 +229,15 @@ def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
 `out_dim` directly; `Concat.derived_widths`
 (`salt/model/modules/plumbing.py:87`) sums its inputs' resolved widths.
 
+### `derived_fields(self, fields: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]`
+
+The column-name counterpart of `derived_widths`: return `{produced_key:
+column_names}` (column order) for keys you produce, only once your inputs are
+present in `fields`. `resolve_bind_schema` runs it to a fixpoint after the width
+phase; a tuple disagreeing with a resolved one, or with the key's width, raises
+`BindError`. Real examples: `Normaliser.derived_fields` (`inputs.<s>` ->
+`normed.<s>`) and `VectorConcat.derived_fields` (concat order, unique names).
+
 ### `forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]`
 
 `salt/model/base.py:128`
@@ -433,8 +446,8 @@ from an `init_arg`: `pred_key = preds.<stream>.<name>`
 
 #### `salt.model.modules.ClassificationTaskModule`
 
-`salt/model/modules/tasks/classification.py:29`, `__init__`
-`classification.py:44-59`
+`salt/model/modules/tasks/classification.py:31`, `__init__`
+`classification.py:54-70`
 
 | `init_arg` | Type | Default |
 |---|---|---|
@@ -451,13 +464,15 @@ from an `init_arg`: `pred_key = preds.<stream>.<name>`
 | `label_map` | `dict[int, int] \| None` | `None` |
 | `expose` | `Sequence[str] \| None` | `None` |
 | `write_targets` | `bool` | `True` |
+| `sample_weight` | `str \| Sequence[str] \| None` | `None` |
 
 `class_names` is checked non-empty and duplicate-free at construction
-(`classification.py:98-106`). `sequence` is inferred when omitted, from
-`input is None` (`:108`). `weight_source: {from_class_dict: <path>}`
+(`classification.py:114-122`). `sequence` is inferred when omitted, from
+`input is None` (`:124`). `weight_source: {from_class_dict: <path>}`
 allocates the cross-entropy `weight` buffer at `bind` and fills it at
 `materialise`, the only file-touching hook this class defines
-(`:251-283`). Default loss is `torch.nn.CrossEntropyLoss` (`:26`).
+(`:238-271`). Default loss is `torch.nn.CrossEntropyLoss` (`:28`).
+`sample_weight` names one `labels.<stream>.<key>` column or a list of them; several keys multiply per row (e.g. a `KinematicWeight` times a `ClassWeight`) and need `loss.init_args.reduction: none`.
 
 #### `salt.model.modules.RegressionTaskModule`
 
@@ -570,7 +585,7 @@ mode also gets the target-label fields alongside the prediction.
 
 Every configurable entry under `model.init_args.modules` is one of the
 classes exported from `salt.model.modules`
-(`salt/model/modules/__init__.py:34-59`, 23 names). Six of those names are
+(`salt/model/modules/__init__.py:34-59`, 26 names). Six of those names are
 base and bind machinery already documented earlier on this page
 (`SaltModelModule`, `ResolvedSchema`, `BindError`, `bind_all`,
 `materialise_all`, `resolve_bind_schema`); the three task classes are
@@ -580,8 +595,8 @@ get one line each at the end of this section
 (`FeaturewiseTransformation`, `PositionalEncoder`). Every remaining name
 below is a real `model.init_args.modules` entry: `class_path`, the source
 line of the class and of `__init__`, an `init_args` table, the bundle keys
-it requires and produces, and which of `bind`, `materialise` and
-`derived_widths` it defines.
+it requires and produces, and which of `bind`, `materialise`,
+`derived_widths` and `derived_fields` it defines.
 
 Three things worth stating loudly, because attempts against these docs have
 repeatedly gotten them wrong:
@@ -655,6 +670,23 @@ A single instance configured with `streams: [jets_logpt, tracks_signed_d0]`
 and `global_object: jets_logpt` declares `tracks_signed_d0` at rank 3
 (`("B", T, F)`) when it is actually rank 2, and the planner raises a
 `ShapeError` the moment that stream's real shape is bound.
+
+#### Plotting the normalisation: `salt.callbacks.InputNormalisationPlotter`
+
+`salt/callbacks/input_normalisation_plotter.py` works with either normaliser, named by
+`normaliser: <model.modules key>`. Each validation epoch it draws one histogram per
+(stream, variable) of the raw input, padded objects excluded: raw units on the bottom axis,
+`(x − mean)/std` from that module's own buffers on the top axis, the sample mean/std in both
+coordinate systems, out-of-range counts annotated and an opt-in `N(0,1)` overlay. Knobs:
+`normaliser` (`norm`), `bins` (100, for float variables; an integer-valued variable whose
+first-batch range is <= 50 gets one bin per integer, edges at k ± 0.5), `max_batches` (null =
+every batch), `gaussian` (false), `log_y` (false; log density axis), `output_dir` (null; PNG +
+JSON per epoch), `class_task` (below). The x-range of every variable is the first non-empty
+validation batch's range widened 5 %; later values beyond it are counted as under/overflow.
+A `CometLogger`, when attached, gets the figures and `mean_std`/`std_std` metrics.
+Every curve is a unit-area density: the total (filled) and, with `class_task` (the `model.modules`
+key of a `ClassificationTaskModule` on the global stream; null = total only), one line per class,
+constituents split by their parent jet's flavour. Per-class stats go to the JSON `classes` only.
 
 ### `salt.model.modules.StreamEmbed`
 
@@ -790,11 +822,15 @@ key list raises `ConfigError`.
 
 Defines no `bind`, `materialise` or `derived_widths`.
 
-### Compact reference: the remaining eight
+### Compact reference: the remaining twelve
 
 | `class_path` | Source | `init_args` | Requires / produces / hooks |
 |---|---|---|---|
-| `salt.model.modules.VectorConcat` | `plumbing.py:186`, `__init__` `:199` | `inputs: Sequence[str]` (required); `out: str = "pooled.global"` | requires each key in `inputs` (own width symbol); produces `out`; `derived_widths` sums the input widths (`:244-248`) |
+| `salt.model.modules.VectorConcat` | `plumbing.py:186`, `__init__` `:199` | `inputs: Sequence[str]` (required); `out: str = "pooled.global"` | requires each key in `inputs` (own width symbol); produces `out`; `derived_widths` sums the input widths (`:244-248`); `derived_fields` joins the input column names in concat order when every input carries them and they are unique |
+| `salt.model.modules.SelectFields` | `plumbing.py` | `input: str` (required); `fields: Sequence[str]` (required); `out: str` (required) | requires `input` (`[B, F]`, must carry column names); produces `out` (`[B, len(fields)]`) declaring `fields`; `bind` resolves the column index |
+| `salt.model.modules.ClassWeight` | `class_weight.py` | `n_classes: int` (required); `stream='jets'`; `label='flavour_label'`; `out='flavour_class_weight'`; `p_floor=1e-4`; `w_max=50.0` | TRAINING-only: requires `labels.<stream>.<label>`; produces `labels.<stream>.<out>` = `1/(K q̂_f)` clipped to `w_max` (jet-mean 1 identically), with `q̂` the running class fraction of the stage-1 FIT batches (rank-reduced every batch, the same counts as `KinematicWeight.q_f`) frozen in `freeze_accumulators`; label-only, so it precedes the prior head in the plan and feeds its `sample_weight`; pair with `KinematicWeight(balanced_prior=True)` |
+| `salt.model.modules.KinematicWeight` | `kinematic_weight.py` | `task_name='kinematic_prior'`; `mode: nn\|binned` (required); `stream='jets'`; `label='flavour_label'`; `weight_field=None` (-> `<mode>_kinematic_weight`); `q_f` XOR `n_classes` (`binned` and the `harmonic*` targets need the accumulate form); `variables` (`{name: {edges, scale, abs} \| {categories}}`, in both modes: `nn` publishes them only, `binned` requires them as its axes); `onehot='container_onehot'` (the `inputs.<onehot>` key whose `fields` are `<variable>_<category>`; categorical codes are decoded by argmax over that block in spec order, validated at `bind`); `balanced_prior=False` (`nn` only; the prior was trained class-balanced, so `P(f\|x) = q_f P_bal/sum_g q_g P_bal` is recovered before the `p_floor` clamp); `target='inclusive'` (`inclusive \| mean \| harmonic \| harmonic_equal`, all `w_f = t/p_f` from the full posterior with `pi = q_f`: `pi_f/P(f\|x)`, `pi_f/(K P(f\|x)) sum_g P(g\|x)/pi_g`, `pi_f/(Z P(f\|x) sum_g alpha_g pi_g/P(g\|x))` with `alpha = pi` resp. `1` and `Z` frozen at the stage boundary); `p_floor=1e-4`; `w_max=50.0`; `min_cell_count=100` (sparse-cell warning at freeze); `eta=1.0` (shrinkage exponent on the own factor, inside the `w_max` clamp); `chain`/`chain_exponents` (earlier weight fields multiplied in after the clamp, re-clamped) | TRAINING-only: requires `labels.<stream>.<label>` + (`nn`) `preds.<stream>.<task_name>` + `labels.<stream>.<v>` for every CONTINUOUS spec variable + `inputs.<onehot>` when a categorical variable exists; produces `labels.<stream>.<weight_field>` detached float32, clipped to `w_max`, and the published keys `labels.<stream>.<weight_field>_<var>` (float32 after `scale`/`abs`; int64 codes) consumed by `salt.callbacks.KinematicReweightPlotter`, which demands only the label + the published keys and writes, per figure and class, unit-sum before/after, the ratios to the class mean, the per-bin mean weight `⟨w⟩` (`mean_w`, `bin_sum_w`, drawn in its own panel under the main histogram), and the selected `n`, `sum_w`, `sum_w2` and per-bin `bin_n` counts, plus the per-bin `bin_sum_w2` (Σw²) and the ±1σ own-class statistical errors `before_err` / `after_err` (and `ratio_before_err` / `ratio_after_err` on continuous figures) drawn as shaded step bands (error bars on categorical bars) and stated per plot in `error_note`: `±1σ statistical, own-class only: before sqrt(bin_n)/n_in_range; after sqrt(bin_sum_w2)/sum_w_in_range; ratio = err/mean over classes (denominator and normalisation not propagated); empty bins carry 0`; `binned` accumulates per-cell class counts (N-dim `bucketize`/code -> flat cell, `scatter_add`) over stage-1 FIT batches and freezes them, with `q_f` and `Z`, in `freeze_accumulators`, called by the training schedule at every stage boundary |
+| `salt.model.modules.IterativeReweighting` | `iterative_reweighting.py` | `n_iterations: int` (required); `prior: dict`, `weight: dict` (raw `ClassificationTaskModule` / `KinematicWeight` init_args); `eta=1.0`; `avg_last=1`; `prior_name='kinematic_prior'`; `weight_name='kinematic_weight'` | a `ModuleGroup`, not a graph node: `SaltModule` expands it into N (prior, weight) pairs — the last keeps the configured names and field `nn_kinematic_weight`, earlier ones are `<prior_name>_k` / `<weight_name>_k` / `<field>_iter_k`; head k trains on the detached cumulative weight of heads < k; the last weight is the geometric mean of the last `avg_last` cumulative weights; N=1 is exactly the plain `kinematic_prior` + `kinematic_weight` pair; targets `inclusive`/`mean` for N>1 |
 | `salt.model.modules.LossGLS` | `losses.py:139`, `__init__` `:157` | same signature as `LossSum` | subclasses `LossSum`, sharing `declare_io` and the `losses.**` wildcard; rejects any per-loss `weights` entry other than `1.0`, since the geometric mean is only meaningful when no task is pre-scaled |
 | `salt.model.modules.EdgeFeatures` | `edge_embed.py:146`, `__init__` `:162-183` | `stream: str` (required); `features: Sequence[str]` (required); `out: str \| None = None`; `input: str \| None = None` | requires `input` (default `inputs.<stream>`) and `masks.<stream>`; produces `out` (default `edges.<stream>`, shape `("B", T, T, E)`); `bind` yes (`:227-231`) |
 | `salt.model.modules.EdgeEmbed` | `edge_embed.py:242`, `__init__` `:257-264` | `stream: str` (required); `out_dim: int` (required); `dense: dict \| None = None`; `input: str \| None = None`; `out: str \| None = None` | requires `input` (default `edges.<stream>`); produces `out` (default `edges.<stream>_emb`); `bind` yes (`:311-315`) |

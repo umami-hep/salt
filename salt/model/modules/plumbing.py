@@ -1,5 +1,5 @@
 """Parameter-free tensor-plumbing GraphModules: stream concatenation/splitting of
-the shared sequence, and feature-dim vector concatenation.
+the shared sequence, feature-dim vector concatenation, and named column selection.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.model.base import SaltModelModule
+from salt.model.bind import BindError, ResolvedSchema
 from salt.model.modules.norm import _checked_streams
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.transformer_encoder import _ENC_LEN, _SEQ_LEN
@@ -172,9 +173,10 @@ class VectorConcat(SaltModelModule):
     the width every GN3 task consumes). Concat ORDER is the config list —
     for converted GN3 checkpoints, ``inputs: [pooled.global, normed.global]``
     (pooled first) matches the task's first-layer weight layout. Output
-    width ``Dsum = sum(D_i)`` is resolved at bind via `derived_widths`. ONNX
-    uses the ``export.inputs`` ``alias:`` mechanism (`OnnxAdapter`), not this
-    module; VectorConcat itself is mode-agnostic.
+    width ``Dsum = sum(D_i)`` is resolved at bind via `derived_widths`; output
+    column names propagate via `derived_fields` when every input carries them
+    (and the concatenated names are unique). ONNX uses the ``export.inputs``
+    ``alias:`` mechanism (`OnnxAdapter`), not this module; VectorConcat itself is mode-agnostic.
     """
 
     def __init__(self, inputs: Sequence[str], out: str = "pooled.global") -> None:
@@ -224,7 +226,110 @@ class VectorConcat(SaltModelModule):
             return {self.out_key: sum(widths[key] for key in self.inputs)}
         return {}
 
+    def derived_fields(self, fields: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+        """Contribute the inputs' column names in concat order when all inputs carry unique ones."""
+        if not all(key in fields for key in self.inputs):
+            return {}
+        names = tuple(name for key in self.inputs for name in fields[key])
+        if len(set(names)) != len(names):
+            return {}
+        return {self.out_key: names}
+
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Concatenate the inputs along the feature dim, in the configured order."""
         del mode
         return {self.out_key: torch.cat([b.get(key) for key in self.inputs], dim=-1)}
+
+
+class SelectFields(SaltModelModule):
+    """Select named last-dim columns of one field-carrying ``[B, F]`` key.
+
+    Columns are picked by NAME from the input's resolved field list, in the
+    configured order, e.g. ``input: normed.jets, fields: [pt, eta],
+    out: prior_kin.jets``. The input must carry column names (a Features
+    ``inputs.<stream>`` key or a normaliser's ``normed.<stream>`` output); the
+    output declares the selected names as its own fields. Parameter-free: the
+    column index is a non-persistent buffer (no state_dict entries).
+    """
+
+    _index: Tensor
+
+    def __init__(self, input: str, fields: Sequence[str], out: str) -> None:  # noqa: A002
+        """Capture the source key, the ordered column names and the output key.
+
+        Parameters
+        ----------
+        input : str
+            Dotted bundle key of the field-carrying ``[B, F]`` source.
+        fields : Sequence[str]
+            Column names to select, in output order. Non-empty, no duplicates.
+        out : str
+            The produced ``[B, len(fields)]`` key; must differ from `input`.
+
+        Raises
+        ------
+        ConfigError
+            If `fields` is empty, a bare string, or contains duplicates, or if
+            `out` equals `input`.
+        """
+        super().__init__()
+        if isinstance(fields, str):
+            raise ConfigError(
+                f"SelectFields: fields must be a list of column names, not a bare string {fields!r}"
+            )
+        if not fields:
+            raise ConfigError("SelectFields: fields must be a non-empty sequence")
+        if len(set(fields)) != len(tuple(fields)):
+            raise ConfigError(f"SelectFields: duplicate fields in {tuple(fields)}")
+        if out == input:
+            raise ConfigError(
+                f"SelectFields: out {out!r} equals input — a module cannot consume its own "
+                "output (write-once)"
+            )
+        self.input = input
+        self.fields = tuple(fields)
+        self.out_key = out
+
+    def declare_io(self, mode: Mode) -> IO:
+        """Declare the ``[B, F]`` input -> the ``[B, len(fields)]`` output carrying `fields`."""
+        del mode
+        return IO(
+            requires=unflatten_spec({
+                self.input: TensorSpec(shape=("B", sym_dim("F", self.name)), dtype="float32"),
+            }),
+            produces=unflatten_spec({
+                self.out_key: TensorSpec(
+                    shape=("B", len(self.fields)), dtype="float32", fields=self.fields
+                ),
+            }),
+        )
+
+    def bind(self, schema: ResolvedSchema) -> None:
+        """Resolve the configured names to column indices of the input's declared fields."""
+        try:
+            available = schema.fields_of(self.input)
+        except BindError as err:
+            raise ConfigError(
+                f"SelectFields {self.name!r}: input {self.input!r} carries no column names, so "
+                f"fields {list(self.fields)} cannot be selected by name — select from a "
+                "field-carrying key (a Features 'inputs.<stream>' key or a normaliser "
+                "'normed.<stream>' output)"
+            ) from err
+        width = schema.width(self.input)
+        if len(available) != width:
+            raise ConfigError(
+                f"SelectFields {self.name!r}: input {self.input!r} has width {width} but "
+                f"{len(available)} declared fields {list(available)}"
+            )
+        if missing := [name for name in self.fields if name not in available]:
+            raise ConfigError(
+                f"SelectFields {self.name!r}: fields {missing} are not columns of "
+                f"{self.input!r}; available: {list(available)}"
+            )
+        index = torch.tensor([available.index(name) for name in self.fields], dtype=torch.int64)
+        self.register_buffer("_index", index, persistent=False)
+
+    def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
+        """Gather the selected columns along the last dim."""
+        del mode
+        return {self.out_key: b.get(self.input).index_select(-1, self._index)}

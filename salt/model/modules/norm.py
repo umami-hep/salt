@@ -160,6 +160,12 @@ class Normaliser(SaltModelModule):
             produces=unflatten_spec(_norm_specs("normed", *args)),
         )
 
+    def derived_fields(self, fields: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+        """Propagate ``inputs.<stream>`` column names to ``normed.<stream>`` (column-preserving)."""
+        return {
+            f"normed.{s}": fields[f"inputs.{s}"] for s in self.streams if f"inputs.{s}" in fields
+        }
+
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate normalisation buffers (means/stds per stream); raises if bound twice."""
         if self._bound:
@@ -340,6 +346,12 @@ class MaskedInputNormaliser(SaltModelModule):
             requires=unflatten_spec(requires),
             produces=unflatten_spec(_norm_specs("normed", *args)),
         )
+
+    def derived_fields(self, fields: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+        """Propagate ``inputs.<stream>`` column names to ``normed.<stream>`` (column-preserving)."""
+        return {
+            f"normed.{s}": fields[f"inputs.{s}"] for s in self.streams if f"inputs.{s}" in fields
+        }
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate the running-stat buffers (identity init); raises if bound twice."""

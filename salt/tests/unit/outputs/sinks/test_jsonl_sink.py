@@ -51,7 +51,7 @@ def _bound_run_task(tmp_path: Path, tasks: list[str]) -> RunTaskOutput:
 
 def _section(tmp_path: Path, tasks: list[str] | None = None) -> dict:
     """A minimal outputs: section (one RunTaskOutput + one InputCopyWriter)."""  # noqa: DOC201 - test helper
-    icw = InputCopyWriter(streams=["jets"])
+    icw = InputCopyWriter(variables={"jets": ["pt"]})
     icw.name = "inputs_copy"
     return {
         "inputs_copy": icw,
@@ -71,16 +71,21 @@ def _ctx(tmp_path: Path, src: str = "pp_output_test_ttbar.h5") -> SinkContext:
 
 
 def _bundle(probs: torch.Tensor, start: int = 0) -> Bundle:
-    """A bundle carrying every leaf the section mints for jets_classification.
+    """A bundle carrying every leaf the section mints for jets_classification
+    PLUS the ``inputs_copy`` writer's ``outputs.jets.pt`` leaf.
 
     That is one leaf per class PLUS the ``target_{task}`` label leaf (tasks
-    ship ``write_targets: true`` by default), and the ``meta.rows`` anchor.
+    ship ``write_targets: true`` by default), the bundle-sourced ``pt`` copy
+    column, and the ``meta.rows`` anchor.
     """  # noqa: DOC201 - test helper
+    b = probs.shape[0]
     leaves = {f"p{name}": probs[:, idx] for idx, name in enumerate(("b", "c", "u"))}
-    leaves[_TARGET] = torch.zeros(probs.shape[0], dtype=torch.int64)
+    leaves[_TARGET] = torch.zeros(b, dtype=torch.int64)
     return Bundle({
-        "outputs": {"jets": {"jets_classification": leaves}},
-        "meta": {"rows": torch.tensor([start, start + probs.shape[0]])},
+        "outputs": {
+            "jets": {"jets_classification": leaves, "pt": torch.arange(start, start + b).float()}
+        },
+        "meta": {"rows": torch.tensor([start, start + b])},
     })
 
 
@@ -143,6 +148,8 @@ class TestJSONLSectionSchema:
         ]
         assert jsonl_names == h5_names
         assert f"{_RUN_NAME}_pb" in jsonl_names
+        # the inputs_copy writer is declared FIRST in the section, bare-named
+        assert jsonl_names[0] == "pt"
 
     def test_unbound_section_is_a_config_error(self):
         """A sink with no section bound cannot know its columns."""
@@ -213,6 +220,7 @@ class TestJSONLRoundTrip:
         records = _read(sink.output_path)
         assert len(records) == 2
         assert set(records[0]) == {
+            "pt",  # bundle-sourced input copy, bare-named
             f"{_RUN_NAME}_pb",
             f"{_RUN_NAME}_pc",
             f"{_RUN_NAME}_pu",

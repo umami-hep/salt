@@ -1,6 +1,6 @@
 """``salt`` entry point — the jsonargparse YAML CLI for salt v2.
 
-``salt fit``/``test`` go through `SaltCLI` (`LightningCLI` over `SaltModule`
+``salt fit``/``validate``/``test`` go through `SaltCLI` (`LightningCLI` over `SaltModule`
 + `SaltDataModule`); ``salt graph``/``schema``/``export``/``inference``/
 ``merge-config``/``profile``/muP tooling dispatch to their own mains.
 """
@@ -433,14 +433,59 @@ def _section_produces_onnx(section: Mapping[str, Any]) -> bool:
     """Whether any ``RunTaskOutput`` in the section opts into ``export`` (ONNX).
 
     Drives the implicit ONNX-sink wiring: only a `RunTaskOutput` mints ONNX
-    leaves (the manifest-only writers — input copies, pad masks — do not), so a
-    section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
+    leaves (`InputCopyWriter` / `PadMaskWriter` write eval-H5 columns only), so
+    a section whose RunTaskOutputs are all ``modes: [test]`` assembles no ONNX
     tuple.
     """
     from salt.graph.spec import Mode
 
     rtos = (w for w in section.values() if callable(getattr(w, "is_run_task_output", None)))
     return any(w.is_run_task_output() and w.runs_in_mode(Mode.ONNX) for w in rtos)
+
+
+def _bind_input_copy_streams(
+    writers: Mapping[str, Any] | None, data_modules: Mapping[str, Any], reader: Any = None
+) -> None:
+    """Bind each section `InputCopyWriter`'s ``streams:``-form streams to a field list.
+
+    With a `reader` advertising an h5py-openable source (``reader.h5_source``,
+    the TEST-stage reader), a stream that is a structured dataset there copies
+    EVERY source field in file order — the eval-H5 copy contract. Otherwise
+    (no reader, a ROOT/multi-sample reader, an unreadable source, or a stream
+    absent from it) the stream falls back to the data pipeline's
+    ``inputs.<stream>`` field list (``declare_io(Mode.TEST)`` produces with
+    non-empty ``fields``). `Labels` is skipped: it produces only ``labels.**``
+    and its streams bind at dataset compile.
+    """
+    import h5py
+
+    from salt.data.processors.labels import Labels
+    from salt.graph.spec import KEY_SEP, Mode, flatten_spec
+    from salt.outputs.input_copy_writer import InputCopyWriter
+
+    copiers = [w for w in (writers or {}).values() if isinstance(w, InputCopyWriter)]
+    if not copiers:
+        return
+    stream_fields: dict[str, tuple[str, ...]] = {}
+    for module in data_modules.values():
+        if isinstance(module, Labels):
+            continue
+        for key, spec in flatten_spec(module.declare_io(Mode.TEST).produces).items():
+            parts = key.split(KEY_SEP)
+            if len(parts) == 2 and parts[0] == "inputs" and spec.fields:
+                stream_fields.setdefault(parts[1], tuple(spec.fields))
+    # best-effort source probe (h5_source may prepare/resolve a VDS): any failure
+    # keeps the Features fallback, so a fit with an odd test source never crashes
+    with contextlib.suppress(OSError, KeyError, ValueError, GraphError):
+        if reader is not None and (source := reader.h5_source) is not None:
+            groups = getattr(reader, "groups", None) or {}
+            with h5py.File(source, "r") as f:
+                for stream in {s for w in copiers for s in w.streams}:
+                    ds = f.get(getattr(groups.get(stream), "dataset", None) or stream)
+                    if isinstance(ds, h5py.Dataset) and ds.dtype.names:
+                        stream_fields[stream] = tuple(ds.dtype.names)
+    for writer in copiers:
+        writer.bind_stream_variables(stream_fields)
 
 
 def _iter_model_blocks(cfg: Any) -> list[tuple[Any, Any]]:
@@ -504,10 +549,12 @@ class SaltCLI(LightningCLI):
     def subcommands() -> dict[str, set[str]]:
         """The trainer entry points exposed.
 
-        ``fit`` and ``test`` only — `SaltModule.setup` rejects ``validate``/``predict``.
+        ``fit``, ``validate`` (one checkpoint-restored pass over the VAL split) and
+        ``test`` — `SaltModule.setup` rejects ``predict``.
         """
         return {
             "fit": {"model", "train_dataloaders", "val_dataloaders", "datamodule"},
+            "validate": {"model", "dataloaders", "datamodule"},
             "test": {"model", "dataloaders", "datamodule"},
         }
 
@@ -551,8 +598,8 @@ class SaltCLI(LightningCLI):
         parser.add_argument(
             "--compile",
             action="store_true",
-            help="torch.compile the model to speed up training (fit only). v2 has no single "
-            "inner nn.Module, so each graph module is compiled individually at the end of "
+            help="torch.compile the model to speed up training (fit and validate). v2 has no "
+            "single inner nn.Module, so each graph module is compiled individually at the end of "
             "SaltModule.setup; the resulting net.<module>._orig_mod.* checkpoint keys are "
             "stripped on load. NOT compatible with attn_type: flash-varlen without the "
             "unpad/repad handling — see docs/training.md.",
@@ -649,6 +696,17 @@ class SaltCLI(LightningCLI):
             kwargs["ckpt_path"] = self._resume_ckpt_path
         self.trainer.fit(model, **kwargs)
 
+    def validate(self, model: Any, **kwargs: Any) -> None:
+        """Run ``trainer.validate`` from the required ``--ckpt_path``, honouring ``--compile``."""
+        if not kwargs.get("ckpt_path"):
+            raise ConfigError(
+                "salt validate needs --ckpt_path: validating fresh weights is meaningless"
+            )
+        config = self.config[self.subcommand] if self.subcommand else self.config
+        if config.get("compile") and hasattr(model, "enable_compile"):
+            model.enable_compile()
+        self.trainer.validate(model, **kwargs)
+
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
         """Assemble ``callbacks:`` dict values (YAML order, ``None`` filtered)
         ahead of the stock ``trainer.callbacks`` list. Drops the default
@@ -685,7 +743,12 @@ class SaltCLI(LightningCLI):
             return assembled
         schedule = self.model.training_controller.schedule
         result = list(assembled)
-        needs_driver = schedule.is_multi_stage or schedule.has_freezing or schedule.has_early_stop
+        needs_driver = (
+            schedule.is_multi_stage
+            or schedule.has_freezing
+            or schedule.has_early_stop
+            or schedule.has_skip_losses
+        )
         for driver, needed in (
             (TrainingScheduleCallback, needs_driver),
             (StageScopedCallbacks, schedule.has_stage_callbacks),
@@ -717,6 +780,21 @@ class SaltCLI(LightningCLI):
             # skips kinds already present, preventing double-wiring.
             composer(live_section)
             writers = getattr(model, "_output_section", live_section)
+            # resolve `streams:` input copies (TEST reader's source-H5 fields, else the
+            # pipeline's inputs.<stream> fields) BEFORE bind_manifests reads
+            # manifest_fields; fit/validate write no eval H5, so skip the source probe.
+            datamodule = getattr(self, "datamodule", None)
+            batch_modules = getattr(datamodule, "batch_modules", None)
+            if batch_modules is not None:
+                test_reader = None
+                stage_reader = getattr(datamodule, "_stage_reader", None)
+                subcommand = getattr(self.config, "subcommand", None)
+                if callable(stage_reader) and subcommand not in {"fit", "validate"}:
+                    from salt.graph.spec import Mode
+
+                    with contextlib.suppress(NotImplementedError, GraphError):
+                        test_reader = stage_reader(Mode.TEST)[0]
+                _bind_input_copy_streams(writers, batch_modules, test_reader)
             self._register_section_sinks(model)
             self._inject_command_sinks(writers)
             self._validate_wired_sinks(model)
@@ -799,6 +877,7 @@ class SaltCLI(LightningCLI):
           sink (any RunTaskOutput running in ``export``), so the static tooling
           and the exporter see the same implicit sinks a real run would.
         - ``salt fit`` (subcommand ``fit``): no output sinks.
+        - ``salt validate`` (subcommand ``validate``): no output sinks, as fit.
 
         A sink already registered — declared in the ``outputs:`` section or
         built programmatically — is left alone; never double-wired.
@@ -813,7 +892,7 @@ class SaltCLI(LightningCLI):
 
         subcommand = getattr(self.config, "subcommand", None)
         trainer = getattr(self, "trainer", None)
-        if subcommand == "fit" or trainer is None:
+        if subcommand in {"fit", "validate"} or trainer is None:
             return
         registered = iter_sinks(trainer)
 
@@ -838,13 +917,17 @@ class SaltCLI(LightningCLI):
         run dirs (stashing a found checkpoint on `self._resume_ckpt_path` —
         see `fit`), then wires a configured experiment logger (name, offline
         mode, log dir); the logger wiring is a no-op unless the user opts
-        into a logger. On ``test``: disables the config dump + logger, globs
+        into a logger. On ``validate``: requires ``--ckpt_path``, rejects
+        ``--init_from``, keeps ``trainer.default_root_dir`` verbatim
+        (``--auto_resume``/``--log_suffix`` are fit-only and ignored) and wires
+        the experiment logger as on fit. On ``test``: disables the config dump + logger, globs
         the best checkpoint when ``--ckpt_path`` is unset, forces
         single-device eval, and refuses a sink-less config (TEST predictions
         would never be persisted). Raises `ConfigError` on ``--init_from``
         combined with ``--ckpt_path`` or a resolved auto-resume checkpoint,
         a sink-less test config, an ambiguous config list without
-        ``--ckpt_path``, or an explicit multi-device list.
+        ``--ckpt_path``, an explicit multi-device list, or a ``validate``
+        without ``--ckpt_path``/with ``--init_from``.
         """
         subcommand = getattr(self.config, "subcommand", None)
         if subcommand == "fit":
@@ -891,6 +974,21 @@ class SaltCLI(LightningCLI):
             # root intact to see the sibling run dirs.
             fit_cfg.trainer.default_root_dir = str(run_dir_path(base, name, suffix))
             self._wire_experiment_logger(fit_cfg)
+            return
+        if subcommand == "validate":
+            cfg = self.config["validate"]
+            if cfg.get(_INIT_FROM_ARG):
+                raise ConfigError(
+                    "--init_from is fit-only: salt validate restores a checkpoint with "
+                    "--ckpt_path (weights, buffers and fit progress)"
+                )
+            if not cfg.get("ckpt_path"):
+                raise ConfigError(
+                    "salt validate needs --ckpt_path: validating fresh weights is meaningless"
+                )
+            # default_root_dir is used VERBATIM: no timestamp / --log_suffix rewrite, no
+            # auto-resume; config.yaml lands there (SaveConfigCallback has no stage filter).
+            self._wire_experiment_logger(cfg)
             return
         if subcommand != "test":
             return
@@ -977,6 +1075,16 @@ class SaltCLI(LightningCLI):
         where = f"checkpoints in {ckpt_dir}" if ckpt_dir else "no checkpoint callback configured"
         console(f"salt fit artifacts: {where}")
 
+    def after_validate(self) -> None:
+        """Announce the run dir and each plotter-style callback's ``output_dir``
+        (duck-typed: a ``figure_name`` plus a non-None ``output_dir``).
+        """
+        console(f"salt validate run dir: {self.trainer.default_root_dir}")
+        for cb in self.trainer.callbacks:
+            out = getattr(cb, "output_dir", None)
+            if hasattr(cb, "figure_name") and out is not None:
+                console(f"salt validate artifacts: {type(cb).__name__} -> {out}")
+
 
 def main(args: Sequence[str] | None = None) -> int:
     """``salt`` console entry point.
@@ -987,7 +1095,7 @@ def main(args: Sequence[str] | None = None) -> int:
     runner, ``salt merge-config`` to the config-merge + per-stage
     freeze-graph tooling (`salt.merge_config.main`), and ``salt profile
     dataset``/``model`` to the profiling harnesses (`salt.utils.profiling.main`);
-    everything else goes to `SaltCLI` (``salt fit``/``test``).
+    everything else goes to `SaltCLI` (``salt fit``/``validate``/``test``).
     Graph errors (`GraphError`) print as a clean one-block form on stderr
     instead of a Python traceback. `SystemExit` is re-raised from the parser.
     """

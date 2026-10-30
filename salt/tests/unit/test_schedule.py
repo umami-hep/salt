@@ -6,10 +6,18 @@ Covers unknown-name validation (an unknown module name in a freeze spec → `Con
 and stage ordering. All CPU-safe — no DataLoader is built.
 """
 
+# Guarantee -> test: num_samples XOR frac_samples, never with epochs, never final, 0 < f < 1
+#   -> TestSampleStageParse; the two N formulas -> TestSampleStageToSteps; a sample stage is
+#   0 epochs and takes N off the top -> TestEpochAllocation/TestStepAllocation; stop_after
+#   (declared, non-final, string) -> TestStopAfter.
+
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
+from salt.callbacks.schedule import TrainingScheduleCallback
 from salt.graph.errors import ConfigError
 from salt.model.saltmodule import SaltModule
 from salt.schedule import (
@@ -110,10 +118,11 @@ class TestValidation:
             )
 
     def test_unknown_stage_key(self):
-        with pytest.raises(ConfigError, match="unknown key"):
+        with pytest.raises(ConfigError, match="unknown key") as excinfo:
             TrainingSchedule.from_config(
                 {"stages": {"fit": {"frozn": ["norm"]}}}, MODULE_NAMES
             )
+        assert "num_samples" in str(excinfo.value) and "frac_samples" in str(excinfo.value)
 
     def test_frozen_must_be_list(self):
         with pytest.raises(ConfigError, match="must be a list of module names"):
@@ -138,6 +147,51 @@ class TestValidation:
             TrainingSchedule.from_config(
                 {"stages": {"fit": {"epochs": 0}}}, MODULE_NAMES
             )
+
+
+TWO = {"a": {"epochs": 1}, "b": {}}
+
+
+def _two(first, last=None):
+    return TrainingSchedule.from_config({"stages": {"a": first, "b": last or {}}}, MODULE_NAMES)
+
+
+class TestStopAfter:
+    """`training_schedule.stop_after`: ends the fit at a named stage's boundary."""
+
+    def test_absent_by_default(self):
+        sched = TrainingSchedule.from_config({"stages": TWO}, MODULE_NAMES)
+        assert sched.stop_after is None
+        assert sched.stop_after_index is None
+
+    def test_set_to_first_of_two_stages(self):
+        sched = TrainingSchedule.from_config({"stages": TWO, "stop_after": "a"}, MODULE_NAMES)
+        assert sched.stop_after == "a"
+        assert sched.stop_after_index == 0
+
+    def test_explicit_order_reordering_follows_execution_order(self):
+        stages = {"a": {"order": 2, "epochs": 1}, "b": {"order": 1, "epochs": 1}, "c": {}}
+        sched = TrainingSchedule.from_config({"stages": stages, "stop_after": "a"}, MODULE_NAMES)
+        assert [s.name for s in sched.stages] == ["b", "a", "c"]
+        assert sched.stop_after_index == 1
+
+    @pytest.mark.parametrize(
+        ("stages", "stop_after", "match"),
+        [
+            (TWO, "ghost", "names unknown stage"),
+            (TWO, "b", "names the final stage"),
+            ({"drop_me": None, **TWO}, "drop_me", "names unknown stage"),
+            (TWO, 3, "non-empty string"),
+            (TWO, "", "non-empty string"),
+        ],
+    )
+    def test_rejected(self, stages, stop_after, match):
+        with pytest.raises(ConfigError, match=match):
+            TrainingSchedule.from_config({"stages": stages, "stop_after": stop_after}, MODULE_NAMES)
+
+    def test_unknown_top_level_key_names_both_stages_and_stop_after(self):
+        with pytest.raises(ConfigError, match="only 'stages' and 'stop_after'"):
+            TrainingSchedule.from_config({"stages": TWO, "stop_afterr": "a"}, MODULE_NAMES)
 
 
 class TestEpochAllocation:
@@ -185,6 +239,18 @@ class TestEpochAllocation:
             with pytest.raises(ConfigError, match="finite positive max_epochs"):
                 sched.validate_epochs(infinite)
 
+    def test_sample_stage_contributes_zero_epochs(self):
+        sched = _two({"num_samples": 62469554}, {"epochs": 10})
+        sched.validate_epochs(10)  # 0 (sample) + 10 (main) == 10
+        with pytest.raises(ConfigError, match="over-allocates epochs"):
+            sched.validate_epochs(9)
+
+    @pytest.mark.parametrize("budget", [{"num_samples": 5}, {"frac_samples": 0.5}])
+    def test_sample_stage_then_open_final(self, budget):
+        sched = TrainingSchedule.from_config({"stages": {"a": budget, "b": {}}}, MODULE_NAMES)
+        sched.validate_epochs(1)  # 0 (sample) + remainder(1) for b
+        assert [sched.stage_index_for_epoch(e, 10) for e in range(10)] == [1] * 10
+
 
 class TestDesugarLegacy:
     """The single-`fit`-stage schedule a plain config desugars to (plan D2)."""
@@ -223,6 +289,70 @@ class TestStepAllocation:
         assert len(allocs) == 3
         # boundaries: round(101*3/10)=30, round(101*6/10)=61 -> [30, 31, 40]
         assert allocs == [30, 31, 40]
+
+    @pytest.mark.parametrize(
+        ("stages", "total", "max_epochs", "targets", "expected"),
+        [
+            ({"j": {"num_samples": 1}, "rest": {}}, 10, 10, {0: 3}, [3, 7]),
+            # `a` starts in epoch 0 (where j fires) and ends at round(110/4)=28
+            ({"j": {"num_samples": 100}, "a": {"epochs": 1}, "c": {}}, 110, 4, {0: 10},
+             [10, 18, 82]),
+            ({"j": {"frac_samples": 0.5}, "a": {"epochs": 1}, "c": {}}, 40, 4, {0: 3},
+             [3, 7, 30]),
+            ({"j1": {"num_samples": 1}, "j2": {"num_samples": 1}, "a": {"epochs": 1}, "c": {}},
+             40, 4, {0: 3, 1: 4}, [3, 4, 3, 30]),
+        ],
+    )
+    def test_sample_stages_take_n_off_the_top(self, stages, total, max_epochs, targets, expected):
+        sched = TrainingSchedule.from_config({"stages": stages}, MODULE_NAMES)
+        allocs = sched.stage_step_allocations(total, max_epochs, step_targets=targets)
+        assert allocs == expected
+        assert sum(allocs) == total
+
+    def test_missing_sample_step_target_rejected(self):
+        sched = TrainingSchedule.from_config(
+            {"stages": {"j": {"num_samples": 100}, "a": {"epochs": 1}, "c": {}}}, MODULE_NAMES
+        )
+        for targets in (None, {}):
+            with pytest.raises(ConfigError, match="step target for every sample stage"):
+                sched.stage_step_allocations(110, 4, step_targets=targets)
+
+    def test_sample_targets_exhausting_the_run_rejected(self):
+        # a single sample stage consuming the whole 1-step run leaves the final stage 0
+        sched = TrainingSchedule.from_config(
+            {"stages": {"j": {"frac_samples": 0.1}, "rest": {}}}, MODULE_NAMES
+        )
+        with pytest.raises(ConfigError, match="leaving the final stage"):
+            sched.stage_step_allocations(1, 1, step_targets={0: 1})
+        multi = TrainingSchedule.from_config(
+            {"stages": {"j1": {"num_samples": 1}, "j2": {"num_samples": 1}, "c": {}}},
+            MODULE_NAMES,
+        )
+        # exact exhaustion and overshoot across several sample stages
+        for targets in ({0: 6, 1: 4}, {0: 7, 1: 5}):
+            with pytest.raises(ConfigError, match="leaving the final stage"):
+                multi.stage_step_allocations(10, 2, step_targets=targets)
+        assert multi.stage_step_allocations(10, 2, step_targets={0: 5, 1: 4}) == [5, 4, 1]
+
+    def test_three_chained_sample_stages(self):
+        """Sequential iterated reweighting: one `num_samples` stage per prior head."""
+        stages = {
+            "iter_1": {"num_samples": 2000, "frozen": []},
+            "iter_2": {"num_samples": 2000, "frozen": ["norm"]},
+            "iter_3": {"num_samples": 2000, "frozen": ["norm"]},
+            "main": {"frozen": ["norm"]},
+        }
+        sched = TrainingSchedule.from_config(
+            {"stages": stages, "stop_after": "iter_3"}, MODULE_NAMES
+        )
+        assert [s.name for s in sched.stages] == ["iter_1", "iter_2", "iter_3", "main"]
+        assert sched.stop_after_index == 2
+        assert sched.frozen_names(sched.stages[0]) == set()  # `frozen: []` accepted
+        targets = sched.stage_step_targets(batch_size=1000, world_size=1)
+        assert targets == {0: 2, 1: 2, 2: 2}
+        assert sched.stage_step_allocations(10, 1, step_targets=targets) == [2, 2, 2, 4]
+        with pytest.raises(ConfigError, match="leaving the final stage"):
+            sched.stage_step_allocations(6, 1, step_targets=targets)
 
 
 class TestStageIndexForEpoch:
@@ -296,6 +426,16 @@ class TestSaltModuleInstantiation:
             },
         )
         assert model.training_controller.schedule.is_multi_stage
+
+    def test_multi_stage_with_stop_after_accepted_at_init(self, norm_dict):
+        schedule = {"stages": {"warmup": {"epochs": 2, "frozen": ["encoder"]}, "full": {}}}
+        model = SaltModule(
+            build_gn2v2_modules(norm_dict), lrs=LRS,
+            training_schedule={**schedule, "stop_after": "warmup"},
+        )
+        sched = model.training_controller.schedule
+        assert (sched.stop_after, sched.stop_after_index) == ("warmup", 0)
+        assert model.training_controller.stop_after_record is None
 
     def test_schedule_names_validate_against_model_modules_only(self, norm_dict):
         # 'loss'/'concat'/'split' ARE model.modules keys and so are valid targets
@@ -489,6 +629,13 @@ class TestBoundaryRecord:
             "epoch": 5, "reason": "early_stop",
         }
 
+    @pytest.mark.parametrize("reason", ["steps", "stop_after"])
+    def test_sample_and_stop_after_reasons_round_trip(self, reason):
+        assert boundary_record("prior", 0, 20824, 0, reason) == {
+            "stage_name": "prior", "stage_index": 0, "global_step": 20824,
+            "epoch": 0, "reason": reason,
+        }
+
 
 # --- per-stage scoped callbacks (schema) ------------------------------------
 
@@ -668,3 +815,90 @@ class TestLRSchedulerParse:
              "lrs": {"initial": 1e-4, "weight_decay": 1e-5}}}}, MODULE_NAMES,
         )
         assert sched.stages[0].lr_scheduler.class_path == _COSINE
+
+
+# --- per-stage sample targets: num_samples / frac_samples (schema) ----------
+
+
+class TestSampleStageParse:
+    @pytest.mark.parametrize(("field", "value"), [("num_samples", 300), ("frac_samples", 0.1)])
+    def test_sample_target_parses(self, field, value):
+        sched = _two({field: value})
+        assert getattr(sched.stages[0], field) == value
+        assert sched.stages[0].is_sample_stage
+        assert sched.has_sample_stages
+        assert sched.sample_stage_indices() == [0]
+        assert not StageConfig(name="x").is_sample_stage
+
+    @pytest.mark.parametrize("bad", [0, -1, True, 0.5, "300"])
+    def test_invalid_num_samples_rejected(self, bad):
+        with pytest.raises(ConfigError, match="num_samples"):
+            _two({"num_samples": bad})
+
+    def test_num_samples_and_frac_samples_both_rejected(self):
+        with pytest.raises(ConfigError, match="'num_samples' and 'frac_samples'"):
+            _two({"num_samples": 5, "frac_samples": 0.1})
+
+    def test_num_samples_with_epochs_rejected(self):
+        with pytest.raises(ConfigError, match="'epochs' and 'num_samples'"):
+            _two({"epochs": 1, "num_samples": 5})
+
+    def test_frac_samples_with_epochs_rejected(self):
+        with pytest.raises(ConfigError, match="'epochs' and 'frac_samples'"):
+            _two({"epochs": 1, "frac_samples": 0.1})
+
+    @pytest.mark.parametrize("bad", [0, 1, 1.5, -0.1, True, "0.1"])
+    def test_frac_samples_out_of_range_rejected(self, bad):
+        with pytest.raises(ConfigError, match="frac_samples") as excinfo:
+            _two({"frac_samples": bad})
+        if bad is not True and bad in {1, 1.5}:
+            assert "use 'epochs' instead" in str(excinfo.value)
+
+    @pytest.mark.parametrize("budget", [{"num_samples": 5}, {"frac_samples": 0.5}])
+    def test_sample_stage_on_final_stage_rejected(self, budget):
+        with pytest.raises(ConfigError, match="names a sample target on the final stage"):
+            _two({"epochs": 1}, budget)
+
+
+class TestSampleStageToSteps:
+    def test_num_samples_converts_via_batch_world_accumulate(self):
+        sched = _two({"num_samples": 62_469_554}, {"epochs": 10})
+        # ceil(62_469_554 / (1000 * 3 * 2)) = ceil(10411.59) = 10412; index 1 absent
+        assert sched.stage_step_targets(1000, 3, accumulate_grad_batches=2) == {0: 10412}
+        assert sched.stage_step_targets(1000, 1) == {0: 62470}
+        assert TrainingSchedule.desugar_legacy(MODULE_NAMES).stage_step_targets(1000, 1) == {}
+        with pytest.raises(ConfigError, match="batch_size"):
+            sched.stage_step_targets(0, 1)
+
+    def test_frac_samples_converts_via_steps_per_epoch(self):
+        sched = _two({"frac_samples": 0.1})
+        assert sched.stage_step_targets(100, 4, 2, steps_per_epoch=37) == {0: 4}  # ceil(3.7)
+        with pytest.raises(ConfigError, match="frac_samples needs steps_per_epoch"):
+            sched.stage_step_targets(100, 1)
+        with pytest.raises(ConfigError, match="steps_per_epoch"):
+            sched.stage_step_targets(100, 1, steps_per_epoch=0)
+
+
+class TestSkipLosses:
+    def test_parses_to_tuple(self):
+        """`skip_losses` parses to a tuple, defaults to ``()`` and sets `has_skip_losses`."""
+        raw = {"stages": {"a": {"epochs": 1, "skip_losses": ["jets_classification"]}, "b": {}}}
+        sched = TrainingSchedule.from_config(raw, MODULE_NAMES)
+        assert sched.stages[0].skip_losses == ("jets_classification",)
+        assert sched.stages[1].skip_losses == ()
+        assert sched.has_skip_losses
+        assert not TrainingSchedule.desugar_legacy(MODULE_NAMES).has_skip_losses
+
+    def test_must_be_list(self):
+        """A bare string is rejected."""
+        with pytest.raises(ConfigError, match="skip_losses"):
+            raw = {"stages": {"fit": {"skip_losses": "jets_classification"}}}
+            TrainingSchedule.from_config(raw, MODULE_NAMES)
+
+    def test_ddp_setup_enables_find_unused_parameters(self):
+        """A skip-only single stage still enables DDP unused-parameter detection."""
+        sched = TrainingSchedule.from_config({"stages": {"fit": {"skip_losses": ["x"]}}}, ())
+        strategy = SimpleNamespace(_ddp_kwargs={"find_unused_parameters": False})
+        module = SimpleNamespace(training_controller=SimpleNamespace(schedule=sched))
+        TrainingScheduleCallback().setup(SimpleNamespace(strategy=strategy), module, "fit")
+        assert strategy._ddp_kwargs["find_unused_parameters"]  # noqa: SLF001

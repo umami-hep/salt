@@ -19,11 +19,11 @@ class PadMaskWriter(OutputSectionWriter):
     re-expansion (incl. the ``mask=False`` truncation quirk) stays in the dumb
     H5 sink.
 
-    Unlike `InputCopyWriter`, the pad mask IS a bundle leaf (``masks.<stream>``),
-    so this writer is a real graph node: it requires ``masks.<stream>`` and
-    produces ``outputs.<stream>.mask`` so the leaf flows through the graph to
-    the sink, which then packs it as a ``('mask', '?')`` column and pads to the
-    file length.
+    The pad mask is a bundle leaf (``masks.<stream>``) and this writer is a
+    graph node: it requires ``masks.<stream>`` and produces
+    ``outputs.<stream>.mask`` so the leaf flows through the graph to the sink,
+    which then packs it as a ``('mask', '?')`` column and pads to the file
+    length.
 
     Parameters
     ----------

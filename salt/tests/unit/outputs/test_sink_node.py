@@ -67,10 +67,9 @@ def test_h5_output_sink_is_a_sink_module():
 
 
 class _FakeH5:
-    """A stand-in for the ftag `H5Writer` recording whether its file handle closed."""
+    """A stand-in for the ftag `H5Writer` recording whether it closed."""
 
     def __init__(self) -> None:
-        self.file = self
         self.closed = False
 
     def close(self) -> None:
@@ -78,14 +77,16 @@ class _FakeH5:
 
 
 def test_close_if_open_closes_handle_without_full_count_assertion():
-    """`close_if_open` closes a leaked handle on an interrupted test and is idempotent."""
+    """`close_if_open` closes a leaked handle on an interrupted test and is idempotent.
+
+    Dynamic-mode `close()` has no completeness assertion, so a handle can be
+    released regardless of how many rows were written before the interrupt.
+    """
     sink = H5OutputSink()
     fake = _FakeH5()
-    # simulate an open writer mid-test with FEWER rows written than expected
-    # (the interrupted-batch shape `flush`'s full-count branch would assert on)
+    # simulate an open writer mid-test, interrupted after a few rows
     sink._h5 = fake  # noqa: SLF001 - white-box cleanup contract
     sink._rows_written = 3  # noqa: SLF001
-    sink._expected = 10  # noqa: SLF001
 
     sink.close_if_open()
     assert fake.closed is True

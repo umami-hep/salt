@@ -2,7 +2,7 @@
 
 Proves the seam has NO per-consumer (MaskFormer) knowledge: a synthetic
 non-MaskFormer group ("particles") declares fields sourcing arbitrary bundle
-leaves and the sink sizes/packs it correctly.
+leaves and the sink packs it correctly.
 """
 
 from __future__ import annotations
@@ -20,8 +20,6 @@ from salt.outputs.output_schema import ObjectGroup, ObjectGroupField, OutputColu
 pytestmark = pytest.mark.cpu_always
 
 _STREAMS = ("jets", "tracks")
-_SEQ_STREAMS = ("tracks",)
-_TOTAL = 123
 _P = 3   # the synthetic object axis (particles)
 _T = 40  # the tracks file token length
 
@@ -87,6 +85,7 @@ def _batch(batch_size=4, n_tracks=_T):
     b.set("labels.particles.truth", torch.randint(0, 2, (batch_size, _P), generator=gen))
     b.set("net.particle_masks", torch.randn(batch_size, _P, n_tracks, generator=gen))
     b.set("outputs.tracks.owner", torch.randint(-2, _P, (batch_size, n_tracks), generator=gen))
+    b.set("outputs.jets.cls", torch.rand(batch_size, 1, generator=gen))
     return b
 
 
@@ -142,23 +141,44 @@ class TestResolveObjectShapes:
             sink._resolve_object_shapes(_STREAMS)  # noqa: SLF001
 
 
+def _written(
+    sink: H5OutputSink, tmp_path, batch_size: int = 4
+) -> tuple[dict[str, np.dtype], dict[str, tuple]]:
+    """Merge columns, consume one batch, and read back the written dtypes/shapes."""
+    sink._merge_columns(  # noqa: SLF001
+        _STREAMS, {"jets": "jets", "tracks": "tracks"}
+    )
+    sink.output_path = tmp_path / "eval.h5"
+    sink.consume(_batch(batch_size))
+    dtypes = {g: sink._h5.file[g].dtype for g in sink._h5.file}  # noqa: SLF001
+    shapes = {g: sink._h5.file[g].shape for g in sink._h5.file}  # noqa: SLF001
+    sink.flush()
+    return dtypes, shapes
+
+
 class TestGroupShape:
-    def test_object_and_reader_shapes(self):
+    def test_object_and_reader_shapes_from_the_first_batch(self, tmp_path):
         sink = _open(_sink())
-        gs = sink._group_shape  # noqa: SLF001
-        assert gs("particles", _SEQ_STREAMS, _TOTAL) == (_TOTAL, _P)
-        assert gs("particle_masks", _SEQ_STREAMS, _TOTAL) == (_TOTAL, _P, _T)
+        sink._merge_columns(  # noqa: SLF001
+            _STREAMS, {"jets": "jets", "tracks": "tracks"}
+        )
+        sink.output_path = tmp_path / "eval.h5"
+        sink.consume(_batch())
+        f = sink._h5.file  # noqa: SLF001
+        assert f["particles"].shape == (4, _P)
+        assert f["particle_masks"].shape == (4, _P, _T)
         # reader streams keep the prior inline rule
-        assert gs("tracks", _SEQ_STREAMS, _TOTAL) == (_TOTAL, _T)
-        assert gs("jets", _SEQ_STREAMS, _TOTAL) == (_TOTAL,)
+        assert f["tracks"].shape == (4, _T)
+        assert f["jets"].shape == (4,)
+        # the row axis is unbounded on every dataset (dynamic resizable append)
+        for name in f:
+            assert f[name].maxshape[0] is None
+        sink.flush()
 
 
 class TestMergeColumns:
-    def test_object_dtypes_and_shapes_appended(self):
-        sink = _open(_sink())
-        dtypes, shapes = sink._merge_columns(  # noqa: SLF001
-            _STREAMS, _SEQ_STREAMS, {"jets": "jets", "tracks": "tracks"}, _TOTAL
-        )
+    def test_object_dtypes_and_shapes_appended(self, tmp_path):
+        dtypes, shapes = _written(_open(_sink()), tmp_path)
         # the task column still lands in its reader group
         assert "salt_pb" in dtypes["jets"].names
         # the object groups carry the field-declared columns + shapes
@@ -166,8 +186,8 @@ class TestMergeColumns:
         assert dtypes["particle_masks"].names == ("logit",)
         # the reader-stream group appends its column to tracks (after task/mask)
         assert "salt_Owner" in dtypes["tracks"].names
-        assert shapes["particles"] == (_TOTAL, _P)
-        assert shapes["particle_masks"] == (_TOTAL, _P, _T)
+        assert shapes["particles"] == (4, _P)
+        assert shapes["particle_masks"] == (4, _P, _T)
 
     def test_object_column_colliding_with_task_column_raises(self):
         # a field minting 'salt_pb' into the reader stream 'jets' collides with
@@ -177,14 +197,11 @@ class TestMergeColumns:
         sink = _open(_sink(groups))
         with pytest.raises(ConfigError, match="is declared by"):
             sink._merge_columns(  # noqa: SLF001
-                _STREAMS, _SEQ_STREAMS, {"jets": "jets", "tracks": "tracks"}, _TOTAL
+                _STREAMS, {"jets": "jets", "tracks": "tracks"}
             )
 
-    def test_half_precision_demotes_float_columns(self):
-        sink = _open(_sink(half=True))
-        dtypes, _ = sink._merge_columns(  # noqa: SLF001
-            _STREAMS, _SEQ_STREAMS, {"jets": "jets", "tracks": "tracks"}, _TOTAL
-        )
+    def test_half_precision_demotes_float_columns(self, tmp_path):
+        dtypes, _ = _written(_open(_sink(half=True)), tmp_path)
         assert dtypes["particles"]["salt_pa"] == np.dtype("f2")
         assert dtypes["particle_masks"]["logit"] == np.dtype("f2")
         # int columns are unaffected by half precision

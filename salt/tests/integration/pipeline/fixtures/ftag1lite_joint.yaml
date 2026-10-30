@@ -1,0 +1,5 @@
+config: readers/ftag1lite_joint.yaml
+fragment: >-
+  jets: both FTAG1LITEReader streaming fragment, stacked under a model config - no
+  synthetic DAOD_FTAG1LITE fixture exists to pair it into a matrix row, so it is
+  exercised only via test_reader_fragment_instantiates.

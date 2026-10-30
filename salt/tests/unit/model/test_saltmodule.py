@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,10 +17,12 @@ from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode
-from salt.model.base import SaltModelModule
+from salt.model.base import ModuleGroup, SaltModelModule
+from salt.model.modules import KinematicWeight
 from salt.model.modules.losses import LossGLS, LossSum
+from salt.model.modules.tasks import ClassificationTaskModule
 from salt.outputs import RunTaskOutput
-from salt.model.saltmodule import CKPT_KEY, SaltModule
+from salt.model.saltmodule import CKPT_KEY, SaltModule, _expand_module_groups, _upstream
 from salt.model.sink_prep import boundary_demand, callback_demand, select_fitval_callbacks
 from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import (
@@ -161,9 +165,19 @@ class TestConstruction:
         with pytest.raises(ConfigError, match="SaltDataModule"):
             build_model(data).setup("fit")
 
-    def test_unsupported_stage_rejected(self, data):
-        with pytest.raises(ConfigError, match="validate"):
-            build_model(data).setup("validate")
+    def test_validate_stage_accepted_predict_rejected(self, data):
+        """``setup("predict")`` raises; ``setup("validate")`` compiles VAL only."""
+        with pytest.raises(ConfigError, match="predict"):
+            build_model(data).setup("predict")
+        model, dm = build_model(data), build_datamodule(data)
+        dm.set_sinks(model.sink_demand())
+        dm.setup("validate")
+        assert dm.val_dset is not None
+        assert getattr(dm, "train_dset", None) is None
+        model._trainer = SimpleNamespace(callbacks=[], datamodule=dm)  # noqa: SLF001
+        model.setup("validate")
+        assert set(model.plans) == {Mode.VAL}
+        assert model.bound
 
     def test_forward_without_plan_rejected(self, data):
         with pytest.raises(ConfigError, match="no compiled plan"):
@@ -458,6 +472,42 @@ class TestCheckpoint:
         finally:
             model.loaded_from_checkpoint = before  # restore fixture state
             model._ckpt_plan_hashes = {}  # noqa: SLF001
+
+
+class _EpochStepRecorder(Callback):
+    """Record ``(current_epoch, global_step)`` at validation start."""
+
+    def __init__(self) -> None:
+        self.seen: tuple[int, int] | None = None
+
+    def on_validation_start(self, trainer, _module) -> None:
+        self.seen = (trainer.current_epoch, trainer.global_step)
+
+
+class TestValidateFromCheckpoint:
+    """``trainer.validate(ckpt_path=...)`` restores the checkpoint's fit progress."""
+
+    def test_validate_restores_checkpoint_epoch_and_global_step(self, data, fitted, tmp_path):
+        """Validation sees the checkpoint's epoch/global_step; no checkpoint is written."""
+        rec = _EpochStepRecorder()
+        meta = torch.load(str(fitted["ckpt"]), weights_only=False)
+        model = build_model(data)
+        trainer = make_trainer(callbacks=[rec], default_root_dir=str(tmp_path))
+        trainer.validate(model, build_datamodule(data), ckpt_path=str(fitted["ckpt"]))
+        assert meta["global_step"] > 0
+        assert rec.seen == (meta["epoch"], meta["global_step"])
+        assert set(model.plans) == {Mode.VAL}
+        assert model.loaded_from_checkpoint
+        assert not list(tmp_path.rglob("*.ckpt"))
+
+    def test_validate_rejects_checkpoint_without_fit_loop_progress(self, data, fitted, tmp_path):
+        """A checkpoint without ``loops`` is a `ConfigError`, never silent zero progress."""
+        ckpt = torch.load(str(fitted["ckpt"]), weights_only=False)
+        del ckpt["loops"]
+        path = tmp_path / "noloops.ckpt"
+        torch.save(ckpt, path)
+        with pytest.raises(ConfigError, match="fit_loop"):
+            make_trainer().validate(build_model(data), build_datamodule(data), ckpt_path=str(path))
 
 
 class TestNormGarbageGuard:
@@ -824,4 +874,164 @@ class TestOriginWeightingResolvedAtSetup:
         modules["loss"] = LossSum()
         model = SaltModule(modules, lrs=LRS)
         with pytest.raises(ConfigError, match="no string-list attr"):
+            make_trainer().fit(model, build_datamodule(data))
+
+
+class _Pair(ModuleGroup):
+    def __init__(self, members: dict) -> None:
+        super().__init__()
+        self.members = members
+
+    def expand(self):
+        return dict(self.members)
+
+
+class TestModuleGroups:
+    def test_group_expands_in_place_and_frozen_names_resolve(self, data):
+        modules = build_gn2v2_modules(data["nd"]) | {"loss": LossSum()}
+        keys, items = list(modules), list(modules.items())  # [6:8]: the two class heads
+        g = dict(items[:6] + [("heads", _Pair(dict(items[6:8])))] + items[8:])
+        model = SaltModule(g, lrs=LRS, training_schedule={"stages": {"fit": {"frozen": [keys[6]]}}})
+        assert list(model.net) == keys and "heads" not in model.net  # members replace it in place
+        assert model.net["jets_classification"].name == "jets_classification"
+
+    def test_duplicate_and_nested_group_rejected(self):
+        with pytest.raises(ConfigError, match="already defines"):  # group output vs LATER entry
+            _expand_module_groups({"g": _Pair({"norm": _AuxProbe()}), "norm": _AuxProbe()})
+        with pytest.raises(ConfigError, match="already defines"):  # group output vs earlier entry
+            _expand_module_groups({"norm": _AuxProbe(), "g": _Pair({"norm": _AuxProbe()})})
+        with pytest.raises(ConfigError, match="cannot nest"):
+            _expand_module_groups({"g": _Pair({"inner": _Pair({})})})
+
+    def test_group_never_joins_the_plan(self):
+        with pytest.raises(ConfigError, match="module group"):
+            _Pair({}).declare_io(Mode.FIT)
+        with pytest.raises(NotImplementedError):
+            ModuleGroup().expand()
+
+
+class TestStagePlanPruning:
+    def test_stage_executors_swap_advance_and_resume(self, data, caplog):
+        """Stage 0 runs the pruned plans; advance installs the full ones; resume reinstalls."""
+        modules = build_gn2v2_modules(data["nd"]) | {"loss": LossSum()}
+        keys = list(modules)
+        sched = {"stages": {"a": {"epochs": 2, "skip_losses": [keys[7]]}, "b": {}}}
+        model = SaltModule(modules, lrs=LRS, training_schedule=sched)
+        trainer = make_trainer(max_epochs=3, callbacks=[StopAfterFirstEpoch()])
+        with caplog.at_level(logging.INFO, logger="salt"):
+            trainer.fit(model, build_datamodule(data))
+        assert "stage 'a' (0): skipping [track_origin]" in caplog.text
+        assert "stage 'a' losses.jets_classification: 0/" in caplog.text
+        assert "params frozen (0%)" in caplog.text
+        assert "stage 'a' losses.track_origin:" not in caplog.text  # skipped: no diagnostics
+        stage_plans, loss = model._stage_plans, model.net["loss"]  # noqa: SLF001
+        full, pruned = model.plans[Mode.FIT], stage_plans[0][Mode.FIT]
+        active = tuple(k for k in loss._loss_keys if k != f"losses.{keys[7]}")  # noqa: SLF001
+        assert model._executors[Mode.FIT].plan is pruned  # noqa: SLF001
+        assert keys[7] not in pruned.module_names and keys[7] in full.module_names
+        assert stage_plans[1][Mode.FIT] is full and loss._active == active  # noqa: SLF001
+        ckpt = data["dir"] / "stage_a.ckpt"
+        trainer.save_checkpoint(ckpt)
+        model.training_controller.advance_to_stage(1, trainer.global_step, 1, "epochs")
+        assert model._executors[Mode.FIT].plan is full and loss._active is None  # noqa: SLF001
+        model.setup("fit")  # a repeated setup recompiles the full plans, then re-enters stage 0
+        assert model.plans[Mode.FIT].plan_hash == full.plan_hash
+        assert model._executors[Mode.VAL].plan is model._stage_plans[0][Mode.VAL]  # noqa: SLF001
+        fresh_modules = build_gn2v2_modules(data["nd"]) | {"loss": LossSum()}
+        fresh = SaltModule(fresh_modules, lrs=LRS, training_schedule=sched)
+        resumed = make_trainer(max_epochs=3, callbacks=[StopAfterFirstEpoch()])
+        resumed.fit(fresh, build_datamodule(data), ckpt_path=ckpt)
+        executors, plans = fresh._executors, fresh._stage_plans[0]  # noqa: SLF001
+        assert all(executors[mode].plan is plans[mode] for mode in (Mode.FIT, Mode.VAL))
+        assert keys[7] not in executors[Mode.FIT].plan.module_names
+        assert fresh.net["loss"]._active == active  # noqa: SLF001
+
+    @staticmethod
+    def _spy_optimizer(monkeypatch) -> list[int]:
+        calls: list[int] = []
+        monkeypatch.setattr(
+            SaltModule, "configure_optimizers", lambda _s: calls.append(1) or pytest.fail("built")
+        )
+        return calls
+
+    def test_fully_frozen_active_loss_errors_at_setup(self, data, monkeypatch):
+        """An active loss with every upstream parameter frozen fails before any optimizer."""
+        keys, calls = list(build_gn2v2_modules(data["nd"])), self._spy_optimizer(monkeypatch)
+        stage = {"trainable": [keys[6]]}
+        model = SaltModule(
+            build_gn2v2_modules(data["nd"]) | {"loss": LossSum()},
+            lrs=LRS,
+            training_schedule={"stages": {"fit": stage}},
+        )
+        with pytest.raises(ConfigError, match="skip_losses") as info:
+            make_trainer().fit(model, build_datamodule(data))
+        msg = str(info.value)
+        assert "stage 'fit'" in msg and any(f"losses.{k}'" in msg for k in keys[7:9])
+        assert not calls
+        monkeypatch.undo()
+        stage["skip_losses"] = [keys[7], keys[8]]
+        modules = build_gn2v2_modules(data["nd"]) | {"loss": LossSum()}
+        model = SaltModule(modules, lrs=LRS, training_schedule={"stages": {"fit": stage}})
+        trainer = make_trainer()
+        trainer.fit(model, build_datamodule(data))
+        assert trainer.state.finished
+
+    @pytest.mark.parametrize(
+        "stage",
+        [{"frozen": ["jets_classification"]}, {"trainable": TASKS}],
+        ids=["frozen_head", "frozen_encoder"],
+    )
+    def test_partially_frozen_chains_fit(self, data, stage):
+        """A frozen head over a trainable encoder, or trainable heads over a frozen one, fit."""
+        modules = build_gn2v2_modules(data["nd"]) | {"loss": LossSum()}
+        model = SaltModule(modules, lrs=LRS, training_schedule={"stages": {"fit": stage}})
+        (trainer := make_trainer()).fit(model, build_datamodule(data))
+        assert trainer.state.finished
+
+    def test_frozen_share_logged_from_materialised_counts(self, data, caplog):
+        """The INFO line reports the frozen/total upstream parameter counts of each loss."""
+        modules = build_gn2v2_modules(data["nd"]) | {"loss": LossSum()}
+        sched = {"stages": {"fit": {"frozen": ["encoder"]}}}
+        model = SaltModule(modules, lrs=LRS, training_schedule=sched)
+        with caplog.at_level(logging.INFO, logger="salt"):
+            make_trainer().fit(model, build_datamodule(data))
+        plan, key = model._stage_plans[0][Mode.FIT], "losses.jets_classification"  # noqa: SLF001
+        up = [k for k in _upstream(plan, key) if k in model.net]
+        n = {k: sum(p.numel() for p in model.net[k].parameters()) for k in up}
+        cold, total = n["encoder"], sum(n.values())
+        assert 0 < cold < total
+        line = f"stage 'fit' {key}: {cold}/{total} params frozen ({100 * cold / total:.0f}%)"
+        assert line in caplog.text
+
+    def test_invalid_later_stage_rejected_at_initial_setup(self, data, monkeypatch):
+        """A fully frozen active loss in a LATER stage fails the initial fit setup."""
+        calls, modules = self._spy_optimizer(monkeypatch), build_gn2v2_modules(data["nd"])
+        sched = {"stages": {"a": {"epochs": 1}, "b": {"trainable": [list(modules)[6]]}}}
+        model = SaltModule(modules | {"loss": LossSum()}, lrs=LRS, training_schedule=sched)
+        with pytest.raises(ConfigError, match="stage 'b'"):
+            make_trainer(max_epochs=2).fit(model, build_datamodule(data))
+        assert not calls
+
+    def test_detached_sample_weight_is_not_a_gradient_path(self, data):
+        """A trainable prior feeding only a label-kind weight leaves the frozen main loss frozen."""
+        modules = build_gn2v2_modules(data["nd"])
+        del modules["loss"]
+        cls = dict(stream="jets", label="flavour_label", class_names=["bjets", "cjets", "ujets"])
+        modules["jets_classification"] = ClassificationTaskModule(
+            **cls, input="pooled.global", dense={"hidden_layers": [16], "activation": "ReLU"},
+            sample_weight="nn_kinematic_weight",
+            loss={"class_path": "torch.nn.CrossEntropyLoss", "init_args": {"reduction": "none"}},
+        )
+        modules["prior"] = ClassificationTaskModule(
+            **cls, input="normed.jets", dense={"hidden_layers": [8], "activation": "ReLU"}
+        )
+        modules["kinematic_weight"] = KinematicWeight(
+            task_name="prior", mode="nn", stream="jets", label="flavour_label", q_f=None,
+            n_classes=3,
+        )
+        stage = {"trainable": ["prior"], "skip_losses": ["track_origin", "track_vertexing"]}
+        model = SaltModule(
+            modules | {"loss": LossSum()}, lrs=LRS, training_schedule={"stages": {"fit": stage}}
+        )
+        with pytest.raises(ConfigError, match="losses.jets_classification"):
             make_trainer().fit(model, build_datamodule(data))

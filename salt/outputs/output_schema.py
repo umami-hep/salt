@@ -89,9 +89,11 @@ class OutputField:
     onnx_name : str | None
         Flat ONNX output suffix; defaults to `h5_name`. ``None`` if the field
         has no ONNX representation.
-    dtype : str
+    dtype : str | None
         Serialisation dtype (numpy descriptor for H5, mapped to the ONNX
-        equivalent via `onnx_dtype`).
+        equivalent via `onnx_dtype`). ``None`` = the producing leaf's dtype
+        at write time (input copies) — such a field has no ONNX
+        representation.
     axis : str
         ``"global"`` (jet-level scalar) or ``"per_token"`` (sequence column).
     final : bool
@@ -114,7 +116,7 @@ class OutputField:
 
     h5_name: str | None
     onnx_name: str | None = None
-    dtype: str = "f4"
+    dtype: str | None = "f4"
     axis: str = "global"
     final: bool = True
     prefix: bool = True
@@ -139,7 +141,12 @@ class OutputField:
 
     @property
     def onnx_dtype(self) -> str:
-        """The ONNX dtype namespace mapping of `dtype` (``f4 -> float32``, ``i1/i8 -> int8``)."""
+        """The ONNX dtype namespace mapping of `dtype` (``f4 -> float32``, ``i1/i8 -> int8``).
+
+        A ``None`` `dtype` (an input-copy field) falls to ``"float32"``, but is
+        never reached in practice — the ONNX sink skips ``dtype is None``
+        fields entirely (they have no ONNX representation).
+        """
         return "int8" if self.dtype in {"i1", "i8", "int8"} else "float32"
 
 
@@ -162,8 +169,10 @@ class OutputColumn:
         last-dim order (e.g. ``["pb", "pc", "pu"]``). The H5 column is
         ``{run_name}_{suffix}`` when `prefix` (default), else the bare
         `suffix`.
-    dtype : str, optional
-        The H5 column dtype (numpy descriptor), by default ``"f4"``.
+    dtype : str | None, optional
+        The H5 column dtype (numpy descriptor), by default ``"f4"``. ``None``
+        = the producing leaf's dtype at write time (input copies) — such a
+        column has no ONNX representation and `np_dtype` refuses to build one.
     prefix : bool, optional
         Whether to prefix each suffix with ``{run_name}_``, by default True
         (False for a bare-column family like ``VertexIndex``).
@@ -176,7 +185,7 @@ class OutputColumn:
 
     key: str
     suffixes: Sequence[str]
-    dtype: str = "f4"
+    dtype: str | None = "f4"
     prefix: bool = True
 
     def __post_init__(self) -> None:
@@ -197,7 +206,19 @@ class OutputColumn:
         return [f"{run_name}_{s}" if self.prefix else str(s) for s in self.suffixes]
 
     def np_dtype(self, run_name: str) -> np.dtype:
-        """The structured numpy dtype this leaf contributes to its group."""
+        """The structured numpy dtype this leaf contributes to its group.
+
+        Raises
+        ------
+        ConfigError
+            When `dtype` is ``None`` (a bundle-dtype copy column) — the caller
+            (the sink) must build the dtype from the leaf's own dtype instead.
+        """
+        if self.dtype is None:
+            raise ConfigError(
+                f"OutputColumn {self.key!r} has no declared dtype (a bundle-dtype copy "
+                "column) — the sink must build the dtype from the leaf"
+            )
         return np.dtype([(col, self.dtype) for col in self.column_names(run_name)])
 
 

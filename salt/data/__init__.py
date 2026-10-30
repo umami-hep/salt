@@ -17,6 +17,8 @@ from salt.data.processors.labels import Labels
 from salt.data.processors.maskformer_targets import MaskFormerTargets
 from salt.data.processors.multi_target import MultiTarget
 from salt.data.readers.cuts import Cut, GlobalObjectCuts
+from salt.data.readers.ftag1lite_categories import ContainerOneHot
+from salt.data.readers.ftag1lite_reader import FTAG1LITEReader
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.readers.reader import GroupConfig, H5StructuredReader
 from salt.data.readers.stream import StreamConfig
@@ -27,8 +29,10 @@ __all__ = [
     "DEFAULT_BLOCK_ROWS",
     "MODEL_VISIBLE_NAMESPACES",
     "ConstituentSelection",
+    "ContainerOneHot",
     "CorpusManifest",
     "Cut",
+    "FTAG1LITEReader",
     "Features",
     "FtagLabeller",
     "GlobalObjectCuts",
