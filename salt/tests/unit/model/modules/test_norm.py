@@ -50,6 +50,14 @@ class TestNormaliser:
         with pytest.raises(ConfigError, match="global_object"):
             Normaliser(norm_dict="x.yaml", streams=["a"], global_object="b")
 
+    def test_derived_fields_maps_inputs_to_normed(self):
+        """Column names of inputs.<s> propagate to normed.<s>; field-less streams are skipped."""
+        norm = Normaliser(norm_dict="x.yaml", streams=["jets", "tracks"], global_object="jets")
+        norm.name = "norm"
+        fields = {"inputs.jets": ("pt", "eta"), "inputs.other": ("x",)}
+        assert norm.derived_fields(fields) == {"normed.jets": ("pt", "eta")}
+        assert norm.derived_fields({}) == {}
+
     def test_materialise_fills_buffers_to_norm_dict_values(self, gn2v2):
         """Buffer values equal the parity norm dict's per-variable constants, in
         variable order (write_parity_norm_dict: mean 0.1*(i+1), std 1+0.05*(i+1))."""
@@ -168,6 +176,17 @@ class TestMaskedInputNormaliser:
             MaskedInputNormaliser(streams=["a"], momentum=1.5)
         with pytest.raises(ConfigError, match="eps"):
             MaskedInputNormaliser(streams=["a"], eps=0.0)
+
+    def test_derived_fields_maps_inputs_to_normed(self):
+        """Column names of inputs.<s> propagate to normed.<s>; field-less streams are skipped."""
+        norm = MaskedInputNormaliser(streams=["jets", "tracks"], global_object="jets")
+        norm.name = "norm"
+        fields = {"inputs.jets": ("pt", "eta"), "inputs.tracks": ("d0", "z0")}
+        assert norm.derived_fields(fields) == {
+            "normed.jets": ("pt", "eta"),
+            "normed.tracks": ("d0", "z0"),
+        }
+        assert norm.derived_fields({"inputs.tracks": ("d0",)}) == {"normed.tracks": ("d0",)}
 
     def test_buffers_init_to_identity(self):
         """A fresh (bound, untrained) Normaliser is identity: mean 0 / var 1, 0 batches."""

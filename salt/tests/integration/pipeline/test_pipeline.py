@@ -435,7 +435,6 @@ FEEDS: dict[str, Feed] = {
     "legacy/dips": ("dummy", "default"),
     "legacy/Dipz": ("dummy", "default"),
     "legacy/DL1": ("dummy", "default"),
-    "readers/ftag1lite_empflow": ("dummy", "default"),
 }
 
 # config_relpath -> (importable module, pip extra) for a config whose reader
@@ -448,9 +447,9 @@ FEEDS: dict[str, Feed] = {
 # `test_reader_fragment_instantiates` gates directly.
 EXTRAS: dict[str, tuple[str, str]] = {
     "GN2/GN2_muP": ("mup", "salt[muP]"),
-    "readers/ftag1lite_empflow": ("awkward", "salt[root]"),
     "readers/easyjet_events": ("awkward", "salt[root]"),
     "readers/ftag1lite": ("awkward", "salt[root]"),
+    "readers/ftag1lite_joint": ("awkward", "salt[root]"),
     "readers/physlite_events": ("awkward", "salt[root]"),
     "readers/physlite_jets": ("awkward", "salt[root]"),
 }
@@ -1348,9 +1347,8 @@ def test_every_fragment_is_exercised():
     "included" entries need >=1 fixture row's config to ``include:`` them
     directly; "paired" entries need a FEEDS entry to reference them by name;
     anything else is a free-text reason and is only existence-checked (by
-    ``test_every_config_has_exactly_one_fixture`` above) — the
-    ``ftag1lite_streaming`` overlay and the two undocumented-pairing PHYSLITE
-    reader fragments.
+    ``test_every_config_has_exactly_one_fixture`` above) — the FTAG1LITE reader
+    fragments and the two undocumented-pairing PHYSLITE reader fragments.
     """
     included_by: set[str] = set()
     for row in ROWS:

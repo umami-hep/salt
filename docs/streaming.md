@@ -40,8 +40,9 @@ data:
 
 Nothing else changes: no sampler to configure, no per-rank settings. A single
 scalar `manifest:` path is accepted only when every streaming stage reads the
-same corpus — see [The corpus manifest](#the-corpus-manifest). A shipped
-overlay is at `salt/configs/readers/ftag1lite_streaming.yaml`.
+same corpus — see [The corpus manifest](#the-corpus-manifest). The shipped FTAG1LITE
+configs, `readers/ftag1lite.yaml` and `readers/ftag1lite_joint.yaml`, set these `data`
+keys inline (`manifest:` excepted: pass it on the command line or in your own overlay).
 
 ## How sharding works
 
@@ -96,6 +97,39 @@ proportional (largest-remainder) apportionment the map-style path uses — appli
 to that shard's own row counts rather than to a global index. Every batch's
 per-sample counts stay within `interleave_block` rows of the proportional share,
 and `max_live_streams` bounds how many samples are open at once.
+
+## FTAG1LITE container streaming
+
+`FTAG1LITEReader` streams through its own `FTAG1LITEStreamingDataset`, which lives with it
+in `salt/data/readers/ftag1lite_reader.py`. A container is each source file's parent
+directory: one directory per rucio container, and a flat directory is one container. The
+reader logs the container count.
+
+- **`per_rank`** (the code default): every rank reads every container, with proportional
+  per-rank batches drawn from a shuffle pool.
+- **`owner`**: each rank owns a disjoint set of containers, and the combined
+  super-batch across GPUs is stratified by container. Stratified means: "if
+  container 1 has 1000k events, and container 2 has 100k events, then EVERY batch
+  should have 10x as many events from container 1 as from container 2". This
+  applies to the super batch; per-GPU batches need not satisfy it.
+
+File handles: a worker opens a ROOT file on its first block and closes it right after its
+last block in that worker's shuffled block order, so it only holds files with unread blocks
+(at most the files its slice spans per container; 2 on a ~3-file-per-container corpus).
+Whatever is still open is released when the pass ends or the iterator is closed or dropped (a
+persistent worker keeps a partially consumed pass's handles until its iterator is replaced).
+Reads never depend on this schedule: a closed file reopens lazily.
+
+Knobs: `shard_scope` and `shuffle_pool_rows` (rows per shuffle pool, 100,000;
+`null` = one batch) on the reader's `init_args`; `block_rows` and
+`max_live_streams` (asserts resident blocks, one per container; `null` = off) on `data`.
+Validation and test always stream `per_rank`. `owner` needs `shuffle_pool_rows: null`.
+The code default is `per_rank` with a 100,000-row pool, but both shipped configs set
+`shard_scope: owner` and `shuffle_pool_rows: null`. To stream `per_rank` with them:
+
+```bash
+--data.modules.reader.init_args.shard_scope per_rank --data.modules.reader.init_args.shuffle_pool_rows 100000
+```
 
 ## Determinism
 

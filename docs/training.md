@@ -43,6 +43,11 @@ distinction (`--init_from` vs `--ckpt_path`); see
 [Warm start vs. resume](finetuning.md#warm-start-vs-resume-init_from-vs-ckpt_path)
 rather than duplicating it here.
 
+To re-run a checkpoint's validation (e.g. to re-render the reweight plots with different
+plotter settings), use [`salt validate`](cli.md#salt-validate): it restores the weights, the
+buffers and the fit progress counters (`epoch`, `global_step`) from `--ckpt_path` and trains
+nothing.
+
 The `OneCycleLR` scheduler fixes the total step count for its cycle up front.
 Resuming a run past its original `--trainer.max_epochs` needs that schedule
 re-armed: set `lrs.last_epoch: 0` in the config (or `--model.lrs.last_epoch 0`
@@ -136,6 +141,21 @@ function of the epoch counter — but restarts partway through that epoch's
 data rather than at its start. If that partial-epoch restart matters for
 your schedule, leave `StepCheckpoint` off and accept only epoch-boundary
 resumes.
+
+### Iterated NN reweighting
+
+`salt.model.modules.IterativeReweighting` with `n_iterations: N` expands into N (prior, weight)
+pairs ([module reference](modules/model.md#compact-reference-the-remaining-twelve)). The
+`training_schedule` picks the mode: **joint** is one sample stage (`num_samples`/`frac_samples`)
+with every prior head trainable (none of them in `frozen`); **sequential** is one `num_samples`
+stage per head (`iter_1` ... `iter_N`) with every other head frozen (plus `norm` from `iter_2`
+on) and `stop_after: iter_N`. Either way the final `main` stage must still be declared and
+freeze every head (`kinematic_prior`, `kinematic_prior_1`, ...). `stop_after` writes its
+checkpoint after the epoch-end validation, so add `salt.callbacks.StepCheckpoint`
+(`every_n_train_steps`) for a checkpoint at the end of prior training;
+`salt.callbacks.PriorClosureMetrics` logs each prior head's validation AUC and CE.
+`salt validate --ckpt_path <stop_after ckpt>` re-renders the plotter/closure outputs of a
+finished prior training from its checkpoint.
 
 ### Loading an older checkpoint
 

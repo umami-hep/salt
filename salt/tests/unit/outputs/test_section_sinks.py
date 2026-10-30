@@ -54,7 +54,7 @@ def _model(outputs=None) -> SaltModule:
 def _section() -> dict:
     """A section with two writers around one sink, sink declared in the MIDDLE."""
     return {
-        "inputs_copy": InputCopyWriter(streams=["jets"]),
+        "inputs_copy": InputCopyWriter(variables={"jets": ["pt"]}),
         "h5_output": H5OutputSink(),
         "pad_mask": PadMaskWriter(streams=["tracks"]),
     }
@@ -80,8 +80,9 @@ def test_section_sink_is_not_folded_into_the_graph():
 
     assert "h5_output" not in model._graph_modules  # noqa: SLF001
     assert "h5_output" not in model.net
-    # the non-manifest-only writer IS folded, so the exclusion is specific to sinks
+    # both writers are folded; the exclusion is specific to sinks
     assert "pad_mask" in model._graph_modules  # noqa: SLF001
+    assert "inputs_copy" in model._graph_modules  # noqa: SLF001
 
 
 def test_section_sink_is_named_by_its_dict_key():
@@ -95,7 +96,7 @@ def test_section_sink_is_named_by_its_dict_key():
 def test_writer_order_is_independent_of_where_the_sink_sits(position):
     """A sink takes no part in column ordering: the writer order is identical wherever it goes."""
     writers = [
-        ("inputs_copy", InputCopyWriter(streams=["jets"])),
+        ("inputs_copy", InputCopyWriter(variables={"jets": ["pt"]})),
         ("pad_mask", PadMaskWriter(streams=["tracks"])),
     ]
     entries = list(writers)

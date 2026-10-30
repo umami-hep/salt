@@ -418,6 +418,19 @@ def safe_pct_start(pct_start: float, total_steps: int) -> float:
     return min(max(pct_start, low), high)
 
 
+def _step_stage_min_pct_start(total_steps: int) -> float:
+    """Stricter `pct_start` floor for a sample stage's exact short-N OneCycle: 3 steps
+    wide, not 2 — a 2-step floor collapses to a single-step up-phase, invisible
+    under the one-batch lag between ``scheduler.step()`` and a per-batch LR read.
+    """
+    if total_steps <= 0:
+        return 0.75
+    low = 3.0 / total_steps
+    if low > 1.0 - 1.0 / total_steps:  # fewer than 4 steps: just be legal
+        return 0.75
+    return low
+
+
 def resolve_lr_scheduler_class(class_path: str) -> type:
     """Import a stage `lr_scheduler.class_path` to its class. Reuses the
     CLI's class-path resolver (local import avoids a load-time cycle).
@@ -495,7 +508,7 @@ def build_optimizer(
 
 
 def build_onecycle_scheduler(
-    opt: Optimizer, lrs: Mapping[str, float], total_steps: int
+    opt: Optimizer, lrs: Mapping[str, float], total_steps: int, *, step_stage: bool = False
 ) -> dict[str, Any]:
     """Build the default step-interval OneCycleLR scheduler config for `opt`.
 
@@ -503,18 +516,22 @@ def build_onecycle_scheduler(
     `optimizer_class is not HybridMuonAdamW` check: `opt` is always
     constructed by `build_optimizer` from a class `resolve_optimizer_class`
     returned (never a subclass), so the runtime type of `opt` and the class
-    used to build it always agree.
+    used to build it always agree. `step_stage` marks a sample stage, whose
+    short exact `total_steps` gets the wider `_step_stage_min_pct_start` floor.
     """
     # clamped against THIS STAGE's step budget, not the whole-run estimate: a
     # sub-stage gets a fraction of the run's steps, so it hits the degenerate
     # warm-up boundary on runs far longer than a single-stage fit would.
+    pct_start = safe_pct_start(float(lrs["pct_start"]), total_steps)
+    if step_stage:
+        pct_start = max(pct_start, _step_stage_min_pct_start(total_steps))
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         opt,
         max_lr=lrs["max"],
         total_steps=total_steps,
         div_factor=lrs["max"] / lrs["initial"],
         final_div_factor=lrs["initial"] / lrs["end"],
-        pct_start=safe_pct_start(float(lrs["pct_start"]), total_steps),
+        pct_start=pct_start,
         last_epoch=int(lrs.get("last_epoch", -1)),
         cycle_momentum=type(opt) is not HybridMuonAdamW,
     )

@@ -118,6 +118,19 @@ rejected fail-loud:
   `trainer.max_epochs`. The explicit epochs must sum to `≤ max_epochs`, and an
   omitted final stage needs at least 1 epoch left over. With `max_epochs: 15` and
   `head_warmup.epochs: 5`, `full_finetune` runs the remaining **10** epochs.
+- **`num_samples`**: a positive integer, the number of rows the stage sees summed
+  over all ranks. The stage ends mid-epoch after
+  `N = ceil(num_samples / (batch_size * world_size * accumulate_grad_batches))`
+  per-rank optimizer steps.
+- **`frac_samples`**: a float strictly between 0 and 1, a fraction of **one
+  epoch** of the per-rank train loader as Lightning sees it:
+  `N = ceil(frac_samples * steps_per_epoch)` with
+  `steps_per_epoch = ceil(trainer.num_training_batches / accumulate_grad_batches)`.
+  A fraction of 1 or more is a `ConfigError`; use `epochs` instead.
+
+  `num_samples` and `frac_samples` are mutually exclusive, never combined with
+  `epochs`, and rejected on the final stage. Such a *sample stage* contributes
+  0 epochs to the budget: it runs inside the first epoch of the next stage.
 - **`frozen`** / **`trainable`**: a list of `model.modules` names. Give **at most
   one**: `frozen` freezes exactly those modules; `trainable` freezes their
   *complement* (everything else). Setting both is a `ConfigError`. Neither freezes
@@ -126,6 +139,18 @@ rejected fail-loud:
   `eval()` mode, so dropout and running statistics stop updating; its weights are
   held bitwise-immobile for the stage. Unfreezing restores it to `train()` and
   re-adds it to the optimizer.
+- **`skip_losses`**: a list of task names (the `losses.<task>` keys) whose loss
+  this stage does not train; `loss.total` sums the rest. Any module that fed only
+  skipped losses is not executed in the stage. Its weights stay in the model,
+  checkpoints and `--init_from`, resumes are unaffected, and it runs again in a
+  stage that needs it. `frozen` and `skip_losses` are independent: a frozen encoder
+  feeding a trained head still runs forward. A module that accumulates statistics
+  across the stage (one exposing `freeze_accumulators`, e.g. `KinematicWeight`,
+  `ClassWeight`) always runs until it is frozen at the stage boundary, whatever the
+  stage skips. The fit logs what each stage skips at stage entry. `val/loss`
+  (= `loss.total`) sums only the stage's active losses, so a run-wide `val/loss`
+  monitor (`ModelCheckpoint`, an early stop spanning stages) is not comparable
+  across stages that skip different losses.
 - **`lrs`**: a mapping that **deep-merges over** the base config's `lrs:`. Only
   list the keys that differ per stage; the rest fall through. (Above, `head_warmup`
   keeps the base `initial`/`end`/`pct_start` and overrides only `max`.)
@@ -154,17 +179,22 @@ wasted GPU allocation.
 them with no GPU, no data file and no checkpoint: an unknown top-level key
 under `training_schedule` or an unknown per-stage key, both `frozen` and
 `trainable` set on one stage, and an unknown module name inside `frozen:` /
-`trainable:` (`salt/schedule.py:316-331`, `:353-367`, `:567-584`).
+`trainable:` (`salt/schedule.py:419-434`, `:472-486`, `:696-713`).
 
 **Caught at fit setup, not at parse time**: a non-final stage that omits
 `epochs`, an over-allocated epoch budget across stages, and a multi-stage
 schedule under a non-finite `trainer.max_epochs`. All three come from
-`TrainingSchedule.validate_epochs` (`salt/schedule.py:246`), called from
+`TrainingSchedule.validate_epochs` (`salt/schedule.py:348`), called from
 `TrainingController.preflight` (`salt/model/multistage_training.py`), called from
 `SaltModule.setup` once the trainer is attached, because the check needs the trainer's
 `max_epochs` and that value does not exist before then. `salt merge-config`
 and `--print_config` only merge and print the config; neither attaches a
-trainer, so neither one catches these three.
+trainer, so neither one catches these three. Likewise a `frac_samples` stage
+needs the train loader length (`trainer.num_training_batches`), so a missing
+or infinite loader length fails only once the fit has loaded its train loader.
+A stage whose `frozen:`/`trainable:` leaves an active loss with no trainable parameter
+upstream raises `ConfigError` naming the stage and the loss (add it to that stage's
+`skip_losses`); the fit logs each active loss's frozen parameter share per stage.
 
 ### How the pieces layer
 
@@ -333,6 +363,25 @@ training_schedule:
 - A config with **no** `lr_scheduler:` anywhere is bitwise-identical to before (every
   stage keeps its OneCycleLR).
 
+### Stopping after a stage: `stop_after`
+
+A top-level `training_schedule.stop_after: <stage>` ends the fit at that stage's
+boundary (it must name a declared, non-final stage) and writes
+`stop_after=<stage>-epoch=NNN.ckpt` (epoch stage) or
+`stop_after=<stage>-step=NNNNNN.ckpt` (sample stage) into the checkpoint directory.
+To continue, remove `stop_after` and resume from that file:
+
+```bash
+salt fit --config <run config.yaml> --ckpt_path <that ckpt>
+```
+
+A sample stage stops mid-epoch, but its checkpoint is written at train-epoch end:
+the resume starts at the **next** epoch and the stopped epoch's remaining batches
+are discarded. Set `trainer.max_epochs` so the resumed stage still has a nonzero
+epoch budget. The resumed run is **not** promised identical data exposure to an
+uninterrupted one; check the resumed stage's optimizer-step count and OneCycle
+allocation instead.
+
 ## Previewing a merge
 
 `salt merge-config` takes the same arguments as `salt fit`. It instantiates no
@@ -356,9 +405,9 @@ write only the `.dot` files, for a machine with no Graphviz `dot` binary
 installed (`merge_config.py:39-46`, `:84`).
 
 The names inside `frozen:` / `trainable:` are `model.init_args.modules`
-config keys, checked against that dict at parse time (`salt/schedule.py:567`,
-`:581-584`); at runtime they map to `net.<name>.*` state-dict prefixes
-(`schedule.py:700`). They are never read from the checkpoint, so a name
+config keys, checked against that dict at parse time (`salt/schedule.py:696`,
+`:710-713`); at runtime they map to `net.<name>.*` state-dict prefixes
+(`schedule.py:845`). They are never read from the checkpoint, so a name
 that is valid in your config stays valid whatever the checkpoint contains.
 
 Run it before any real fit to confirm a config surgery did what you intended.

@@ -103,9 +103,6 @@ outputs:
     class_path: salt.outputs.InputCopyWriter
     init_args:
       streams: [jets, tracks]
-      variables:
-        jets: []
-        tracks: []
   run_tasks:
     class_path: salt.outputs.RunTaskOutput
     init_args:

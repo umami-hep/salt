@@ -1,0 +1,7 @@
+config: GN3/GN3_joint.yaml
+fragment: >-
+  joint small-R + large-R model over the jets: both FTAG1LITEReader stream
+  (include:s readers/ftag1lite_joint.yaml) - no synthetic DAOD_FTAG1LITE fixture
+  exists to feed it as a matrix row, so its reader is exercised via
+  test_reader_fragment_instantiates and its per-type labelling by
+  unit/data/processors/test_ftag_labeller.py.

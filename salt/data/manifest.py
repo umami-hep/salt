@@ -367,7 +367,9 @@ def ensure_manifest(reader: Reader, path: str | Path, stage: str) -> CorpusManif
 
 
 def _group_names(reader: Reader) -> list[str]:
-    """Sample names for a multi-sample reader, else a single default group."""
+    """A reader's own `group_names`, else sample names, else a single default group."""
+    if (names := getattr(reader, "group_names", None)) is not None:
+        return [str(n) for n in names]
     samples = getattr(reader, "samples", None)
     if samples:
         return [str(getattr(s, "name", i)) for i, s in enumerate(samples)]

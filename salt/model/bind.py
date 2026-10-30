@@ -100,8 +100,15 @@ def resolve_bind_schema(
     config-fixed, so unifying across modes is sound; the planner has already
     rejected genuinely conflicting declarations on connected edges.
 
-    A `BindError` propagates from the unifier if two observations bind the same
-    symbolic dim (or the same key's last dim) to different concrete sizes.
+    Derived widths (``derived_widths``) and derived field names
+    (``derived_fields``) run to a fixpoint; a field-carrying key with no
+    observed width takes its column count as width.
+
+    A `BindError` propagates if two observations bind one symbolic dim (or one
+    key's last dim) to different sizes, two derivations disagree for one key,
+    or a key with DERIVED fields resolves to a width other than its column
+    count. Declared fields are not width-checked: on a structured key such as
+    ``raw.<stream>`` (``[B, T]``) they name struct fields, not columns.
 
     Parameters
     ----------
@@ -111,8 +118,7 @@ def resolve_bind_schema(
         Reader stream->dataset map (see `reader_stream_datasets`); empty when
         built without a reader (muP data-free path, unit fixtures).
     """
-    if isinstance(plans, Plan):
-        plans = (plans,)
+    plans = (plans,) if isinstance(plans, Plan) else tuple(plans)
     observed: dict[str, list[TensorSpec]] = {}
     for plan in plans:
         # sources first, then each step's produces before its requires
@@ -176,9 +182,18 @@ def resolve_bind_schema(
     # with a not-yet-resolved key (e.g. a pool output sharing its input's width
     # symbol). Binding K's symbol to its resolved width then resolves the
     # sharers, which may in turn unlock further derivations.
+    #
+    # Derived field names (`derived_fields`) run after the width fixpoint; a key
+    # gaining fields gains its column count as width, which may unlock more
+    # widths, so both phases repeat until neither grows.
+    derived_keys: set[str] = set()
     while True:
-        _apply_derived_widths(plans, widths)
-        if not _back_bind_symbols(observed, widths, dims):
+        while True:
+            _apply_derived_widths(plans, widths)
+            if not _back_bind_symbols(observed, widths, dims):
+                break
+        derived_keys |= _apply_derived_fields(plans, fields)
+        if not _widths_from_fields(fields, widths, derived_keys):
             break
     return ResolvedSchema(widths=widths, fields=fields, datasets=dict(datasets or {}))
 
@@ -198,6 +213,29 @@ def reader_stream_datasets(reader: Any) -> dict[str, str]:
         for stream, cfg in groups.items()
         if isinstance(dataset := getattr(cfg, "dataset", None), str)
     }
+
+
+def _widths_from_fields(
+    fields: Mapping[str, tuple[str, ...]], widths: dict[str, int], derived_keys: set[str]
+) -> bool:
+    """Give every field-carrying key without a width its column count; True if any added.
+
+    Raises `BindError` when a key in `derived_keys` (fields from a
+    ``derived_fields`` hook, so they ARE its columns) has a different width.
+    Declared fields are never checked (on ``raw.<stream>`` they name struct fields).
+    """
+    added = False
+    for key, names in fields.items():
+        width = widths.get(key)
+        if width is None:
+            widths[key] = len(names)
+            added = True
+        elif width != len(names) and key in derived_keys:
+            raise BindError(
+                f"key {key!r} resolves to width {width} but carries {len(names)} field names "
+                f"{list(names)} — conflicting widths"
+            )
+    return added
 
 
 def _back_bind_symbols(
@@ -238,7 +276,7 @@ def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None
     resolves regardless of plan order. Raises `BindError` when a derived
     width disagrees with an already-resolved one.
     """
-    modules = _unique_derived_modules(plans)
+    modules = _unique_derived_modules(plans, "derived_widths")
     for _ in range(len(modules) + 1):
         changed = False
         for module in modules:
@@ -257,13 +295,42 @@ def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None
             return
 
 
-def _unique_derived_modules(plans: Iterable[Plan]) -> list[GraphModule]:
-    """The plan-step modules that expose a callable ``derived_widths``, deduped by identity.
+def _apply_derived_fields(plans: Iterable[Plan], fields: dict[str, tuple[str, ...]]) -> set[str]:
+    """Let plan-step modules contribute field names derived from resolved input fields.
+
+    Same FIXPOINT and conflict rule as `_apply_derived_widths`, over
+    ``derived_fields``. Returns the keys whose field tuple this call added.
+    """
+    added: set[str] = set()
+    modules = _unique_derived_modules(plans, "derived_fields")
+    for _ in range(len(modules) + 1):
+        changed = False
+        for module in modules:
+            for key, names in module.derived_fields(fields).items():  # type: ignore[attr-defined]
+                derived = tuple(names)
+                previous = fields.get(key)
+                if previous is not None and previous != derived:
+                    raise BindError(
+                        f"module {getattr(module, 'name', '?')!r} derives fields {list(derived)} "
+                        f"for {key!r} but the resolved schema already has {list(previous)} — "
+                        "conflicting fields"
+                    )
+                if previous is None:
+                    fields[key] = derived
+                    added.add(key)
+                    changed = True
+        if not changed:
+            break
+    return added
+
+
+def _unique_derived_modules(plans: Iterable[Plan], hook: str) -> list[GraphModule]:
+    """The plan-step modules that expose a callable `hook`, deduped by identity.
 
     First-seen order across the supplied plans (one entry per live module).
     """
     unique = {id(step.module): step.module for plan in plans for step in plan.steps}
-    return [m for m in unique.values() if callable(getattr(m, "derived_widths", None))]
+    return [m for m in unique.values() if callable(getattr(m, hook, None))]
 
 
 def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: ResolvedSchema) -> None:

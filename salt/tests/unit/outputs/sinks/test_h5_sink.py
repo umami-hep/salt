@@ -501,11 +501,19 @@ class TestSectionWriterUnits:
             "target_track_vertexing",
         ]
 
-    def test_input_copy_is_manifest_only(self):
-        """InputCopyWriter is manifest-only (no graph leaf — the sink re-reads copies)."""
-        icw = InputCopyWriter(streams=["jets", "tracks"])
-        assert icw.is_manifest_only() is True
-        assert icw.streams == ("jets", "tracks")
+    def test_input_copy_writer_declares_label_requires_and_output_leaves(self):
+        """InputCopyWriter is a real graph node: labels.* requires -> outputs.* produces."""
+        from salt.graph.spec import flatten_spec
+
+        icw = InputCopyWriter(variables={"jets": ["pt"], "tracks": ["d0"]})
+        io = icw.declare_io(Mode.TEST)
+        req = flatten_spec(io.requires)
+        assert set(req) == {"labels.jets.pt", "labels.tracks.d0"}
+        assert all(spec.kind == "label" for spec in req.values())
+        assert set(flatten_spec(io.produces)) == {"outputs.jets.pt", "outputs.tracks.d0"}
+        onnx_io = icw.declare_io(Mode.ONNX)
+        assert flatten_spec(onnx_io.requires) == {}
+        assert flatten_spec(onnx_io.produces) == {}
 
     def test_pad_mask_produces_mask_leaf(self):
         """PadMaskWriter produces outputs.<stream>.mask from masks.<stream>."""

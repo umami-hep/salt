@@ -1,8 +1,8 @@
 # Command line reference
 
 Every `salt` subcommand, gathered in one place: what it takes, what it
-writes, and where the output lands. `salt fit` and `salt test` go through
-the Lightning-based trainer CLI; `salt graph`, `salt schema`, `salt export`
+writes, and where the output lands. `salt fit`, `salt validate` and
+`salt test` go through the Lightning-based trainer CLI; `salt graph`, `salt schema`, `salt export`
 and `salt inference` are trainer-free and touch no data beyond the file
 they are explicitly pointed at. Config structure and settings (what goes
 under `data:`/`model:`/`trainer:`) live on [Configuration](configuration.md);
@@ -133,6 +133,7 @@ Run `salt fit --help` for the full flag list; most of what it prints
 (`--model.*`, `--data.*`, `--trainer.*`, `--callbacks`, `--outputs`,
 `--training_schedule`, `--compile`, `--class_dict`) is config surface
 documented on [Configuration](configuration.md), not CLI mechanics.
+`--compile` applies to `salt fit` and `salt validate`.
 
 ## Previewing the resolved config: --print_config
 
@@ -240,6 +241,43 @@ writes](#what-a-run-writes).
 
 For what the eval H5 contains and how to add columns to it, see
 [Evaluation](evaluation.md) and [Outputs](outputs.md).
+
+## salt validate
+
+```bash
+salt validate --config <run_dir>/config.yaml \
+  --ckpt_path <run_dir>/ckpts/<ckpt> \
+  --trainer.default_root_dir <dir>
+```
+
+Runs ONE validation pass over the VAL split with the checkpoint's weights
+AND buffers (running statistics, the reweighting `q_f`/`z`), firing the
+validation callbacks — `KinematicReweightPlotter`, `PriorClosureMetrics`,
+... — exactly as a fit-time validation would. Use it to re-render a
+finished run's validation outputs, e.g. with different plotter settings
+stacked on via `--callbacks.*`. `--config` stacks like `fit`;
+`--trainer.*`/`--data.*`/`--callbacks.*` overrides apply as usual.
+
+- `--ckpt_path` is REQUIRED (a `ConfigError` otherwise — validating fresh
+  weights is meaningless); `--init_from` is rejected (fit-only).
+- **Epoch and step are restored.** The checkpoint's `epoch` and
+  `global_step` are loaded into the trainer BEFORE the val dataloader is
+  built, so the plotters' `step<N>.json`/`<key>_step<N>.png` stems and
+  "step N, epoch E" titles match the fit's own validation, and a streaming
+  reader seeded by the epoch (FTAG1LITE) sees the same epoch — i.e. the same
+  validation jets in the same order. A checkpoint without Lightning fit-loop
+  progress (`loops.fit_loop`) or integer `epoch`/`global_step` is a
+  `ConfigError`, never a silent step 0.
+- `--trainer.default_root_dir` is used VERBATIM: no `<name>_<timestamp>` /
+  `--log_suffix` rewrite and no `--auto_resume` (both fit-only). It
+  receives `config.yaml`.
+- No checkpoints are written.
+- The experiment logger is wired as on `fit` (`--name` becomes the Comet
+  experiment name; offline without `COMET_API_KEY`), and the two callbacks
+  above write `comet_experiment.json` into their `output_dir`.
+- A plan-hash mismatch between the checkpoint and the current config only
+  warns (the VAL plan is non-FIT). `GraphArtifacts` writes nothing on
+  validate (it is keyed on fit/test start).
 
 ## salt schema dump
 
@@ -527,7 +565,9 @@ ONNX](deployment/export.md); this section is the invocation only.
 
 ## What a run writes
 
-Every `salt fit`/`salt test` run writes, at stage start on rank zero:
+Every `salt fit`/`salt test` run writes, at stage start on rank zero
+(a `salt validate` run writes only `config.yaml` into its
+`default_root_dir`, plus its callbacks' own outputs):
 `plan_fit.txt`+`plan_val.txt` (or `plan_test.txt` for a test run), which
 are the dataset and model plan tables, including the narrowed label list,
 the demand-narrowed per-group read columns, and, for a test run, the

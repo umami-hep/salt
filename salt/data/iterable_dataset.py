@@ -87,7 +87,9 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
         Shard resolution overrides. ``None`` (the default) detects them from
         `torch.distributed` and `torch.utils.data.get_worker_info`. Injecting
         them is what lets tests sweep a whole (ranks x workers) grid in one
-        process with no DDP and no DataLoader.
+        process with no DDP and no DataLoader. Inside a DataLoader worker
+        `world_size`/`rank` must be injected (`SaltDataModule` does) and
+        `worker_id` must not be; `num_workers` alone marks a rank's main-process handle.
 
     Raises
     ------
@@ -147,8 +149,27 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
 
     def _dist(self) -> tuple[int, int]:
         """``(world_size, rank)`` — overrides first, then `torch.distributed`, else (1, 0)."""
+        in_worker = get_worker_info() is not None
         if self._world_size is not None or self._rank is not None:
-            return _override(self._world_size, self._rank, "world_size", "rank")
+            world, rank = _override(self._world_size, self._rank, "world_size", "rank")
+            group = self._process_group() if in_worker else None
+            if group is not None and group != (world, rank):
+                raise ConfigError(
+                    f"injected (world_size, rank)={(world, rank)} disagrees with the "
+                    f"process group {group} this DataLoader worker inherited"
+                )
+            return world, rank
+        if in_worker:
+            raise ConfigError(
+                "sharding inside a DataLoader worker needs world_size/rank injected by the "
+                "main process (SaltDataModule does this); the fallback would silently shard "
+                "every rank as rank 0 of 1"
+            )
+        return self._process_group() or (1, 0)
+
+    @staticmethod
+    def _process_group() -> tuple[int, int] | None:
+        """``(world_size, rank)`` of an initialised `torch.distributed` group, else None."""
         try:
             import torch.distributed as dist
 
@@ -156,15 +177,31 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
                 return dist.get_world_size(), dist.get_rank()
         except (ImportError, RuntimeError):  # no distributed build / not initialised
             pass
-        return 1, 0
+        return None
 
-    def _worker(self) -> tuple[int, int]:
-        """``(num_workers, worker_id)`` — overrides first, then the DataLoader, else (1, 0)."""
-        if self._num_workers is not None or self._worker_id is not None:
+    def _worker(self) -> tuple[int, int | None]:
+        """``(num_workers, worker_id)``: the DataLoader's in a worker, else overrides, else (1, 0).
+
+        ``worker_id`` is None for the main-process handle of an n-worker rank.
+        """
+        info = get_worker_info()
+        if info is not None:
+            if self._worker_id is not None or self._num_workers not in {None, info.num_workers}:
+                raise ConfigError(
+                    f"injected num_workers={self._num_workers}/worker_id={self._worker_id} "
+                    f"inside DataLoader worker {info.id} of {info.num_workers}; inside a worker "
+                    "only a matching num_workers may be injected"
+                )
+            return max(1, int(info.num_workers)), int(info.id)
+        if self._worker_id is not None:
             n = None if self._num_workers is None else max(1, int(self._num_workers))
             return _override(n, self._worker_id, "num_workers", "worker_id")
-        info = get_worker_info()
-        return (1, 0) if info is None else (max(1, int(info.num_workers)), int(info.id))
+        n = int(self._num_workers or 0)
+        return (n, None) if n > 0 else (1, 0)
+
+    def _rank_worker(self) -> tuple[int, int, int, int | None]:
+        """``(world_size, rank, num_workers, worker_id)`` of the calling process."""
+        return (*self._dist(), *self._worker())
 
     def shard(self) -> tuple[int, int]:
         """The calling process's ``(n_shards, shard_id)``.
@@ -175,6 +212,11 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
         """
         world, rank = self._dist()
         n_workers, worker_id = self._worker()
+        if worker_id is None:
+            raise ConfigError(
+                f"the main-process handle of a {n_workers}-worker rank is not a shard; "
+                "iterate it through its DataLoader"
+            )
         return world * n_workers, rank * n_workers + worker_id
 
     # -- layout ---------------------------------------------------------------
@@ -215,15 +257,21 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
         from the ``<= 1``-row-per-group interval residual, plus the partial final
         batch.
         """
+        return self._shard_batches(*self.shard())
+
+    def _shard_batches(self, n_shards: int, shard_id: int) -> int:
+        """Batches shard `shard_id` of `n_shards` emits — the seam subclasses override."""
         _blocks, group_rows = self._resolve_layout()
-        n_shards, shard_id = self.shard()
         per_shard = shard_row_counts(group_rows, n_shards)
         if self.drop_last:
             return min(per_shard) // self.batch_size
         return -(-per_shard[shard_id] // self.batch_size)  # ceil
 
     def __len__(self) -> int:
-        """Batches this shard emits (exact, not an estimate)."""
+        """Batches this process yields (exact); a main-process handle sums its workers'."""
+        world, rank, n, wid = self._rank_worker()
+        if wid is None:
+            return sum(self._shard_batches(world * n, rank * n + w) for w in range(n))
         return self.n_batches()
 
     # -- iteration ------------------------------------------------------------

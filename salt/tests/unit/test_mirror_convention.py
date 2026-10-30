@@ -35,6 +35,11 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/integration/multistage_training/test_training_schedule.py",
         "salt/tests/integration/multistage_training/test_schedule_resume.py",
     ),
+    # shared Comet/disk/warn-once helper, exercised through both plotter callbacks
+    "salt/callbacks/_plot_io.py": (
+        "salt/tests/unit/callbacks/test_kinematic_reweight_plotter.py",
+        "salt/tests/unit/callbacks/test_input_normalisation_plotter.py",
+    ),
     # reader/dataset ABCs asserted throughout unit/data
     "salt/data/base.py": (
         "salt/tests/unit/data/readers/test_multisample_reader.py",
@@ -63,9 +68,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     ),
     "salt/data/processors/labels.py": ("salt/tests/unit/data/test_label_stripped_read.py",),
     # config-driven processors exercised through the shipped-config lifecycles
-    "salt/data/processors/ftag_labeller.py": (
-        "salt/tests/integration/pipeline/test_pipeline.py",
-    ),
     "salt/data/processors/maskformer_targets.py": (
         "salt/tests/unit/model/modules/test_maskdecoder.py",
         "salt/tests/integration/pipeline/test_pipeline.py",
@@ -88,7 +90,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
     "salt/model/nn/transformer.py": (
         "salt/tests/unit/model/modules/test_transformer_encoder.py",
     ),
-    "salt/outputs/input_copy_writer.py": ("salt/tests/unit/outputs/test_dumb_sink_guards.py",),
     "salt/outputs/maskformer.py": (
         "salt/tests/unit/outputs/test_maskformer_eval_h5.py",
         "salt/tests/unit/outputs/test_producer_manifests.py",

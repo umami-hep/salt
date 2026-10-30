@@ -286,6 +286,9 @@ class GlobalObjectCuts:
     global_cuts : Sequence[Cut | str], optional
         AND-combined cuts. Entries normalise through `Cut.parse`, so YAML may
         write plain strings.
+    per_split : Mapping[str, Sequence[Cut | str]], optional
+        Extra AND-combined cuts per bound stage (``train``/``val``/``test``), e.g. an
+        ``eventNumber % 10`` split; `for_split` returns ``global_cuts + per_split[stage]``.
 
     Raises
     ------
@@ -294,33 +297,57 @@ class GlobalObjectCuts:
     """
 
     global_cuts: tuple[str, ...] = ()
+    per_split: Mapping[str, tuple[str, ...]] = field(default_factory=dict, hash=False)
     _cuts: tuple[Cut, ...] = field(default=(), init=False, repr=False, compare=False)
+    _split_cuts: Mapping[str, tuple[Cut, ...]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         cuts = _parse_cuts(tuple(self.global_cuts), "GlobalObjectCuts.global_cuts")
         object.__setattr__(self, "global_cuts", tuple(c.expr for c in cuts))
         object.__setattr__(self, "_cuts", cuts)
+        if bad := sorted(set(self.per_split) - {"train", "val", "test"}):
+            raise ConfigError(f"GlobalObjectCuts.per_split: unknown stage keys {bad}")
+        split = {
+            str(stage): _parse_cuts(tuple(specs), f"GlobalObjectCuts.per_split[{stage!r}]")
+            for stage, specs in self.per_split.items()
+        }
+        object.__setattr__(
+            self, "per_split", {s: tuple(c.expr for c in cs) for s, cs in split.items()}
+        )
+        object.__setattr__(self, "_split_cuts", split)
 
-    def eligible(self, rows: np.ndarray) -> np.ndarray:
+    def for_split(self, stage: str | None) -> tuple[Cut, ...]:
+        """The effective cuts for `stage`: global + its `per_split` (global only for None)."""
+        if stage is None:
+            return self._cuts
+        return (*self._cuts, *self._split_cuts.get(stage, ()))
+
+    def eligible(self, rows: np.ndarray, stage: str | None = None) -> np.ndarray:
         """Bool ``(N_rows,)`` mask: True where every cut passes `rows` (all-True with no cuts);
         `KeyError` propagates from `Cut.mask` for a field absent from `rows`.
         """
         keep = np.ones(len(rows), dtype=bool)
-        for c in self._cuts:
+        for c in self.for_split(stage):
             keep &= c.mask(rows)
         return keep
+
+    def _all_cuts(self) -> tuple[Cut, ...]:
+        """Global + every stage's cuts — what an index build may need to read."""
+        return (*self._cuts, *(c for cs in self._split_cuts.values() for c in cs))
 
     def fields(self) -> tuple[str, ...]:
         """Bare ROW-axis field names referenced, deduplicated in first-seen order (the
         reader's read-at-index-build contract; reduced fields are `aggregations`, not here).
         """
-        return _first_seen_fields(self._cuts)
+        return _first_seen_fields(self._all_cuts())
 
     def aggregations(self) -> tuple[Aggregation, ...]:
         """Constituent-axis reductions the cuts need precomputed, deduplicated by key (the
         reader evaluates each and adds it to the row record under `Aggregation.key` first).
         """
         seen: dict[str, Aggregation] = {}
-        for agg in (a for c in self._cuts for a in c.aggregations):
+        for agg in (a for c in self._all_cuts() for a in c.aggregations):
             seen.setdefault(agg.key, agg)  # the FIRST aggregation per key wins
         return tuple(seen.values())

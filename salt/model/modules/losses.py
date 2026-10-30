@@ -51,8 +51,31 @@ class LossSum(SaltModelModule):
         super().__init__()
         self._loss_keys: tuple[str, ...] | None = None
         self.weights = {_loss_key(k): float(v) for k, v in (weights or {}).items()}
+        self._active: tuple[str, ...] | None = None
         if losses is not None:
             self._set_loss_keys(tuple(_loss_key(k) for k in losses))
+
+    def resolve_active(self, skip: Iterable[str]) -> tuple[str, ...]:
+        """The narrowed keys minus `skip` (bare or dotted); ConfigError on an unknown key or
+        when nothing is left.
+        """
+        assert self._loss_keys is not None
+        drop = {_loss_key(k) for k in skip}
+        if unknown := sorted(drop - set(self._loss_keys)):
+            raise ConfigError(
+                f"LossSum {self.name!r}: skip_losses names unknown loss key(s) {unknown} — "
+                f"the summed keys are {list(self._loss_keys)}"
+            )
+        if not (keep := tuple(k for k in self._loss_keys if k not in drop)):
+            raise ConfigError(
+                f"LossSum {self.name!r}: skip_losses removes every summed loss — a stage must "
+                "train at least one"
+            )
+        return keep
+
+    def set_active(self, keys: tuple[str, ...] | None) -> None:
+        """Restrict `declare_io`/`forward` to `keys`; ``None`` = every narrowed key."""
+        self._active = keys
 
     def _set_loss_keys(self, keys: tuple[str, ...]) -> None:
         """Fix the summed loss keys; reject weight entries that name none of them."""
@@ -116,7 +139,7 @@ class LossSum(SaltModelModule):
             )
         loss_spec = TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)
         return IO(
-            requires=unflatten_spec(dict.fromkeys(self._loss_keys, loss_spec)),
+            requires=unflatten_spec(dict.fromkeys(self._active or self._loss_keys, loss_spec)),
             produces=unflatten_spec({"loss.total": loss_spec}),
         )
 
@@ -127,7 +150,8 @@ class LossSum(SaltModelModule):
         # list, not generator: dynamo refuses to reconstruct a generator whose
         # closure mutates and drops the frame to eager. Summation order is
         # unchanged, so this stays bit-for-bit identical.
-        total = sum([self.weights.get(key, 1.0) * b.get(key) for key in self._loss_keys])  # noqa: C419
+        keys = self._active or self._loss_keys
+        total = sum([self.weights.get(key, 1.0) * b.get(key) for key in keys])  # noqa: C419
         return {"loss.total": total}
 
 
@@ -214,10 +238,11 @@ class LossGLS(LossSum):
         # cannot reconstruct a generator that mutates its closure, and fails the
         # whole frame back to eager rather than taking a graph break. The
         # multiplication order is identical, so the result is bit-for-bit the same.
-        product = b.get(self._loss_keys[0])
-        for key in self._loss_keys[1:]:
+        keys = self._active or self._loss_keys
+        product = b.get(keys[0])
+        for key in keys[1:]:
             product = product * b.get(key)
-        return {"loss.total": torch.pow(product, 1.0 / len(self._loss_keys))}
+        return {"loss.total": torch.pow(product, 1.0 / len(keys))}
 
 
 def _loss_key(key: str) -> str:

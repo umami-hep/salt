@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -39,6 +40,13 @@ class ClassificationTaskModule(_TaskModuleBase):
     resume. A literal ``loss.init_args.weight`` list is exclusive with
     ``weight_source``. The class dict is indexed by the stream's dataset name
     (`ResolvedSchema.dataset_of`), not the raw stream name.
+
+    Class weights and per-row ``sample_weight`` weights (one label key, or a list of
+    keys whose per-row PRODUCT is the weight, e.g. ``[nn_kinematic_weight,
+    flavour_class_weight]`` = a `KinematicWeight` times a `ClassWeight` column) are
+    independent and MULTIPLY. Rows with a consumed label of ``-1``
+    (padded, invalid, or another jet type's rows) are inert on every loss path,
+    including an all-ignored batch (loss 0, finite gradients).
     """
 
     def __init__(
@@ -56,6 +64,7 @@ class ClassificationTaskModule(_TaskModuleBase):
         label_map: dict[int, int] | None = None,
         expose: Sequence[str] | None = None,
         write_targets: bool = True,
+        sample_weight: str | Sequence[str] | None = None,
     ) -> None:
         """Capture config only.
 
@@ -75,13 +84,18 @@ class ClassificationTaskModule(_TaskModuleBase):
             Also emit the consumed class label (post ``label_map`` remap) as
             the TEST eval column ``target_{task}``, by default True. Never
             emitted in ONNX/export mode.
+        sample_weight : str | Sequence[str] | None, optional
+            Per-sample loss-weight label(s) ``labels.<stream>.<name>`` (FIT|VAL
+            only), by default None; several keys multiply per row. Requires
+            ``loss.reduction == 'none'``; the weighted mean is taken in `calculate_loss`.
 
         Raises
         ------
         ConfigError
             On empty/duplicate class names, malformed `weight_source`, a
-            literal loss weight combined with `weight_source`, or a bad
-            `expose` list.
+            literal loss weight combined with `weight_source`, an empty or
+            duplicated `sample_weight` list, or one with a non-``none`` loss
+            reduction, or a bad `expose` list.
         """
         super().__init__(
             stream,
@@ -114,16 +128,48 @@ class ClassificationTaskModule(_TaskModuleBase):
                 "ClassificationTaskModule: class weights already specified in the loss config — "
                 "remove them or drop weight_source (v1 use_class_dict contract, cli.py:476-479)"
             )
+        self.sample_weights: tuple[str, ...] = (
+            ()
+            if sample_weight is None
+            else (sample_weight,)
+            if isinstance(sample_weight, str)
+            else tuple(sample_weight)
+        )
+        if sample_weight is not None and not self.sample_weights:
+            raise ConfigError(
+                "ClassificationTaskModule: sample_weight must name at least one label"
+            )
+        if len(set(self.sample_weights)) != len(self.sample_weights):
+            raise ConfigError(
+                f"ClassificationTaskModule: duplicate sample_weight keys {self.sample_weights}"
+            )
+        if self.sample_weights and (
+            self.loss_cfg.get("init_args", {}).get("reduction", "mean") != "none"
+        ):
+            raise ConfigError(
+                f"ClassificationTaskModule: sample_weight {list(self.sample_weights)!r} requires "
+                "the loss reduction to be 'none' — the per-sample weight multiplies the unreduced "
+                "loss before the weighted-mean reduction; set loss: "
+                "{class_path: torch.nn.CrossEntropyLoss, init_args: {reduction: none}}"
+            )
+
+    @property
+    def weight_label_keys(self) -> tuple[str, ...]:
+        """``labels.<stream>.<key>`` for every `sample_weights` entry (empty when unset)."""
+        return tuple(f"labels.{self.stream}.{k}" for k in self.sample_weights)
 
     def declare_io(self, mode: Mode) -> IO:
         """Global or per-token pred spec depending on `sequence`; label/loss ports
-        are TRAINING-only.
+        (and the ``sample_weight`` labels) are TRAINING-only.
         """
         del mode
         label = TensorSpec(shape=self._tokens, dtype="int64", kind="label", modes=Mode.TRAINING)
-        return self._head_io(
-            label_specs={self.label_key: label}, pred_shape=(*self._tokens, len(self.class_names))
-        )
+        labels = {self.label_key: label}
+        for key in self.weight_label_keys:
+            labels[key] = TensorSpec(
+                shape=self._tokens, dtype="float32", kind="label", modes=Mode.TRAINING
+            )
+        return self._head_io(label_specs=labels, pred_shape=(*self._tokens, len(self.class_names)))
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Builds the head; when `weight_source` is set, allocates a ones-initialised
@@ -209,13 +255,90 @@ class ClassificationTaskModule(_TaskModuleBase):
         if not (mode & Mode.TRAINING):
             return {self.pred_key: preds}
         labels = self._consumed_labels(b)
+        keys = self.weight_label_keys
+        sample_weights = functools.reduce(torch.mul, (b.get(k) for k in keys)) if keys else None
+        loss = self.calculate_loss(preds, labels, sample_weights)
+        return {self.pred_key: preds, self.loss_key: loss * self.weight}
+
+    def calculate_loss(
+        self, preds: Tensor, labels: Tensor, sample_weights: Tensor | None = None
+    ) -> Tensor:
+        """The head loss over the consumed `labels`, before the task ``weight``.
+
+        Without `sample_weights`, a ``CrossEntropyLoss(reduction='mean')`` reduces via
+        `_masked_ce_mean` for both global ``[B, C]`` and sequence ``[B, T, C]`` heads
+        (the latter after moving the class axis to ``[B, C, T]``). With them, the
+        ``reduction='none'`` loss is reduced inline to
+        ``sum(w_i * c_{y_i} * l_i) / sum(w_i * c_{y_i})`` over rows with ``label != -1``:
+        ``CrossEntropyLoss(reduction='none')`` already returns the class-weighted
+        ``c_{y_i} * l_i``, so this mirrors torch's weighted
+        ``reduction='mean'``. ``c`` is the loss's class ``weight`` (``1`` when unset,
+        and always for `torch.nn.BCEWithLogitsLoss`, whose ``weight`` is per element).
+
+        Returns
+        -------
+        Tensor
+            The scalar loss (an all-ignored or all-zero-weight batch gives 0).
+        """
+        masked_mean = (
+            sample_weights is None
+            and isinstance(self.loss, torch.nn.CrossEntropyLoss)
+            and self.loss.reduction == "mean"
+        )
         if preds.ndim == 3:
-            loss = self.loss(preds.permute(0, 2, 1), labels)
+            # sequence head: put the class axis in place, [B, T, C] -> [B, C, T]
+            seq_preds = preds.permute(0, 2, 1)
+            if masked_mean:
+                loss = self._masked_ce_mean(seq_preds, labels)
+            else:
+                loss = self.loss(seq_preds, labels)
         elif isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
             loss = self.loss(preds.squeeze(-1), labels.float())
+        elif masked_mean:
+            loss = self._masked_ce_mean(preds, labels)
         else:
             loss = self.loss(preds, labels)
-        return {self.pred_key: preds, self.loss_key: loss * self.weight}
+        if sample_weights is None:
+            return loss
+        w_row = sample_weights * (labels != -1).to(loss.dtype)
+        class_weight = (
+            None
+            if isinstance(self.loss, torch.nn.BCEWithLogitsLoss)
+            else getattr(self.loss, "weight", None)
+        )
+        c_row = class_weight[labels.clamp(min=0)] if class_weight is not None else 1.0
+        denominator = (w_row * c_row).sum()
+        return (w_row * loss).sum() / denominator.clamp(min=torch.finfo(denominator.dtype).tiny)
+
+    def _masked_ce_mean(self, preds: Tensor, labels: Tensor) -> Tensor:
+        """``CrossEntropyLoss(reduction='mean')`` that survives an all-ignored batch.
+
+        Covers global ``[B, C]`` logits with ``[B]`` labels and sequence ``[B, C, T]``
+        logits with ``[B, T]`` labels (per-element losses and masks are elementwise).
+        Torch's weighted mean ``sum(c_y * l) / sum(c_y)`` over ``label != -1`` rows or
+        tokens is 0/0 = NaN when none is supervised (e.g. a batch holding only the
+        other jet type, or a sequence batch with every token ignored). The clamped
+        denominator makes that 0 with zero gradients; with at least one valid row or
+        token it equals torch's mean.
+        """
+        assert isinstance(self.loss, torch.nn.CrossEntropyLoss)
+        class_weight = self.loss.weight
+        per = torch.nn.functional.cross_entropy(
+            preds,
+            labels,
+            weight=class_weight,
+            ignore_index=-1,
+            reduction="none",
+            label_smoothing=self.loss.label_smoothing,
+        )
+        valid = (labels != -1).to(per.dtype)
+        c_row = (
+            class_weight[labels.clamp(min=0)].to(per.dtype)
+            if class_weight is not None
+            else torch.ones_like(per)
+        )
+        denominator = (c_row * valid).sum()
+        return (per * valid).sum() / denominator.clamp(min=torch.finfo(per.dtype).tiny)
 
     # -- output rendering ---------------------------------------------------
 

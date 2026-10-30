@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import lightning
+from lightning.pytorch.trainer.states import TrainerFn
 from torch import nn
 from torch.optim import Optimizer
 
@@ -20,9 +21,9 @@ from salt.data.dataset import SaltDataset
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.executor import Executor
-from salt.graph.planner import Plan, compile_plan
-from salt.graph.spec import Mode, SinkModule, TensorSpec, unflatten_spec
-from salt.model.base import SaltModelModule
+from salt.graph.planner import SOURCES, Plan, compile_plan
+from salt.graph.spec import Mode, SinkModule, TensorSpec, flatten_spec, unflatten_spec
+from salt.model.base import ModuleGroup, SaltModelModule
 from salt.model.bind import (
     ResolvedSchema,
     bind_all,
@@ -66,14 +67,51 @@ _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
 _OPTIMIZERS = ("AdamW", "lion", "lion-pytorch", "HybridMuonAdamW")
 
 
+def _expand_module_groups(modules: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, SaltModelModule] = {}
+    for key, mod in modules.items():
+        for name, m in (mod.expand() if isinstance(mod, ModuleGroup) else {key: mod}).items():
+            nest = isinstance(m, ModuleGroup)
+            if nest or name in out or (name != key and name in modules):
+                why = "groups cannot nest" if nest else "another entry already defines it"
+                raise ConfigError(f"module group {key!r} expands to {name!r} — {why}")
+            out[name] = m
+    return out
+
+
+def _accumulator_sinks(modules: Mapping[str, Any], mode: Mode) -> list[str]:
+    """Produced keys of every ``freeze_accumulators`` module, so a skipped loss never starves it."""
+    return [
+        key
+        for module in modules.values()
+        if callable(getattr(module, "freeze_accumulators", None))
+        for key in flatten_spec(module.declare_io(mode).produces)
+    ]
+
+
+def _upstream(plan: Plan, key: str) -> set[str]:
+    """Modules feeding `key` by gradient path: `SOURCES` and label-kind (detached) edges stop it."""
+    kinds = {(s.name, k): spec.kind for s in plan.steps for k, spec in s.produces.items()}
+    feeds: dict[str, set[str]] = {}
+    for e in plan.edges:
+        if e.producer != SOURCES and kinds.get((e.producer, e.key)) != "label":
+            feeds.setdefault(e.consumer, set()).add(e.producer)
+    todo = {e.producer for e in plan.edges if e.key == key and e.producer != SOURCES}
+    seen: set[str] = set()
+    while todo:
+        seen.add(name := todo.pop())
+        todo |= feeds.get(name, set()) - seen
+    return seen
+
+
 class SaltModule(lightning.LightningModule):
     """Lightning wrapper around a configured graph-module dict.
 
     Parameters
     ----------
     modules : dict[str, SaltModelModule | None]
-        Model-side graph modules by instance name. ``None`` entries are
-        dropped (deletion via ``--model.modules.X=null``).
+        Model-side graph modules by instance name. ``None`` entries are dropped (deletion via
+        ``--model.modules.X=null``); a `ModuleGroup` entry is expanded in place into its members.
     lrs : Mapping[str, float]
         OneCycleLR schedule config: required keys ``initial``, ``max``,
         ``end``, ``pct_start``; optional ``weight_decay`` (default 1e-5) and
@@ -130,6 +168,8 @@ class SaltModule(lightning.LightningModule):
         modules = {key: module for key, module in modules.items() if module is not None}
         if not modules:
             raise ConfigError("SaltModule needs a non-empty module dict")
+        # module groups expand here, so frozen:/ckpt/CLI names are the EXPANDED names
+        modules = _expand_module_groups(modules)
         for key, module in modules.items():
             if not isinstance(module, SaltModelModule):
                 raise ConfigError(
@@ -174,6 +214,19 @@ class SaltModule(lightning.LightningModule):
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
         # not an nn.Module: owns no params, so this adds no checkpoint keys
         self.training_controller = TrainingController(schedule, self.net, self.lrs, self.optimizer)
+        # a tuple, not a Module attribute: no second registration under the LightningModule
+        self._loss_sums = tuple(m for m in modules.values() if isinstance(m, LossSum))
+        self._stage_plans: dict[int, dict[Mode, Plan]] = {}
+        if schedule.has_skip_losses:
+            if len(self._loss_sums) != 1:
+                raise ConfigError(
+                    "training_schedule skip_losses needs exactly one LossSum module in "
+                    "model.modules"
+                )
+            for stage in schedule.stages:
+                if stage.skip_losses:
+                    self._loss_sums[0].resolve_active(stage.skip_losses)
+        self.training_controller.stage_listener = self._activate_stage
         # model-only by construction: modules + non-manifest-only outputs: writers,
         # never a terminal sink.
         self._graph_modules: dict[str, SaltModelModule] = dict(modules)
@@ -209,13 +262,12 @@ class SaltModule(lightning.LightningModule):
     def compose_output_section(self, section: Mapping[str, SaltModelModule | SinkModule]) -> None:
         """Compose the top-level ``outputs:`` section onto the model.
 
-        WRITERS are folded into the planning module dict (and `net`, params-free);
-        their declaration order is the eval-H5 per-group column order. SINKS go
-        to `_section_sinks` instead: excluded from the graph dict (folded into
-        the per-mode plan at ``compile_mode``) and from the bound section
-        manifest (a sink reads that manifest, so it must not contain itself).
-        MANIFEST-ONLY writers (`InputCopyWriter`) have no ``produces`` so the
-        demand closure would prune them — they stay in the section dict only,
+        WRITERS fold into the planning module dict (and `net`, params-free); their
+        declaration order is the eval-H5 per-group column order. SINKS go to
+        `_section_sinks`, kept out of the graph dict (folded into the per-mode plan
+        at ``compile_mode``) and out of the bound section manifest (a sink reads it,
+        so it must not contain itself). Copy-spec-only writers (no ``produces``)
+        would be pruned by the demand closure, so they stay in the section dict only,
         for the sink to read their copy spec at ``bind_output_section``.
 
         Raises `ConfigError` on an entry that is neither a `SaltModelModule`
@@ -380,22 +432,92 @@ class SaltModule(lightning.LightningModule):
         self._verify_ckpt_hash(mode, plan)
         return plan
 
-    def setup(self, stage: str) -> None:
-        """Compile the stage's plans and run the two-phase bind, after the
-        datamodule's own ``setup``; binds at most once, before any checkpoint
-        state-dict load.
+    def _compile_stage_plans(self, boundaries: Mapping[Mode, Mapping[str, TensorSpec]]) -> None:
+        """One FIT and one VAL plan per stage: the full plans, or demand-pruned to the stage's
+        active losses plus every accumulator module's outputs.
         """
-        if stage not in {"fit", "test"}:
+        for index, stage in enumerate(self.training_controller.schedule.stages):
+            if not stage.skip_losses:
+                self._stage_plans[index] = {mode: self.plans[mode] for mode in boundaries}
+                continue
+            loss = self._loss_sums[0]
+            loss.set_active(loss.resolve_active(stage.skip_losses))
+            try:
+                plans: dict[Mode, Plan] = {}
+                for mode, boundary in boundaries.items():
+                    prep = self._sink_prep((mode,), writer_demand=False)
+                    keep = _accumulator_sinks(prep.modules, mode)
+                    plans[mode] = compile_plan(
+                        prep.modules,
+                        mode,
+                        sources=unflatten_spec(dict(boundary)),
+                        sinks=[*prep.by_mode[mode].anchors, *keep],
+                    )
+                self._stage_plans[index] = plans
+            finally:
+                loss.set_active(None)
+
+    def _activate_stage(self, index: int) -> None:
+        """Install stage `index`'s FIT/VAL executors and active losses; logs what it skips."""
+        if not self._stage_plans:
+            return
+        stage = self.training_controller.schedule.stages[index]
+        plans = self._stage_plans[index]
+        for loss in self._loss_sums:
+            loss.set_active(loss.resolve_active(stage.skip_losses) if stage.skip_losses else None)
+        for mode, plan in plans.items():
+            self._executors[mode] = Executor(plan)
+        skipped = sorted(set(self.plans[Mode.FIT].module_names) - set(plans[Mode.FIT].module_names))
+        _LOG.info(
+            "training_schedule stage %r (%d): skipping %s",
+            stage.name,
+            index,
+            f"[{', '.join(skipped)}]" if skipped else "nothing",
+        )
+
+    def _check_frozen_losses(self) -> None:
+        """Per stage and active loss, log the frozen share of its upstream params; error at 100%."""
+        if self.hparams.get("training_schedule") is None:  # a plain fit logs nothing new
+            return
+        schedule = self.training_controller.schedule
+        for index, stage in enumerate(schedule.stages):
+            plan, frozen = self._stage_plans[index][Mode.FIT], schedule.frozen_names(stage)
+            for key in [k for s in plan.steps if isinstance(s.module, LossSum) for k in s.requires]:
+                up = [n for n in _upstream(plan, key) if n in self.net]
+                counts = {n: sum(p.numel() for p in self.net[n].parameters()) for n in up}
+                total, cold = sum(counts.values()), sum(v for n, v in counts.items() if n in frozen)
+                msg = "training_schedule stage %r %s: %d/%d params frozen (%.0f%%)"
+                _LOG.info(msg, stage.name, key, cold, total, 100 * cold / total if total else 100.0)
+                if cold == total:
+                    raise ConfigError(
+                        f"training_schedule stage {stage.name!r}: every parameter upstream of "
+                        f"{key!r} is frozen ({cold}/{total}; frozen modules "
+                        f"{sorted(set(counts) & frozen)}) — add {key.removeprefix('losses.')!r} "
+                        "to that stage's skip_losses"
+                    )
+
+    def setup(self, stage: str) -> None:
+        """Compile the stage's plans (``fit`` -> FIT+VAL, ``validate`` -> VAL,
+        ``test`` -> TEST) and run the two-phase bind, after the datamodule's own
+        ``setup``; binds at most once, before any checkpoint state-dict load.
+        """
+        if stage not in {"fit", "validate", "test"}:
             raise ConfigError(
-                f"stage {stage!r} is not supported by SaltModule — use trainer.fit or "
-                "trainer.test (validate/predict entry points are not supported)"
+                f"stage {stage!r} is not supported by SaltModule — use trainer.fit, "
+                "trainer.validate (salt validate) or trainer.test (predict is not supported)"
             )
         dm = self._graph_datamodule()
         if stage == "fit":
-            self.compile_mode(Mode.FIT, self._boundary(dm.train_dset, "train"))
-            self.compile_mode(Mode.VAL, self._boundary(dm.val_dset, "val"))
+            for loss in self._loss_sums:  # a repeated setup compiles the FULL plans again
+                loss.set_active(None)
+            self.compile_mode(Mode.FIT, fit_boundary := self._boundary(dm.train_dset, "train"))
+            self.compile_mode(Mode.VAL, val_boundary := self._boundary(dm.val_dset, "val"))
             self._assert_fit_val_identical()
+            self._compile_stage_plans({Mode.FIT: fit_boundary, Mode.VAL: val_boundary})
             reader = dm.train_dset.reader
+        elif stage == "validate":
+            self.compile_mode(Mode.VAL, self._boundary(dm.val_dset, "val"))
+            reader = dm.val_dset.reader
         else:
             self.compile_mode(Mode.TEST, self._boundary(dm.test_dset, "test"))
             reader = dm.test_dset.reader
@@ -423,6 +545,7 @@ class SaltModule(lightning.LightningModule):
             # start (freeze composes on the loaded weights) and BEFORE Lightning's
             # strategy.setup builds the optimizer, so it sees stage 0's requires_grad mask.
             # Later stages are driven by `TrainingScheduleCallback`. Fit-only.
+            self._check_frozen_losses()
             self.training_controller.preflight(self._trainer)
             preflight_lr_schedulers(self.training_controller.schedule)
             self.training_controller.start_fit(self._trainer)
@@ -673,7 +796,9 @@ class SaltModule(lightning.LightningModule):
         if stage.lr_scheduler is not None:
             return [opt], [build_stage_lr_scheduler(opt, stage.lr_scheduler)]
         total_steps = int(controller.stage_total_steps(self.trainer))
-        return [opt], [build_onecycle_scheduler(opt, lrs, total_steps)]
+        return [opt], [
+            build_onecycle_scheduler(opt, lrs, total_steps, step_stage=stage.is_sample_stage)
+        ]
 
     # -- checkpoints: schema + plan hashes, never Plan objects --------------------
 
@@ -714,7 +839,9 @@ class SaltModule(lightning.LightningModule):
         of a multi-stage schedule) restores the saved stage index + freeze mask
         BEFORE the optimizer is rebuilt (see
         `TrainingController.restore_schedule_stage`). Marks the instance
-        checkpoint-loaded (disables `materialise`).
+        checkpoint-loaded (disables `materialise`). Under ``trainer.validate``
+        (``salt validate``) it also restores the checkpoint's fit-loop progress
+        (`_restore_fit_progress_for_validate`).
         """
         state_dict = checkpoint.get("state_dict")
         cleaned = reject_v1_and_strip_orig_mod(state_dict)
@@ -722,6 +849,10 @@ class SaltModule(lightning.LightningModule):
             checkpoint["state_dict"] = cleaned
 
         self.loaded_from_checkpoint = True
+        trainer = getattr(self, "_trainer", None)  # None on a bare instance (no __init__ ran)
+        fn = getattr(getattr(trainer, "state", None), "fn", None)
+        if fn == TrainerFn.VALIDATING:
+            self._restore_fit_progress_for_validate(checkpoint)
         payload = checkpoint.get(CKPT_KEY)
         if payload is None:
             warnings.warn(
@@ -744,6 +875,39 @@ class SaltModule(lightning.LightningModule):
         # configure_optimizers builds a stage-k optimizer whose state_dict shape
         # matches the saved stage-k state.
         self.training_controller.restore_schedule_stage(payload.get("schedule"), self._trainer)
+
+    def _restore_fit_progress_for_validate(self, checkpoint: dict[str, Any]) -> None:
+        """`salt validate`: load the checkpoint's fit-loop progress so ``trainer.current_epoch``
+        / ``trainer.global_step`` equal its ``epoch`` / ``global_step`` (Lightning's
+        ``restore_loops`` restores only the validate loop off-fit). Hook order in
+        ``Trainer._run``: ``_call_setup_hook`` -> ``_restore_modules_and_callbacks`` (THIS hook,
+        before the state-dict load) -> ``restore_training_state`` (validate loop only) ->
+        ``_evaluation_loop.run`` -> ``setup_data`` -> `SaltDataModule.get_dataloader` reads
+        ``trainer.current_epoch`` (the streaming epoch seed) and the plotters stamp
+        ``step<global_step>``. Raises `ConfigError` when the checkpoint lacks ``epoch`` /
+        ``global_step`` / ``loops.fit_loop`` or the restored counters disagree with them.
+        """
+        meta = {key: checkpoint.get(key) for key in ("epoch", "global_step")}
+        loops = checkpoint.get("loops") or {}
+        if any(not isinstance(v, int) for v in meta.values()) or "fit_loop" not in loops:
+            raise ConfigError(
+                "salt validate needs a Lightning fit checkpoint with integer epoch/global_step "
+                f"and loops.fit_loop progress (got epoch={meta['epoch']!r}, "
+                f"global_step={meta['global_step']!r}, loops={sorted(loops)}) — cannot "
+                "restore the validation epoch/step"
+            )
+        trainer = self._trainer
+        trainer.fit_loop.load_state_dict(loops["fit_loop"])
+        got = (int(trainer.current_epoch), int(trainer.global_step))
+        want = (meta["epoch"], meta["global_step"])
+        if got != want:
+            raise ConfigError(
+                f"salt validate restored (epoch, global_step)={got} but the checkpoint records "
+                f"{want} — unsupported loop layout / optimisation mode"
+            )
+        _LOG.info(
+            f"salt validate: restored checkpoint progress epoch={got[0]} global_step={got[1]}"
+        )
 
     def _verify_ckpt_hash(self, mode: Mode, plan: Plan) -> None:
         """Compare a compiled plan's hash with the checkpoint's stored hash;

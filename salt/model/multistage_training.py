@@ -9,7 +9,8 @@ plus `TrainingScheduleCallback` (`salt/callbacks/schedule.py`).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from salt.graph.errors import ConfigError
@@ -21,9 +22,12 @@ from salt.schedule import (
     boundary_record,
     reducer_safe_freeze_required,
 )
+from salt.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from torch import nn
+
+log = get_logger(__name__)
 
 __all__ = ["TrainingController"]
 
@@ -88,10 +92,15 @@ class TrainingController:
         self.early_stop_tracker: EarlyStopTracker | None = None
         self.boundary_records: list[dict[str, Any]] = []
         self.pending_early_advance = False  # plain attribute — replaces the read-only property
+        self.stage_start_step = 0
+        self.epoch_start_step: int | None = None
+        self.stage_step_targets: dict[int, int] | None = None
+        self.stop_after_record: dict[str, Any] | None = None
         # when True, schedule-managed params keep requires_grad=True at DDP wrap
         # (unfreeze stays rank-synced); "frozen" is enforced by optimizer-exclusion
         # + eval + per-step grad clearing. False = requires_grad-based freeze.
         self.reducer_safe_freeze = False
+        self.stage_listener: Callable[[int], None] | None = None  # start/advance/resume
 
     # -- fit setup ------------------------------------------------------------------
 
@@ -131,11 +140,16 @@ class TrainingController:
             getattr(trainer, "strategy", None), self.schedule
         )
         self.current_stage_index = 0
+        self.stage_start_step = 0
+        self.epoch_start_step = 0
         self.stage_start_epoch = 0
         self.boundary_records = []
         self.pending_early_advance = False
+        self.stop_after_record = None
         self.early_stop_tracker = self._make_early_stop_tracker(self.schedule.stages[0])
         self._apply_stage_freeze(self.schedule.stages[0])
+        if self.stage_listener is not None:
+            self.stage_listener(0)
 
     def _preflight_early_stop(self, trainer: Any) -> None:
         """Fail fast at fit setup if the schedule declares `early_stop` but the
@@ -188,32 +202,101 @@ class TrainingController:
 
     def advance_to_stage(self, new_index: int, global_step: int, epoch: int, reason: str) -> None:
         """Enter stage `new_index`: set the active index + apply its freeze mask
-        (the delta off the previous stage). Under the `early_stop` master switch,
+        (the delta off the previous stage). Under the sample/`early_stop` switches,
         also records the boundary, resets the stage's live counters, and marks the
-        new stage's start epoch (so the per-stage epoch-cap count is measured from
+        new stage's start step/epoch (so the per-stage epoch-cap count is measured from
         here). The optimizer/LR rebuild is done by the caller
         (`TrainingScheduleCallback`) via ``strategy.setup_optimizers`` right after.
-        `reason` is ``"epochs"`` or ``"early_stop"`` (recorded only under the
-        `early_stop` switch).
+        `reason` is ``"epochs"``, ``"early_stop"`` or ``"steps"`` (recorded only under the
+        sample/`early_stop` switches). Every accumulator module is frozen first.
         """
         self.current_stage_index = new_index
         stage = self.schedule.stages[new_index]
         self._apply_stage_freeze(stage)
-        if self.schedule.has_early_stop:
+        self._freeze_accumulators(stage, global_step, epoch)
+        if self.schedule.has_sample_stages or self.schedule.has_early_stop:
+            self.stage_start_step = global_step
             self.stage_start_epoch = epoch
             self.pending_early_advance = False
             self.boundary_records.append(
                 boundary_record(stage.name, new_index, global_step, epoch, reason)
             )
             self.early_stop_tracker = self._make_early_stop_tracker(stage)
+        if self.stage_listener is not None:
+            self.stage_listener(new_index)
 
-    def next_stage_index_early_stop(self, current_epoch: int) -> int:
+    def _freeze_accumulators(self, stage: StageConfig, global_step: int, epoch: int) -> None:
+        """Freeze every duck-typed ``freeze_accumulators`` module; `RuntimeError` if unfrozen."""
+        for name, module in self.net.items():
+            freeze = getattr(module, "freeze_accumulators", None)
+            if not callable(freeze):
+                continue
+            freeze(global_step, epoch)
+            if getattr(module, "accumulators_frozen", False) is not True:
+                raise RuntimeError(
+                    f"model module {name!r} still reports unfrozen accumulators after "
+                    f"freeze_accumulators() at the boundary into stage {stage.name!r} (epoch "
+                    f"{epoch}, global step {global_step}) — refusing to run on unfrozen statistics"
+                )
+
+    def resolve_step_targets(self, trainer: Any) -> None:
+        """Resolve each sample stage's per-rank step target N once, broadcast from rank 0."""
+        if not self.schedule.has_sample_stages or self.stage_step_targets is not None:
+            return
+        batch_size = getattr(getattr(trainer, "datamodule", None), "batch_size", None)
+        if batch_size is None:
+            raise ConfigError("sample stages need data.batch_size to convert targets to steps")
+        world_size = int(getattr(trainer, "world_size", 1) or 1)
+        accumulate = int(getattr(trainer, "accumulate_grad_batches", 1) or 1)
+        steps_per_epoch: int | None = None
+        if any(stage.frac_samples is not None for stage in self.schedule.stages):
+            batches = getattr(trainer, "num_training_batches", None)
+            if not isinstance(batches, int | float) or not math.isfinite(batches) or batches <= 0:
+                raise ConfigError(
+                    "frac_samples needs a finite train loader length (trainer."
+                    f"num_training_batches is {batches!r}); use num_samples instead"
+                )
+            steps_per_epoch = math.ceil(batches / accumulate)
+        targets = self.schedule.stage_step_targets(
+            int(batch_size), world_size, accumulate, steps_per_epoch
+        )
+        bcast = getattr(getattr(trainer, "strategy", None), "broadcast", None)
+        if callable(bcast):
+            targets = bcast(targets, src=0)  # rank 0's N wins: no rank can disagree
+        self.stage_step_targets = dict(targets)
+        inputs = f"batch_size={batch_size}, world_size={world_size}, accumulate={accumulate}"
+        for i in self.schedule.sample_stage_indices():
+            s, n = self.schedule.stages[i], self.stage_step_targets[i]
+            log.info(
+                f"training_schedule: stage {s.name!r} (num_samples={s.num_samples}, frac_samples="
+                f"{s.frac_samples}) -> N={n} steps ({inputs}, steps_per_epoch={steps_per_epoch})"
+            )
+
+    def step_target(self, index: int) -> int:
+        """The resolved per-rank optimizer-step target N of sample stage `index`."""
+        if self.stage_step_targets is None:
+            raise RuntimeError(
+                "sample-stage step targets not resolved — call resolve_step_targets(trainer)"
+            )
+        return self.stage_step_targets[index]
+
+    def record_stop_after(self, global_step: int, epoch: int) -> dict[str, Any]:
+        """Store (under `early_stop` also append) and return the `stop_after` boundary record."""
+        idx = self.schedule.stop_after_index
+        assert idx is not None, "record_stop_after called on a schedule without stop_after"
+        rec = boundary_record(self.schedule.stages[idx].name, idx, global_step, epoch, "stop_after")
+        self.stop_after_record = rec
+        if self.schedule.has_early_stop:
+            self.boundary_records.append(rec)
+        return rec
+
+    def next_stage_index(self, current_epoch: int) -> int:
         """The stage index to run at `current_epoch` under the `early_stop` switch:
         advance by exactly one when the active stage's early-stop fired (a pending
         advance) OR it reached its epoch cap (``current_epoch - stage_start >=
         epochs``); the final stage never advances by cap (its early-stop ends the
         fit instead). Data-dependent boundaries make this replace the pure
-        epoch-arithmetic `stage_index_for_epoch` whenever any stage can early-stop.
+        epoch-arithmetic `stage_index_for_epoch` (also with sample stages, which advance by step).
         """
         idx = self.current_stage_index
         if idx >= len(self.schedule.stages) - 1:
@@ -261,21 +344,27 @@ class TrainingController:
         schedule uses the whole-run `estimated_stepping_batches` exactly (parity);
         a multi-stage schedule uses this stage's proportional per-stage allocation
         of that estimate (never the whole-run figure for a sub-stage).
-        Under the `early_stop` switch the envelope is sized from the stage's epoch
+        Under the sample/`early_stop` switch the envelope is sized from the stage's epoch
         cap measured from its ACTUAL start epoch (see `_early_stop_stage_total_steps`)
         so a stage that starts early — because an earlier stage early-stopped — never
-        over-steps its OneCycle.
+        over-steps its OneCycle, nor one whose start moved on resume. A sample stage uses N.
         """
         total = trainer.estimated_stepping_batches
         if not self.schedule.is_multi_stage:
             return total
-        if self.schedule.has_early_stop:
+        self.resolve_step_targets(trainer)
+        if self.schedule.has_sample_stages:  # validation only: raises if targets exhaust the run
+            self.schedule.stage_step_allocations(total, trainer.max_epochs, self.stage_step_targets)
+        index = self.current_stage_index
+        if self.schedule.stages[index].is_sample_stage:
+            return self.step_target(index)
+        if self.schedule.has_early_stop or self.schedule.has_sample_stages:
             return self._early_stop_stage_total_steps(total, trainer)
         allocations = self.schedule.stage_step_allocations(total, trainer.max_epochs)
         return allocations[self.current_stage_index]
 
     def _early_stop_stage_total_steps(self, total: int, trainer: Any) -> int:
-        """OneCycle `total_steps` for the active stage under the `early_stop` switch:
+        """OneCycle `total_steps` for the active stage under the sample/`early_stop` switch:
         a per-epoch step estimate (``total / max_epochs``) times the stage's epoch
         budget — its `epochs` cap for a non-final stage, or ``max_epochs -
         stage_start_epoch`` for the final stage (whose real length depends on when
@@ -292,7 +381,9 @@ class TrainingController:
         else:
             assert stage.epochs is not None  # non-final stages require epochs
             budget_epochs = stage.epochs
-        return max(1, steps_per_epoch * budget_epochs)
+        # minus this epoch's steps already taken on a mid-epoch entry (None = unknown: none)
+        start = self.stage_start_step if self.epoch_start_step is None else self.epoch_start_step
+        return max(1, steps_per_epoch * budget_epochs - max(0, self.stage_start_step - start))
 
     # -- checkpoints --------------------------------------------------------------
 
@@ -302,17 +393,26 @@ class TrainingController:
         legacy payload — a parity guard). Under the `early_stop` master switch it
         additionally carries the active stage's start epoch, the completed-boundary
         records, and the live early-stop counters, so a data-dependent resume
-        reconstructs the exact stage position + patience state.
+        reconstructs the exact stage position + patience state. Sample stages add the
+        start epoch, boundaries and `stage_start_step`; `stop_after` adds its block.
         """
         state: dict[str, Any] = {
             "stage_index": self.current_stage_index,
             "stage_name": self.schedule.stages[self.current_stage_index].name,
         }
-        if self.schedule.has_early_stop:
+        if self.schedule.has_sample_stages or self.schedule.has_early_stop:
             state["stage_start_epoch"] = self.stage_start_epoch
             state["boundaries"] = list(self.boundary_records)
-            if self.early_stop_tracker is not None:
-                state["early_stop_state"] = self.early_stop_tracker.state_dict()
+        if self.schedule.has_early_stop and self.early_stop_tracker is not None:
+            state["early_stop_state"] = self.early_stop_tracker.state_dict()
+        if self.schedule.has_sample_stages:
+            state["stage_start_step"] = self.stage_start_step
+        if self.schedule.stop_after is not None:
+            state["stop_after"] = {
+                "stage": self.schedule.stop_after,
+                "reached": self.stop_after_record is not None,
+                "boundary": self.stop_after_record,
+            }
         return state
 
     def restore_schedule_stage(
@@ -327,7 +427,7 @@ class TrainingController:
         A payload missing any key this version's writer emits (`stage_index`,
         `stage_name`, and under `early_stop`: `stage_start_epoch`, `boundaries`,
         `early_stop_state`, `early_stop_state.fingerprint`) raises `ConfigError`
-        — there is no legacy-payload path.
+        — there is no legacy-payload path (sample stages also need `stage_start_step`).
         """
         if schedule_state is None:
             return
@@ -354,22 +454,37 @@ class TrainingController:
                 )
             self.current_stage_index = index
             self._apply_stage_freeze(self.schedule.stages[index])
+            if self.stage_listener is not None:
+                self.stage_listener(index)
         else:
             index = 0
-        if self.schedule.has_early_stop:
+        if self.schedule.has_sample_stages or self.schedule.has_early_stop:
             self._restore_early_stop_state(index, schedule_state)
 
     def _restore_early_stop_state(self, index: int, schedule_state: Mapping[str, Any]) -> None:
-        """Restore early-stop resume state (stage start epoch, boundary records,
+        """Restore boundary resume state (stage start epoch/step, boundary records,
         live counters) so a mid-stage resume continues patience exactly. A stage
         without an `early_stop` criterion restores no tracker (the writer emits
         no `early_stop_state` for it); a criterion-fingerprint mismatch with the
-        current config raises `ConfigError` (resume undefined).
+        current config raises `ConfigError` (resume undefined). A reached `stop_after`
+        block for this stage, stopped before its N or epoch cap, re-arms the advance.
         """
         self.stage_start_epoch = _require(schedule_state, "stage_start_epoch", "schedule")
         self.boundary_records = list(_require(schedule_state, "boundaries", "schedule"))
         self.pending_early_advance = False
+        self.epoch_start_step = None
+        if self.schedule.has_sample_stages:
+            self.stage_start_step = int(_require(schedule_state, "stage_start_step", "schedule"))
         stage = self.schedule.stages[index]
+        if self.schedule.has_early_stop:
+            blk = schedule_state.get("stop_after")
+            bnd = blk.get("boundary") if isinstance(blk, Mapping) and blk.get("reached") else None
+            if isinstance(bnd, Mapping) and bnd.get("stage_index") == index:
+                # a real N hit still advances first ("steps"), a cap stop with reason "epochs"
+                self.pending_early_advance = stage.is_sample_stage or (
+                    stage.epochs is not None
+                    and bnd["epoch"] + 1 - self.stage_start_epoch < stage.epochs
+                )
         if stage.early_stop is None:
             self.early_stop_tracker = None
             return

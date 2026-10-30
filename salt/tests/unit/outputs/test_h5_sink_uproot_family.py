@@ -7,7 +7,11 @@ The sink keys its structured-H5 path on the reader's advertised CAPABILITY
 NOT be driven into the H5StructuredReader branch (which assumes ``.dataset`` /
 ``.global_object`` / an h5py-openable ``source_path``). It advertises no
 ``h5_source`` and so takes the no-source path: task outputs are written; a
-pad-mask / input-copy demand raises a ConfigError naming the capability. A
+pad-mask demand raises a ConfigError naming the capability (input copies come
+from the bundle now, so global-stream copies are written; a sequence-stream copy
+needs the file token length and raises a ConfigError at the first consume). A
+reader that declares a fixed-length ``raw.<stream>`` ``(B, pad_max)`` supplies
+that token length itself, so its per-token columns and pad masks are written. A
 MultiSampleReader-shaped reader whose ``.groups`` DELEGATE to a sub-reader (and
 so DO expose ``.dataset``) must still route to the no-source path — proving the
 probe is capability-keyed, not ``hasattr(group, "dataset")``-keyed.
@@ -19,16 +23,20 @@ from pathlib import Path
 
 import h5py
 import pytest
+import torch
 
+from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.outputs import InputCopyWriter, PadMaskWriter
-from salt.outputs.sinks.h5_sink import H5OutputSink
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
+from salt.outputs import PadMaskWriter
+from salt.outputs.sinks.h5_sink import H5OutputSink, _declared_seq_lengths
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.sink import SinkContext
 
 pytestmark = pytest.mark.cpu_always
 
 _N = 128  # rows (>= the ftag H5Writer default chunk size of 100)
+_T = 15  # the declared tracks length of `_DeclaringUprootReader`
 
 
 class _UprootGroupCfg:
@@ -58,8 +66,12 @@ class _UprootReader:
 
     def __init__(self, filename: Path) -> None:
         self.filename = filename
-        self.streams = ("jets", "event")
-        self.groups = {"jets": _UprootGroupCfg(True), "event": _UprootGroupCfg(False)}
+        self.streams = ("jets", "tracks", "event")
+        self.groups = {
+            "jets": _UprootGroupCfg(True),
+            "tracks": _UprootGroupCfg(True),
+            "event": _UprootGroupCfg(False),
+        }
         # h5_source intentionally absent -> getattr(reader, "h5_source", None) is None
 
 
@@ -117,34 +129,95 @@ def _ctx(dm: _DataModule, tmp_path: Path) -> SinkContext:
 def test_uproot_reader_ok_writes_global_task_output(tmp_path):
     """A uproot-family reader (groups present, h5_source None) resolves its
     schema and writes a global 'event' task-output group — no crash on the
-    UprootGroupConfig's missing ``.dataset``.
+    UprootGroupConfig's missing ``.dataset``. The file itself is created
+    LAZILY by the first `consume` (dynamic append).
     """
     out = tmp_path / "eval.h5"
     reader = _UprootReader(tmp_path / "ttbar_test.root")
-    sink = H5OutputSink(output=str(out))  # no InputCopyWriter / PadMaskWriter section bound
+    sink = H5OutputSink(output=str(out))  # no PadMaskWriter section bound
     _seed_global_column(sink)
     sink.open_schema(_ctx(_DataModule(reader), tmp_path))
-    assert sink._h5 is not None  # noqa: SLF001 - FIXED-mode writer was created
-    assert out.exists()
+    assert sink._h5 is None  # noqa: SLF001 - lazy: no writer until the first consume
+    assert not out.exists()
+    sink.consume(
+        Bundle({
+            "meta": {"rows": torch.tensor([0, _N])},
+            "outputs": {"event": {"cls": torch.rand(_N, 2)}},
+        })
+    )
+    sink.flush()
     with h5py.File(out) as f:
         assert f["event"].shape == (_N,)  # global stream -> (total,) shape
+        assert f["event"].maxshape == (None,)  # dynamic (resizable) dataset
         assert list(f["event"].dtype.names) == ["salt_p0", "salt_p1"]
+
+
+def test_uproot_reader_sequence_copy_raises_config_error(tmp_path):
+    """A [B, T] single-field input copy (``dtype=None``) on the 'tracks'
+    sequence stream of a source-less uproot reader fails loudly at the first
+    consume: the file token length is unknown, so the ConfigError names the
+    stream, the column and the missing ``h5_source`` capability (not an opaque
+    u2s error or a ``_seq_lengths`` KeyError). Nothing is written.
+    """
+    out = tmp_path / "eval.h5"
+    reader = _UprootReader(tmp_path / "ttbar_test.root")
+    sink = H5OutputSink(output=str(out))
+    sink._columns = (  # noqa: SLF001 - white-box column seeding, as `_seed_global_column`
+        OutputColumn(key="outputs.tracks.d0", suffixes=["d0"], dtype=None, prefix=False),
+    )
+    sink._columns_resolved = True  # noqa: SLF001
+    sink.open_schema(_ctx(_DataModule(reader), tmp_path))
+    with pytest.raises(ConfigError, match="token length") as exc:
+        sink.consume(
+            Bundle({
+                "meta": {"rows": torch.tensor([0, _N])},
+                "outputs": {"tracks": {"d0": torch.rand(_N, 5)}},
+            })
+        )
+    assert "'tracks'" in str(exc.value)
+    assert "outputs.tracks.d0" in str(exc.value)
+    assert "_UprootReader" in str(exc.value)
+    assert sink._h5 is None  # noqa: SLF001 - raised before the lazy writer was created
+    assert not out.exists()
+
+
+def test_uproot_reader_global_copy_still_written(tmp_path):
+    """A ``dtype=None`` [B] input copy on the global 'jets' stream is written
+    by the same source-less uproot reader, at the leaf's own dtype.
+    """
+    out = tmp_path / "eval.h5"
+    reader = _UprootReader(tmp_path / "ttbar_test.root")
+    sink = H5OutputSink(output=str(out))
+    sink._columns = (  # noqa: SLF001 - white-box column seeding, as `_seed_global_column`
+        OutputColumn(key="outputs.jets.pt", suffixes=["pt"], dtype=None, prefix=False),
+    )
+    sink._columns_resolved = True  # noqa: SLF001
+    sink.open_schema(_ctx(_DataModule(reader), tmp_path))
+    pt = torch.rand(_N)
+    sink.consume(
+        Bundle({
+            "meta": {"rows": torch.tensor([0, _N])},
+            "outputs": {"jets": {"pt": pt}},
+        })
+    )
+    sink.flush()
+    with h5py.File(out) as f:
+        assert f["jets"].shape == (_N,)
+        assert list(f["jets"].dtype.names) == ["pt"]
+        assert f["jets"].dtype["pt"] == pt.numpy().dtype
+        assert (f["jets"]["pt"] == pt.numpy()).all()
 
 
 @pytest.mark.parametrize(
     ("section", "match"),
     [
-        (
-            {"inputs_copy": InputCopyWriter(streams=["jets"], variables={"jets": ["pt"]})},
-            "input-copying",
-        ),
         ({"pad_mask": PadMaskWriter(streams=["jets"])}, "pad-mask columns"),
     ],
-    ids=["input-copying", "pad-mask"],
+    ids=["pad-mask"],
 )
 def test_uproot_reader_rejected_when_source_needed(tmp_path, section, match):
-    """Binding input-copying OR pad-mask columns to a source-less uproot reader
-    hard-fails, the ConfigError naming exactly the missing capability.
+    """Binding pad-mask columns to a source-less uproot reader hard-fails, the
+    ConfigError naming exactly the missing capability.
     """
     reader = _UprootReader(tmp_path / "ttbar_test.root")
     sink = H5OutputSink(output=str(tmp_path / "eval.h5"))
@@ -164,7 +237,63 @@ def test_multisample_delegating_groups_still_no_source_path(tmp_path):
     sink = H5OutputSink(output=str(out))
     _seed_global_column(sink)
     sink.open_schema(_ctx(_DataModule(reader), tmp_path))
-    assert sink._h5 is not None  # noqa: SLF001
+    assert sink._h5 is None  # noqa: SLF001 - lazy: no writer until the first consume
+    sink.consume(
+        Bundle({
+            "meta": {"rows": torch.tensor([0, _N])},
+            "outputs": {"event": {"cls": torch.rand(_N, 2)}},
+        })
+    )
+    sink.flush()
     assert out.exists()
     with h5py.File(out) as f:
         assert f["event"].shape == (_N,)
+
+
+class _DeclaringUprootReader(_UprootReader):
+    """A source-less reader that declares its padded streams, as `FTAG1LITEReader` does."""
+
+    def declare_io(self, mode: Mode) -> IO:
+        del mode
+        flat = {
+            "raw.jets": TensorSpec(shape=("B",), kind="data"),
+            "raw.tracks": TensorSpec(shape=("B", _T), kind="data"),
+            "masks.tracks": TensorSpec(shape=("B", _T), dtype="bool", kind="pad_mask"),
+        }
+        return IO(produces=unflatten_spec(flat))
+
+
+def test_declared_lengths_read_from_reader_io(tmp_path):
+    """Only fixed-length ``raw.<stream>`` ``(B, T)`` declarations count as sequence streams."""
+    assert _declared_seq_lengths(_DeclaringUprootReader(tmp_path / "t.root")) == {"tracks": _T}
+    assert _declared_seq_lengths(_UprootReader(tmp_path / "t.root")) == {}
+
+
+def test_declaring_reader_writes_per_token_outputs_and_pad_mask(tmp_path):
+    """A source-less reader declaring ``raw.tracks`` ``(B, T)`` gets a per-token task
+    output and a pad-mask column on ``tracks``, both at the declared length.
+    """
+    out = tmp_path / "eval.h5"
+    reader = _DeclaringUprootReader(tmp_path / "ttbar_test.root")
+    sink = H5OutputSink(output=str(out))
+    # bind BEFORE seeding: binding resets the resolved column table
+    sink.bind_output_section({"pad_mask": PadMaskWriter(streams=["tracks"])})
+    sink._columns = (  # noqa: SLF001 - white-box column seeding, as `_seed_global_column`
+        OutputColumn(key="outputs.tracks.origin", suffixes=["p0", "p1", "p2"]),
+    )
+    sink._columns_resolved = True  # noqa: SLF001
+    sink.open_schema(_ctx(_DataModule(reader), tmp_path))
+    probs = torch.rand(_N, _T, 3)
+    mask = torch.rand(_N, _T) > 0.5
+    sink.consume(
+        Bundle({
+            "meta": {"rows": torch.tensor([0, _N])},
+            "outputs": {"tracks": {"origin": probs, "mask": mask}},
+        })
+    )
+    sink.flush()
+    with h5py.File(out) as f:
+        assert f["tracks"].shape == (_N, _T)
+        assert list(f["tracks"].dtype.names) == ["salt_p0", "salt_p1", "salt_p2", "mask"]
+        assert (f["tracks"]["mask"] == mask.numpy()).all()
+        assert (f["tracks"]["salt_p2"] == probs[..., 2].numpy()).all()

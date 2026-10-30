@@ -437,7 +437,7 @@ class H5StructuredReader(Reader):
         `_apply_row_cuts` engine. Returns `None` when no cuts engage — the sentinel that
         keeps the contiguous read path byte-identical.
         """
-        if self.cuts is None or not self.cuts.global_cuts:
+        if self.cuts is None or not self.cuts.for_split(self.stage):
             return None
         ds = f[first.dataset]
         if ds.ndim != 1:

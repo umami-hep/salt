@@ -265,8 +265,9 @@ def boundary_demand(
     """Per-mode dataset-boundary demand + per-key demander descriptions.
 
     In TEST, the selected sink's ``writer_demand`` extends the demand so
-    writer-demanded dataset keys keep their producers alive. In FIT/VAL, a
-    configured callback's dataset-namespace demand does the same.
+    writer-demanded dataset keys keep their producers alive, and
+    ``meta.rows`` (the batch's row range, for writers) is appended last. In
+    FIT/VAL, a configured callback's dataset-namespace demand does the same.
 
     Parameters
     ----------
@@ -379,7 +380,7 @@ def prepare_sinks(
     sinks : Iterable[Any]
         Every sink reachable by the caller.
     output_section : Mapping[str, Any]
-        The ``outputs:`` section writers sinks bind their copy spec from.
+        The ``outputs:`` section writers sinks bind their column manifest from.
     reader : Any
         The attached dataset reader; a TEST sink is only selected (and
         folded) when this is not None.

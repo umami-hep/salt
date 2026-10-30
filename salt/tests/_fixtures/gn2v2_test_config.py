@@ -70,6 +70,14 @@ SMALL: dict[str, Any] = {
 # does not carry fails at schema resolution, so the derived config declares the
 # variables the fixture provides — this list, not the shipped one, is what the
 # suites' width assertions (19 track features) are anchored to.
+#
+# The shipped config's `inputs_copy` writer now lists the SHIPPED feature names
+# (`pt_btagJes`/`eta_btagJes` + the full open-data track list) — names this
+# fixture's dummy file does not carry. `derive()` deep-merges arbitrary
+# top-level keys (lists REPLACE, not merge), so this patch overrides
+# `outputs.inputs_copy.init_args.variables` with fixture-present names too,
+# keeping `test_input_copies_precede_task_columns` meaningful (a copied column
+# must actually exist ahead of the task columns, not just be declared).
 FIXTURE_VARIABLES: dict[str, Any] = {
     "data": {
         "modules": {
@@ -82,7 +90,17 @@ FIXTURE_VARIABLES: dict[str, Any] = {
                 }
             }
         }
-    }
+    },
+    "outputs": {
+        "inputs_copy": {
+            "init_args": {
+                "variables": {
+                    "jets": list(JET_VARIABLES),
+                    "tracks": ["d0", "z0SinTheta"],
+                }
+            }
+        }
+    },
 }
 
 # The head shape the curated EXPECTED_OUTPUTS table (salt/tests/integration/

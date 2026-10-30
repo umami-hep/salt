@@ -1,7 +1,9 @@
 """H5OutputSink open_schema reader-shape guard — a structured-reader-less
 (global-only, no ``.groups``/``.source_path``) reader is accepted when nothing
 demands the source file, and rejected (naming the capability) when pad-mask
-columns or input-copying are requested.
+columns are requested. Input copies no longer need the source file at all —
+`InputCopyWriter` copies straight from the bundle, so a copy column is just
+another `OutputColumn` the sink packs like any other.
 """
 
 from __future__ import annotations
@@ -10,9 +12,11 @@ from pathlib import Path
 
 import h5py
 import pytest
+import torch
 
+from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.outputs import InputCopyWriter, PadMaskWriter
+from salt.outputs import PadMaskWriter
 from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.sink import SinkContext
@@ -67,15 +71,25 @@ def _ctx(tmp_path: Path) -> SinkContext:
 
 
 def test_groupless_reader_ok_when_nothing_needs_source(tmp_path):
-    """No copy + no pad mask: a groups-less global-only reader resolves its schema."""
+    """No pad mask: a groups-less global-only reader resolves its schema, and
+    the FILE itself is created LAZILY by the first `consume` (dynamic append).
+    """
     out = tmp_path / "eval.h5"
-    sink = H5OutputSink(output=str(out))  # no InputCopyWriter / PadMaskWriter section bound
+    sink = H5OutputSink(output=str(out))  # no PadMaskWriter section bound
     _seed_global_column(sink)
     sink.open_schema(_ctx(tmp_path))
-    assert sink._h5 is not None  # noqa: SLF001 - FIXED-mode writer was created
-    assert out.exists()  # schema file written to disk
+    assert sink._h5 is None  # noqa: SLF001 - lazy: no writer until the first consume
+    assert not out.exists()  # nothing written yet
+    sink.consume(
+        Bundle({
+            "meta": {"rows": torch.tensor([0, _N])},
+            "outputs": {"mnist": {"cls": torch.rand(_N, 2)}},
+        })
+    )
+    sink.flush()
     with h5py.File(out) as f:
         assert f["mnist"].shape == (_N,)  # global stream -> (total,) shape
+        assert f["mnist"].maxshape == (None,)  # dynamic (resizable) dataset
         cols = list(f["mnist"].dtype.names)
     assert cols == ["salt_p0", "salt_p1"]
 
@@ -83,17 +97,13 @@ def test_groupless_reader_ok_when_nothing_needs_source(tmp_path):
 @pytest.mark.parametrize(
     ("section", "match"),
     [
-        (
-            {"inputs_copy": InputCopyWriter(streams=["mnist"], variables={"mnist": ["digit"]})},
-            "input-copying",
-        ),
         ({"pad_mask": PadMaskWriter(streams=["mnist"])}, "pad-mask columns"),
     ],
-    ids=["input-copying", "pad-mask"],
+    ids=["pad-mask"],
 )
 def test_groupless_reader_rejected_when_source_needed(tmp_path, section, match):
-    """Binding input-copying OR pad-mask columns to a groups-less reader hard-fails,
-    the ConfigError naming exactly the missing capability.
+    """Binding pad-mask columns to a groups-less reader hard-fails, the
+    ConfigError naming exactly the missing capability.
     """
     sink = H5OutputSink(output=str(tmp_path / "eval.h5"))
     sink.bind_output_section(section)  # bind BEFORE seeding: binding resets the column table

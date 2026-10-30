@@ -201,11 +201,15 @@ class OnnxExportSink(Node):
         Keys in first-appearance order: one field -> a single-``name`` leaf
         (per-token when the field is), N fields -> a ``names`` split leaf.
         A split leaf is a set of GLOBAL float scalars, so a per-token field
-        mixed into one is a `ConfigError`.
+        mixed into one is a `ConfigError`. Fields with no ONNX name, or with
+        ``dtype is None`` (an input-copy field — a bundle-dtype eval-H5 column
+        with no ONNX representation), are skipped.
         """
         by_key: dict[str, list[OutputField]] = {}
         for leaf_key, field in fields:
-            if field.resolved_onnx_name is not None:
+            # dtype None = an input-copy field (bundle-dtype eval-H5 column); Athena
+            # feeds the inputs itself, so it has no ONNX leaf and no export demand.
+            if field.resolved_onnx_name is not None and field.dtype is not None:
                 by_key.setdefault(leaf_key, []).append(field)
         leaves: list[OnnxExportLeaf] = []
         for leaf_key, group in by_key.items():

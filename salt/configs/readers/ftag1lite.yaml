@@ -1,52 +1,273 @@
-# Reader fragment — DAOD_FTAG1LITE POOL files, small-R EMPFlow jets.
+# Reader config - DAOD_FTAG1LITE POOL files, small-R EMPFlow jets, all input collections.
 #
-# Stackable: `salt fit --config readers/ftag1lite.yaml --config <model>.yaml`
-# (jsonargparse deep-merges configs left-to-right). Provide the source file(s)
-# via --data.train_file / --data.val_file (or the datamodule's file keys).
+# Two shipped FTAG1LITEReader configs, each self-contained (no include):
+#   readers/ftag1lite.yaml        jets: small_r (AntiKt4EMPFlow)
+#   readers/ftag1lite_joint.yaml  jets: both (small-R + AntiKt10UFOCSSKSoftDropBeta100Zcut10)
+# Usage (source files from --data.train_file / --data.val_file or the datamodule's file keys):
+#   salt fit --config readers/ftag1lite.yaml --config <model>.yaml \
+#            --data.manifest '{train: /path/to/train_manifest.json, val: /path/to/val_manifest.json}'
 #
-# Schema notes:
-#   - unroll: jets  -> one row per small-R jet; `[event][jet]` is flattened away.
-#   - Jet-level scalars and track constituents both live under the jet
-#     collection's aux store, so both groups share
-#     prefix: AntiKt4EMPFlowJetsAuxDyn.
-#   - Track lists are DIRECT double-jagged decorations (`ft1l_trk_*`), NOT
-#     ElementLinks — no link_branch/target_prefix needed (contrast PHYSLITE).
-#   - Track truth labels stay under v1 field names so the task heads' label
-#     derivation holds (VertexingTaskModule derives the origin key by replacing
-#     'VertexIndex' -> 'OriginLabel').
+# Both configs stream: the datamodule builds the reader's FTAG1LITEStreamingDataset instead
+# of SaltDataset. Rows arrive in a different order; the batch object, the plan and
+# everything downstream are unchanged.
+#
+# Containers: each source file's parent directory is one container (one directory per
+# rucio container; a flat directory is one container). `shard_scope: owner` - each rank
+# owns a disjoint set of containers and the combined super-batch across GPUs is
+# stratified by container; owner needs `shuffle_pool_rows: null`. To stream per_rank
+# instead (every rank reads every container, proportional per-rank batches drawn from a
+# 100,000-row shuffle pool):
+#   --data.modules.reader.init_args.shard_scope per_rank --data.modules.reader.init_args.shuffle_pool_rows 100000
+# Validation and test always stream per_rank.
+#
+# `manifest:` is REQUIRED on the streaming path and is not set here (salt never chooses a
+# storage location): pass it on the command line, as above, or in your own overlay. A
+# single path is valid only when every stage reads the same corpus. An existing manifest
+# is validated and read, a missing one is built at that path on rank 0 in prepare_data,
+# and a stale one is a hard error - delete the file to rebuild.
 
 data:
+  iterable: true
+  # Rows per reader call (one container block at a time).
+  block_rows: 1024
+  # Every container keeps one resident block, so a cap below the per-shard container
+  # count would only force re-reads.
+  max_live_streams: null  # null leaves the cap unasserted
+  shuffle_stream: true
   modules:
     reader:
-      class_path: salt.data.UprootReader
+      class_path: salt.data.FTAG1LITEReader
       init_args:
-        tree: CollectionTree
-        unroll: jets
-        groups:
-          jets:
-            prefix: AntiKt4EMPFlowJetsAuxDyn.
-            jagged: false
-            branches:
-              pt: pt
-              eta: eta_calibrated
-              phi: phi_calibrated
-              mass: mass_calibrated
-              flavour_label: HadronConeExclTruthLabelID
-          tracks:
-            prefix: AntiKt4EMPFlowJetsAuxDyn.
-            jagged: true
-            pad_max: 40
-            branches:
-              d0: ft1l_trk_d0_bf16
-              z0SinTheta: ft1l_trk_z0SinTheta_bf16
-              d0Uncertainty: ft1l_trk_d0Uncertainty_bf16
-              z0SinThetaUncertainty: ft1l_trk_z0SinThetaUncertainty_bf16
-              lifetimeSignedD0Significance: ft1l_trk_lifetimeSignedD0Significance_bf16
-              lifetimeSignedZ0SinThetaSignificance: ft1l_trk_lifetimeSignedZ0SinThetaSignificance_bf16
-              pt: ft1l_trk_pt_bf16
-              deta: ft1l_trk_deta_bf16
-              dphi: ft1l_trk_dphi_bf16
-              numberOfPixelHits: ft1l_trk_numberOfPixelHits
-              numberOfSCTHits: ft1l_trk_numberOfSCTHits
-              ftagTruthOriginLabel: ft1l_trk_ftagTruthOriginLabel
-              ftagTruthVertexIndex: ft1l_trk_ftagTruthVertexIndex
+        jets: small_r
+        shard_scope: owner
+        shuffle_pool_rows: null
+        small:
+          groups:
+            jets:
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: false
+              branches:
+                pt: pt
+                eta: eta_calibrated
+                phi: phi_calibrated
+                mass: mass_calibrated
+                # truth LABELS below (never features)
+                HadronGhostTruthLabelID: HadronGhostTruthLabelID
+                PartonTruthLabelID: PartonTruthLabelID
+                ptFromTruthDressedWZJet: ptFromTruthDressedWZJet
+                matchedToTruthDressedWZJet: matchedToTruthDressedWZJet
+                flavour_label: HadronConeExclTruthLabelID
+            tracks:
+              # GN3V00 track inputs + 3 int32 truth LABEL branches (ftagTruth*)
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: true
+              pad_max: 100
+              branches:
+                d0: ft1l_trk_d0_bf16
+                z0SinTheta: ft1l_trk_z0SinTheta_bf16
+                dphi: ft1l_trk_dphi_bf16
+                deta: ft1l_trk_deta_bf16
+                qOverP: ft1l_trk_qOverP
+                lifetimeSignedD0Significance: ft1l_trk_lifetimeSignedD0Significance_bf16
+                lifetimeSignedZ0SinThetaSignificance: ft1l_trk_lifetimeSignedZ0SinThetaSignificance_bf16
+                phiUncertainty: ft1l_trk_phiUncertainty_bf16
+                thetaUncertainty: ft1l_trk_thetaUncertainty_bf16
+                qOverPUncertainty: ft1l_trk_qOverPUncertainty_bf16
+                numberOfPixelHits: ft1l_trk_numberOfPixelHits
+                numberOfSCTHits: ft1l_trk_numberOfSCTHits
+                numberOfInnermostPixelLayerHits: ft1l_trk_numberOfInnermostPixelLayerHits
+                numberOfNextToInnermostPixelLayerHits: ft1l_trk_numberOfNextToInnermostPixelLayerHits
+                numberOfInnermostPixelLayerSharedHits: ft1l_trk_numberOfInnermostPixelLayerSharedHits
+                numberOfInnermostPixelLayerSplitHits: ft1l_trk_numberOfInnermostPixelLayerSplitHits
+                numberOfPixelSharedHits: ft1l_trk_numberOfPixelSharedHits
+                numberOfPixelSplitHits: ft1l_trk_numberOfPixelSplitHits
+                numberOfSCTSharedHits: ft1l_trk_numberOfSCTSharedHits
+                leptonID: ft1l_trk_leptonID
+                muon_quality: ft1l_trk_muon_quality
+                muon_qOverPratio: ft1l_trk_muon_qOverPratio_bf16
+                muon_momentumBalanceSignificance: ft1l_trk_muon_momentumBalanceSignificance_bf16
+                muon_scatteringNeighbourSignificance: ft1l_trk_muon_scatteringNeighbourSignificance_bf16
+                ftagTruthOriginLabel: ft1l_trk_ftagTruthOriginLabel
+                ftagTruthVertexIndex: ft1l_trk_ftagTruthVertexIndex
+                ftagTruthTypeLabel: ft1l_trk_ftagTruthTypeLabel
+            flows:
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: true
+              pad_max: 100
+              branches:
+                pt: ft1l_flow_constituent_pt_bf16
+                energy: ft1l_flow_constituent_energy_bf16
+                deta: ft1l_flow_constituent_deta_bf16
+                dphi: ft1l_flow_constituent_dphi_bf16
+                isCharged: ft1l_flow_constituent_isCharged
+            calo:
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: true
+              pad_max: 100
+              branches:
+                AVG_LAR_Q: ft1l_calo_AVG_LAR_Q_bf16
+                CELL_SIGNIFICANCE: ft1l_calo_CELL_SIGNIFICANCE_bf16
+                CENTER_LAMBDA: ft1l_calo_CENTER_LAMBDA_bf16
+                CENTER_MAG: ft1l_calo_CENTER_MAG_bf16
+                EMB1: ft1l_calo_EMB1_bf16
+                EMB2: ft1l_calo_EMB2_bf16
+                EMB3: ft1l_calo_EMB3_bf16
+                EME1: ft1l_calo_EME1_bf16
+                EME2: ft1l_calo_EME2_bf16
+                EME3: ft1l_calo_EME3_bf16
+                EM_PROBABILITY: ft1l_calo_EM_PROBABILITY_bf16
+                ENG_BAD_CELLS: ft1l_calo_ENG_BAD_CELLS_bf16
+                ENG_FRAC_MAX: ft1l_calo_ENG_FRAC_MAX_bf16
+                ENG_POS: ft1l_calo_ENG_POS_bf16
+                FCAL0: ft1l_calo_FCAL0_bf16
+                FCAL1: ft1l_calo_FCAL1_bf16
+                FCAL2: ft1l_calo_FCAL2_bf16
+                FIRST_ENG_DENS: ft1l_calo_FIRST_ENG_DENS_bf16
+                HEC0: ft1l_calo_HEC0_bf16
+                HEC1: ft1l_calo_HEC1_bf16
+                HEC2: ft1l_calo_HEC2_bf16
+                HEC3: ft1l_calo_HEC3_bf16
+                ISOLATION: ft1l_calo_ISOLATION_bf16
+                LATERAL: ft1l_calo_LATERAL_bf16
+                LONGITUDINAL: ft1l_calo_LONGITUDINAL_bf16
+                MASS: ft1l_calo_MASS_bf16
+                PreSamplerB: ft1l_calo_PreSamplerB_bf16
+                PreSamplerE: ft1l_calo_PreSamplerE_bf16
+                SECOND_LAMBDA: ft1l_calo_SECOND_LAMBDA_bf16
+                SECOND_R: ft1l_calo_SECOND_R_bf16
+                SIGNIFICANCE: ft1l_calo_SIGNIFICANCE_bf16
+                TileBar0: ft1l_calo_TileBar0_bf16
+                TileBar1: ft1l_calo_TileBar1_bf16
+                TileBar2: ft1l_calo_TileBar2_bf16
+                TileExt0: ft1l_calo_TileExt0_bf16
+                TileExt1: ft1l_calo_TileExt1_bf16
+                TileExt2: ft1l_calo_TileExt2_bf16
+                TileGap1: ft1l_calo_TileGap1_bf16
+                TileGap2: ft1l_calo_TileGap2_bf16
+                TileGap3: ft1l_calo_TileGap3_bf16
+                calE: ft1l_calo_calE_bf16
+                calEta: ft1l_calo_calEta_bf16
+                calPhi: ft1l_calo_calPhi_bf16
+                deta: ft1l_calo_deta_bf16
+                dphi: ft1l_calo_dphi_bf16
+                pt: ft1l_calo_pt_bf16
+                rawE: ft1l_calo_rawE_bf16
+                rawEta: ft1l_calo_rawEta_bf16
+                rawPhi: ft1l_calo_rawPhi_bf16
+                usedInChargedFlow: ft1l_calo_usedInChargedFlow
+            electrons:
+              # 30 inputs + 3 int32 truth LABEL branches (ftagTruth*)
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: true
+              pad_max: 16
+              branches:
+                Eratio: ft1l_el_Eratio_bf16
+                Reta: ft1l_el_Reta_bf16
+                Rhad1: ft1l_el_Rhad1_bf16
+                Rhad: ft1l_el_Rhad_bf16
+                Rphi: ft1l_el_Rphi_bf16
+                deltaEta1: ft1l_el_deltaEta1_bf16
+                deltaPhiRescaled2: ft1l_el_deltaPhiRescaled2_bf16
+                dr: ft1l_el_dr_bf16
+                eta: ft1l_el_eta_bf16
+                f1: ft1l_el_f1_bf16
+                f3: ft1l_el_f3_bf16
+                ftag_deltaPOverP: ft1l_el_ftag_deltaPOverP_bf16
+                ftag_energyOverP: ft1l_el_ftag_energyOverP_bf16
+                ftag_et: ft1l_el_ftag_et_bf16
+                ftag_gsf_abs_eta: ft1l_el_ftag_gsf_abs_eta_bf16
+                ftag_gsf_d0Significance: ft1l_el_ftag_gsf_d0Significance_bf16
+                ftag_gsf_d0: ft1l_el_ftag_gsf_d0_bf16
+                ftag_gsf_eProbabilityHT: ft1l_el_ftag_gsf_eProbabilityHT_bf16
+                ftag_gsf_numberOfPixelHits: ft1l_el_ftag_gsf_numberOfPixelHits_bf16
+                ftag_gsf_numberOfSCTHitsInclDead: ft1l_el_ftag_gsf_numberOfSCTHitsInclDead_bf16
+                ftag_gsf_qOverP: ft1l_el_ftag_gsf_qOverP
+                ftag_ptVarCone30OverPt: ft1l_el_ftag_ptVarCone30OverPt_bf16
+                ftag_z0AlongBeamspotSignificance: ft1l_el_ftag_z0AlongBeamspotSignificance_bf16
+                ftag_z0AlongBeamspot: ft1l_el_ftag_z0AlongBeamspot_bf16
+                phi: ft1l_el_phi_bf16
+                pt: ft1l_el_pt_bf16
+                ptfrac: ft1l_el_ptfrac_bf16
+                ptrel: ft1l_el_ptrel_bf16
+                weta2: ft1l_el_weta2_bf16
+                wtots1: ft1l_el_wtots1_bf16
+                ftagTruthOriginLabel: ft1l_el_ftagTruthOriginLabel
+                ftagTruthVertexIndex: ft1l_el_ftagTruthVertexIndex
+                ftagTruthTypeLabel: ft1l_el_ftagTruthTypeLabel
+            muons:
+              # FTAG1LITE has no muon truth labels
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: true
+              pad_max: 8
+              branches:
+                CaloMuonScore: ft1l_mu_CaloMuonScore_bf16
+                MeasEnergyLossSigma: ft1l_mu_MeasEnergyLossSigma_bf16
+                MeasEnergyLoss: ft1l_mu_MeasEnergyLoss_bf16
+                ParamEnergyLossSigmaMinus: ft1l_mu_ParamEnergyLossSigmaMinus_bf16
+                ParamEnergyLossSigmaPlus: ft1l_mu_ParamEnergyLossSigmaPlus_bf16
+                ParamEnergyLoss: ft1l_mu_ParamEnergyLoss_bf16
+                dr: ft1l_mu_dr_bf16
+                eProbabilityHT: ft1l_mu_eProbabilityHT_bf16
+                eta: ft1l_mu_eta_bf16
+                expectInnermostPixelLayerHit: ft1l_mu_expectInnermostPixelLayerHit
+                expectNextToInnermostPixelLayerHit: ft1l_mu_expectNextToInnermostPixelLayerHit
+                lifetimeSignedD0Significance: ft1l_mu_lifetimeSignedD0Significance_bf16
+                lifetimeSignedD0: ft1l_mu_lifetimeSignedD0_bf16
+                lifetimeSignedZ0SinThetaSignificance: ft1l_mu_lifetimeSignedZ0SinThetaSignificance_bf16
+                lifetimeSignedZ0SinTheta: ft1l_mu_lifetimeSignedZ0SinTheta_bf16
+                momentumBalanceSignificance: ft1l_mu_momentumBalanceSignificance_bf16
+                numberOfInnermostPixelLayerHits: ft1l_mu_numberOfInnermostPixelLayerHits
+                numberOfInnermostPixelLayerOutliers: ft1l_mu_numberOfInnermostPixelLayerOutliers
+                numberOfInnermostPixelLayerSharedHits: ft1l_mu_numberOfInnermostPixelLayerSharedHits
+                numberOfInnermostPixelLayerSplitHits: ft1l_mu_numberOfInnermostPixelLayerSplitHits
+                numberOfNextToInnermostPixelLayerHits: ft1l_mu_numberOfNextToInnermostPixelLayerHits
+                numberOfNextToInnermostPixelLayerOutliers: ft1l_mu_numberOfNextToInnermostPixelLayerOutliers
+                numberOfPixelHits: ft1l_mu_numberOfPixelHits
+                numberOfPixelHoles: ft1l_mu_numberOfPixelHoles
+                numberOfPixelSharedHits: ft1l_mu_numberOfPixelSharedHits
+                numberOfPixelSplitHits: ft1l_mu_numberOfPixelSplitHits
+                numberOfPixelSpoiltHits: ft1l_mu_numberOfPixelSpoiltHits
+                numberOfSCTHits: ft1l_mu_numberOfSCTHits
+                numberOfSCTHoles: ft1l_mu_numberOfSCTHoles
+                numberOfSCTSharedHits: ft1l_mu_numberOfSCTSharedHits
+                phi: ft1l_mu_phi_bf16
+                pt: ft1l_mu_pt_bf16
+                ptfrac: ft1l_mu_ptfrac_bf16
+                ptrel: ft1l_mu_ptrel_bf16
+                qOverP: ft1l_mu_qOverP
+                qOverPratio: ft1l_mu_qOverPratio_bf16
+                quality: ft1l_mu_quality
+                scatteringNeighbourSignificance: ft1l_mu_scatteringNeighbourSignificance_bf16
+                segmentDeltaEta: ft1l_mu_segmentDeltaEta_bf16
+                segmentDeltaPhi: ft1l_mu_segmentDeltaPhi_bf16
+            towers:
+              prefix: AntiKt4EMPFlowJetsAuxDyn.
+              jagged: true
+              pad_max: 100
+              branches:
+                deta: ft1l_tower_deta_bf16
+                dphi: ft1l_tower_dphi_bf16
+                dr: ft1l_tower_dr_bf16
+                energy: ft1l_tower_energy_bf16
+                eta: ft1l_tower_eta_bf16
+                mass: ft1l_tower_mass_bf16
+                phi: ft1l_tower_phi_bf16
+                pt: ft1l_tower_pt_bf16
+            event:
+              # entry-axis event scalar repeated onto every jet row; feeds cuts.per_split
+              prefix: EventInfoAuxDyn.
+              jagged: false
+              broadcast: true
+              branches: {eventNumber: eventNumber}
+          cuts:
+            global_cuts:
+              # Keep only jets one of the six ghost-flavour classes labels (ftag/flavours.yaml):
+              # ghost in {4, 5, 15} always passes (>= 400); ghost == 0 passes iff
+              # |parton-12| >= 9, i.e. parton <= 3 or >= 21; ghost == 0 with parton in
+              # [4, 20] is an orphan jet and fails.
+              - "HadronGhostTruthLabelID * 100 + abs(PartonTruthLabelID - 12) >= 9"
+            per_split:
+              # One corpus split by event number: 80% train, 10% val, 10% test (disjoint).
+              train: ["eventNumber % 10 < 8"]
+              val: ["eventNumber % 10 == 8"]
+              test: ["eventNumber % 10 == 9"]

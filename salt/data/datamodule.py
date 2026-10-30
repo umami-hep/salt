@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import lightning
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from salt.data.base import Reader, SaltDatasetModule
@@ -444,7 +445,10 @@ class SaltDataModule(lightning.LightningDataModule):
         # through the sampler, expressed on the dataset because an
         # IterableDataset has no sampler to make it.
         fit = mode == Mode.FIT
-        return IterableSaltDataset(
+        dataset_cls = getattr(reader, "iterable_dataset_class", None) or IterableSaltDataset
+        # resolved HERE: forkserver/spawn workers inherit no process group to detect it from
+        world, rank = self._resolve_shard_context()
+        return dataset_cls(
             modules,
             batch_size=self.batch_size,
             shuffle=self.shuffle_stream and fit,
@@ -453,8 +457,38 @@ class SaltDataModule(lightning.LightningDataModule):
             interleave_block=self.interleave_block,
             max_live_streams=self.max_live_streams,
             manifest=manifest,
+            world_size=world,
+            rank=rank,
+            num_workers=self.num_workers,
             **common,
         )
+
+    def _resolve_shard_context(self) -> tuple[int, int]:
+        """``(world_size, rank)`` to shard by: the initialised process group, cross-checked
+        against the trainer; ``(1, 0)`` only when neither reports more than one rank.
+        """
+        pg = (
+            (dist.get_world_size(), dist.get_rank())
+            if dist.is_available() and dist.is_initialized()
+            else None
+        )
+        tr = self.trainer
+        tw, trank = getattr(tr, "world_size", None), getattr(tr, "global_rank", None)
+        trainer_ctx = (int(tw), int(trank)) if tw is not None and trank is not None else None
+        if pg is not None and trainer_ctx is not None and pg != trainer_ctx:
+            raise ConfigError(
+                f"torch.distributed reports (world_size, rank)={pg} but the trainer reports "
+                f"{trainer_ctx} — refusing to shard the streaming dataset on inconsistent state"
+            )
+        if pg is not None:
+            return pg
+        if trainer_ctx is not None and trainer_ctx[0] > 1:
+            raise ConfigError(
+                f"trainer reports world_size={trainer_ctx[0]} but no torch.distributed process "
+                "group is initialised — the streaming dataset cannot shard by rank (a "
+                "strategy/launch problem, never a silent (1, 0))"
+            )
+        return 1, 0
 
     def _resolve_stage_root(self, stage: str) -> Path | None:
         """The opt-in staging root for this stage, or None.
@@ -506,7 +540,9 @@ class SaltDataModule(lightning.LightningDataModule):
         ``setup``, which is exactly the coordination a built artifact needs: one
         writer, no lock, and everyone else finds a finished file. Idempotent — a
         second call validates and reuses the artifact the first one wrote; a
-        stale one is a hard error naming the file to delete.
+        stale one is a hard error naming the file to delete. Under
+        ``trainer.validate`` (``salt validate``) ONLY the val manifest is
+        ensured/read — the train manifest is never touched.
         """
         if not self.iterable:
             if self.manifest is not None:
@@ -518,7 +554,14 @@ class SaltDataModule(lightning.LightningDataModule):
         # the hook takes no stage argument; the trainer's entry point is what
         # says whether a test corpus is about to be read or is merely configured
         fn = getattr(getattr(self.trainer, "state", None), "fn", None)
-        stage = "test" if str(getattr(fn, "value", "")).startswith("test") else "fit"
+        value = str(getattr(fn, "value", ""))
+        stage = (
+            "test"
+            if value.startswith("test")
+            else "validate"
+            if value.startswith("validate")
+            else "fit"
+        )
         for mode in self._modes_for_stage(stage):
             reader, _num = self._stage_reader(mode)
             if reader is None:
@@ -539,7 +582,9 @@ class SaltDataModule(lightning.LightningDataModule):
         return ensure_manifest(reader, self._manifest_path(mode), _STAGE_OF_MODE[mode])
 
     def setup(self, stage: str) -> None:
-        """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"test"`` -> TEST."""
+        """Build the per-stage datasets: ``"fit"`` -> FIT+VAL, ``"validate"`` -> VAL,
+        ``"test"`` -> TEST.
+        """
         self._auto_sinks()
         self._stage_root = self._resolve_stage_root(stage)
         if stage == "fit":
@@ -547,6 +592,10 @@ class SaltDataModule(lightning.LightningDataModule):
             self.val_dset = self._make_dataset(Mode.VAL)
             if self.trainer is None or self.trainer.is_global_zero:
                 _LOG.info(f"Created training dataset with {len(self.train_dset):,} entries")
+                _LOG.info(f"Created validation dataset with {len(self.val_dset):,} entries")
+        if stage == "validate":
+            self.val_dset = self._make_dataset(Mode.VAL)
+            if self.trainer is None or self.trainer.is_global_zero:
                 _LOG.info(f"Created validation dataset with {len(self.val_dset):,} entries")
         if stage == "test":
             if self._resolve_source(Mode.TEST)[0] is None:
@@ -556,9 +605,13 @@ class SaltDataModule(lightning.LightningDataModule):
 
     @staticmethod
     def _modes_for_stage(stage: str) -> tuple[Mode, ...]:
-        """The per-batch modes a Lightning stage builds (``setup("fit")`` -> FIT+VAL)."""
+        """The per-batch modes a Lightning stage builds (``setup("fit")`` -> FIT+VAL,
+        ``setup("validate")`` -> VAL).
+        """
         if stage == "fit":
             return (Mode.FIT, Mode.VAL)
+        if stage == "validate":
+            return (Mode.VAL,)
         if stage == "test":
             return (Mode.TEST,)
         return ()
@@ -615,7 +668,7 @@ class SaltDataModule(lightning.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         """Validation loader: sequential, no drop_last."""
-        assert self.val_dset is not None, "setup('fit') has not run"
+        assert self.val_dset is not None, "setup('fit'/'validate') has not run"
         return self.get_dataloader(dataset=self.val_dset, stage="test", shuffle=False)
 
     def test_dataloader(self) -> DataLoader:

@@ -11,6 +11,7 @@ stage-boundary lookup the `TrainingScheduleCallback` drives.
 from __future__ import annotations
 
 import itertools
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
@@ -89,11 +90,16 @@ class StageConfig:
     (default `frozen=()` — everything trainable). `epochs=None` means "take the
     remaining epochs" (only the final stage may omit it). `order` pins execution
     position; otherwise declaration order is used. `early_stop` optionally ends the
-    stage before its epoch cap when a monitored metric stops improving.
+    stage before its epoch cap when a monitored metric stops improving. A non-final
+    sample stage sets `num_samples` XOR `frac_samples` (not `epochs`), ending mid-epoch on N.
+    `skip_losses` names task losses this stage does not train; modules feeding only those are
+    not executed.
     """
 
     name: str
     epochs: int | None = None
+    num_samples: int | None = None
+    frac_samples: float | None = None
     frozen: tuple[str, ...] | None = None
     trainable: tuple[str, ...] | None = None
     optimizer: str | None = None
@@ -102,6 +108,12 @@ class StageConfig:
     early_stop: EarlyStopConfig | None = None
     callbacks: tuple[Mapping[str, Any], ...] | None = None
     lr_scheduler: LRSchedulerConfig | None = None
+    skip_losses: tuple[str, ...] = ()
+
+    @property
+    def is_sample_stage(self) -> bool:
+        """Whether the stage ends on a `num_samples`/`frac_samples` step target."""
+        return self.num_samples is not None or self.frac_samples is not None
 
 
 # recognised per-stage / `early_stop` / `lr_scheduler` keys: exactly the dataclass fields
@@ -119,14 +131,23 @@ class TrainingSchedule:
     parameters are held fixed for that stage (see `frozen_names`).
     """
 
-    def __init__(self, stages: list[StageConfig], module_names: Sequence[str]) -> None:
+    def __init__(
+        self, stages: list[StageConfig], module_names: Sequence[str], stop_after: str | None = None
+    ) -> None:
         self.stages = stages
         self._module_names = tuple(module_names)
+        self.stop_after: str | None = stop_after
 
     @property
     def is_multi_stage(self) -> bool:
         """Whether the schedule declares more than one stage."""
         return len(self.stages) > 1
+
+    @property
+    def stop_after_index(self) -> int | None:
+        """Execution-order index of the `stop_after` stage, or ``None``."""
+        names = [stage.name for stage in self.stages]
+        return None if self.stop_after is None else names.index(self.stop_after)
 
     @property
     def module_names(self) -> tuple[str, ...]:
@@ -145,6 +166,11 @@ class TrainingSchedule:
         pure epoch arithmetic and no early-stop checkpoint state is written.
         """
         return any(stage.early_stop is not None for stage in self.stages)
+
+    @property
+    def has_skip_losses(self) -> bool:
+        """Whether any stage declares `skip_losses`."""
+        return any(stage.skip_losses for stage in self.stages)
 
     @property
     def has_stage_callbacks(self) -> bool:
@@ -186,6 +212,8 @@ class TrainingSchedule:
         """
         bounds, acc = [], 0
         for stage in self.stages[:-1]:
+            if stage.is_sample_stage:  # 0 epochs: runs inside the next epoch stage
+                continue
             assert stage.epochs is not None  # validated by validate_epochs
             acc += stage.epochs
             bounds.append(acc)
@@ -203,29 +231,108 @@ class TrainingSchedule:
         bounds = self._non_final_epoch_bounds()
         return next((i for i, bound in enumerate(bounds) if epoch < bound), len(self.stages) - 1)
 
-    def stage_step_allocations(self, total_steps: int, max_epochs: int) -> list[int]:
+    @property
+    def has_sample_stages(self) -> bool:
+        """Whether any stage is a `num_samples`/`frac_samples` sample stage."""
+        return any(stage.is_sample_stage for stage in self.stages)
+
+    def sample_stage_indices(self) -> list[int]:
+        """Execution-order indices of the sample stages."""
+        return [i for i, stage in enumerate(self.stages) if stage.is_sample_stage]
+
+    def stage_step_targets(
+        self,
+        batch_size: int,
+        world_size: int,
+        accumulate_grad_batches: int = 1,
+        steps_per_epoch: int | None = None,
+    ) -> dict[int, int]:
+        """The single samples→steps conversion site: ``{stage_index: N}`` per-rank
+        optimizer steps per sample stage, ``ceil(num_samples / (batch_size *
+        world_size * accumulate_grad_batches))`` or ``ceil(frac_samples * steps_per_epoch)``.
+        """
+        checks: dict[str, Any] = {"batch_size": batch_size, "world_size": world_size}
+        checks["accumulate_grad_batches"] = accumulate_grad_batches
+        if steps_per_epoch is not None:
+            checks["steps_per_epoch"] = steps_per_epoch
+        for field, value in checks.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(
+                    f"stage_step_targets '{field}' must be a positive integer (got {value!r})."
+                )
+        divisor = batch_size * world_size * accumulate_grad_batches
+        targets: dict[int, int] = {}
+        for i, stage in enumerate(self.stages):
+            if stage.num_samples is not None:
+                targets[i] = math.ceil(stage.num_samples / divisor)
+            elif stage.frac_samples is not None:
+                if steps_per_epoch is None:
+                    raise ConfigError(
+                        f"stage {stage.name!r}: frac_samples needs steps_per_epoch (loader length)."
+                    )
+                targets[i] = math.ceil(stage.frac_samples * steps_per_epoch)
+        return targets
+
+    def stage_step_allocations(
+        self, total_steps: int, max_epochs: int, step_targets: Mapping[int, int] | None = None
+    ) -> list[int]:
         """Split `total_steps` (Lightning's whole-run `estimated_stepping_batches`)
-        across the stages proportionally to their epoch budgets, so each stage's
-        `OneCycleLR.total_steps` spans only that stage. Boundaries are
-        rounded at each non-final stage end and the final stage takes the exact
-        remainder, so the allocations always sum to `total_steps`. A single-stage
-        schedule returns ``[total_steps]`` unchanged (bitwise parity path).
+        across the stages so each stage's `OneCycleLR.total_steps` spans only that
+        stage (a single stage returns ``[total_steps]``). Epoch ``e`` starts at step
+        ``round(total_steps * e / max_epochs)``; a sample stage takes exactly its
+        `step_targets` N, an epoch stage is measured from its actual start epoch
+        (as in `TrainingController.next_stage_index`), the final stage takes the rest.
+        Raises `ConfigError` if the sample targets leave the final stage no steps.
         """
         if not self.is_multi_stage:
             return [total_steps]
-        allocations, prev = [], 0
-        for bound in self._non_final_epoch_bounds():
-            boundary_step = round(total_steps * bound / max_epochs)
-            allocations.append(boundary_step - prev)
-            prev = boundary_step
-        allocations.append(total_steps - prev)  # final stage: exact remainder
-        return allocations
+        targets: Mapping[int, int] = step_targets or {}
+        if missing := [i for i in self.sample_stage_indices() if i not in targets]:
+            raise ConfigError(
+                "stage_step_allocations needs a step target for every sample stage (missing "
+                f"index(es) {missing}) — pass `step_targets` from `stage_step_targets`."
+            )
+
+        def boundary(epoch: int) -> int:
+            return round(total_steps * epoch / max_epochs)
+
+        def epoch_containing(step: int) -> int:  # largest e with boundary(e) < step (step > 0)
+            epoch = 0
+            while boundary(epoch + 1) < step:
+                epoch += 1
+            return epoch
+
+        allocs: list[int] = []
+        cursor, cursor_epoch, prev_sample = 0, 0, False
+        for i, stage in enumerate(self.stages[:-1]):
+            if stage.is_sample_stage:
+                cursor += (alloc := targets[i])
+                prev_sample = True
+            else:
+                assert stage.epochs is not None  # validated by validate_epochs
+                # after a sample stage, start in the epoch its boundary fired in
+                start_epoch = epoch_containing(cursor) if prev_sample and cursor else cursor_epoch
+                cursor_epoch = start_epoch + stage.epochs
+                end = boundary(cursor_epoch)
+                # a sample stage ending on this end edge leaves 0 steps; OneCycleLR needs >= 1
+                alloc = max(1, end - cursor)
+                cursor = max(cursor, end)
+                prev_sample = False
+            allocs.append(alloc)
+        if (remainder := total_steps - cursor) < 1:  # final stage: exact remainder
+            raise ConfigError(
+                f"training_schedule sample-stage step targets {dict(targets)} consume {cursor} of "
+                f"{total_steps} steps, leaving the final stage {self.stages[-1].name!r} none - "
+                "lower num_samples/frac_samples or raise trainer.max_epochs."
+            )
+        allocs.append(remainder)
+        return allocs
 
     def validate_epochs(self, max_epochs: int | None) -> None:
         """Validate the stage epoch allocation against `trainer.max_epochs`
         (available only once the trainer is attached, so this runs at setup).
 
-        Non-final stages must give an explicit positive `epochs`; only the final
+        Non-final, non-sample stages must give a positive `epochs`; only the final
         stage may omit it (taking the remainder). The explicit epochs must sum to
         ``<= max_epochs``, and an omitted final stage needs a remainder of ``>= 1``
         — over-allocation or a zero-length remainder is a hard `ConfigError`.
@@ -247,11 +354,11 @@ class TrainingSchedule:
             return
         *non_final, final = self.stages
         for stage in non_final:
-            if stage.epochs is None:
+            if stage.epochs is None and not stage.is_sample_stage:
                 raise ConfigError(
                     f"training_schedule stage {stage.name!r} omits 'epochs' — only the final "
                     "stage may omit it (to take the remaining epochs); every earlier stage needs "
-                    "an explicit positive 'epochs'."
+                    "an explicit positive 'epochs' or a 'num_samples'/'frac_samples' target."
                 )
         explicit_sum = sum(s.epochs for s in self.stages if s.epochs is not None)
         if final.epochs is None:
@@ -278,7 +385,8 @@ class TrainingSchedule:
         Validates: non-empty schedule, known per-stage keys, `frozen` XOR
         `trainable`, freeze names ⊆ `module_names`, integer `epochs`/`order`, and
         no duplicate explicit `order`. Execution order is declaration order,
-        stably overridden by explicit `order`.
+        stably overridden by explicit `order`. A sample stage (one budget key only)
+        may not be final; the optional top-level `stop_after` names a non-final stage.
 
         Returns
         -------
@@ -295,10 +403,10 @@ class TrainingSchedule:
                 "training_schedule must be a mapping with a 'stages' key "
                 "(a dict of stage-name -> stage config)."
             )
-        if extra := set(raw) - {"stages"}:
+        if extra := set(raw) - {"stages", "stop_after"}:
             raise ConfigError(
                 f"training_schedule has unknown top-level key(s) {sorted(extra)} — only "
-                "'stages' is supported."
+                "'stages' and 'stop_after' are supported."
             )
         raw_stages = raw["stages"]
         if not isinstance(raw_stages, Mapping):
@@ -311,7 +419,24 @@ class TrainingSchedule:
         known = set(module_names)
         stages = [_parse_stage(name, cfg, known) for name, cfg in stage_items]
         _check_orders(stages)
-        return cls(_order_stages(stages), module_names)
+        ordered = _order_stages(stages)
+        if ordered[-1].is_sample_stage:
+            raise ConfigError(
+                f"training_schedule stage {ordered[-1].name!r} names a sample target on the "
+                "final stage — the final stage runs to trainer.max_epochs; give it 'epochs'."
+            )
+        stop_after = raw.get("stop_after")
+        if stop_after is not None:
+            names, problem = [s.name for s in ordered], ""
+            if not isinstance(stop_after, str) or not stop_after.strip():
+                problem = "must be a non-empty string naming a stage"
+            elif stop_after not in names:
+                problem = f"names unknown stage — declared stages are {names}"
+            elif stop_after == names[-1]:
+                problem = "names the final stage — the fit ends there anyway; remove stop_after"
+            if problem:
+                raise ConfigError(f"training_schedule.stop_after {problem} (got {stop_after!r}).")
+        return cls(ordered, module_names, stop_after=stop_after)
 
     @classmethod
     def desugar_legacy(cls, module_names: Sequence[str]) -> TrainingSchedule:
@@ -344,6 +469,14 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
     frozen_t = _validate_names(name, "frozen", frozen, module_names)
     trainable_t = _validate_names(name, "trainable", trainable, module_names)
     epochs = _as_positive_int(name, "epochs", cfg.get("epochs"))
+    num_samples = _as_positive_int(name, "num_samples", cfg.get("num_samples"))
+    frac_samples = _as_fraction(name, "frac_samples", cfg.get("frac_samples"))
+    budgets = {"epochs": epochs, "num_samples": num_samples, "frac_samples": frac_samples}
+    if len(given := [repr(k) for k, v in budgets.items() if v is not None]) > 1:
+        raise ConfigError(
+            f"training_schedule stage {name!r} sets BOTH {' and '.join(given)} — give at most "
+            "one stage budget (an epoch count or a single sample target)."
+        )
     order = _as_int(name, "order", cfg.get("order"))
     lrs = cfg.get("lrs")
     if lrs is not None and not isinstance(lrs, Mapping):
@@ -355,9 +488,18 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
             f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
             "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs'."
         )
+    skip = cfg.get("skip_losses", ())
+    bad = isinstance(skip, str) or not isinstance(skip, Sequence)
+    if bad or not all(isinstance(k, str) for k in skip):
+        raise ConfigError(
+            f"training_schedule stage {name!r} 'skip_losses' must be a list of task names "
+            f"(got {type(skip).__name__})."
+        )
     return StageConfig(
         name=name,
         epochs=epochs,
+        num_samples=num_samples,
+        frac_samples=frac_samples,
         frozen=frozen_t,
         trainable=trainable_t,
         optimizer=cfg.get("optimizer"),
@@ -366,6 +508,7 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
         early_stop=_parse_early_stop(name, cfg),
         callbacks=_parse_stage_callbacks(name, cfg),
         lr_scheduler=lr_scheduler,
+        skip_losses=tuple(skip),
     )
 
 
@@ -570,6 +713,22 @@ def _as_positive_int(stage: str, field: str, value: Any) -> int | None:
     return result
 
 
+def _as_fraction(stage: str, field: str, value: Any) -> float | None:
+    """Validate an optional fraction strictly inside ``(0, 1)``."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(
+            f"training_schedule stage {stage!r} '{field}' must be a number (got {value!r})."
+        )
+    if not 0 < value < 1:
+        raise ConfigError(
+            f"training_schedule stage {stage!r} '{field}' must satisfy 0 < {field} < 1 "
+            f"(got {value!r}); for a fraction >= 1 use 'epochs' instead."
+        )
+    return float(value)
+
+
 def _as_int(stage: str, field: str, value: Any) -> int | None:
     """Validate an optional integer field (rejects bool and non-int)."""
     if value is None:
@@ -767,9 +926,9 @@ def boundary_record(
     stage_name: str, stage_index: int, global_step: int, epoch: int, reason: str
 ) -> dict[str, Any]:
     """A completed stage-transition record appended to the checkpoint at each
-    boundary. `reason` is ``"epochs"`` (the stage hit its epoch cap)
-    or ``"early_stop"`` (its criterion triggered); the records let a resume
-    reconstruct the data-dependent stage position rather than epoch arithmetic.
+    boundary. `reason` is ``"epochs"`` (epoch cap), ``"early_stop"`` (criterion),
+    ``"steps"`` (sample-stage step target) or ``"stop_after"`` (prefix run ended); the
+    records let a resume reconstruct the stage position rather than epoch arithmetic.
 
     Returns
     -------

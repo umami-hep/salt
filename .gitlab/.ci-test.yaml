@@ -64,7 +64,7 @@ modular-unit-tests:
 # a dedicated unit suite under salt/tests/unit/ (see its module docstring
 # for the config paths it resolves).
 #
-# PIPELINE_ROW here must equal exactly the 31 runnable fixture stems (fixture
+# PIPELINE_ROW here must equal exactly the 30 runnable fixture stems (fixture
 # YAMLs under pipeline/fixtures/ with no top-level `fragment` key) — the
 # both-ways consistency test `test_cpu_ci_matrix_matches_runnable_fixtures` in
 # test_pipeline.py enforces this both ways (CI-only names AND fixture-only
@@ -79,7 +79,7 @@ integration-cpu:
   stage: per-config
   parallel:
     matrix:
-      - PIPELINE_ROW: [dips, dipz, dl1, easyjet_flavour, event_tagger_easyjet, ftag1lite_empflow, gn2_mup, gn2emu, gn2v2_opendata, gn2x_qcdsplit, gn2xe, gn3_baseline, gn3_baseline_loose, gn3_charge, gn3_dr, gn3_flow, gn3_hybrid, gn3_lepid_smt, gn3_softe, gn3_tracklabel, gn3_v00, gn3epclv01, gn3v00_base, gn3x, hitz, maskformer, nan_regression, regression, regression_gaussian, regression_multi_target, regression_weighted]
+      - PIPELINE_ROW: [dips, dipz, dl1, easyjet_flavour, event_tagger_easyjet, gn2_mup, gn2emu, gn2v2_opendata, gn2x_qcdsplit, gn2xe, gn3_baseline, gn3_baseline_loose, gn3_charge, gn3_dr, gn3_flow, gn3_hybrid, gn3_lepid_smt, gn3_softe, gn3_tracklabel, gn3_v00, gn3epclv01, gn3v00_base, gn3x, hitz, maskformer, nan_regression, regression, regression_gaussian, regression_multi_target, regression_weighted]
   script:
     - JUNIT_FILE="reports/integration-cpu-${PIPELINE_ROW}.xml" run_test salt/tests/integration/pipeline --pipeline-row="${PIPELINE_ROW}" --pipeline-row-scope=all
 
@@ -96,9 +96,9 @@ integration-cpu:
 # test_gpu_ci_matrix_matches_gpu_fixtures below), the non-parametrized
 # row-artifact tests (regression/regression_gaussian sink mechanics), and all
 # of multistage_training/. Coverage note: this job's .coverage* artifact, plus
-# unit-tests' and all 31 per-config jobs', is what the coverage job (stage:
+# unit-tests' and all 30 per-config jobs', is what the coverage job (stage:
 # coverage, no needs:/dependencies:, stage-collects from every prior job)
-# merges via `coverage combine` — 33 artifact sets total (31 rows + unit-tests
+# merges via `coverage combine` — 32 artifact sets total (30 rows + unit-tests
 # + this job; the 3 manual tests-gpu jobs contribute only when
 # someone actually triggers them).
 integration-misc:

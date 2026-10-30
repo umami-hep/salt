@@ -11,7 +11,10 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
+import h5py
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -20,14 +23,16 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, Mo
 from lightning.pytorch.loggers import CometLogger
 
 from salt.callbacks import Checkpoint, ProgressBar
-from salt.data import SaltDataModule
+from salt.data import Features, Labels, SaltDataModule
 from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode
 from salt.main import (
     CONFIG_DIR,
     RUN_DIR_TIMESTAMP_FORMAT,
     SALT_AUTO_RESUME_ENV,
     SaltCLI,
     _best_checkpoint,  # noqa: PLC2701 - the fallback glob under test
+    _bind_input_copy_streams,  # noqa: PLC2701 - the streams-form binder under test
     _resolve_class_path,  # noqa: PLC2701 - resolves the saved (shortened) logger class_path
     latest_checkpoint,
     main,
@@ -36,6 +41,7 @@ from salt.main import (
 )
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
+from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.schema import dump_schema, save_schema
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
@@ -57,11 +63,11 @@ GN2V2_MODULES = {
     "track_origin",
     "track_vertexing",
     "loss",
-    # the outputs: section writers are graph-folded into model.net
-    # (inputs_copy is manifest-only, not folded).
+    # all three section writers are graph-folded, including inputs_copy
     "jets_out",
     "origin_out",
     "pad_mask",
+    "inputs_copy",
 }
 
 FOURTH_TASK_YAML = """
@@ -150,11 +156,12 @@ class TestParseAndInstantiate:
         assert isinstance(cli.model, SaltModule)
         # the open-data config is on the outputs: section path — model.net carries
         # the model modules (nets + tasks + loss) PLUS the composed section
-        # GRAPH-node writers. Open-data uses ONE run_tasks writer (+ pad_mask;
-        # inputs_copy is manifest-only, not an nn.Module) — the dummy's mode-split
-        # jets_out/origin_out writers (in GN2V2_MODULES) do not appear here.
-        base = GN2V2_MODULES - {"jets_out", "origin_out", "pad_mask"}
-        assert set(cli.model.net.keys()) == base | {"run_tasks", "pad_mask"}
+        # GRAPH-node writers. Open-data uses ONE run_tasks writer (+ pad_mask +
+        # inputs_copy, both real nn.Module graph writers) — the dummy's
+        # mode-split jets_out/origin_out writers (in GN2V2_MODULES) do not
+        # appear here: net = model modules + run_tasks + pad_mask + inputs_copy.
+        base = GN2V2_MODULES - {"jets_out", "origin_out", "pad_mask", "inputs_copy"}
+        assert set(cli.model.net.keys()) == base | {"run_tasks", "pad_mask", "inputs_copy"}
         jets_task = cli.model.net["jets_classification"]
         assert isinstance(jets_task, ClassificationTaskModule)
         assert list(jets_task.class_names) == ["bjets", "cjets", "ujets", "taujets"]
@@ -1154,6 +1161,11 @@ training_schedule:
         initial: 1.0e-7
         max: 1.0e-5
 """
+SKIP_ONLY_SCHEDULE_YAML = """
+training_schedule:
+  stages:
+    fit: {skip_losses: [track_origin]}
+"""
 
 SCHEDULE_OVERRIDE_YAML = """
 training_schedule:
@@ -1303,6 +1315,16 @@ class TestScheduleCallbackAutoInjection:
         override = write_yaml(tmp_path, "sched.yaml", TOP_LEVEL_SCHEDULE_YAML)
         cli = make_cli(data, extra=["--config", override])
         cli.config.subcommand = "fit"  # the injector keys off the fit subcommand
+        assembled = cli._maybe_add_schedule_callback([], [])  # noqa: SLF001
+        assert any(isinstance(cb, TrainingScheduleCallback) for cb in assembled)
+
+    def test_callback_injected_for_skip_losses_only(self, data, tmp_path):
+        """A single stage with only `skip_losses` still gets the schedule callback."""
+        from salt.callbacks.schedule import TrainingScheduleCallback
+
+        override = write_yaml(tmp_path, "skip.yaml", SKIP_ONLY_SCHEDULE_YAML)
+        cli = make_cli(data, extra=["--config", override])
+        cli.config.subcommand = "fit"
         assembled = cli._maybe_add_schedule_callback([], [])  # noqa: SLF001
         assert any(isinstance(cb, TrainingScheduleCallback) for cb in assembled)
 
@@ -2007,3 +2029,88 @@ class TestStepCheckpointFit:
         )
         assert b_state["epoch"] == 1
         assert b_state["global_step"] == 6
+
+
+class TestValidateSubcommand:
+    """``salt validate``: one checkpoint-restored validation pass."""
+
+    def test_cli_exposes_validate(self, data, tmp_path):
+        """``validate`` is a subcommand; it needs ``--ckpt_path`` and rejects ``--init_from``."""
+        assert set(SaltCLI.subcommands()) == {"fit", "validate", "test"}
+        assert SaltCLI.subcommands()["validate"] == {"model", "dataloaders", "datamodule"}
+        base = [
+            "validate",
+            "--config",
+            disable_logger_in_config(str(DUMMY_CFG)),
+            *required_overrides(data),
+            f"--trainer.default_root_dir={tmp_path}",
+            "--trainer.accelerator=cpu",
+            "--callbacks.progress=null",
+        ]
+        # both guards fire in before_instantiate_classes, before anything is instantiated
+        with pytest.raises(ConfigError, match="ckpt_path"):
+            SaltCLI(args=base)
+        fake = tmp_path / "x.ckpt"
+        with pytest.raises(ConfigError, match="init_from"):
+            SaltCLI(args=[*base, f"--ckpt_path={fake}", f"--init_from={fake}"])
+        assert not list(tmp_path.rglob("config.yaml"))
+
+
+class TestBindInputCopyStreams:
+    """`_bind_input_copy_streams` resolves a streams-form `InputCopyWriter` from the
+    reader's source H5 when it has one, else the data pipeline's ``inputs.<stream>``
+    field lists (no trainer).
+    """
+
+    @staticmethod
+    def _data_modules() -> dict[str, object]:
+        # an unbound Labels (streams resolve only at dataset compile) is skipped
+        return {
+            "features": Features(variables={"jets": ["pt", "eta"], "tracks": ["d0"]}),
+            "labels": Labels(),
+        }
+
+    def test_streams_form_binds_from_features_fields(self):
+        icw = InputCopyWriter(streams=["jets", "tracks"])
+        _bind_input_copy_streams({"inputs_copy": icw}, self._data_modules())
+        assert icw.copy_leaves(Mode.TEST) == [("jets", "pt"), ("jets", "eta"), ("tracks", "d0")]
+
+    def test_explicit_variables_are_kept(self):
+        icw = InputCopyWriter(streams=["jets", "tracks"], variables={"jets": ["mass"]})
+        _bind_input_copy_streams({"inputs_copy": icw}, self._data_modules())
+        assert icw.copy_leaves(Mode.TEST) == [("jets", "mass"), ("tracks", "d0")]
+
+    def test_stream_not_produced_as_inputs_is_a_config_error(self):
+        icw = InputCopyWriter(streams=["jets", "hits"])
+        with pytest.raises(ConfigError, match=r"'hits'.*no `inputs\.hits`"):
+            _bind_input_copy_streams({"inputs_copy": icw}, self._data_modules())
+
+    def test_no_input_copy_writer_is_a_noop(self):
+        _bind_input_copy_streams(None, self._data_modules())
+        _bind_input_copy_streams({}, {"labels": Labels()})
+
+    def test_streams_form_binds_every_source_field_in_file_order(self, tmp_path):
+        src = tmp_path / "src.h5"
+        jets = np.zeros(3, dtype=[("mass", "f4"), ("pt", "f4"), ("flavour", "i4"), ("eta", "f4")])
+        tracks = np.zeros((3, 4), dtype=[("z0", "f4"), ("valid", "?"), ("d0", "f4")])
+        with h5py.File(src, "w") as f:
+            f.create_dataset("jets", data=jets)
+            f.create_dataset("tracks", data=tracks)
+        icw = InputCopyWriter(streams=["jets", "tracks"])
+        reader = SimpleNamespace(h5_source=src)
+        _bind_input_copy_streams({"inputs_copy": icw}, self._data_modules(), reader)
+        assert icw.copy_leaves(Mode.TEST) == [
+            ("jets", "mass"),
+            ("jets", "pt"),
+            ("jets", "flavour"),
+            ("jets", "eta"),
+            ("tracks", "z0"),
+            ("tracks", "valid"),
+            ("tracks", "d0"),
+        ]
+
+    def test_reader_without_h5_source_keeps_features_fields(self):
+        icw = InputCopyWriter(streams=["jets", "tracks"])
+        reader = SimpleNamespace(h5_source=None)
+        _bind_input_copy_streams({"inputs_copy": icw}, self._data_modules(), reader)
+        assert icw.copy_leaves(Mode.TEST) == [("jets", "pt"), ("jets", "eta"), ("tracks", "d0")]

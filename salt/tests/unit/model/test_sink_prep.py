@@ -30,7 +30,6 @@ from salt.model.sink_prep import (
 )
 from salt.outputs import (
     H5OutputSink,
-    InputCopyWriter,
     OnnxExportSink,
     OutputColumn,
     OutputField,
@@ -70,22 +69,19 @@ def _seed_columns(
 ) -> H5OutputSink:
     """Bind an ``outputs:`` section whose producer mints `columns` (survives manifest rebinds).
 
-    `extra` section writers (e.g. copy/mask writers) bind in the SAME section, ahead of the
-    producer, so the bind does not reset the copy/mask state they set.
+    `extra` section writers (e.g. a pad-mask writer) bind in the SAME section, ahead of the
+    producer, so the bind does not reset the mask state they set.
     """
     sink.bind_output_section({**(extra or {}), "run_tasks": _ColumnProducer(columns)})
     return sink
 
 
 def _h5_sink() -> H5OutputSink:
-    """A real H5 persistence sink, seeded with one resolved column + copy/mask writers."""
+    """A real H5 persistence sink, seeded with one resolved column + a pad-mask writer."""
     sink = _seed_columns(
         H5OutputSink(),
         [OutputColumn(key="outputs.jets.jets_classification", suffixes=["pb", "pc", "pu"])],
-        extra={
-            "inputs_copy": InputCopyWriter(streams=["jets", "tracks"]),
-            "pad_mask": PadMaskWriter(streams=["tracks"]),
-        },
+        extra={"pad_mask": PadMaskWriter(streams=["tracks"])},
     )
     if sink.name != "h5_output":
         sink.name = "h5_output"

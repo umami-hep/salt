@@ -190,11 +190,24 @@ class TestEvalH5ByteParity:
             ].tobytes()
         )
 
-    def test_column_schema(self):
-        """The merged column dtypes/order match the v1 eval schema exactly."""
-        dtypes, shapes = _sink()._merge_columns(  # noqa: SLF001
-            ("jets", "tracks"), ("tracks",), {"jets": "jets", "tracks": "tracks"}, 64
+    def _column_schema(self, tmp_path, *, half=False):
+        """Merge columns, consume one batch (batch size 6), and read back the sink's H5."""
+        sink = _sink(half=half)
+        sink._merge_columns(  # noqa: SLF001
+            ("jets", "tracks"), {"jets": "jets", "tracks": "tracks"}
         )
+        sink.output_path = tmp_path / "eval.h5"
+        b, _ = _batch_bundle()
+        b.set("outputs.jets.cls", torch.rand(6, 1))
+        sink.consume(b)
+        dtypes = {g: sink._h5.file[g].dtype for g in sink._h5.file}  # noqa: SLF001
+        shapes = {g: sink._h5.file[g].shape for g in sink._h5.file}  # noqa: SLF001
+        sink.flush()
+        return dtypes, shapes
+
+    def test_column_schema(self, tmp_path):
+        """The merged column dtypes/order match the v1 eval schema exactly."""
+        dtypes, shapes = self._column_schema(tmp_path)
         assert dtypes["objects"].names == (
             f"{RUN_NAME}_pb", f"{RUN_NAME}_pc", f"{RUN_NAME}_pnull", "class_label",
         )
@@ -204,13 +217,11 @@ class TestEvalH5ByteParity:
         assert dtypes["object_masks"]["truth_mask"] == _I8
         assert dtypes["object_masks"]["mask_logits"] == _F4
         assert f"{RUN_NAME}_{INDEX_SUFFIX}" in dtypes["tracks"].names
-        assert shapes["objects"] == (64, _M)
-        assert shapes["object_masks"] == (64, _M, _N_TRACKS)
+        assert shapes["objects"] == (6, _M)
+        assert shapes["object_masks"] == (6, _M, _N_TRACKS)
 
-    def test_half_precision_demotes_float_object_columns(self):
-        dtypes, _ = _sink(half=True)._merge_columns(  # noqa: SLF001
-            ("jets", "tracks"), ("tracks",), {"jets": "jets", "tracks": "tracks"}, 64
-        )
+    def test_half_precision_demotes_float_object_columns(self, tmp_path):
+        dtypes, _ = self._column_schema(tmp_path, half=True)
         assert dtypes["objects"][f"{RUN_NAME}_pb"] == np.dtype("f2")
         assert dtypes["object_masks"]["mask_logits"] == np.dtype("f2")
         assert dtypes["object_masks"]["truth_mask"] == _I8  # int stays i8

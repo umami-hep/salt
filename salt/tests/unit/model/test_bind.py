@@ -8,7 +8,8 @@ from torch import nn
 
 from salt.graph.bundle import Bundle
 from salt.graph.executor import Executor
-from salt.graph.spec import IO, Mode
+from salt.graph.planner import compile_plan
+from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.model.modules import (
     BindError,
     SaltModelModule,
@@ -169,3 +170,89 @@ class TestBindAllDirectCalls:
         materialise_all(mixed)
         # the real modules were still bound/materialised (Normaliser flips its buffer)
         assert bool(modules["norm"].materialised)
+
+
+# derived_fields: column names that are a function of resolved input fields
+
+
+class _FieldToy(SaltModelModule):
+    """A toy plan step with static IO and an optional derived-fields rule."""
+
+    def __init__(self, name, requires, produces, derive=None):
+        super().__init__()
+        self.name = name
+        self._io = IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+        self._derive = derive
+
+    def declare_io(self, mode):
+        del mode
+        return self._io
+
+    def derived_fields(self, fields):
+        return {} if self._derive is None else self._derive(fields)
+
+
+_SRC_FIELDS = ("a", "b", "c")
+
+
+def _field_plan(*modules, sink):
+    sources = unflatten_spec({
+        "inputs.x": TensorSpec(shape=("B", "F:x"), dtype="float32", fields=_SRC_FIELDS)
+    })
+    return compile_plan({m.name: m for m in modules}, Mode.TEST, sources=sources, sinks=[sink])
+
+
+def _spec(last="F:out", fields=None):
+    return TensorSpec(shape=("B", last), dtype="float32", fields=fields)
+
+
+def _same_as(src, dst, prefix=""):
+    def derive(fields):
+        return {dst: tuple(f"{prefix}{n}" for n in fields[src])} if src in fields else {}
+
+    return derive
+
+
+def _scale(out_spec):
+    derive = _same_as("inputs.x", "normed.x")
+    return _FieldToy("scale", {"inputs.x": _spec("F:x")}, {"normed.x": out_spec}, derive)
+
+
+class TestDerivedFields:
+    def test_names_propagate_through_a_chain(self):
+        """A chain of derivations resolves names and widths regardless of module order."""
+        derive = _same_as("normed.x", "renamed.x", prefix="r_")
+        rename = _FieldToy(
+            "rename", {"normed.x": _spec("F:scale")}, {"renamed.x": _spec("F:rename")}, derive
+        )
+        plan = _field_plan(rename, _scale(_spec("F:scale")), sink="renamed.x")
+        schema = resolve_bind_schema(plan)
+        assert schema.fields_of("normed.x") == _SRC_FIELDS
+        assert schema.width("normed.x") == len(_SRC_FIELDS)
+        assert schema.fields_of("renamed.x") == ("r_a", "r_b", "r_c")
+        assert schema.width("renamed.x") == len(_SRC_FIELDS)
+
+    def test_conflicting_derived_tuple_raises(self):
+        """A derived tuple disagreeing with the declared fields raises, naming module and key."""
+        scale = _scale(_spec("F:scale", fields=("p", "q", "r")))
+        with pytest.raises(BindError, match=r"'scale' derives fields .* for 'normed\.x'"):
+            resolve_bind_schema(_field_plan(scale, sink="normed.x"))
+
+    def test_width_vs_derived_fields_length_mismatch_raises(self):
+        """A key whose resolved width differs from its derived column count raises."""
+        with pytest.raises(BindError, match=r"'normed\.x' resolves to width 2 but carries 3"):
+            resolve_bind_schema(_field_plan(_scale(_spec(2)), sink="normed.x"))
+
+    def test_structured_key_declared_fields_do_not_constrain_width(self):
+        """Declared struct fields on a ``[B, T]`` raw key do not override its observed width."""
+        features = _FieldToy(
+            "features",
+            {"raw.x": TensorSpec(kind="data", fields=_SRC_FIELDS)},
+            {"inputs.x": _spec("F:x", fields=_SRC_FIELDS)},
+        )
+        sources = unflatten_spec({"raw.x": TensorSpec(shape=("B", 40), kind="data")})
+        plan = compile_plan({"features": features}, Mode.TEST, sources=sources, sinks=["inputs.x"])
+        schema = resolve_bind_schema(plan)
+        assert schema.width("raw.x") == 40
+        assert schema.fields_of("raw.x") == _SRC_FIELDS
+        assert schema.width("inputs.x") == len(_SRC_FIELDS)

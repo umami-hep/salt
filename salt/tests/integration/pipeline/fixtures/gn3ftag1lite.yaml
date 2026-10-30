@@ -1,0 +1,8 @@
+config: GN3/GN3FTAG1LITE.yaml
+fragment: >-
+  small-R two-stage kinematic-reweighting example on the FTAG1LITEReader streaming
+  fragment - no synthetic DAOD_FTAG1LITE fixture exists to pair it into a matrix row,
+  so its reader is exercised via test_reader_fragment_instantiates, its model and
+  schedule via the parse-level salt/tests/unit/test_gn3ftag1lite_config.py, and its
+  two-stage fit via the synthetic fit in
+  salt/tests/integration/multistage_training/test_training_schedule.py.

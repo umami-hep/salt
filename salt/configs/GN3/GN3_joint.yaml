@@ -1,0 +1,249 @@
+# GN3 joint small-R + large-R: one two-stream (tracks + flows) body trained on
+# DAOD_FTAG1LITE small-R (AntiKt4EMPFlow) and large-R (AntiKt10UFOCSSKSoftDrop) jets
+# together, read as one row stream by readers/ftag1lite_joint.yaml (included below).
+#
+# Each jet type has its own flavour head. `jets.jet_type` (0 small-R / 1 large-R) tells
+# the rows apart: each FtagLabeller labels its own type and gives every other row -1,
+# which the classification loss ignores, so a head only learns from its own jet type.
+# The three track heads train on the tracks of both jet types. The jet pT regression
+# (as in GN3V00) learns from small-R jets only: its target, ptFromTruthDressedWZJet, is NaN
+# for unmatched small-R jets and for every large-R row, and NaN targets are ignored.
+#
+# Usage (the manifest paths are yours to choose, see docs/streaming.md):
+#   salt fit --config GN3/GN3_joint.yaml \
+#            --data.train_file '/path/to/containers/*/*.root' \
+#            --data.val_file '/path/to/containers/*/*.root' \
+#            --data.manifest '{train: /path/to/train_manifest.json, val: /path/to/val_manifest.json}'
+# Train and val read the same files: the reader's per_split cuts divide them by eventNumber.
+#
+# Evaluate on the test split (eventNumber % 10 == 9); the eval H5 lands next to the checkpoint:
+#   salt test --config <run_dir>/config.yaml --ckpt_path <run_dir>/ckpts/<checkpoint>.ckpt \
+#            --data.test_file '/path/to/containers/*/*.root' \
+#            --data.manifest '{train: /path/to/train_manifest.json, val: /path/to/val_manifest.json, test: /path/to/test_manifest.json}'
+#
+# Inputs are normalised by MaskedInputNormaliser, which learns its statistics during
+# training: no norm_dict exists for DAOD_FTAG1LITE. The losses are combined by their
+# geometric mean (LossGLS), as in GN3 and GN3X. A batch with no jets of one type would give
+# that head a loss of 0 and the geometric mean would collapse with it; on the 0.15%
+# FTAG1LITE selection a 1000-jet batch holds ~99 large-R jets (fewest seen: 43 in 210,510
+# batches), so this practically never happens in training; if it does, the
+# SkipBatchesWithoutLabels callback below skips that step. Small validation tail batches
+# can still miss a jet type; their total then reads 0, which only nudges the logged val/loss.
+
+include:
+  - readers/ftag1lite_joint.yaml
+
+name: GN3Joint
+
+data:
+  batch_size: 1000
+  num_workers: 8
+  modules:
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          jets: [pt, eta, mass, jet_type]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              lifetimeSignedD0Significance,
+              lifetimeSignedZ0SinThetaSignificance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+              leptonID,
+              muon_quality,
+              muon_qOverPratio,
+              muon_momentumBalanceSignificance,
+              muon_scatteringNeighbourSignificance,
+            ]
+          flows: [pt, energy, deta, dphi, isCharged]
+    labels:
+      class_path: salt.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+    small_r_labeller:
+      class_path: salt.data.FtagLabeller
+      init_args:
+        # class_names must match small_r_classification.class_names index-for-index.
+        stream: jets
+        label: small_r_flavour
+        class_names: &small_r_flavour
+          [ghostbjets, ghostcjets, ghostsjets, ghostudjets, ghostgjets, ghosttaujets]
+        select_field: jet_type
+        select_value: 0
+    large_r_labeller:
+      class_path: salt.data.FtagLabeller
+      init_args:
+        # class_names must match large_r_classification.class_names index-for-index.
+        stream: jets
+        label: large_r_flavour
+        class_names: &large_r_flavour
+          [htautauhad, hbb, hcc, top, qcdbb, qcdbx, qcdcx, qcdll, Wqq]
+        select_field: jet_type
+        select_value: 1
+
+model:
+  class_path: salt.model.SaltModule
+  init_args:
+    lrs: {initial: 2.0e-8, max: 1.0e-4, end: 2.0e-6, pct_start: 0.01, weight_decay: 1.0e-5}
+    optimizer: lion
+    modules:
+      norm:
+        class_path: salt.model.modules.MaskedInputNormaliser
+        init_args:
+          streams: [jets, tracks, flows]
+          global_object: jets
+      track_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets]
+          out_dim: &embed_dim 512
+          dense: {hidden_layers: [512], activation: SiLU}
+      flow_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: flows
+          context: [normed.jets]
+          out_dim: *embed_dim # equal embed width is a Concat constraint
+          dense: {hidden_layers: [512], activation: SiLU}
+      concat:
+        class_path: salt.model.modules.Concat
+        init_args: {streams: [tracks, flows]}
+      encoder:
+        class_path: salt.model.modules.TransformerEncoder
+        init_args:
+          dim: *embed_dim
+          out_dim: 256
+          num_layers: 4
+          num_registers: 8
+          attention: {num_heads: 8, attn_type: torch-math}
+          dense: {activation: SiLU, gated: true}
+      split:
+        # only tracks has per-token tasks
+        class_path: salt.model.modules.Split
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.model.modules.GlobalAttentionPooling
+        init_args: {input: encoded.seq, out: pooled.global}
+      small_r_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: small_r_flavour
+          class_names: *small_r_flavour
+          weight_source: null
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      large_r_classification:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          label: large_r_flavour
+          class_names: *large_r_flavour
+          weight_source: null
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      track_origin:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthOriginLabel
+          class_names: [Pileup, Fake, Primary, FromB, FromBC, FromC, FromTau, OtherSecondary]
+          weight_source: null
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      track_vertexing:
+        class_path: salt.model.modules.tasks.VertexingTaskModule
+        init_args:
+          stream: tracks
+          label: ftagTruthVertexIndex
+          origin_label: ftagTruthOriginLabel # declared dependency for origin-weighted loss
+          context: pooled.global
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      track_type:
+        class_path: salt.model.modules.tasks.ClassificationTaskModule
+        init_args:
+          stream: tracks
+          context: pooled.global
+          label: ftagTruthTypeLabel
+          label_map: {-2: 2, -3: 3, 5: 4, -5: 4, 6: 5, -6: 5}
+          class_names: [NoTruth, Other, Pion, Kaon, Electron, Muon]
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      jet_pt_regression:
+        class_path: salt.model.modules.tasks.RegressionTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          targets: ptFromTruthDressedWZJet
+          target_denominators: pt
+          loss: {class_path: torch.nn.L1Loss, init_args: {reduction: none}}
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      loss:
+        class_path: salt.model.modules.LossGLS
+
+outputs:
+  inputs_copy:
+    # jet kinematics, jet type and both types' truth labels next to the predictions
+    class_path: salt.outputs.InputCopyWriter
+    init_args:
+      variables:
+        jets:
+          [
+            pt,
+            eta,
+            mass,
+            jet_type,
+            HadronGhostTruthLabelID,
+            PartonTruthLabelID,
+            R10TruthLabel_R22v1,
+            GhostBHadronsFinalCount,
+            GhostCHadronsFinalCount,
+          ]
+  run_tasks:
+    class_path: salt.outputs.RunTaskOutput
+    init_args:
+      tasks:
+        [
+          small_r_classification,
+          large_r_classification,
+          track_origin,
+          track_vertexing,
+          track_type,
+          jet_pt_regression,
+        ]
+  pad_mask:
+    class_path: salt.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+
+callbacks:
+  skip_batches_without_jet_type:
+    # LossGLS safety net: a training batch with no small-R or no large-R jets, or no
+    # truth-matched small-R jet for the pT regression, is skipped (no weight update) and
+    # reported as a warning and as train/skipped_batches.
+    class_path: salt.callbacks.skip_batches.SkipBatchesWithoutLabels
+    init_args:
+      labels:
+        [
+          labels.jets.small_r_flavour,
+          labels.jets.large_r_flavour,
+          labels.jets.ptFromTruthDressedWZJet,
+        ]
+
+trainer:
+  max_epochs: 40
+  precision: 32-true
