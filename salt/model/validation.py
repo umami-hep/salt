@@ -30,12 +30,9 @@ def _concat_first_stream(modules: Mapping[str, Any]) -> tuple[str, str] | None:
         streams = getattr(module, "streams", None)
         if not (isinstance(streams, (list, tuple)) and streams):
             continue
-        declare = getattr(module, "declare_io", None)
-        if not callable(declare):
-            continue
         # declare_io is config-only/static — cheap and side-effect-free to call here.
-        produces = flatten_spec(declare(Mode.FIT).produces)
-        if "seq.x" in produces:
+        declare = getattr(module, "declare_io", None)
+        if callable(declare) and "seq.x" in flatten_spec(declare(Mode.FIT).produces):
             return name, streams[0]
     return None
 
@@ -53,11 +50,7 @@ def validate_edge_port(modules: Mapping[str, Any]) -> int:
     returns the number of edge-bearing encoders validated.
     """
     # duck-typed: a `TransformerEncoder` with ``edges:`` configured sets ``edges_key``
-    encoders = [
-        (name, module)
-        for name, module in modules.items()
-        if getattr(module, "edges_key", None) is not None
-    ]
+    encoders = [(n, m) for n, m in modules.items() if getattr(m, "edges_key", None) is not None]
     if not encoders:
         return 0
     concat = _concat_first_stream(modules)
@@ -126,8 +119,8 @@ def check_class_names(modules: Mapping[str, GraphModule], reader: Any) -> int:
         ):
             continue  # no class-name attr for this label — nothing to check
         checked += 1
-        if list(class_names) != list(attr):
-            configured, stored = list(class_names), list(attr)
+        configured, stored = list(class_names), list(attr)
+        if configured != stored:
             diagnosis = (
                 "same classes, DIFFERENT ORDER — the model head indices would be "
                 "silently mislabelled"
@@ -156,9 +149,5 @@ def resolve_origin_weighting(modules: Mapping[str, GraphModule], reader: Any) ->
     weighting and schema-less readers are no-ops; a name-based config that
     resolves nothing fails loudly at bind. Returns the count resolved.
     """
-    resolved = 0
-    for module in modules.values():
-        resolve = getattr(module, "resolve_origin_names", None)
-        if callable(resolve) and resolve(reader):
-            resolved += 1
-    return resolved
+    resolvers = (getattr(module, "resolve_origin_names", None) for module in modules.values())
+    return sum(1 for resolve in resolvers if callable(resolve) and resolve(reader))

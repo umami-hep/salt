@@ -106,19 +106,12 @@ def select_test_sink(sinks: Sequence[Any]) -> Node | None:
     `is_test_persistence_sink` true), or None; raises `ConfigError` if the selected
     sink is not a graph node.
     """
-    sink = next(
-        (
-            s
-            for s in sinks
-            if callable(getattr(s, "writer_demand", None)) and is_test_persistence_sink(s)
-        ),
-        None,
-    )
+    demanders = (s for s in sinks if callable(getattr(s, "writer_demand", None)))
+    sink = next((s for s in demanders if is_test_persistence_sink(s)), None)
     if sink is None:
         return None
     is_sink = getattr(sink, "is_sink", None)
-    has_io = callable(getattr(sink, "declare_io", None))
-    if not (has_io and callable(is_sink) and bool(is_sink())):
+    if not (callable(getattr(sink, "declare_io", None)) and callable(is_sink) and bool(is_sink())):
         raise ConfigError(
             f"TEST persistence sink {getattr(sink, 'name', type(sink).__name__)!r} "
             f"({type(sink).__name__}) is not a graph node — a persistence sink must provide "
@@ -184,6 +177,20 @@ def callback_demand(
     return out
 
 
+def _is_pred(key: str) -> bool:
+    return key.split(KEY_SEP, 1)[0] == "preds"
+
+
+def _first_producers(model_modules: Mapping[str, Any], mode: Mode) -> dict[str, str]:
+    """``{key: first producing module}`` over every key active in `mode`, in scan order."""
+    produced: dict[str, str] = {}
+    for name, module in model_modules.items():
+        for key, spec in flatten_spec(module.declare_io(mode).produces).items():
+            if spec.active_in(mode):
+                produced.setdefault(key, name)
+    return produced
+
+
 def model_sinks(
     model_modules: Mapping[str, Any], mode: Mode, *, callback_keys: Iterable[str] = ()
 ) -> list[str]:
@@ -191,23 +198,15 @@ def model_sinks(
     `callback_keys` (demand only ADDS sinks, never narrows), else every declared
     ``preds.*`` key; raises `ConfigError` if the mode's anchor key is unproduced.
     """
-    produced: dict[str, str] = {}
-    for name, module in model_modules.items():
-        for key, spec in flatten_spec(module.declare_io(mode).produces).items():
-            if spec.active_in(mode):
-                produced.setdefault(key, name)
+    produced = _first_producers(model_modules, mode)
     if mode & Mode.TRAINING:
         if "loss.total" not in produced:
             raise ConfigError(
                 f"no module produces 'loss.total' in mode {mode.name} — training plans "
                 "anchor on it; add a LossSum module"
             )
-        sinks = ["loss.total"]
-        for key in callback_keys:
-            if key not in sinks:
-                sinks.append(key)
-        return sinks
-    preds = [key for key in produced if key.split(KEY_SEP, 1)[0] == "preds"]
+        return list(dict.fromkeys(["loss.total", *callback_keys]))
+    preds = [key for key in produced if _is_pred(key)]
     # the ONNX output manifest is not writer-derived — the folded OnnxExportSink
     # anchors its conversion-leaf demand itself. When no export sink demand is
     # present it falls back to every preds.* key below.
@@ -224,11 +223,7 @@ def assert_no_dead_preds(model_modules: Mapping[str, Any], plan: Plan) -> None:
     edge — with a sink NODE folded, the sink demands ``outputs.*`` not ``preds.*``,
     so a genuinely-dead ``preds.*`` would otherwise ship silently.
     """
-    produced: dict[str, str] = {}
-    for name, module in model_modules.items():
-        for key, spec in flatten_spec(module.declare_io(Mode.TEST).produces).items():
-            if key.split(KEY_SEP, 1)[0] == "preds" and spec.active_in(Mode.TEST):
-                produced.setdefault(key, name)
+    produced = {k: v for k, v in _first_producers(model_modules, Mode.TEST).items() if _is_pred(k)}
     # a plan edge exists only between surviving nodes — absent here means no consumer
     consumed = {edge.key for edge in plan.edges}
     if dead := [key for key in produced if key not in consumed]:
@@ -250,9 +245,7 @@ def dead_preds_message(dead: list[str], produced: Mapping[str, str]) -> str:
     fix = "  fix: widen the writers"
     targets = sorted({produced[key] for key in dead if key in produced})
     if targets:
-        expose_form = " / ".join(
-            f"--model.modules.{name}.init_args.expose=[fit,val]" for name in targets
-        )
+        expose_form = " / ".join(f"--model.modules.{n}.init_args.expose=[fit,val]" for n in targets)
         null_form = " / ".join(f"--model.modules.{name}=null" for name in targets)
         # expose first — it keeps the task training and only prunes its TEST/ONNX
         # prediction; --model.modules.X=null deletes the task outright.
@@ -311,9 +304,7 @@ def boundary_demand(
                     "narrow it before compile"
                 )
             if key.split(KEY_SEP, 1)[0] not in MODEL_VISIBLE_NAMESPACES:
-                consumers = ", ".join(
-                    f"{name!r} (config: model.modules.{name})" for name in required[key]
-                )
+                consumers = ", ".join(f"{n!r} (config: model.modules.{n})" for n in required[key])
                 raise ConfigError(
                     f"[mode={mode.name}] key {key!r} is required by module(s) {consumers} "
                     "but no model module produces it, and it cannot come from the dataset "
@@ -433,10 +424,9 @@ def prepare_sinks(
             onnx_sink.model_name = sanitised_model_name(run_name)
 
     modules = dict(model_modules)
-    if test_sink is not None:
-        modules = fold_sink_node(modules, test_sink)
-    if onnx_sink is not None:
-        modules = fold_sink_node(modules, onnx_sink)
+    for sink_node in (test_sink, onnx_sink):
+        if sink_node is not None:
+            modules = fold_sink_node(modules, sink_node)
 
     fitval = select_fitval_callbacks(callbacks)
 
@@ -486,7 +476,6 @@ def prepare_sinks(
                         raise
                     error = str(err)
                     anchors = model_sinks(model_modules, mode)
-                    anchor_origins = None
             else:
                 anchors = model_sinks(model_modules, mode)
         by_mode[mode] = ModeSinks(

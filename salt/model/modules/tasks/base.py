@@ -8,12 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from torch import nn
+from torch import Tensor, nn
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.spec import Mode, TensorSpec
+from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.model.base import SaltModelModule
+from salt.model.modules.stream_embed import _stream_len
 from salt.model.nn.dense import Dense, _reject_width_keys
 from salt.outputs.output_schema import OutputField
 
@@ -87,12 +88,6 @@ class _TaskModuleBase(SaltModelModule):
             start += width
         return slice(0, 0)
 
-    def _pred_spec(self, spec: TensorSpec) -> TensorSpec:
-        """Re-stamp `spec` to the configured ``expose`` modes (kind/shape/dtype kept)."""
-        if self.expose_modes == Mode.ALL:
-            return spec
-        return replace(spec, modes=spec.modes & self.expose_modes)
-
     @property
     def pred_key(self) -> str:
         """``preds.<stream>.<instance-name>``."""
@@ -115,24 +110,71 @@ class _TaskModuleBase(SaltModelModule):
         """
         return self.sequence and self.stream not in _NO_PAD_MASK_STREAMS
 
+    @property
+    def _tokens(self) -> tuple[str, ...]:
+        """The label shape: ``("B", "T:<stream>")`` for a per-token head, else ``("B",)``."""
+        return ("B", _stream_len(self.stream)) if self.sequence else ("B",)
+
+    def _head_io(
+        self,
+        *,
+        label_specs: Mapping[str, TensorSpec],
+        pred_shape: tuple[int | str, ...] | None,
+        extra_requires: Mapping[str, TensorSpec] | None = None,
+        extra_produces: Mapping[str, TensorSpec] | None = None,
+        context_last: bool = False,
+    ) -> IO:
+        """The shared head `IO`, keys in this insertion order.
+
+        Requires ``input`` (``[*_tokens, D]``), ``context`` (last instead when
+        `context_last`), the stream pad mask (iff `has_pad_mask`), `label_specs`,
+        `extra_requires`. Produces the `expose`-gated pred (``pred_shape=None``:
+        shape- and dtype-free) and the TRAINING loss port, or `extra_produces`
+        in the loss port's place.
+        """
+        width = sym_dim("D", self.name)
+        requires = {self.input_key: TensorSpec(shape=(*self._tokens, width), dtype="float32")}
+        context = {self.context: TensorSpec(dtype="float32")} if self.context is not None else {}
+        if not context_last:
+            requires |= context
+        if self.has_pad_mask:
+            requires[f"masks.{self.stream}"] = TensorSpec(
+                shape=("B", _stream_len(self.stream)), dtype="bool", kind="pad_mask"
+            )
+        requires |= {**label_specs, **(extra_requires or {})}
+        if context_last:
+            requires |= context
+        pred = TensorSpec(shape=pred_shape, dtype=None if pred_shape is None else "float32")
+        if self.expose_modes != Mode.ALL:
+            pred = replace(pred, modes=pred.modes & self.expose_modes)
+        loss = {self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)}
+        produces = {self.pred_key: pred, **(loss if extra_produces is None else extra_produces)}
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
+
     def _emit_targets(self, mode: Mode) -> bool:
         """Whether `mode` gets target-label fields: TEST only, ``write_targets`` on
         (never ONNX — export/inference stays label-free).
         """
         return self.write_targets and bool(mode & Mode.TEST)
 
-    def _target_field(self, axis: str = "per_token") -> OutputField:
-        """The value-free ``target_{task}`` i4 label column, unprefixed (labels are
-        model-independent).
+    def _target_fields(self, dtype: str, suffixes: Sequence[str] = ("",)) -> list[OutputField]:
+        """Value-free ``target_{task}{suffix}`` label columns, unprefixed (labels are
+        model-independent), per-token iff `sequence`.
         """
-        return OutputField(
-            h5_name=f"target_{self.name}",
-            onnx_name=None,
-            dtype="i4",
-            axis=axis,
-            final=True,
-            prefix=False,
-        )
+        axis = "per_token" if self.sequence else "global"
+        return [
+            OutputField(f"target_{self.name}{s}", None, dtype, axis, final=True, prefix=False)
+            for s in suffixes
+        ]
+
+    def _output_deps(self, mode: Mode, labels: Sequence[str], pre: Sequence[str] = ()) -> list[str]:
+        """`pre` + the stream pad mask (iff `has_pad_mask`), then (TEST with
+        ``write_targets``) the target `labels` not already listed.
+        """
+        deps = [*pre, *([f"masks.{self.stream}"] if self.has_pad_mask else [])]
+        if self._emit_targets(mode):
+            deps.extend(k for k in labels if k not in deps)
+        return deps
 
     # -- output rendering: the get_output surface --------------------------------
     #
@@ -148,12 +190,12 @@ class _TaskModuleBase(SaltModelModule):
         deps (`output_time_requires`) from `b`, applies the eval conversion
         (softmax / masked-softmax / argmax / descale / union-find) in
         TRACEABLE torch ops so ONNX sees them in-graph, and returns one
-        `OutputField` per serialisation leaf. Implementations derive that list
-        from `get_output_manifest` and attach values with
-        ``dataclasses.replace``. Each field carries the converted torch
-        ``value`` plus the bare suffix + dtype + axis metadata — it does NOT
-        pack a structured numpy array, prefix the run/model name, or downcast
-        precision (the sink does all three).
+        `OutputField` per serialisation leaf: the `get_output_manifest` list
+        with each converted value attached via ``dataclasses.replace``. Each
+        field carries the converted torch ``value`` plus the bare suffix +
+        dtype + axis metadata — it does NOT pack a structured numpy array,
+        prefix the run/model name, or downcast precision (the sink does all
+        three).
 
         Target-label emission: in TEST mode, and unless the
         task's ``write_targets`` flag is off, the prediction fields are
@@ -168,7 +210,8 @@ class _TaskModuleBase(SaltModelModule):
         de-scaled prediction columns); vertexing emits its per-token
         vertex-index label (padded positions ``-1``). In ONNX/export mode NO
         label field is ever emitted, declared, or demanded — the export graph
-        must stay label-free.
+        must stay label-free. A task family that ships no rendering raises
+        `ConfigError` (from the `_output_values` hook).
 
         Parameters
         ----------
@@ -182,12 +225,18 @@ class _TaskModuleBase(SaltModelModule):
             Accepted for interface symmetry but NOT baked into the field
             names (the sink prefixes).
 
-        Raises
-        ------
-        ConfigError
-            For a task family that ships no output rendering.
+        Returns
+        -------
+        list[OutputField]
+            The manifest fields with their converted values attached.
         """
-        del b, mode, run_name
+        values = self._output_values(b, mode)
+        fields = self.get_output_manifest(mode, run_name)
+        return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
+
+    def _output_values(self, b: Bundle, mode: Mode) -> list[Tensor]:
+        """The converted values `get_output` attaches, in manifest order."""
+        del b, mode
         raise ConfigError(self._no_render_msg("output"))
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
@@ -300,8 +349,7 @@ def _loss_cfg(loss: str | dict[str, Any] | None, default: dict[str, Any]) -> dic
     `ConfigError` if malformed.
     """
     if loss is None:
-        cfg: dict[str, Any] = {k: dict(v) if isinstance(v, dict) else v for k, v in default.items()}
-        return cfg
+        return {k: dict(v) if isinstance(v, dict) else v for k, v in default.items()}
     if isinstance(loss, str):
         return {"class_path": loss if "." in loss else f"torch.nn.{loss}"}
     if isinstance(loss, Mapping) and "class_path" in loss:

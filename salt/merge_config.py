@@ -199,9 +199,7 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     """
     from salt.cli import _compile, _resolve_widths, load_config
 
-    merged = yaml.safe_load(merged_text)
-    schedule = _schedule_from_merged(merged)
-
+    schedule = _schedule_from_merged(yaml.safe_load(merged_text))
     cfg = load_config([str(output_path)])
     if err := cfg.mode_errors.get(Mode.FIT):
         raise ConfigError(f"salt merge-config: the FIT-mode plan does not compile: {err}")
@@ -211,10 +209,9 @@ def _write_stage_plots(output_path: Path, merged_text: str, *, do_plots: bool) -
     widths = _resolve_widths(cfg)
 
     stem = output_path.with_suffix("")
-    n_stages = len(schedule.stages)
     for index, stage in enumerate(schedule.stages):
         frozen = frozenset(schedule.frozen_names(stage))
-        title = _stage_title(index, n_stages, stage.name, frozen, stage)
+        title = _stage_title(index, len(schedule.stages), stage.name, frozen, stage)
         dot_text = dot_source(plan, cfg.modules, pruned, widths=widths, frozen=frozen, title=title)
         dot_path = Path(f"{stem}_stage{index:02d}_{stage.name}.dot")
         dot_path.write_text(dot_text)

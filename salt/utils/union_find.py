@@ -48,10 +48,7 @@ def symmetrize_edge_scores(scores: Tensor, node_numbers: Tensor) -> Tensor:
 
 
 def update_node_indices(
-    scores: Tensor,
-    node_indices: Tensor,
-    update_indices: Tensor,
-    node_numbers: Tensor,
+    scores: Tensor, node_indices: Tensor, update_indices: Tensor, node_numbers: Tensor
 ) -> tuple[Tensor, Tensor]:
     """Run one union-find-style update step over a batch of graphs.
 

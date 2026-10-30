@@ -8,6 +8,7 @@ and computes the matched classification/mask/regression loss components.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -67,8 +68,8 @@ class MaskFormerMatchedLoss(SaltModelModule):
     Raises
     ------
     ConfigError
-        On a non-positive ``num_classes``, an unknown ``loss_weights`` key, an
-        all-zero matcher-weight sum, or no requested loss component.
+        On a non-positive ``num_classes`` / ``num_queries``, an unknown
+        ``loss_weights`` / ``matcher_weights`` key, or an all-zero matcher-weight sum.
     """
 
     _KNOWN_COMPONENTS = ("object_class_ce", "mask_dice", "mask_focal", "mask_ce", "regression")
@@ -84,33 +85,25 @@ class MaskFormerMatchedLoss(SaltModelModule):
         input_stream: str = "objects",
     ) -> None:
         super().__init__()
-        if num_classes < 1:
-            raise ConfigError(
-                f"MaskFormerMatchedLoss: num_classes (non-null classes) must be >= 1, got "
-                f"{num_classes}"
-            )
-        if num_queries < 1:
-            raise ConfigError(
-                f"MaskFormerMatchedLoss: num_queries (query count M) must be >= 1, got "
-                f"{num_queries}"
-            )
+        for arg, value in (("num_classes", num_classes), ("num_queries", num_queries)):
+            if value < 1:
+                raise ConfigError(f"MaskFormerMatchedLoss: {arg} must be >= 1, got {value}")
+        checked = {"loss_weights": loss_weights, "matcher_weights": matcher_weights or {}}
+        for arg, weights in checked.items():
+            if unknown := sorted(set(weights) - set(self._KNOWN_COMPONENTS)):
+                raise ConfigError(
+                    f"MaskFormerMatchedLoss: unknown {arg} keys {unknown} — known components "
+                    f"are {list(self._KNOWN_COMPONENTS)}"
+                )
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.input_stream = input_stream
+        # the scaled object-regression (prediction, target) keys
+        self._reg_keys = (f"preds.{input_stream}.regression", f"targets.{input_stream}.regression")
 
         self.loss_weights = {k: float(v) for k, v in dict(loss_weights).items()}
-        if unknown := sorted(set(self.loss_weights) - set(self._KNOWN_COMPONENTS)):
-            raise ConfigError(
-                f"MaskFormerMatchedLoss: unknown loss_weights keys {unknown} — known components "
-                f"are {list(self._KNOWN_COMPONENTS)} (v1 maskformer_loss.py loss_map + regression)"
-            )
         mw = self.loss_weights if matcher_weights is None else dict(matcher_weights)
         self.matcher_weights = {k: float(v) for k, v in mw.items()}
-        if unknown := sorted(set(self.matcher_weights) - set(self._KNOWN_COMPONENTS)):
-            raise ConfigError(
-                f"MaskFormerMatchedLoss: unknown matcher_weights keys {unknown} — known components "
-                f"are {list(self._KNOWN_COMPONENTS)}"
-            )
         # get_batch_cost reads object_class_ce unconditionally — default it to the
         # loss weight if absent.
         self.matcher_weights.setdefault(
@@ -123,17 +116,11 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 f"matcher_weights entry must be positive (got {self.matcher_weights})"
             )
 
-        # object_class_ce is always computed; the others only when their loss
-        # weight is truthy. regression is the matched extension.
+        # object_class_ce is always computed (so this is never empty); the others only
+        # when their loss weight is truthy. regression is the matched extension.
         self.components: tuple[str, ...] = tuple(
             c for c in self._KNOWN_COMPONENTS if c == "object_class_ce" or self.loss_weights.get(c)
         )
-        if not self.components:
-            raise ConfigError(
-                "MaskFormerMatchedLoss: no loss component requested — set at least "
-                "object_class_ce in loss_weights"
-            )
-
         self.null_class_weight = float(null_class_weight)
         self.class_weights = list(class_weights) if class_weights is not None else None
 
@@ -152,155 +139,87 @@ class MaskFormerMatchedLoss(SaltModelModule):
         """The composed `HungarianMatcher` (owned by the loss)."""
         return self.v1_loss.matcher
 
-    def _reg_pred_key(self) -> str:
-        """The scaled object-regression prediction key (``preds.<stream>.regression``)."""
-        return f"preds.{self.input_stream}.regression"
-
-    def _reg_tgt_key(self) -> str:
-        """The scaled object-regression target key (``targets.<stream>.regression``)."""
-        return f"targets.{self.input_stream}.regression"
-
     def declare_io(self, mode: Mode) -> IO:
         """Declare the object preds + truth labels -> ``matched.*``/``losses.*`` (FIT|VAL only)."""
         if not (mode & Mode.TRAINING):
             return IO(requires={}, produces={})
+        s, lbl, mo = self.input_stream, f"labels.{OBJECT_STREAM}", f"matched.{OBJECT_STREAM}"
+        n_cls, tok, emb = self.num_classes + 1, sym_dim("T", self.name), sym_dim("E", self.name)
 
-        m = self.num_queries
-        tok = sym_dim("T", self.name)
-        emb = sym_dim("E", self.name)
-        n_classes = self.num_classes + 1
-        f = Mode.TRAINING
+        def _spec(*tail: int | str, dtype: str = "float32", **kw: Any) -> TensorSpec:
+            shape = ("B", self.num_queries, *tail)
+            return TensorSpec(shape=shape, dtype=dtype, modes=Mode.TRAINING, **kw)
 
-        requires: dict[str, TensorSpec] = {
-            f"{self.input_stream}.class_logits": TensorSpec(
-                shape=("B", m, n_classes), dtype="float32", modes=f
-            ),
-            f"{self.input_stream}.class_probs": TensorSpec(
-                shape=("B", m, n_classes), dtype="float32", modes=f
-            ),
-            f"{self.input_stream}.masks": TensorSpec(shape=("B", m, tok), dtype="float32", modes=f),
-            f"labels.{OBJECT_STREAM}.object_class": TensorSpec(
-                shape=("B", m), dtype="int64", kind="label", modes=f
-            ),
-            f"labels.{OBJECT_STREAM}.masks": TensorSpec(
-                shape=("B", m, tok), dtype="bool", kind="label", modes=f
-            ),
+        # insertion order is kept stable (it fixes the nested spec order)
+        requires = {
+            f"{s}.class_logits": _spec(n_cls),
+            f"{s}.class_probs": _spec(n_cls),
+            f"{s}.masks": _spec(tok),
+            f"{lbl}.object_class": _spec(dtype="int64", kind="label"),
+            f"{lbl}.masks": _spec(tok, dtype="bool", kind="label"),
+        }
+        produces = {
+            f"{mo}.embed": _spec(emb),
+            f"{mo}.class_logits": _spec(n_cls),
+            f"{mo}.class_probs": _spec(n_cls),
+            f"{mo}.masks": _spec(tok),
+            f"{mo}.object_class": _spec(dtype="int64", kind="label"),
+            f"{mo}.target_masks": _spec(tok, dtype="bool", kind="label"),
         }
         if "regression" in self.components:
             r = sym_dim("R", self.name)
-            requires[self._reg_pred_key()] = TensorSpec(shape=("B", m, r), dtype="float32", modes=f)
-            requires[self._reg_tgt_key()] = TensorSpec(shape=("B", m, r), dtype="float32", modes=f)
-
-        produces: dict[str, TensorSpec] = {
-            f"matched.{OBJECT_STREAM}.embed": TensorSpec(
-                shape=("B", m, emb), dtype="float32", modes=f
-            ),
-            f"matched.{OBJECT_STREAM}.class_logits": TensorSpec(
-                shape=("B", m, n_classes), dtype="float32", modes=f
-            ),
-            f"matched.{OBJECT_STREAM}.class_probs": TensorSpec(
-                shape=("B", m, n_classes), dtype="float32", modes=f
-            ),
-            f"matched.{OBJECT_STREAM}.masks": TensorSpec(
-                shape=("B", m, tok), dtype="float32", modes=f
-            ),
-            f"matched.{OBJECT_STREAM}.object_class": TensorSpec(
-                shape=("B", m), dtype="int64", kind="label", modes=f
-            ),
-            f"matched.{OBJECT_STREAM}.target_masks": TensorSpec(
-                shape=("B", m, tok), dtype="bool", kind="label", modes=f
-            ),
-        }
-        requires[f"{self.input_stream}.embed"] = TensorSpec(
-            shape=("B", m, emb), dtype="float32", modes=f
-        )
-        if "regression" in self.components:
-            r = sym_dim("R", self.name)
-            produces[f"matched.{OBJECT_STREAM}.regression"] = TensorSpec(
-                shape=("B", m, r), dtype="float32", modes=f
-            )
-            produces[f"matched.{OBJECT_STREAM}.target_regression"] = TensorSpec(
-                shape=("B", m, r), dtype="float32", modes=f
-            )
+            requires.update({key: _spec(r) for key in self._reg_keys})
+            produces.update({f"{mo}.regression": _spec(r), f"{mo}.target_regression": _spec(r)})
+        requires[f"{s}.embed"] = _spec(emb)
         for component in self.components:
-            produces[f"losses.{component}"] = TensorSpec(shape=(), kind="loss", modes=f)
+            produces[f"losses.{component}"] = TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING)
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Validate the regression prediction/target widths agree; skips if either is unresolved."""
-        if "regression" not in self.components:
+        if "regression" not in self.components or any(
+            key not in schema.widths for key in self._reg_keys
+        ):
             return
-        reg_pred_key, reg_tgt_key = self._reg_pred_key(), self._reg_tgt_key()
-        if reg_pred_key not in schema.widths or reg_tgt_key not in schema.widths:
-            return
-        wp = schema.width(reg_pred_key)
-        wt = schema.width(reg_tgt_key)
-        if wp != wt:
+        pred_key, tgt_key = self._reg_keys
+        if (wp := schema.width(pred_key)) != (wt := schema.width(tgt_key)):
             raise ConfigError(
                 f"MaskFormerMatchedLoss {self.name!r}: regression prediction width {wp} != "
-                f"target width {wt} ({reg_pred_key!r} vs {reg_tgt_key!r}) — "
-                "the matched L1 is element-wise (v1 maskformer_loss.py regression cost)"
+                f"target width {wt} ({pred_key!r} vs {tgt_key!r}) — the matched L1 is element-wise"
             )
-
-    def _matched_regression_loss(
-        self, reg_pred: Tensor, reg_tgt: Tensor, object_class: Tensor
-    ) -> Tensor:
-        """The matched object-regression L1 over valid objects (``object_class != num_classes``).
-
-        Returns 0.0 if no valid object in the batch.
-        """
-        valid = object_class != self.num_classes  # [B, M]
-        if not valid.any():
-            return reg_pred.new_zeros(())
-        # element-wise L1 over the valid objects' targets; the matcher-permuted preds
-        # are already truth-aligned. mean over (valid objects x R), v1-style reduction.
-        return torch.nn.functional.l1_loss(reg_pred[valid], reg_tgt[valid])
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Match queries to truth; emit matched preds (new ``matched.*`` keys) + loss components."""
         del mode
-        class_logits = b.get(f"{self.input_stream}.class_logits")
-        class_probs = b.get(f"{self.input_stream}.class_probs")
-        masks = b.get(f"{self.input_stream}.masks")
-        embed = b.get(f"{self.input_stream}.embed")
+        s, mo = self.input_stream, f"matched.{OBJECT_STREAM}"
+        class_logits, class_probs, masks, embed = (
+            b.get(f"{s}.{leaf}") for leaf in ("class_logits", "class_probs", "masks", "embed")
+        )
         object_class = b.get(f"labels.{OBJECT_STREAM}.object_class")
         target_masks = b.get(f"labels.{OBJECT_STREAM}.masks")
 
         # matcher cost stays in scaled space
-        pred_for_match: dict[str, Tensor] = {
-            "class_logits": class_logits,
-            "class_probs": class_probs,
-            "masks": masks,
-        }
-        tgt_for_match: dict[str, Tensor] = {
-            "object_class": object_class,
-            "masks": target_masks.to(masks.dtype),
-        }
+        pred_for_match = {"class_logits": class_logits, "class_probs": class_probs, "masks": masks}
+        tgt_for_match = {"object_class": object_class, "masks": target_masks.to(masks.dtype)}
         reg_pred = reg_tgt = None
         if "regression" in self.components:
-            reg_pred = b.get(self._reg_pred_key())
-            reg_tgt = b.get(self._reg_tgt_key())
-            pred_for_match["regression"] = reg_pred
-            tgt_for_match["regression"] = reg_tgt
-
+            reg_pred, reg_tgt = b.get(self._reg_keys[0]), b.get(self._reg_keys[1])
+            pred_for_match["regression"], tgt_for_match["regression"] = reg_pred, reg_tgt
         idx = self.matcher(pred_for_match, tgt_for_match)
 
-        # advanced indexing returns a fresh tensor, so matched.* never aliases the
+        # advanced indexing returns fresh tensors, so matched.* never aliases the
         # decoder output (no in-place permute).
-        m_class_logits = class_logits[idx]
-        m_class_probs = class_probs[idx]
-        m_masks = masks[idx]
-        m_embed = embed[idx]
-
+        m_class_logits, m_class_probs, m_masks, m_embed = (
+            t[idx] for t in (class_logits, class_probs, masks, embed)
+        )
         out: dict[str, Tensor] = {
-            f"matched.{OBJECT_STREAM}.embed": m_embed,
-            f"matched.{OBJECT_STREAM}.class_logits": m_class_logits,
-            f"matched.{OBJECT_STREAM}.class_probs": m_class_probs,
-            f"matched.{OBJECT_STREAM}.masks": m_masks,
-            f"matched.{OBJECT_STREAM}.object_class": object_class,
-            f"matched.{OBJECT_STREAM}.target_masks": target_masks,
+            f"{mo}.embed": m_embed,
+            f"{mo}.class_logits": m_class_logits,
+            f"{mo}.class_probs": m_class_probs,
+            f"{mo}.masks": m_masks,
+            f"{mo}.object_class": object_class,
+            f"{mo}.target_masks": target_masks,
         }
-
         permuted = {"class_logits": m_class_logits, "masks": m_masks}
         truth = {"object_class": object_class, "masks": target_masks}
         losses = self.v1_loss.loss_labels(permuted, truth)
@@ -312,9 +231,16 @@ class MaskFormerMatchedLoss(SaltModelModule):
                 assert reg_pred is not None
                 assert reg_tgt is not None
                 m_reg = reg_pred[idx]
-                reg_loss = self._matched_regression_loss(m_reg, reg_tgt, object_class)
-                out[f"matched.{OBJECT_STREAM}.regression"] = m_reg
-                out[f"matched.{OBJECT_STREAM}.target_regression"] = reg_tgt
+                # matched L1 (mean over valid objects x R; preds already truth-aligned);
+                # 0.0 if the batch has no valid (non-null) object
+                valid = object_class != self.num_classes  # [B, M]
+                reg_loss = (
+                    torch.nn.functional.l1_loss(m_reg[valid], reg_tgt[valid])
+                    if valid.any()
+                    else m_reg.new_zeros(())
+                )
+                out[f"{mo}.regression"] = m_reg
+                out[f"{mo}.target_regression"] = reg_tgt
                 out["losses.regression"] = self.loss_weights["regression"] * reg_loss
             else:
                 out[f"losses.{component}"] = self.loss_weights[component] * losses[component]

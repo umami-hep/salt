@@ -153,14 +153,9 @@ def _pattern_matches(pattern: str, key: str) -> bool:
     def match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
         if not pat:
             return not parts
-        head, rest = pat[0], pat[1:]
-        if head == "**":
-            return any(match(rest, parts[i:]) for i in range(1, len(parts) + 1))
-        if not parts:
-            return False
-        if head in {"*", parts[0]}:
-            return match(rest, parts[1:])
-        return False
+        if pat[0] == "**":
+            return any(match(pat[1:], parts[i:]) for i in range(1, len(parts) + 1))
+        return bool(parts) and pat[0] in {"*", parts[0]} and match(pat[1:], parts[1:])
 
     return match(tuple(pattern.split(KEY_SEP)), tuple(key.split(KEY_SEP)))
 
@@ -267,13 +262,12 @@ class TensorSpec:
             for dim in self.shape:  # type: ignore[union-attr]
                 if isinstance(dim, str):
                     split_symbolic_dim(dim)
-                elif isinstance(dim, int):
-                    if dim < 0:
-                        raise ValueError(f"concrete dim must be non-negative, got {dim}")
-                else:
+                elif not isinstance(dim, int):
                     raise TypeError(
                         f"shape entries must be int or symbolic str, got {type(dim).__name__}"
                     )
+                elif dim < 0:
+                    raise ValueError(f"concrete dim must be non-negative, got {dim}")
         if self.kind not in KINDS:
             raise ValueError(f"invalid kind {self.kind!r}: must be one of {KINDS}")
         if not isinstance(self.modes, Mode):
@@ -402,10 +396,9 @@ class IO:
     rewrites: NestedSpec = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Validate both trees eagerly (component names + leaf types).
-        flatten_spec(self.requires)
-        flatten_spec(self.produces)
-        flatten_spec(self.rewrites)
+        # Validate every tree eagerly (component names + leaf types).
+        for tree in (self.requires, self.produces, self.rewrites):
+            flatten_spec(tree)
 
 
 UNNAMED = "unnamed"
@@ -432,7 +425,6 @@ class GraphModule(Protocol):
 
     def declare_io(self, mode: Mode) -> IO:
         """Return the declared requires/produces for the given mode."""
-        ...
 
 
 @runtime_checkable
@@ -453,8 +445,6 @@ class SinkModule(Protocol):
 
     def is_sink(self) -> bool:
         """Whether this module is a terminal sink (excluded from the executor forward loop)."""
-        ...
 
     def declare_io(self, mode: Mode) -> IO:
         """Return the declared requires/produces for the given mode (empty produces)."""
-        ...

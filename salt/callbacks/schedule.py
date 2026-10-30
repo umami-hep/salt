@@ -119,8 +119,7 @@ class TrainingScheduleCallback(Callback):
         should_stop = trainer.strategy.reduce_boolean_decision(local_should_stop, all=False)
         if not should_stop:
             return
-        is_final = controller.current_stage_index == len(schedule.stages) - 1
-        if is_final:
+        if controller.current_stage_index == len(schedule.stages) - 1:  # the final stage
             trainer.should_stop = True
         else:
             # consumed at the next train-epoch-start transition
@@ -133,8 +132,7 @@ def _read_monitor(trainer: Trainer, monitor: str) -> float | None:
     The value is already rank-reduced when logged with ``sync_dist`` — the synced
     monitor half of the rank-consistency contract.
     """
-    value = trainer.callback_metrics.get(monitor)
-    if value is None:
+    if (value := trainer.callback_metrics.get(monitor)) is None:
         return None
     return float(value.item() if hasattr(value, "item") else value)
 
@@ -238,8 +236,7 @@ def _instantiate_stage_callback(spec: Mapping[str, Any]) -> Callback:
     from salt.main import _resolve_class_path
 
     cls = _resolve_class_path(spec["class_path"])
-    init_args = spec.get("init_args") or {}
-    return cls(**init_args)
+    return cls(**(spec.get("init_args") or {}))
 
 
 def _make_stage_hook_forwarder(hook_name: str):

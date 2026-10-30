@@ -20,7 +20,14 @@ from salt.callbacks.sink_adapter import SinkAdapter, attach_runtime_sink
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode
-from salt.outputs import H5OutputSink, Node, OnnxExportSink, RuntimeSink
+from salt.outputs import (
+    H5OutputSink,
+    InputCopyWriter,
+    Node,
+    OnnxExportSink,
+    PadMaskWriter,
+    RuntimeSink,
+)
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.registry import iter_sinks, register_sink, sink_registry
 from salt.outputs.sinks.sink import SinkContext
@@ -327,11 +334,12 @@ def _opened_h5_sink(tmp_path: Path) -> H5OutputSink:
     """A real H5 sink with a live handle and one batch already written."""  # noqa: DOC201 - test helper
     src = tmp_path / "src.h5"
     _source_file(src)
-    sink = H5OutputSink(
-        copy_inputs={"jets": ["pt", "n_trks"]},
-        write_pad_mask=["tracks"],
-        output=str(tmp_path / "crashed.h5"),
-    )
+    sink = H5OutputSink(output=str(tmp_path / "crashed.h5"))
+    # bind BEFORE seeding: binding resets the resolved column table
+    sink.bind_output_section({
+        "inputs_copy": InputCopyWriter(streams=["jets"], variables={"jets": ["pt", "n_trks"]}),
+        "pad_mask": PadMaskWriter(streams=["tracks"]),
+    })
     _seed_columns(sink)
     sink.open_schema(
         SinkContext(

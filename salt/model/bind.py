@@ -115,12 +115,9 @@ def resolve_bind_schema(
         plans = (plans,)
     observed: dict[str, list[TensorSpec]] = {}
     for plan in plans:
-        for key, spec in plan.sources.items():
-            observed.setdefault(key, []).append(spec)
-        for step in plan.steps:
-            for key, spec in step.produces.items():
-                observed.setdefault(key, []).append(spec)
-            for key, spec in step.requires.items():
+        # sources first, then each step's produces before its requires
+        for mapping in (plan.sources, *(m for s in plan.steps for m in (s.produces, s.requires))):
+            for key, spec in mapping.items():
                 observed.setdefault(key, []).append(spec)
 
     dims = DimTable(error=BindError)
@@ -145,13 +142,9 @@ def resolve_bind_schema(
     # and lets the width propagate to downstream keys sharing the symbol.
     for key, specs in observed.items():
         declared = next((s.fields for s in specs if s.fields is not None), None)
-        if declared is None:
-            continue
         for spec in specs:
-            if spec.shape:
-                last = spec.shape[-1]
-                if is_symbolic_dim(last):
-                    dims.bind(str(last), len(declared), f"key {key!r} declared fields")
+            if declared is not None and spec.shape and is_symbolic_dim(spec.shape[-1]):
+                dims.bind(str(spec.shape[-1]), len(declared), f"key {key!r} declared fields")
 
     widths: dict[str, int] = {}
     fields: dict[str, tuple[str, ...]] = {}
@@ -159,15 +152,12 @@ def resolve_bind_schema(
         for spec in specs:
             if spec.fields is not None and key not in fields:
                 fields[key] = spec.fields
-            if spec.shape is None or len(spec.shape) == 0 or key in widths:
+            if not spec.shape or key in widths:
                 continue
             last = spec.shape[-1]
-            if isinstance(last, int):
-                widths[key] = last
-            else:
-                size = dims.size_of(str(last))
-                if size is not None:
-                    widths[key] = size
+            size = last if isinstance(last, int) else dims.size_of(str(last))
+            if size is not None:
+                widths[key] = size
         # when no shape observation binds a width (shape=None, rank is
         # reader-inferred), the declared column count IS the width.
         if key not in widths and key in fields:
@@ -203,18 +193,15 @@ def reader_stream_datasets(reader: Any) -> dict[str, str]:
     groups = getattr(reader, "groups", None)
     if not isinstance(groups, Mapping):
         return {}
-    out: dict[str, str] = {}
-    for stream, cfg in groups.items():
-        dataset = getattr(cfg, "dataset", None)
-        if isinstance(dataset, str):
-            out[str(stream)] = dataset
-    return out
+    return {
+        str(stream): dataset
+        for stream, cfg in groups.items()
+        if isinstance(dataset := getattr(cfg, "dataset", None), str)
+    }
 
 
 def _back_bind_symbols(
-    observed: Mapping[str, list[TensorSpec]],
-    widths: dict[str, int],
-    dims: DimTable,
+    observed: Mapping[str, list[TensorSpec]], widths: dict[str, int], dims: DimTable
 ) -> bool:
     """Bind symbolic last dims from resolved key widths, then re-resolve sharers.
 
@@ -233,11 +220,8 @@ def _back_bind_symbols(
         if key in widths:
             continue
         for spec in specs:
-            if not spec.shape:
-                continue
-            last = spec.shape[-1]
-            if is_symbolic_dim(last):
-                size = dims.size_of(str(last))
+            if spec.shape and is_symbolic_dim(spec.shape[-1]):
+                size = dims.size_of(str(spec.shape[-1]))
                 if size is not None:
                     widths[key] = size
                     changed = True
@@ -255,8 +239,7 @@ def _apply_derived_widths(plans: Iterable[Plan], widths: dict[str, int]) -> None
     width disagrees with an already-resolved one.
     """
     modules = _unique_derived_modules(plans)
-    max_sweeps = len(modules) + 1
-    for _ in range(max_sweeps):
+    for _ in range(len(modules) + 1):
         changed = False
         for module in modules:
             for key, size in module.derived_widths(widths).items():  # type: ignore[attr-defined]
@@ -279,17 +262,8 @@ def _unique_derived_modules(plans: Iterable[Plan]) -> list[GraphModule]:
 
     First-seen order across the supplied plans (one entry per live module).
     """
-    seen: set[int] = set()
-    derived: list[GraphModule] = []
-    for plan in plans:
-        for step in plan.steps:
-            module = step.module
-            if id(module) in seen:
-                continue
-            seen.add(id(module))
-            if callable(getattr(module, "derived_widths", None)):
-                derived.append(module)
-    return derived
+    unique = {id(step.module): step.module for plan in plans for step in plan.steps}
+    return [m for m in unique.values() if callable(getattr(m, "derived_widths", None))]
 
 
 def bind_all(modules: Mapping[str, SaltModelModule | GraphModule], schema: ResolvedSchema) -> None:

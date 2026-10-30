@@ -172,15 +172,13 @@ class OnnxAdapter(nn.Module):
         example: list[Tensor] = []
         for entry in self._positional:
             width = len(self._field_list(entry.port))
-            if entry.sequence:
-                n = (
-                    sequence_length
-                    if lengths is None
-                    else lengths[stream_of_input_port(entry.port)]
-                )
-                example.append(torch.rand(n, width, generator=generator))
+            if not entry.sequence:
+                n = 1
+            elif lengths is None:
+                n = sequence_length
             else:
-                example.append(torch.rand(1, width, generator=generator))
+                n = lengths[stream_of_input_port(entry.port)]
+            example.append(torch.rand(n, width, generator=generator))
         return tuple(example)
 
     # -- the traced forward ---------------------------------------------------

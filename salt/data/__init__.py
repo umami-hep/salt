@@ -19,7 +19,7 @@ from salt.data.processors.multi_target import MultiTarget
 from salt.data.readers.cuts import Cut, GlobalObjectCuts
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.data.readers.reader import GroupConfig, H5StructuredReader
-from salt.data.readers.stream import OffsetIndex, StreamConfig
+from salt.data.readers.stream import StreamConfig
 from salt.data.readers.uproot_reader import UprootGroupConfig, UprootReader
 from salt.data.readers.xaod_reader import xAODGroupConfig, xAODReader
 
@@ -41,7 +41,6 @@ __all__ = [
     "MaskFormerTargets",
     "MultiSampleReader",
     "MultiTarget",
-    "OffsetIndex",
     "Processor",
     "Reader",
     "RowBlock",

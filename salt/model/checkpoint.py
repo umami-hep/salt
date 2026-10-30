@@ -127,16 +127,14 @@ def apply_warm_start(
     ``(loaded, new, dropped)`` module-name partition. Raises `ConfigError` on
     partial coverage of a retained module (see `warm_start_from_checkpoint`).
     """
-    current_state = model.state_dict()
-    current_by_mod = partition_by_module(current_state)
+    current_by_mod = partition_by_module(model.state_dict())
     ckpt_by_mod = partition_by_module(ckpt_state)
-    config_names = list(config_modules)
 
     loaded: list[str] = []
     new: list[str] = []
     partial: list[str] = []
     to_load: dict[str, Tensor] = {}
-    for name in config_names:
+    for name in list(config_modules):
         cur = current_by_mod.get(name, {})
         ckpt = ckpt_by_mod.get(name, {})
         if not ckpt:
@@ -145,8 +143,7 @@ def apply_warm_start(
             if cur:
                 new.append(name)
             continue
-        mismatch = coverage_mismatch(cur, ckpt)
-        if mismatch is not None:
+        if (mismatch := coverage_mismatch(cur, ckpt)) is not None:
             partial.append(f"  - {name}: {mismatch}")
             continue
         loaded.append(name)
@@ -159,9 +156,7 @@ def apply_warm_start(
             "fresh-inits the new ones (rename-with-weights is out of scope). "
             "Offenders:\n" + "\n".join(partial)
         )
-    dropped = sorted(
-        name for name in ckpt_by_mod if name is not None and name not in config_modules
-    )
+    dropped = sorted(n for n in ckpt_by_mod if n is not None and n not in config_modules)
     # strict=False tolerates the missing new-module keys; shape errors cannot
     # reach here (the coverage preflight above already rejected them).
     model.load_state_dict(to_load, strict=False)

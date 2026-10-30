@@ -166,9 +166,7 @@ class MaskFormerTargets(Processor):
         # Selection (and the pv_class PV-pin REORDER) runs ONLY when the user
         # explicitly configured cuts / sort_by / max_objects. max_lxy relabel
         # is a SEPARATE gate.
-        self._should_select: bool = (
-            bool(self.cuts) or sort_by is not None or max_objects is not None
-        )
+        self._should_select = bool(self.cuts) or sort_by is not None or max_objects is not None
 
         if max_objects is not None and max_objects < 1:
             raise ConfigError(f"MaskFormerTargets: max_objects must be >= 1, got {max_objects}")
@@ -187,11 +185,8 @@ class MaskFormerTargets(Processor):
         # derived raw-id sets: PV raws (mapped == pv_class) are pinned at slot 0
         # and exempt from cuts/sorts; the null raw is the sentinel written to pad
         # slots' class field so np.select maps them back to null_index
-        self._pv_raw_values: tuple[int, ...] = (
-            tuple(r for r, m in self._raw_to_mapped.items() if m == self.pv_class)
-            if self.pv_class is not None
-            else ()
-        )
+        # (mapped ids are ints, so pv_class=None matches nothing -> ())
+        self._pv_raw_values = tuple(r for r, m in self._raw_to_mapped.items() if m == self.pv_class)
         self._null_raw_value: int = next(
             r for r, m in self._raw_to_mapped.items() if m == self.null_index
         )
@@ -232,14 +227,12 @@ class MaskFormerTargets(Processor):
             # null raw id defaults to -1; raw may be a scalar or a
             # list/tuple -> class merge
             raw_spec = spec.get("raw", -1)
-            if isinstance(raw_spec, (list, tuple)):
-                if not raw_spec:
-                    raise ConfigError(
-                        f"MaskFormerTargets: class_map[{name!r}] 'raw' list must not be empty"
-                    )
-                raws = [int(r) for r in raw_spec]
-            else:
-                raws = [int(raw_spec)]
+            is_list = isinstance(raw_spec, (list, tuple))
+            if is_list and not raw_spec:
+                raise ConfigError(
+                    f"MaskFormerTargets: class_map[{name!r}] 'raw' list must not be empty"
+                )
+            raws = [int(r) for r in (raw_spec if is_list else [raw_spec])]
             for r in raws:
                 if r in raw_to_mapped and raw_to_mapped[r] != mapped:
                     raise ConfigError(
@@ -293,19 +286,15 @@ class MaskFormerTargets(Processor):
             ),
         }
         m: int | str = self.max_objects if self.max_objects is not None else sym_dim("M", self.name)
-        tok = sym_dim("T", self.constituent_stream)
-        produces: dict[str, TensorSpec] = {
-            f"labels.{OBJECT_STREAM}.object_class": TensorSpec(
-                shape=("B", m), dtype="int64", kind="label"
-            ),
-            f"labels.{OBJECT_STREAM}.masks": TensorSpec(
-                shape=("B", m, tok), dtype="bool", kind="label"
-            ),
+        tok, lab = sym_dim("T", self.constituent_stream), f"labels.{OBJECT_STREAM}"
+        produces = {
+            f"{lab}.object_class": TensorSpec(shape=("B", m), dtype="int64", kind="label"),
+            f"{lab}.masks": TensorSpec(shape=("B", m, tok), dtype="bool", kind="label"),
+            **{
+                f"{lab}.{t}": TensorSpec(shape=("B", m), dtype="float32", kind="label")
+                for t in self.regression_targets
+            },
         }
-        for target in self.regression_targets:
-            produces[f"labels.{OBJECT_STREAM}.{target}"] = TensorSpec(
-                shape=("B", m), dtype="float32", kind="label"
-            )
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def _select_objects(self, obj: np.ndarray) -> np.ndarray:

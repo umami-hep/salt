@@ -153,33 +153,24 @@ def compile_onnx_plan(
         )
     # the folded OnnxExportSink anchors its conversion leaves as a terminal node
     # (the planner pulls them in), so no flat `sinks=` are needed.
-    sinks: list[str] = []
-    sink_origins: dict[str, str] = {}
+    sources = derive_onnx_sources(export, variables)
     try:
-        return compile_plan(
-            modules,
-            Mode.ONNX,
-            sources=derive_onnx_sources(export, variables),
-            sinks=sinks,
-            sink_origins=sink_origins,
-        )
+        return compile_plan(modules, Mode.ONNX, sources=sources, sinks=[], sink_origins={})
     except ShapeError as err:
-        message = str(err)
         for i, entry in enumerate(export.inputs):
-            if f"'{entry.port}'" not in message:
-                continue
-            stream = stream_of_input_port(entry.port)
-            fix = (
-                "set 'sequence: false' (a global [1, F] vector has no token axis)"
-                if entry.sequence
-                else f"set 'sequence: true' (and optionally dyn_axis, default 'n_{stream}')"
-            )
-            raise ShapeError(
-                f"{message}\n  this source comes from export.inputs (config: "
-                f"export.inputs[{i}], port {entry.port!r}) — if {stream!r} is a "
-                f"{'fixed-width global' if entry.sequence else 'variable-length sequence'} "
-                f"stream, {fix}"
-            ) from err
+            if f"'{entry.port}'" in str(err):
+                stream = stream_of_input_port(entry.port)
+                raise ShapeError(
+                    f"{err}\n  this source comes from export.inputs (config: "
+                    f"export.inputs[{i}], port {entry.port!r}) — if {stream!r} is a "
+                    + (
+                        "fixed-width global stream, set 'sequence: false' (a global [1, F] "
+                        "vector has no token axis)"
+                        if entry.sequence
+                        else "variable-length sequence stream, set 'sequence: true' (and "
+                        f"optionally dyn_axis, default 'n_{stream}')"
+                    )
+                ) from err
         raise
 
 
@@ -289,14 +280,7 @@ def export_graph(
         adapter.output_names, adapter.output_dtypes, adapter.model_name
     )
     plan_txt_path.write_text(plan_table(plan) + "\n\n" + output_table + "\n")
-    return ExportResult(
-        adapter=adapter,
-        plan=plan,
-        export=resolved,
-        onnx_path=onnx_path,
-        gnn_config=gnn_config,
-        plan_txt_path=plan_txt_path,
-    )
+    return ExportResult(adapter, plan, resolved, onnx_path, gnn_config, plan_txt_path)
 
 
 # ---------------------------------------------------------------------------
@@ -311,48 +295,38 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         description="Export a trained salt model to ONNX.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--ckpt_path",
-        type=Path,
-        default=None,
-        help="checkpoint path (required except with --manifest)",
-    )
-    parser.add_argument(
+    add = parser.add_argument
+    add("--ckpt_path", type=Path, help="checkpoint path (required except with --manifest)")
+    add(
         "--manifest",
         action="store_true",
         help="print the writer-derived output manifest (full ONNX names, dtypes, reduces) "
         "and exit — no checkpoint needed",
     )
-    parser.add_argument(
+    add(
         "-c",
         "--config",
         type=Path,
         action="append",
-        default=None,
         help="saved run config; inferred at <ckpt>/../../config.yaml when omitted "
         "(v1 contract, to_onnx.py:629-631). Repeatable: later configs deep-merge on top "
         "(the fit semantics) — e.g. stack an export-block override file onto a run "
         "config trained without one",
     )
-    parser.add_argument(
+    add(
         "-n",
         "--name",
-        type=str,
-        default=None,
         help="export model name override (no '_'/'-'); defaults to export.model_name, "
         "then the sanitised run name",
     )
-    parser.add_argument(
+    add(
         "--output",
         type=Path,
-        default=None,
         help="output .onnx path; defaults to network.onnx next to the run config "
         "(v1 contract, to_onnx.py:708-709)",
     )
-    parser.add_argument(
-        "-o", "--overwrite", action="store_true", help="overwrite an existing ONNX file"
-    )
-    parser.add_argument(
+    add("-o", "--overwrite", action="store_true", help="overwrite an existing ONNX file")
+    add(
         "--set",
         dest="set_overrides",
         action="append",
@@ -361,19 +335,15 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         help="config override applied on the run-free parse (repeatable), e.g. "
         "--set outputs.onnx_export.init_args.model_name=GN2v2",
     )
-    parser.add_argument(
+    add(
         "--check",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="run the torch-vs-ONNX sweep checker after export (v1 always checks)",
     )
-    parser.add_argument(
-        "--trials", type=int, default=10, help="random draws per sequence length (check.py:177)"
-    )
-    parser.add_argument(
-        "--max-length", type=int, default=40, help="sweep lengths 0..N-1 (check.py:176)"
-    )
-    parser.add_argument(
+    add("--trials", type=int, default=10, help="random draws per sequence length (check.py:177)")
+    add("--max-length", type=int, default=40, help="sweep lengths 0..N-1 (check.py:176)")
+    add(
         "--float-atol",
         type=float,
         default=1e-4,
@@ -474,10 +444,8 @@ def _cross_check_schema(model: Any, export: ExportConfig, variables: Mapping[str
     if schema is None:
         return
     for entry in export.inputs:
-        stream = stream_of_input_port(entry.port)
-        configured = len(variables[stream])
-        stored = schema.widths.get(entry.port)
-        if stored is not None and stored != configured:
+        configured = len(variables[stream_of_input_port(entry.port)])
+        if (stored := schema.widths.get(entry.port)) is not None and stored != configured:
             raise ConfigError(
                 f"export input {entry.port!r}: the config declares {configured} variables but "
                 f"the checkpoint schema stores width {stored} — the Features list drifted "
@@ -516,15 +484,11 @@ def _print_check_result(result: CheckResult) -> None:
     console(f"ONNX check: {result.n_cases} cases")
     for name, diff in sorted(result.worst_abs_diff.items()):
         console(f"  {name:50s} worst abs diff {diff:.3e}")
+    # int8 outputs are exact-or-fail (never tolerant); give them a positive
+    # verdict row so every declared output is visibly checked
+    int8 = f"exact over {result.n_cases} cases" if result.passed else "exact-or-fail (see failures)"
     for name, values in sorted(result.int8_distinct.items()):
-        # int8 outputs are exact-or-fail (never tolerant); give them a positive
-        # verdict row so every declared output is visibly checked
-        status = (
-            f"int8 exact over {result.n_cases} cases"
-            if result.passed
-            else "int8 exact-or-fail (see failures)"
-        )
-        console(f"  {name:50s} {status} (values seen: {values})")
+        console(f"  {name:50s} int8 {int8} (values seen: {values})")
     for failure in result.failures[:20]:
         console(f"  FAIL: {failure}")
     if len(result.failures) > 20:
@@ -591,9 +555,8 @@ def _resolve_config_paths(parsed: argparse.Namespace) -> list[Path]:
     embedded ``config.yaml`` payload). Raises `ConfigError` when no config
     is given and none can be inferred.
     """
-    config_paths: list[Path] = list(parsed.config or [])
-    if config_paths:
-        return config_paths
+    if parsed.config:
+        return list(parsed.config)
     if parsed.ckpt_path is None:
         raise ConfigError("salt export --manifest needs a config — pass -c <config.yaml>")
     inferred = parsed.ckpt_path.parents[1] / "config.yaml"
@@ -613,11 +576,9 @@ def _print_manifest_from_cli(parsed: argparse.Namespace) -> int:
     """
     from salt.cli import _static_onnx_export_sink
 
-    config_paths = _resolve_config_paths(parsed)
-    cli = _run_free_cli(config_paths, parsed.set_overrides)
+    cli = _run_free_cli(_resolve_config_paths(parsed), parsed.set_overrides)
     # the manifest derives from the folded OnnxExportSink's declared leaves.
-    export_sink = _static_onnx_export_sink(cli)
-    if export_sink is None:
+    if (export_sink := _static_onnx_export_sink(cli)) is None:
         raise ConfigError(
             "config has no OnnxExportSink — the ONNX output manifest is declared by an "
             "OnnxExportSink in the outputs: section, naming the conversion outputs.* "
@@ -652,8 +613,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
     # anchor the ONNX plan demand.
     from salt.cli import _static_onnx_export_sink
 
-    export_sink = _static_onnx_export_sink(cli)
-    if export_sink is None:
+    if (export_sink := _static_onnx_export_sink(cli)) is None:
         raise ConfigError(
             f"config {config_path} has no OnnxExportSink — the ONNX output manifest and the "
             "export contract are declared by an OnnxExportSink in the outputs: section, "

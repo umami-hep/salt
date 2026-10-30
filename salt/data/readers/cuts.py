@@ -246,6 +246,11 @@ class Cut:
         return _eval(_parse(self.expr).outer, source)
 
 
+def _first_seen_fields(cuts: Sequence[Cut]) -> tuple[str, ...]:
+    """Every field the cuts read, deduplicated in first-seen order."""
+    return tuple(dict.fromkeys(f for c in cuts for f in c.fields))
+
+
 def _parse_cuts(specs: Sequence[Cut | str], where: str) -> tuple[Cut, ...]:
     """Normalise a config cut sequence to `Cut` instances, naming `where` on failure.
 
@@ -309,18 +314,13 @@ class GlobalObjectCuts:
         """Bare ROW-axis field names referenced, deduplicated in first-seen order (the
         reader's read-at-index-build contract; reduced fields are `aggregations`, not here).
         """
-        seen: dict[str, None] = {}
-        for c in self._cuts:
-            for f in c.fields:
-                seen.setdefault(f, None)
-        return tuple(seen)
+        return _first_seen_fields(self._cuts)
 
     def aggregations(self) -> tuple[Aggregation, ...]:
         """Constituent-axis reductions the cuts need precomputed, deduplicated by key (the
         reader evaluates each and adds it to the row record under `Aggregation.key` first).
         """
         seen: dict[str, Aggregation] = {}
-        for c in self._cuts:
-            for agg in c.aggregations:
-                seen.setdefault(agg.key, agg)
+        for agg in (a for c in self._cuts for a in c.aggregations):
+            seen.setdefault(agg.key, agg)  # the FIRST aggregation per key wins
         return tuple(seen.values())

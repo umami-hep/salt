@@ -12,6 +12,7 @@ import h5py
 import pytest
 
 from salt.graph.errors import ConfigError
+from salt.outputs import InputCopyWriter, PadMaskWriter
 from salt.outputs.sinks.h5_sink import H5OutputSink
 from salt.outputs.output_schema import OutputColumn
 from salt.outputs.sinks.sink import SinkContext
@@ -68,7 +69,7 @@ def _ctx(tmp_path: Path) -> SinkContext:
 def test_groupless_reader_ok_when_nothing_needs_source(tmp_path):
     """No copy + no pad mask: a groups-less global-only reader resolves its schema."""
     out = tmp_path / "eval.h5"
-    sink = H5OutputSink(output=str(out))  # no copy_inputs, write_pad_mask=False default
+    sink = H5OutputSink(output=str(out))  # no InputCopyWriter / PadMaskWriter section bound
     _seed_global_column(sink)
     sink.open_schema(_ctx(tmp_path))
     assert sink._h5 is not None  # noqa: SLF001 - FIXED-mode writer was created
@@ -80,17 +81,22 @@ def test_groupless_reader_ok_when_nothing_needs_source(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "match"),
+    ("section", "match"),
     [
-        ({"copy_inputs": {"mnist": ["digit"]}}, "input-copying"),
-        ({"write_pad_mask": ["mnist"]}, "pad-mask columns"),
+        (
+            {"inputs_copy": InputCopyWriter(streams=["mnist"], variables={"mnist": ["digit"]})},
+            "input-copying",
+        ),
+        ({"pad_mask": PadMaskWriter(streams=["mnist"])}, "pad-mask columns"),
     ],
+    ids=["input-copying", "pad-mask"],
 )
-def test_groupless_reader_rejected_when_source_needed(tmp_path, kwargs, match):
+def test_groupless_reader_rejected_when_source_needed(tmp_path, section, match):
     """Binding input-copying OR pad-mask columns to a groups-less reader hard-fails,
     the ConfigError naming exactly the missing capability.
     """
-    sink = H5OutputSink(output=str(tmp_path / "eval.h5"), **kwargs)
+    sink = H5OutputSink(output=str(tmp_path / "eval.h5"))
+    sink.bind_output_section(section)  # bind BEFORE seeding: binding resets the column table
     _seed_global_column(sink)
     with pytest.raises(ConfigError, match=match):
         sink.open_schema(_ctx(tmp_path))

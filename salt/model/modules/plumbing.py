@@ -20,6 +20,7 @@ from salt.graph.spec import (
     unflatten_spec,
 )
 from salt.model.base import SaltModelModule
+from salt.model.modules.norm import _checked_streams
 from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.transformer_encoder import _ENC_LEN, _SEQ_LEN
 
@@ -47,17 +48,13 @@ class Concat(SaltModelModule):
             is nonzero (registers live in `TransformerEncoder`, see class docstring).
         """
         super().__init__()
-        if not streams:
-            raise ConfigError("Concat: streams must be a non-empty sequence")
-        if len(set(streams)) != len(tuple(streams)):
-            raise ConfigError(f"Concat: duplicate streams in {tuple(streams)}")
+        self.streams = _checked_streams(streams, "Concat")
         if registers != 0:
             raise ConfigError(
                 "Concat: registers are internal to TransformerEncoder (the composed v1 "
                 "Transformer appends them, transformer.py:679-681) — set "
                 "encoder num_registers instead"
             )
-        self.streams = tuple(streams)
         self.registers = registers
 
     def declare_io(self, mode: Mode) -> IO:
@@ -66,12 +63,9 @@ class Concat(SaltModelModule):
         embed_dim = sym_dim("E", self.name)
         requires: dict[str, TensorSpec] = {}
         for stream in self.streams:
-            requires[f"embed.{stream}"] = TensorSpec(
-                shape=("B", _stream_len(stream), embed_dim), dtype="float32"
-            )
-            requires[f"masks.{stream}"] = TensorSpec(
-                shape=("B", _stream_len(stream)), dtype="bool", kind="pad_mask"
-            )
+            n = _stream_len(stream)
+            requires[f"embed.{stream}"] = TensorSpec(shape=("B", n, embed_dim), dtype="float32")
+            requires[f"masks.{stream}"] = TensorSpec(shape=("B", n), dtype="bool", kind="pad_mask")
         return IO(
             requires=unflatten_spec(requires),
             produces=unflatten_spec({
@@ -90,11 +84,8 @@ class Concat(SaltModelModule):
         Needed because `StreamEmbed`'s ``shape=None`` output gives the dim
         table nothing concrete to bind ``embed_dim`` from directly.
         """
-        for stream in self.streams:
-            width = widths.get(f"embed.{stream}")
-            if width is not None:
-                return {"seq.x": width}
-        return {}
+        width = next((w for s in self.streams if (w := widths.get(f"embed.{s}")) is not None), None)
+        return {} if width is None else {"seq.x": width}
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Any]:
         """Concatenate streams along the token dim + record the layout (+ ONNX ``seq.offsets``)."""
@@ -132,19 +123,9 @@ class Split(SaltModelModule):
     """
 
     def __init__(self, streams: Sequence[str]) -> None:
-        """Capture the streams to slice out.
-
-        Raises
-        ------
-        ConfigError
-            If `streams` is empty or contains duplicates.
-        """
+        """Capture the streams to slice out; empty or duplicated `streams` is a `ConfigError`."""
         super().__init__()
-        if not streams:
-            raise ConfigError("Split: streams must be a non-empty sequence")
-        if len(set(streams)) != len(tuple(streams)):
-            raise ConfigError(f"Split: duplicate streams in {tuple(streams)}")
-        self.streams = tuple(streams)
+        self.streams = _checked_streams(streams, "Split")
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``encoded.seq``/``seq.layout`` -> per-stream ``encoded.*`` (+ ONNX offsets)."""
@@ -215,16 +196,12 @@ class VectorConcat(SaltModelModule):
             (a self-feed).
         """
         super().__init__()
-        if not inputs:
-            raise ConfigError("VectorConcat: inputs must be a non-empty sequence")
-        if len(set(inputs)) != len(tuple(inputs)):
-            raise ConfigError(f"VectorConcat: duplicate inputs in {tuple(inputs)}")
+        self.inputs = _checked_streams(inputs, "VectorConcat", "inputs")
         if out in inputs:
             raise ConfigError(
                 f"VectorConcat: out {out!r} appears in inputs {tuple(inputs)} — a module cannot "
                 "consume its own output (write-once)"
             )
-        self.inputs = tuple(inputs)
         self.out_key = out
 
     def declare_io(self, mode: Mode) -> IO:

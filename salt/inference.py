@@ -57,14 +57,11 @@ def inference_demand(export: ExportConfig) -> list[str]:
     nothing and a label-stripped file reads fine.
     """
     demand: list[str] = []
-    for entry in export.inputs:
-        if entry.alias is not None:
-            continue
+    for entry in (e for e in export.inputs if e.alias is None):
         demand.append(entry.port)
         if entry.sequence:
             demand.append(f"masks.{stream_of_input_port(entry.port)}")
-    demand.append("meta.rows")
-    return demand
+    return [*demand, "meta.rows"]
 
 
 def build_inference_sink(section: Any, output: str | Path | None = None) -> Any:
@@ -168,11 +165,8 @@ def _consume_batch(
     any batch whose valid tokens are not the leading rows.
     """
     bundle_in = Bundle(dict(batch))
-    seq_streams = {
-        stream_of_input_port(entry.port)
-        for entry in adapter._positional  # noqa: SLF001 - same-package (check.py precedent)
-        if entry.sequence
-    }
+    positional = adapter._positional  # noqa: SLF001 - same-package (check.py precedent)
+    seq_streams = {stream_of_input_port(entry.port) for entry in positional if entry.sequence}
     for stream in sorted(seq_streams | set(sink._mask_streams)):  # noqa: SLF001 - sink drive
         _check_leading_valid(bundle_in.get(f"masks.{stream}"), stream)
     rows = bundle_in.get("meta.rows")
@@ -289,9 +283,7 @@ def run_inference(
     # the eager loop covers all len(dset) rows; the datamodule's num_test cap
     # (--data.num_test, default every row) does the limiting, never this driver.
     ctx = SinkContext(
-        run_name=getattr(model, "name", None) or "salt",
-        datamodule=dm,
-        ckpt_path=str(ckpt_path),
+        run_name=getattr(model, "name", None) or "salt", datamodule=dm, ckpt_path=str(ckpt_path)
     )
     sink.open_schema(ctx)
     try:

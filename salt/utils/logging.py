@@ -33,11 +33,8 @@ def _resolve_level(level: int | str) -> int:
 
 def _env_level() -> int:
     """Resolve `SALT_LOG_LEVEL`, falling back to `DEFAULT_LEVEL` on any bad value."""
-    raw = os.environ.get(LEVEL_ENV_VAR)
-    if raw is None:
-        return _resolve_level(DEFAULT_LEVEL)
     try:
-        return _resolve_level(raw)
+        return _resolve_level(os.environ.get(LEVEL_ENV_VAR, DEFAULT_LEVEL))
     except ValueError:
         return _resolve_level(DEFAULT_LEVEL)
 
@@ -79,8 +76,7 @@ def _ensure_configured() -> None:
         handler = _StderrHandler()
         handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
         root.addHandler(handler)
-    level = _EXPLICIT_LEVEL if _EXPLICIT_LEVEL is not None else _env_level()
-    root.setLevel(_resolve_level(level))
+    root.setLevel(_resolve_level(_EXPLICIT_LEVEL if _EXPLICIT_LEVEL is not None else _env_level()))
     _CONFIGURED = True
 
 
@@ -100,10 +96,8 @@ def get_logger(name: str | None = None) -> logging.Logger:
         A standard library logger, configured with salt's handler and level.
     """
     _ensure_configured()
-    if name is None or name == ROOT_NAME:
-        return logging.getLogger(ROOT_NAME)
-    if name.startswith(f"{ROOT_NAME}."):
-        return logging.getLogger(name)
+    if name is None or name == ROOT_NAME or name.startswith(f"{ROOT_NAME}."):
+        return logging.getLogger(name or ROOT_NAME)
     return logging.getLogger(f"{ROOT_NAME}.{name}")
 
 
@@ -123,11 +117,7 @@ def set_level(level: int | str) -> None:
 
 
 def console(
-    *args: object,
-    sep: str = " ",
-    end: str = "\n",
-    file: TextIO | None = None,
-    flush: bool = False,
+    *args: object, sep: str = " ", end: str = "\n", file: TextIO | None = None, flush: bool = False
 ) -> None:
     r"""Write user-facing results to stdout, unconditionally.
 

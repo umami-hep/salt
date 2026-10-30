@@ -21,9 +21,7 @@ from salt.model.bind import ResolvedSchema
 from salt.model.nn.dense import Dense, _reject_width_keys
 from salt.model.nn.featurewise import FeaturewiseTransformation
 from salt.model.nn.posenc import PositionalEncoder
-from salt.utils.tensor_utils import (
-    attach_context,
-)
+from salt.utils.tensor_utils import attach_context
 
 
 def _stream_len(stream: str) -> str:
@@ -119,19 +117,16 @@ class StreamEmbed(SaltModelModule):
         self.input_key = input if input is not None else f"normed.{stream}"
         self.mup = bool(mup)
         self.net: nn.Module | None = None
-        # -- optional input-layer FiLM ---------------------------------------
-        self.featurewise_cfg = dict(featurewise) if featurewise is not None else None
-        self.params_key = "inputs.parameters"
+        # optional input-layer FiLM; its `parameters` key is popped off the config
+        fw = None if featurewise is None else dict(featurewise)
+        self.params_key = (fw or {}).pop("parameters", "inputs.parameters")
+        if fw is not None and fw.setdefault("layer", "input") != "input":
+            raise ConfigError(
+                "StreamEmbed featurewise: layer must be 'input' (the embed is the input-layer "
+                "FiLM site; use TransformerEncoder for encoder/global layers)"
+            )
+        self.featurewise_cfg = fw
         self.featurewise: FeaturewiseTransformation | None = None
-        if self.featurewise_cfg is not None:
-            self.params_key = self.featurewise_cfg.pop("parameters", self.params_key)
-            if self.featurewise_cfg.get("layer", "input") != "input":
-                raise ConfigError(
-                    "StreamEmbed featurewise: layer must be 'input' (the embed is the input-layer "
-                    "FiLM site; use TransformerEncoder for encoder/global layers)"
-                )
-            self.featurewise_cfg["layer"] = "input"
-        # -- optional positional encoding ------------------------------------
         self.pos_enc_cfg = dict(pos_enc) if pos_enc is not None else None
         self.pos_enc: PositionalEncoder | None = None
         self.pos_enc_indices: tuple[int, ...] = ()
@@ -139,13 +134,11 @@ class StreamEmbed(SaltModelModule):
     def declare_io(self, mode: Mode) -> IO:
         """Declare input + context keys -> ``embed.<stream>`` (rank-agnostic, ``shape=None``)."""
         del mode
-        requires: dict[str, TensorSpec] = {
-            self.input_key: TensorSpec(shape=None, dtype="float32"),
+        # rank/width unconstrained: context may be a [B, F] global vector or
+        # broadcastable — widths resolve from the producer side
+        requires = {
+            k: TensorSpec(shape=None, dtype="float32") for k in (self.input_key, *self.context)
         }
-        for key in self.context:
-            # rank/width unconstrained: context may be a [B, F] global vector
-            # or broadcastable — widths resolve from the producer side
-            requires[key] = TensorSpec(shape=None, dtype="float32")
         if self.featurewise_cfg is not None:
             # the per-event conditioning parameters: a rank-2 [B, n_params] global stream
             requires[self.params_key] = TensorSpec(
@@ -176,11 +169,8 @@ class StreamEmbed(SaltModelModule):
                 **self.featurewise_cfg,
             )
             self.featurewise.name = self.name
-            self.featurewise.build()
         if self.pos_enc_cfg is not None:
-            cfg = dict(self.pos_enc_cfg)
-            cfg.setdefault("dim", self.out_dim)
-            self.pos_enc = PositionalEncoder(**cfg)
+            self.pos_enc = PositionalEncoder(**{"dim": self.out_dim, **self.pos_enc_cfg})
             self.pos_enc.name = self.name
             # resolve the coordinate column indices by NAME from the input fields
             fields = schema.fields_of(self.input_key)

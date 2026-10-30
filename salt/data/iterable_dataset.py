@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import IterableDataset, get_worker_info
 
 from salt.data.base import RowBlock, SaltDatasetModule
-from salt.data.manifest import CorpusManifest
+from salt.data.manifest import CorpusManifest, _rows_per_group
 from salt.data.plan_runner import _PlanRunner
 from salt.data.readers.stream import pad_fill
 from salt.data.sharding import interleave_plan, partition_blocks, shard_row_counts
@@ -148,11 +148,7 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
     def _dist(self) -> tuple[int, int]:
         """``(world_size, rank)`` — overrides first, then `torch.distributed`, else (1, 0)."""
         if self._world_size is not None or self._rank is not None:
-            world = 1 if self._world_size is None else int(self._world_size)
-            rank = 0 if self._rank is None else int(self._rank)
-            if not 0 <= rank < world:
-                raise ConfigError(f"rank {rank} out of range for world_size {world}")
-            return world, rank
+            return _override(self._world_size, self._rank, "world_size", "rank")
         try:
             import torch.distributed as dist
 
@@ -165,15 +161,10 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
     def _worker(self) -> tuple[int, int]:
         """``(num_workers, worker_id)`` — overrides first, then the DataLoader, else (1, 0)."""
         if self._num_workers is not None or self._worker_id is not None:
-            n = 1 if self._num_workers is None else max(1, int(self._num_workers))
-            wid = 0 if self._worker_id is None else int(self._worker_id)
-            if not 0 <= wid < n:
-                raise ConfigError(f"worker_id {wid} out of range for num_workers {n}")
-            return n, wid
+            n = None if self._num_workers is None else max(1, int(self._num_workers))
+            return _override(n, self._worker_id, "num_workers", "worker_id")
         info = get_worker_info()
-        if info is None:
-            return 1, 0
-        return max(1, int(info.num_workers)), int(info.id)
+        return (1, 0) if info is None else (max(1, int(info.num_workers)), int(info.id))
 
     def shard(self) -> tuple[int, int]:
         """The calling process's ``(n_shards, shard_id)``.
@@ -212,10 +203,7 @@ class IterableSaltDataset(_PlanRunner, IterableDataset):
             else:
                 blocks = list(self._reader.row_blocks())
                 n_groups = 1 + max((b.group for b in blocks), default=0)
-                group_rows = [0] * n_groups
-                for block in blocks:
-                    group_rows[block.group] += block.n_rows
-                self._layout = (blocks, group_rows)
+                self._layout = (blocks, _rows_per_group(blocks, n_groups))
         return self._layout
 
     def n_batches(self) -> int:
@@ -453,3 +441,14 @@ def _n_rows(produced: Mapping[str, np.ndarray]) -> int:
         if key.startswith("raw."):
             return int(value.shape[0])
     raise ConfigError(f"reader produced no raw.* stream: {sorted(produced)}")
+
+
+def _override(
+    size: int | None, index: int | None, size_name: str, index_name: str
+) -> tuple[int, int]:
+    """``(size, index)`` from explicit shard overrides (None -> 1 / 0), range-checked."""
+    n = 1 if size is None else int(size)
+    i = 0 if index is None else int(index)
+    if not 0 <= i < n:
+        raise ConfigError(f"{index_name} {i} out of range for {size_name} {n}")
+    return n, i

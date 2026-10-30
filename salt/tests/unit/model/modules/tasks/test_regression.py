@@ -38,6 +38,14 @@ def _bind_reg_module(task: RegressionTaskModule, schema_widths: dict[str, int]) 
     task.bind(ResolvedSchema(widths=schema_widths))
 
 
+def _bundle(leaves: dict[str, torch.Tensor]) -> Bundle:
+    """A bundle holding `leaves` under their dotted keys."""
+    b = Bundle()
+    for key, value in leaves.items():
+        b.set(key, value)
+    return b
+
+
 class TestRegressionTaskModule:
     def test_targets_required(self):
         with pytest.raises(ConfigError, match="targets is required"):
@@ -167,10 +175,10 @@ class TestRegressionTaskModule:
         out = Executor(fit).run(b, debug=True)
         v2_pred = out.get("preds.jets.regression")
         v2_loss = out.get("losses.regression")
-        # call the head math directly (head_forward) for the reference
+        # call the head math directly (the folded forward on the pooled input) for the reference
         pooled = out.get("pooled.global")
-        tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
-        ref_pred, ref_loss = task.head_forward(pooled, tdict, None, context=None)
+        ref = task.forward(_bundle({"pooled.global": pooled, **labels}), Mode.FIT)
+        ref_pred, ref_loss = ref["preds.jets.regression"], ref["losses.regression"]
         assert torch.allclose(v2_pred, ref_pred, atol=1e-6)  # FIT preds are raw/scaled
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
@@ -203,18 +211,16 @@ class TestRegressionTaskModule:
         v2_test = b.get("preds.jets.regression")
         pooled = b.get("pooled.global")
         with torch.no_grad():
-            raw, _ = task.head_forward(pooled, {}, None, context=None)
+            raw = task.net(pooled, None)  # the head's raw (scaled-space) output
         # the TEST forward publishes the RAW scaled preds (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
         # get_output owns the de-scale (label-sourced denominator; the retired
         # get_h5 pack is re-anchored onto the get_output field)
         field = task.get_output(b, Mode.TEST, "reg")[0]  # [0]: prediction field (then targets)
         assert field.h5_name == "pt"  # custom_output_names
-        with torch.no_grad():
-            ref = task.run_inference(
-                raw.clone(), labels={"jets": {"pt_btagJes": labels["labels.jets.pt_btagJes"]}}
-            )
-        assert torch.allclose(field.value, ref[..., 0], atol=1e-6)
+        # v1 ratio de-scale: the raw prediction times the LABEL denominator
+        ref = raw[..., 0] * labels["labels.jets.pt_btagJes"]
+        assert torch.allclose(field.value, ref, atol=1e-6)
 
     def test_onnx_descale_uses_input_feature_by_name(self, norm_paths):
         """ONNX de-scales with the denominator gathered BY NAME from inputs.<stream>."""
@@ -259,14 +265,13 @@ class TestRegressionTaskModule:
         denom_from_input = inputs["jets"][..., col]
         pooled = b_onnx.get("pooled.global")
         with torch.no_grad():
-            raw, _ = task.head_forward(pooled, {}, None, context=None)
-            ref_onnx = task.run_inference(
-                raw.clone(), labels={"jets": {"pt_btagJes": denom_from_input}}
-            )
+            raw = task.net(pooled, None)  # the head's raw (scaled-space) output
+        # v1 ratio de-scale with the denominator gathered from the input Feature
+        ref_onnx = raw[..., 0] * denom_from_input
         (onnx_field,) = task.get_output(b_onnx, Mode.ONNX, "reg")
         # ONNX get_output de-scales by-name from the input Feature; value is the
         # squeezed scalar at B>1 it stays [B] (squeeze drops no non-size-1 dim)
-        assert torch.allclose(onnx_field.value, ref_onnx[..., 0], atol=1e-6)
+        assert torch.allclose(onnx_field.value, ref_onnx, atol=1e-6)
         # the TEST get_output de-scales from the LABEL denominator -> a DIFFERENT
         # result than the ONNX (input-Feature) de-scale
         (test_field,) = task.get_output(b_test, Mode.TEST, "reg")
@@ -306,7 +311,7 @@ class TestRegressionTaskModule:
         assert pred.shape == (B, T, 2)
         # the TEST forward emits the RAW scaled preds (no de-scale, no nan-pad)
         with torch.no_grad():
-            raw, _ = task.head_forward(x, {}, {"tracks": mask}, context=None)
+            raw = task.net(x, None)  # the head's raw (scaled-space) output
         assert torch.equal(pred, raw)
         # get_output now owns the scaler de-scale + the masked-position nan-pad
         bt2 = Bundle()
@@ -314,7 +319,12 @@ class TestRegressionTaskModule:
         bt2.set("masks.tracks", mask)
         with torch.no_grad():
             fields = task.get_output(bt2, Mode.TEST, "reg")
-            ref = task.run_inference(raw.clone(), labels=None, pad_mask=mask)
+            # v1 de-scale: the scaler inverse per target column (in place, same
+            # strided layout), then NaN at padded positions
+            ref = raw.clone()
+            for i, target in enumerate(task.targets):
+                ref[..., i] = task.scaler.inverse(target, ref[..., i])
+            ref = torch.masked_fill(ref, mask.unsqueeze(-1), torch.nan)
         for i, f in enumerate(fields):
             assert torch.isnan(f.value[:, T - 1]).all()  # masked positions nan-padded
             assert torch.equal(torch.nan_to_num(f.value), torch.nan_to_num(ref[..., i]))
@@ -382,8 +392,8 @@ class TestRegressionTaskModule:
         v2_loss = out.get("losses.regression")
         assert v2_pred.shape == (B, 2)  # means ‖ raw variances
         pooled = out.get("pooled.global")
-        tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
-        ref_pred, ref_loss = task.head_forward(pooled, tdict, None, context=None)
+        ref = task.forward(_bundle({"pooled.global": pooled, **labels}), Mode.FIT)
+        ref_pred, ref_loss = ref["preds.jets.regression"], ref["losses.regression"]
         assert torch.allclose(v2_pred, ref_pred, atol=1e-6)
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
@@ -414,12 +424,15 @@ class TestRegressionTaskModule:
         assert v2_test.shape == (B, 2)
         pooled = b.get("pooled.global")
         with torch.no_grad():
-            raw, _ = task.head_forward(pooled, {}, None, context=None)
+            raw = task.net(pooled, None)  # the head's raw [B, 2R] output
         # the gaussian TEST forward publishes the RAW [B, 2R] (NO de-scale)
         assert torch.allclose(v2_test, raw, atol=1e-6)
-        # get_output owns the de-scale + the means‖stds one-array re-concat
+        # get_output owns the de-scale + the means‖stds one-array re-concat;
+        # v1 reference (norm_params mean 2, std 3): mean = raw * std + mean,
+        # stddev = sqrt(softplus(raw var)) * std
+        ref_means = raw[..., :1] * 3.0 + 2.0
+        ref_stds = torch.sqrt(torch.nn.functional.softplus(raw[..., 1:])) * 3.0
         with torch.no_grad():
-            ref_means, ref_stds = task.run_inference(raw.clone())
             fields = task.get_output(b, Mode.TEST, "reg")
         descaled = torch.stack([f.value for f in fields], dim=-1)
         assert torch.allclose(descaled, torch.cat([ref_means, ref_stds], dim=-1), atol=1e-6)
@@ -539,11 +552,11 @@ class TestRegressionTaskModule:
         b.set("labels.jets.w", w)
         out = Executor(fit).run(b, debug=True)
         v2_loss = out.get("losses.regression")
-        # v1 reference: the same head, weight in the targets dict (task.py:430)
+        # reference: the same head called directly, weight label alongside the
+        # targets (v1 task.py:430)
         pooled = out.get("pooled.global")
-        tdict = {"jets": {t: labels[f"labels.jets.{t}"] for t in targets}}
-        tdict["jets"]["w"] = w
-        _, ref_loss = task.head_forward(pooled, tdict, None, context=None)
+        leaves = {"pooled.global": pooled, **labels, "labels.jets.w": w}
+        ref_loss = task.forward(_bundle(leaves), Mode.FIT)["losses.regression"]
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_nan_target_masking_loss_parity(self, norm_paths):
@@ -576,8 +589,8 @@ class TestRegressionTaskModule:
         v2_loss = out.get("losses.regression")
         assert torch.isfinite(v2_loss)  # NaN targets did not poison the loss
         pooled = out.get("pooled.global")
-        tdict = {"jets": {targets[0]: poisoned}}
-        _, ref_loss = task.head_forward(pooled, tdict, None, context=None)
+        leaves = {"pooled.global": pooled, f"labels.jets.{targets[0]}": poisoned}
+        ref_loss = task.forward(_bundle(leaves), Mode.FIT)["losses.regression"]
         assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
 
     def test_declare_and_bind_are_file_free(self, monkeypatch):

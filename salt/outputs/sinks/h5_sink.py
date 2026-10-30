@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from operator import attrgetter
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,11 @@ def _pad_to(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
+def _join(arrs: list[np.ndarray]) -> np.ndarray:
+    """One group's structured fragments as one array (a lone fragment passes through)."""
+    return arrs[0] if len(arrs) == 1 else join_structured_arrays(arrs)
+
+
 class H5OutputSink(RuntimeSink):
     """The H5 sink: a terminal graph node serialising ``outputs.*`` to the eval H5.
 
@@ -70,12 +76,13 @@ class H5OutputSink(RuntimeSink):
     Parameters
     ----------
     copy_inputs : Mapping[str, Sequence[str]] | None, optional
-        Per-stream source-file variables to copy into the eval H5, in column
-        order, by default None.
+        Deprecated, ignored; kept so pre-round-5 saved configs still load.
+        Must be left at the default (None); use `InputCopyWriter` in the
+        ``outputs:`` section.
     write_pad_mask : bool | Sequence[str], optional
-        Boolean ``mask`` column per sequence stream: ``True`` writes one for
-        every demanded output's sequence stream; a list names the streams;
-        by default False.
+        Deprecated, ignored; kept so pre-round-5 saved configs still load.
+        Must be left at the default (False); use `PadMaskWriter` in the
+        ``outputs:`` section.
     output : str, optional
         Output path template (``{ckpt_dir}``/``{ckpt_stem}``/``{sample}``),
         by default `DEFAULT_OUTPUT`.
@@ -101,9 +108,10 @@ class H5OutputSink(RuntimeSink):
     Raises
     ------
     ConfigError
-        (At run setup) a column-name collision / unknown stream / missing
-        source variable, or no bound producer minting a column for the
-        selection.
+        (At construction) `copy_inputs` / `write_pad_mask` given a non-default
+        value; (at run setup) a column-name collision / unknown stream /
+        missing source variable, or no bound producer minting a column for
+        the selection.
     """
 
     name = "h5_output"
@@ -119,17 +127,28 @@ class H5OutputSink(RuntimeSink):
         modes: Sequence[str] | None = None,
         consumes: Sequence[str] | None = None,
     ) -> None:
+        if copy_inputs is not None:
+            raise ConfigError(
+                "H5OutputSink: copy_inputs is no longer supported (deprecated, ignored; kept "
+                "only so pre-round-5 saved configs still load) — request input copies with an "
+                "InputCopyWriter entry in the outputs: section"
+            )
+        if write_pad_mask is not False:
+            raise ConfigError(
+                "H5OutputSink: write_pad_mask is no longer supported (deprecated, ignored; kept "
+                "only so pre-round-5 saved configs still load) — request pad-mask columns with a "
+                "PadMaskWriter entry in the outputs: section"
+            )
         super().__init__(modes=modes, consumes=consumes)
         self._columns: tuple[OutputColumn, ...] = ()
         self._columns_resolved = False
-        self.copy_inputs = {s: list(v) for s, v in (copy_inputs or {}).items()}
-        self.write_pad_mask = write_pad_mask
+        # section-driven copy/mask state: set by bind_output_section, empty until then
+        self.copy_inputs: dict[str, list[str]] = {}
+        self.write_pad_mask: tuple[str, ...] | bool = False
         self.output = output
         self.half_precision = half_precision
         # empty by default — then a strict no-op, H5 schema byte-identical
-        self._object_groups: tuple[ObjectGroup, ...] = tuple(
-            ObjectGroup.coerce(g) for g in (object_groups or ())
-        )
+        self._object_groups = tuple(ObjectGroup.coerce(g) for g in object_groups or ())
         # Mode.TEST = eval schema (default); Mode.ONNX = strictly the export
         # output set (`use_export_selection`, salt inference).
         self._section_mode: Mode = Mode.TEST
@@ -196,7 +215,7 @@ class H5OutputSink(RuntimeSink):
         `InputCopyWriter`, `PadMaskWriter`): the sink derives its column
         schema + input-copy spec + pad-mask streams from the SECTION manifest
         in SECTION DECLARATION ORDER (the H5 column-order authority); the
-        section's copy/mask writers override the constructor knobs. A
+        section's copy/mask writers set the sink's copy/mask state. A
         copy/mask writer whose ``modes:`` exclude this sink's selection mode
         contributes nothing.
         """
@@ -206,9 +225,7 @@ class H5OutputSink(RuntimeSink):
         from salt.outputs.run_task_output import OutputSectionWriter
 
         super().bind_output_section(section)
-        # the section drives copy_inputs + write_pad_mask too (override the ctor
-        # knobs): collect from the InputCopyWriter / PadMaskWriter that RUN in
-        # this sink's selection mode.
+        # copy_inputs / write_pad_mask also come from the section's writers (this sink's mode)
         copy_inputs: dict[str, list[str]] = {}
         mask_streams: list[str] = []
         mode = self._section_mode
@@ -229,40 +246,27 @@ class H5OutputSink(RuntimeSink):
         self.write_pad_mask = tuple(dict.fromkeys(mask_streams)) if mask_streams else False
 
     def _resolve_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
-        """Resolve the H5 column table from the bound manifest sources (cached)."""
-        if self._columns_resolved:
-            return self._columns
-        return self._resolve_section_columns(run_name)
-
-    def _column_suffix(self, field: Any) -> str | None:
-        """The field's column suffix under this sink's selection mode, or None.
-
-        TEST keeps fields with an ``h5_name`` (the eval schema); the export
-        selection (``Mode.ONNX``) keeps fields with a resolved ONNX name — the
-        EXACT selection rule the `OnnxExportSink` tuple uses, so the inference
-        H5 columns are 1:1 with the ONNX tuple by construction.
-        """
-        if self._section_mode is Mode.TEST:
-            return field.h5_name
-        return field.resolved_onnx_name
-
-    def _resolve_section_columns(self, run_name: str) -> tuple[OutputColumn, ...]:
-        """Resolve H5 columns from the bound manifest sources.
+        """Resolve the H5 column table from the bound manifest sources (cached).
 
         Collects every FINAL field the bound producers declare for the
-        selection mode, narrows by ``consumes:``, keeps fields the selection
-        names (`_column_suffix`), and assembles ONE `OutputColumn` per
-        ``outputs.*`` leaf. MANIFEST field order (not executor topo order) is
-        the H5 column-order authority; the resolved table is cached. Copy/mask
-        writers contribute through `_merge_columns`, not here. `ConfigError`
-        when no producer mints a final column for the selection, or two leaves
-        mint the same flat H5 column.
+        selection mode, narrows by ``consumes:``, and assembles ONE
+        `OutputColumn` per ``outputs.*`` leaf from the fields the selection
+        names: TEST keeps fields with an ``h5_name`` (the eval schema); the
+        export selection (``Mode.ONNX``) keeps fields with a resolved ONNX name
+        — the EXACT rule the `OnnxExportSink` tuple uses, so the inference H5
+        columns are 1:1 with the ONNX tuple by construction. MANIFEST field
+        order (not executor topo order) is the H5 column-order authority.
+        Copy/mask writers contribute through `_merge_columns`, not here.
+        `ConfigError` when no producer mints a final column for the selection,
+        or two leaves mint the same flat H5 column.
         """
+        if self._columns_resolved:
+            return self._columns
         columns = group_columns(
             self._filter_consumed(
                 collect_manifest_fields(self._manifest_sources(), self._section_mode)
             ),
-            self._column_suffix,
+            attrgetter("h5_name" if self._section_mode is Mode.TEST else "resolved_onnx_name"),
         )
         if not columns:
             raise ConfigError(
@@ -280,10 +284,8 @@ class H5OutputSink(RuntimeSink):
                         f"{col.stream!r} is minted by BOTH {other} AND {col.key!r}"
                     )
                 seen_cols[col.stream, column_name] = col.key
-        resolved = tuple(columns)
-        self._columns = resolved
-        self._columns_resolved = True
-        return resolved
+        self._columns, self._columns_resolved = tuple(columns), True
+        return self._columns
 
     def _ensure_columns(self) -> tuple[OutputColumn, ...]:
         """The resolved columns for the CURRENT run name (auto-collect aware).
@@ -318,39 +320,18 @@ class H5OutputSink(RuntimeSink):
             # reads the bool mask from it — the section feeds the sink through
             # the graph.
             req[f"outputs.{stream}.mask"] = TensorSpec(shape=None, dtype=None, kind="data")
-        # demand each object-group field's source leaf so its producer stays
-        # alive in the TEST plan; empty for non-object-group sinks.
-        for key, spec in self._object_group_requires().items():
-            req.setdefault(key, spec)
+        # demand each object-group field's source leaf (first declaration wins)
+        # so its producer stays alive in the TEST plan; empty for non-object-group
+        # sinks. Dtype unconstrained (cast at write time); the field's ``kind``
+        # must match its producer's declared kind or the planner's kind-unify raises.
+        for field in (f for group in self._object_groups for f in group.fields):
+            req.setdefault(field.leaf, TensorSpec(shape=None, dtype=None, kind=field.kind))
         return IO(requires=unflatten_spec(req), produces={})
 
-    def _object_group_requires(self) -> dict[str, TensorSpec]:
-        """The source-leaf demand of every object-group field, for the sink to anchor.
-
-        The sink consumes each leaf and casts at write time, so the require
-        dtype is unconstrained; the field's ``kind`` must match its producer's
-        declared kind (data / label / pad_mask) or the planner's kind-unify
-        raises.
-        """
-        out: dict[str, TensorSpec] = {}
-        for group in self._object_groups:
-            for field in group.fields:
-                out.setdefault(field.leaf, TensorSpec(shape=None, dtype=None, kind=field.kind))
-        return out
-
     def _pad_mask_streams(self) -> tuple[str, ...]:
-        """The sequence streams a pad-mask column is requested for.
-
-        ``True`` -> every demanded output's stream, de-duplicated in
-        first-seen order.
-        """
-        if self.write_pad_mask is False:
+        """The PadMaskWriter-declared streams a pad-mask column is requested for."""
+        if not self.write_pad_mask:
             return ()
-        if self.write_pad_mask is True:
-            seen: dict[str, None] = {}
-            for col in self._ensure_columns():
-                seen.setdefault(col.stream, None)
-            return tuple(seen)
         return tuple(dict.fromkeys(self.write_pad_mask))
 
     # -- node lifecycle (relocated VERBATIM from on_test_*) --------
@@ -370,8 +351,7 @@ class H5OutputSink(RuntimeSink):
         input-copying (which genuinely need the source file).
         """
         dm = ctx.datamodule
-        dset = getattr(dm, "test_dset", None)
-        if dset is None:
+        if (dset := getattr(dm, "test_dset", None)) is None:
             raise ConfigError(
                 "H5OutputSink needs a SaltDataModule with a built test dataset — "
                 f"got {type(dm).__name__}"
@@ -389,14 +369,8 @@ class H5OutputSink(RuntimeSink):
         copy_requested = bool(self.copy_inputs) or self._copy_all_tasked_streams
         if h5_source is None:
             if self._mask_streams or copy_requested:
-                want = " and ".join(
-                    label
-                    for label, needed in (
-                        ("pad-mask columns", bool(self._mask_streams)),
-                        ("input-copying", copy_requested),
-                    )
-                    if needed
-                )
+                needs = {"pad-mask columns": self._mask_streams, "input-copying": copy_requested}
+                want = " and ".join(label for label, needed in needs.items() if needed)
                 raise ConfigError(
                     f"H5OutputSink: {want} need an H5StructuredReader-style reader "
                     f"exposing an h5py-openable source (reader.h5_source) — "
@@ -465,22 +439,18 @@ class H5OutputSink(RuntimeSink):
                 f"{self._rows_written} rows written so far — sharded or uneven-batch test "
                 "loaders are not supported (row-alignment contract)"
             )
-        rows = slice(start, stop)
         n = stop - start
         fragments: dict[str, list[np.ndarray]] = {}
-        # input copies first (the v1 inputs_copy -> tasks -> pad_mask column order)
-        for stream, arr in self._copy_fragments(rows).items():
-            fragments.setdefault(stream, []).append(arr)
-        # output columns next
-        for arr_stream, arr in self._output_fragments(bundle).items():
-            fragments.setdefault(arr_stream, []).append(arr)
-        # pad masks last
-        for stream, arr in self._mask_fragments(bundle).items():
-            fragments.setdefault(stream, []).append(arr)
-        # object groups: appended AFTER copy/output/mask fragments so the join
-        # order matches `_merge_columns` (object-group columns come last).
-        for stream, arr in self._object_group_fragments(bundle).items():
-            fragments.setdefault(stream, []).append(arr)
+        # input copies, output columns, pad masks, then object groups: the v1
+        # inputs_copy -> tasks -> pad_mask column order, as `_merge_columns` lays it out
+        for part in (
+            self._copy_fragments(slice(start, stop)),
+            self._output_fragments(bundle),
+            self._mask_fragments(bundle),
+            self._object_group_fragments(bundle),
+        ):
+            for stream, arr in part.items():
+                fragments.setdefault(stream, []).append(arr)
         for stream, arrs in fragments.items():
             for arr in arrs:
                 if len(arr) != n:
@@ -488,11 +458,7 @@ class H5OutputSink(RuntimeSink):
                         f"H5OutputSink: fragment for group {stream!r} has {len(arr)} rows, "
                         f"expected {n} (rows [{start}, {stop}))"
                     )
-        data = {
-            self._group_of[stream]: (arrs[0] if len(arrs) == 1 else join_structured_arrays(arrs))
-            for stream, arrs in fragments.items()
-        }
-        self._h5.write(data)
+        self._h5.write({self._group_of[stream]: _join(arrs) for stream, arrs in fragments.items()})
         self._rows_written = stop
 
     def flush(self) -> None:
@@ -536,11 +502,9 @@ class H5OutputSink(RuntimeSink):
         Per-token (sequence-stream) leaves are re-expanded to the file
         sequence length; a 2-D ``[B, C]`` global leaf is packed directly.
         """
-        out: dict[str, np.ndarray] = {}
         frags: dict[str, list[np.ndarray]] = {}
         for col in self._ensure_columns():
-            tensor = bundle.get(col.key)
-            values = tensor.detach().cpu().numpy()
+            values = bundle.get(col.key).detach().cpu().numpy()
             # the producer leaf may be [B] / [B, L] (collapsed index columns) or
             # [B, C] / [B, L, C] — give u2s an explicit trailing channel axis so a
             # single-suffix column packs the same as the v1 eval path
@@ -550,9 +514,7 @@ class H5OutputSink(RuntimeSink):
             if arr.ndim == 2:
                 arr = _pad_to(arr, self._seq_lengths[col.stream])
             frags.setdefault(col.stream, []).append(arr)
-        for stream, arrs in frags.items():
-            out[stream] = arrs[0] if len(arrs) == 1 else join_structured_arrays(arrs)
-        return out
+        return {stream: _join(arrs) for stream, arrs in frags.items()}
 
     def _mask_fragments(self, bundle: Bundle) -> dict[str, np.ndarray]:
         """Build the boolean ``mask`` column per requested sequence stream.
@@ -580,20 +542,17 @@ class H5OutputSink(RuntimeSink):
         """
         out: dict[str, np.ndarray] = {}
         for group in self._object_groups:
-            frags = [self._pack_object_field(bundle, f) for f in group.fields]
-            arr = frags[0] if len(frags) == 1 else join_structured_arrays(frags)
+            arr = _join([self._pack_object_field(bundle, f) for f in group.fields])
             if group.name in self._seq_lengths and arr.ndim >= 2:
                 arr = _pad_to(arr, self._seq_lengths[group.name])
-            if group.name in self._object_shapes:
-                declared = self._object_shapes[group.name]
-                actual = arr.shape[1:]
-                if actual != declared:
-                    raise ConfigError(
-                        f"H5OutputSink: object group {group.name!r} fragment per-row shape "
-                        f"{actual} does not match the schema-declared per-row shape {declared} "
-                        "— a reader `pad_max` narrower than the file width is unsupported for a "
-                        "non-reader object group (its trailing axes must span the full file width)"
-                    )
+            declared = self._object_shapes.get(group.name)
+            if declared is not None and arr.shape[1:] != declared:
+                raise ConfigError(
+                    f"H5OutputSink: object group {group.name!r} fragment per-row shape "
+                    f"{arr.shape[1:]} does not match the schema-declared per-row shape {declared} "
+                    "— a reader `pad_max` narrower than the file width is unsupported for a "
+                    "non-reader object group (its trailing axes must span the full file width)"
+                )
             out[group.name] = arr
         return out
 
@@ -637,19 +596,17 @@ class H5OutputSink(RuntimeSink):
             return
         if unknown := sorted(set(self.copy_inputs) - set(streams)):
             raise ConfigError(
-                f"H5OutputSink: copy_inputs streams {unknown} are not reader streams — "
+                f"H5OutputSink: InputCopyWriter streams {unknown} are not reader streams — "
                 f"streams are {list(streams)}"
             )
         self._copy_handle = h5py.File(source_path, "r", swmr=True, libver="latest")
-        for stream in streams:  # reader config order
-            if stream not in self.copy_inputs:
-                continue
+        for stream in [s for s in streams if s in self.copy_inputs]:  # reader config order
             ds = self._copy_handle[group_datasets[stream]]
             file_fields = list(ds.dtype.names or ())
             fields = self.copy_inputs[stream] or file_fields
             if missing := sorted(set(fields) - set(file_fields)):
                 raise ConfigError(
-                    f"H5OutputSink: copy_inputs variables {missing} missing for stream "
+                    f"H5OutputSink: InputCopyWriter variables {missing} missing for stream "
                     f"{stream!r} in {source_path.name!r} (v1 extra_vars contract)"
                 )
             self._copy_reads[stream] = (ds, list(fields))
@@ -696,16 +653,13 @@ class H5OutputSink(RuntimeSink):
                 )
             trailing: list[int] = []
             for dim in group.shape:
-                if isinstance(dim, str):
-                    if dim not in self._seq_lengths:
-                        raise ConfigError(
-                            f"H5OutputSink: object group {group.name!r} shape token {dim!r} is "
-                            f"not a sequence stream — sequence streams are "
-                            f"{sorted(self._seq_lengths)}"
-                        )
-                    trailing.append(self._seq_lengths[dim])
-                else:
-                    trailing.append(int(dim))
+                if isinstance(dim, str) and dim not in self._seq_lengths:
+                    raise ConfigError(
+                        f"H5OutputSink: object group {group.name!r} shape token {dim!r} is "
+                        f"not a sequence stream — sequence streams are "
+                        f"{sorted(self._seq_lengths)}"
+                    )
+                trailing.append(self._seq_lengths[dim] if isinstance(dim, str) else int(dim))
             shapes[group.name] = tuple(trailing)
         return shapes
 
@@ -734,21 +688,17 @@ class H5OutputSink(RuntimeSink):
                     "(declare a non-reader group's `shape` in object_groups)"
                 )
             for descr in dtype.descr:
-                field_name = descr[0]
-                if (other := owners.get((stream, field_name))) is not None:
+                if (other := owners.get((stream, descr[0]))) is not None:
                     raise ConfigError(
-                        f"column {field_name!r} in group {stream!r} is declared by {other} AND "
+                        f"column {descr[0]!r} in group {stream!r} is declared by {other} AND "
                         f"{who} — rename one output (collision check)"
                     )
-                owners[stream, field_name] = who
+                owners[stream, descr[0]] = who
                 descrs.setdefault(stream, []).append(descr)
 
         for stream, (ds, fields) in self._copy_reads.items():
-            _add(
-                stream,
-                np.dtype([(fname, ds.dtype[fname]) for fname in fields]),
-                f"copy_inputs[{stream!r}]",
-            )
+            copy_dtype = np.dtype([(f, ds.dtype[f]) for f in fields])
+            _add(stream, copy_dtype, f"InputCopyWriter[{stream!r}]")
         for col in self._ensure_columns():
             _add(col.stream, col.np_dtype(self._run_name), f"output {col.key!r}")
         for stream in self._mask_streams:
@@ -756,20 +706,14 @@ class H5OutputSink(RuntimeSink):
         # object-group columns come last; same `_add` uniqueness/attribution
         # check as reader columns. Dead code when object_groups is empty.
         for group in self._object_groups:
-            for field in group.fields:
-                _add(
-                    group.name,
-                    field.np_dtype(self._run_name, self.half_precision),
-                    f"object_groups[{group.name!r}].{field.leaf!r}",
-                )
+            for fld in group.fields:
+                who = f"object_groups[{group.name!r}].{fld.leaf!r}"
+                _add(group.name, fld.np_dtype(self._run_name, self.half_precision), who)
         if not descrs:
             raise ConfigError("H5OutputSink declares no output columns at all")
         self._group_of = {stream: group_datasets.get(stream, stream) for stream in descrs}
-        dtypes = {self._group_of[stream]: np.dtype(descr) for stream, descr in descrs.items()}
-        shapes = {
-            self._group_of[stream]: self._group_shape(stream, sequence_streams, total)
-            for stream in descrs
-        }
+        dtypes = {self._group_of[s]: np.dtype(descr) for s, descr in descrs.items()}
+        shapes = {self._group_of[s]: self._group_shape(s, sequence_streams, total) for s in descrs}
         return dtypes, shapes
 
     def _group_shape(
@@ -794,10 +738,7 @@ class H5OutputSink(RuntimeSink):
         ``min(total, num_batches * batch_size)`` — with the sequential
         no-drop sampler only the last batch is partial.
         """
-        num_batches = ctx.num_test_batches
-        if not num_batches:
-            return total
-        limit = num_batches[0]
+        limit = ctx.num_test_batches[0] if ctx.num_test_batches else None
         if isinstance(limit, (int, float)) and math.isfinite(limit):
             return min(total, int(limit) * batch_size)
         return total
@@ -821,8 +762,7 @@ class H5OutputSink(RuntimeSink):
             src = srcs[0] if srcs else self._run_name
         stem = Path(src).stem
         sample = split[3] if len(split := stem.split("_")) == 4 else stem
-        test_suff = getattr(dm, "test_suff", None)
-        if test_suff:
+        if test_suff := getattr(dm, "test_suff", None):
             sample = f"{sample}_{test_suff}"
         keys = {
             "ckpt_dir": str(Path(ckpt_path).parent),

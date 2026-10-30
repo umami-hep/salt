@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any
 
 from salt.graph.errors import ConfigError
@@ -30,23 +30,6 @@ __all__ = [
     "trainable_named_params",
 ]
 
-# recognised per-stage keys — anything else is a config typo, rejected fail-loud.
-_STAGE_FIELDS = frozenset({
-    "epochs",
-    "frozen",
-    "trainable",
-    "optimizer",
-    "lrs",
-    "order",
-    "early_stop",
-    "callbacks",
-    "lr_scheduler",
-})
-# recognised `early_stop` sub-keys (Lightning EarlyStopping vocabulary).
-_EARLY_STOP_FIELDS = frozenset({"monitor", "mode", "patience", "min_delta", "check_finite"})
-# recognised `lr_scheduler` sub-keys: a class spec + Lightning
-# scheduler-config keys.
-_LR_SCHEDULER_FIELDS = frozenset({"class_path", "init_args", "interval", "frequency", "monitor"})
 # OneCycle-only `lrs:` keys — meaningless (and rejected in a stage's OWN override)
 # when the stage swaps in a custom `lr_scheduler`; `initial`/`weight_decay` remain
 # the optimizer's base LR / weight decay and stay valid.
@@ -79,12 +62,7 @@ class EarlyStopConfig:
         dict[str, Any]
             The monitor/mode/min_delta/patience fingerprint.
         """
-        return {
-            "monitor": self.monitor,
-            "mode": self.mode,
-            "min_delta": self.min_delta,
-            "patience": self.patience,
-        }
+        return {key: getattr(self, key) for key in ("monitor", "mode", "min_delta", "patience")}
 
 
 @dataclass(frozen=True)
@@ -126,6 +104,13 @@ class StageConfig:
     lr_scheduler: LRSchedulerConfig | None = None
 
 
+# recognised per-stage / `early_stop` / `lr_scheduler` keys: exactly the dataclass fields
+# (a stage's `name` is its mapping key). Anything else is a config typo, rejected fail-loud.
+_STAGE_FIELDS = frozenset(f.name for f in fields(StageConfig)) - {"name"}
+_EARLY_STOP_FIELDS = frozenset(f.name for f in fields(EarlyStopConfig))
+_LR_SCHEDULER_FIELDS = frozenset(f.name for f in fields(LRSchedulerConfig))
+
+
 class TrainingSchedule:
     """Parsed, validated training schedule — an ordered list of `StageConfig`.
 
@@ -137,11 +122,6 @@ class TrainingSchedule:
     def __init__(self, stages: list[StageConfig], module_names: Sequence[str]) -> None:
         self.stages = stages
         self._module_names = tuple(module_names)
-
-    @property
-    def initial_stage(self) -> StageConfig:
-        """The first stage in execution order."""
-        return self.stages[0]
 
     @property
     def is_multi_stage(self) -> bool:
@@ -220,10 +200,8 @@ class TrainingSchedule:
         # which the same caller invokes with the same value; the final stage
         # owning everything past the last bound makes it unnecessary here.
         del max_epochs
-        for index, bound in enumerate(self._non_final_epoch_bounds()):
-            if epoch < bound:
-                return index
-        return len(self.stages) - 1
+        bounds = self._non_final_epoch_bounds()
+        return next((i for i, bound in enumerate(bounds) if epoch < bound), len(self.stages) - 1)
 
     def stage_step_allocations(self, total_steps: int, max_epochs: int) -> list[int]:
         """Split `total_steps` (Lightning's whole-run `estimated_stepping_batches`)
@@ -331,12 +309,9 @@ class TrainingSchedule:
             raise ConfigError("training_schedule.stages is empty — declare at least one stage.")
 
         known = set(module_names)
-        stages: list[StageConfig] = []
-        for name, cfg in stage_items:
-            stages.append(_parse_stage(name, cfg, known))
+        stages = [_parse_stage(name, cfg, known) for name, cfg in stage_items]
         _check_orders(stages)
-        ordered = _order_stages(stages)
-        return cls(ordered, module_names)
+        return cls(_order_stages(stages), module_names)
 
     @classmethod
     def desugar_legacy(cls, module_names: Sequence[str]) -> TrainingSchedule:
@@ -374,14 +349,12 @@ def _parse_stage(name: str, cfg: Any, module_names: set[str]) -> StageConfig:
     if lrs is not None and not isinstance(lrs, Mapping):
         raise ConfigError(f"training_schedule stage {name!r} 'lrs' must be a mapping.")
     lr_scheduler = _parse_lr_scheduler(name, cfg)
-    if lr_scheduler is not None and isinstance(lrs, Mapping):
-        clash = _ONECYCLE_ONLY_LRS & set(lrs)
-        if clash:
-            raise ConfigError(
-                f"training_schedule stage {name!r} sets both 'lr_scheduler' and OneCycle-only "
-                f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
-                "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs'."
-            )
+    if lr_scheduler is not None and lrs is not None and (clash := _ONECYCLE_ONLY_LRS & set(lrs)):
+        raise ConfigError(
+            f"training_schedule stage {name!r} sets both 'lr_scheduler' and OneCycle-only "
+            f"'lrs' key(s) {sorted(clash)} — those keys only apply to the default OneCycleLR. "
+            "With a custom lr_scheduler keep only 'initial'/'weight_decay' in 'lrs'."
+        )
     return StageConfig(
         name=name,
         epochs=epochs,
@@ -622,10 +595,7 @@ def _order_stages(stages: list[StageConfig]) -> list[StageConfig]:
     """Order stages by explicit `order`, falling back to declaration index; the
     stable sort keeps declaration order among unpinned stages.
     """
-    keyed = sorted(
-        enumerate(stages),
-        key=lambda item: item[1].order if item[1].order is not None else item[0],
-    )
+    keyed = sorted(enumerate(stages), key=lambda p: p[1].order if p[1].order is not None else p[0])
     return [stage for _, stage in keyed]
 
 
@@ -722,6 +692,9 @@ def clear_frozen_grads(net: Any, frozen: set[str]) -> None:
 # from records + the persisted tracker, not epoch arithmetic.
 
 
+_TRACKER_COUNTERS = ("best_score", "wait_count", "check_count")  # checkpointed, in this order
+
+
 @dataclass
 class EarlyStopTracker:
     """Live early-stop counters for the ACTIVE stage: checkpointed for exact
@@ -775,12 +748,8 @@ class EarlyStopTracker:
         dict[str, Any]
             ``{best_score, wait_count, check_count, fingerprint}``.
         """
-        return {
-            "best_score": self.best_score,
-            "wait_count": self.wait_count,
-            "check_count": self.check_count,
-            "fingerprint": self.config.fingerprint(),
-        }
+        state = {key: getattr(self, key) for key in _TRACKER_COUNTERS}
+        return {**state, "fingerprint": self.config.fingerprint()}
 
     @classmethod
     def from_state_dict(cls, config: EarlyStopConfig, state: Mapping[str, Any]) -> EarlyStopTracker:
@@ -791,12 +760,7 @@ class EarlyStopTracker:
         EarlyStopTracker
             A tracker with the restored counters.
         """
-        return cls(
-            config,
-            best_score=state["best_score"],
-            wait_count=state["wait_count"],
-            check_count=state["check_count"],
-        )
+        return cls(config, **{key: state[key] for key in _TRACKER_COUNTERS})
 
 
 def boundary_record(

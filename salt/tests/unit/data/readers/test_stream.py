@@ -7,8 +7,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from salt.data import OffsetIndex, StreamConfig
-from salt.data.readers.stream import INT_PAD_SENTINEL, _truncate_pad, pad_fill, stage_file
+from salt.data import StreamConfig
+from salt.data.readers.stream import (
+    INT_PAD_SENTINEL,
+    _truncate_pad,
+    covering_range,
+    pad_fill,
+    stage_file,
+)
 from salt.graph.errors import ConfigError
 from salt.schema import GroupSchema
 
@@ -146,41 +152,17 @@ def test_no_cuts_no_sort_dtype_sentinels_on_padded_positions() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 5. OffsetIndex
+# 5. covering_range
 # --------------------------------------------------------------------------- #
 
 
-def test_offset_index_cumulative_and_total() -> None:
-    idx = OffsetIndex([3, 0, 5, 2])
-    assert idx.offsets == [0, 3, 3, 8, 10]
-    assert idx.total == 10
-    assert idx.file_starts() == [0, 3, 3, 8]
-
-
-def test_offset_index_runs_single_file() -> None:
-    idx = OffsetIndex([10, 10])
-    # slice entirely within file 0
-    assert idx.runs(slice(2, 7)) == [(0, 2, 7)]
-
-
-def test_offset_index_runs_crossing_boundary() -> None:
-    idx = OffsetIndex([10, 10])
-    # slice [8, 13) -> file 0 local [8,10), file 1 local [0,3)
-    assert idx.runs(slice(8, 13)) == [(0, 8, 10), (1, 0, 3)]
-
-
-def test_offset_index_runs_skips_empty_files() -> None:
-    idx = OffsetIndex([5, 0, 5])
-    assert idx.runs(slice(3, 8)) == [(0, 3, 5), (2, 0, 3)]
-
-
-def test_offset_index_covering_range() -> None:
+def test_covering_range() -> None:
     # per-event kept-jet counts: [2, 0, 3, 1] -> cum [0,2,2,5,6]
     cum = np.array([0, 2, 2, 5, 6])
     # kept-jet range [3, 5) -> covered by event index 2 only (cum[2]=2, cum[3]=5)
-    c0, c1, off = OffsetIndex.covering_range(cum, 3, 5)
+    c0, c1, off = covering_range(cum, 3, 5)
     assert (c0, c1) == (2, 3)
     assert off == 1  # jlo=3 is at offset 1 within event 2's [2,5) block
     # range [0, 6) covers all events 0..3 (event 1 empty)
-    c0, c1, off = OffsetIndex.covering_range(cum, 0, 6)
+    c0, c1, off = covering_range(cum, 0, 6)
     assert (c0, c1, off) == (0, 4, 0)

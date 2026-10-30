@@ -80,12 +80,8 @@ class MaskformerMetrics(Callback):
             target_masks}`` keys.
         """
         del model_modules
-        return (
-            self._matched_key("class_logits"),
-            self._matched_key("object_class"),
-            self._matched_key("masks"),
-            self._matched_key("target_masks"),
-        )
+        leaves = ("class_logits", "object_class", "masks", "target_masks")
+        return tuple(self._matched_key(leaf) for leaf in leaves)
 
     def on_validation_batch_end(
         self,
@@ -98,11 +94,7 @@ class MaskformerMetrics(Callback):
     ) -> None:
         """Compute + log the object metrics from the step bundle's matched keys."""
         del batch, batch_idx, dataloader_idx
-        if trainer.fast_dev_run:
-            return
-        metrics = self._compute(outputs["bundle"])
-        self.last_metrics = {k: float(v) for k, v in metrics.items()}
-        self._log(trainer, pl_module, metrics, "val")
+        self._step(trainer, pl_module, outputs, "val")
 
     def on_train_batch_end(
         self,
@@ -114,10 +106,22 @@ class MaskformerMetrics(Callback):
     ) -> None:
         """Compute + log the object metrics on train batches when ``only_val`` is off."""
         del batch, batch_idx
-        if self.only_val or trainer.fast_dev_run:
+        if not self.only_val:
+            self._step(trainer, pl_module, outputs, "train")
+
+    def _step(
+        self, trainer: Trainer, pl_module: LightningModule, outputs: STEP_OUTPUT, stage: str
+    ) -> None:
+        """Skip under ``fast_dev_run``; else compute, stash ``last_metrics`` (VAL only) and log
+        each metric through the LightningModule as ``<stage>/<name>`` (sync across devices).
+        """
+        if trainer.fast_dev_run:
             return
         metrics = self._compute(outputs["bundle"])
-        self._log(trainer, pl_module, metrics, "train")
+        if stage == "val":
+            self.last_metrics = {k: float(v) for k, v in metrics.items()}
+        for name, value in metrics.items():
+            pl_module.log(f"{stage}/{name}", value)
 
     def _compute(self, bundle: Bundle) -> dict[str, Tensor]:
         """Compute ``{metric name: scalar tensor}`` from the matched object bundle keys."""
@@ -147,12 +151,12 @@ class MaskformerMetrics(Callback):
         # per-class + not-null efficiency (recall) / purity (precision)
         present_tgt = tgt_flat != null_index
         present_pred = pred_flat != null_index
-        metrics["notnull_eff"] = _recall(present_pred, present_tgt)
-        metrics["notnull_pur"] = _precision(present_pred, present_tgt)
+        metrics["notnull_eff"] = _ratio(present_pred, present_tgt, present_tgt)
+        metrics["notnull_pur"] = _ratio(present_pred, present_tgt, present_pred)
         for c in range(null_index):  # every non-null class
             is_tgt, is_pred = tgt_flat == c, pred_flat == c
-            metrics[f"class{c}_eff"] = _recall(is_pred, is_tgt)
-            metrics[f"class{c}_pur"] = _precision(is_pred, is_tgt)
+            metrics[f"class{c}_eff"] = _ratio(is_pred, is_tgt, is_tgt)
+            metrics[f"class{c}_pur"] = _ratio(is_pred, is_tgt, is_pred)
 
         # mask reco metrics: predicted masks suppressed on padded tokens + null objects
         pad_key = f"masks.{self.constituent_stream}"
@@ -177,28 +181,11 @@ class MaskformerMetrics(Callback):
                 )
         return metrics
 
-    def _log(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        metrics: Mapping[str, Tensor],
-        stage: str,
-    ) -> None:
-        """Log each metric through the LightningModule (sync across devices)."""
-        del trainer
-        for name, value in metrics.items():
-            pl_module.log(f"{stage}/{name}", value)
 
-
-def _recall(pred: Tensor, tgt: Tensor) -> Tensor:
-    """Binary recall TP / (TP + FN); 0.0 when there are no positives."""
+def _ratio(pred: Tensor, tgt: Tensor, denom: Tensor) -> Tensor:
+    """TP / ``denom.sum()`` — recall with ``denom=tgt``, purity (precision) with ``denom=pred``;
+    0.0 when the denominator is empty.
+    """
     tp = (pred & tgt).sum().float()
-    denom = tgt.sum().float()
-    return tp / denom if denom > 0 else torch.zeros((), device=pred.device)
-
-
-def _precision(pred: Tensor, tgt: Tensor) -> Tensor:
-    """Binary precision TP / (TP + FP); 0.0 when there are no predictions."""
-    tp = (pred & tgt).sum().float()
-    denom = pred.sum().float()
-    return tp / denom if denom > 0 else torch.zeros((), device=pred.device)
+    total = denom.sum().float()
+    return tp / total if total > 0 else torch.zeros((), device=pred.device)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from typing import Any
 
 import torch
@@ -11,9 +10,8 @@ from torch import Tensor
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
-from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
+from salt.graph.spec import IO, Mode, TensorSpec
 from salt.model.bind import ResolvedSchema
-from salt.model.modules.stream_embed import _stream_len
 from salt.model.modules.tasks.base import _loss_class, _TaskModuleBase
 from salt.model.nn.dense import Dense
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField
@@ -40,6 +38,8 @@ class VertexingTaskModule(_TaskModuleBase):
     TEST publishes per-node vertex assignments (union-find); ONNX publishes
     RAW edge scores that `get_output` folds into the union-find vertex index.
     """
+
+    sequence = True  # always per-token (no `sequence` config parameter)
 
     def __init__(
         self,
@@ -113,6 +113,7 @@ class VertexingTaskModule(_TaskModuleBase):
                 "label.replace('VertexIndex', 'OriginLabel')"
             )
         self.origin_label = origin_label
+        self.origin_label_key = f"labels.{stream}.{origin_label}"
         self.prefix_vertex_column = bool(prefix_vertex_column)
         weighting = dict(origin_weighting or {"heavy": [3, 4, 5], "fake": [1]})
         if unknown := sorted(set(weighting) - {"heavy", "fake"}):
@@ -126,18 +127,14 @@ class VertexingTaskModule(_TaskModuleBase):
         # so heavy_ids/fake_ids stay None until resolved (a name-based bind without
         # a schema then fails loudly instead of silently mis-weighting)
         self._heavy_cfg, self._fake_cfg = heavy, fake
-        self._names_pending = _is_name_weighting(heavy, fake)
-        if self._names_pending:
-            self.heavy_ids: tuple[int, ...] | None = None
-            self.fake_ids: tuple[int, ...] | None = None
-        else:
-            self.heavy_ids = _coerce_origin_ids(heavy, "heavy")
-            self.fake_ids = _coerce_origin_ids(fake, "fake")
+        ids = (_origin_ids("heavy", heavy), _origin_ids("fake", fake))
+        self._names_pending = None in ids
+        self.heavy_ids, self.fake_ids = (None, None) if self._names_pending else ids
 
     @property
-    def origin_label_key(self) -> str:
-        """``labels.<stream>.<origin_label>``."""
-        return f"labels.{self.stream}.{self.origin_label}"
+    def has_pad_mask(self) -> bool:
+        """Always: the edge adjacency is built from the stream pad mask."""
+        return True
 
     def resolve_origin_names(self, reader: Any) -> bool:
         """Resolve name-based ``origin_weighting`` to ids against the schema.
@@ -196,16 +193,13 @@ class VertexingTaskModule(_TaskModuleBase):
         order; raises `ConfigError` on a name absent from the schema's origin
         classes.
         """
-        ids: list[int] = []
-        for name in names:
-            if name not in index:
-                raise ConfigError(
-                    f"VertexingTaskModule {self.name!r}: origin_weighting {role!r} class "
-                    f"{name!r} is not among the {self.origin_label!r} classes {list(classes)} "
-                    f"(config: model.modules.{self.name}.init_args.origin_weighting)"
-                )
-            ids.append(index[name])
-        return tuple(ids)
+        if missing := [name for name in names if name not in index]:
+            raise ConfigError(
+                f"VertexingTaskModule {self.name!r}: origin_weighting {role!r} class "
+                f"{missing[0]!r} is not among the {self.origin_label!r} classes {list(classes)} "
+                f"(config: model.modules.{self.name}.init_args.origin_weighting)"
+            )
+        return tuple(index[name] for name in names)
 
     def declare_io(self, mode: Mode) -> IO:
         """Requires both vertex and origin labels (FIT|VAL); the shape-unconstrained
@@ -213,30 +207,12 @@ class VertexingTaskModule(_TaskModuleBase):
         assignments.
         """
         del mode
-        width = sym_dim("D", self.name)
-        label_spec = TensorSpec(
-            shape=("B", _stream_len(self.stream)),
-            dtype="int64",
-            kind="label",
-            modes=Mode.TRAINING,
+        label = TensorSpec(shape=self._tokens, dtype="int64", kind="label", modes=Mode.TRAINING)
+        return self._head_io(
+            label_specs={self.label_key: label, self.origin_label_key: label},
+            pred_shape=None,
+            context_last=True,
         )
-        requires: dict[str, TensorSpec] = {
-            self.input_key: TensorSpec(
-                shape=("B", _stream_len(self.stream), width), dtype="float32"
-            ),
-            f"masks.{self.stream}": TensorSpec(
-                shape=("B", _stream_len(self.stream)), dtype="bool", kind="pad_mask"
-            ),
-            self.label_key: label_spec,
-            self.origin_label_key: label_spec,
-        }
-        if self.context is not None:
-            requires[self.context] = TensorSpec(shape=None, dtype="float32")
-        produces: dict[str, TensorSpec] = {
-            self.pred_key: self._pred_spec(TensorSpec(shape=None, dtype=None)),
-            self.loss_key: TensorSpec(shape=(), kind="loss", modes=Mode.TRAINING),
-        }
-        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
         """``input_size = 2 * width(input)`` (edge-pair concat); requires the
@@ -289,6 +265,10 @@ class VertexingTaskModule(_TaskModuleBase):
         on. Left un-seamed the head cost eight scattered breaks, which fragment
         the graph AROUND it as well; one break is strictly better.
 
+        The loss is the per-edge pairwise-matching BCE, weighted by
+        `get_weights` and normalised by the number of matched pairs, times
+        ``weight``.
+
         Returns
         -------
         tuple[Tensor, Tensor | None]
@@ -319,69 +299,26 @@ class VertexingTaskModule(_TaskModuleBase):
         tt_matrix[:, :d] = x.unsqueeze(-2).expand(ex_size)[adjmat[:, :-1, :-1]]
         tt_matrix[:, d:] = x.unsqueeze(-3).expand(ex_size)[adjmat[:, :-1, :-1]]
         pred = self.net(tt_matrix, context_matrix)
-        loss: Tensor | None = None
-        if labels is not None and origin_labels is not None:
-            loss = self.calculate_loss(pred, labels, origin_labels, adjmat=adjmat[:, :-1, :-1])
-
-        return pred, loss
-
-    def calculate_loss(
-        self, pred: Tensor, labels: Tensor, origin_labels: Tensor, adjmat: Tensor
-    ) -> Tensor:
-        """Compute the vertexing loss against pairwise matching labels.
-
-        Returns
-        -------
-        Tensor
-            Weighted average loss scaled by ``self.weight``.
-        """
+        if labels is None or origin_labels is None:
+            return pred, None
+        adjmat = adjmat[:, :-1, :-1]
         match_matrix = labels.unsqueeze(-1) == labels.unsqueeze(-2)
-
         # negative-class labels never count as a match, even to each other
         unique_matrix = labels < 0
-        unique_matrix = unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2)
-        match_matrix *= ~unique_matrix
-
+        match_matrix *= ~(unique_matrix.unsqueeze(-1) | unique_matrix.unsqueeze(-2))
         match_matrix = match_matrix[adjmat].float()
-
-        loss = self.loss(pred.squeeze(-1), match_matrix)
-
-        weights = self.get_weights(origin_labels, adjmat)
-        weighted_loss = loss * weights
-
-        num_non_masked_elements = match_matrix.sum()
-        loss = weighted_loss.sum() / num_non_masked_elements
-
-        return loss * self.weight
+        loss = self.loss(pred.squeeze(-1), match_matrix) * self.get_weights(origin_labels, adjmat)
+        return pred, loss.sum() / match_matrix.sum() * self.weight
 
     def get_weights(self, labels: Tensor, adjmat: Tensor) -> Tensor:
-        """Compute per-edge weights from the configured heavy/fake origin ids.
-
-        With the default ids (3, 4, 5 / 1) this reproduces the historic
+        """Per-edge weights ``[E]`` (after adjacency compression) from the configured
+        heavy/fake origin ids; the default ids (3, 4, 5 / 1) reproduce the historic
         hardcoded weighting bit-for-bit.
-
-        Returns
-        -------
-        Tensor
-            Per-edge weights of shape ``[E]`` after adjacency compression.
         """
         heavy = torch.clip(sum(labels == i for i in self.heavy_ids), 0, 1)
         fake = torch.clip(sum(labels == i for i in self.fake_ids), 0, 1)
         weights = heavy - fake.int()
-        weights = weights.unsqueeze(-1) & weights.unsqueeze(-2)
-        weights = weights[adjmat]
-        return 1 + weights
-
-    def run_inference(self, preds: Tensor, pad_mask: Tensor | None = None) -> Tensor:
-        """Per-node assignments from edge predictions.
-
-        Returns
-        -------
-        Tensor
-            Flattened per-node assignments with paddings filled to ``-inf``.
-        """
-        preds = get_node_assignment_jit(preds, pad_mask)
-        return mask_fill_flattened(preds, pad_mask)
+        return 1 + (weights.unsqueeze(-1) & weights.unsqueeze(-2))[adjmat]
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Publishes RAW ``[E, 1]`` edge scores in every non-training mode; the
@@ -391,13 +328,12 @@ class VertexingTaskModule(_TaskModuleBase):
         x = b.get(self.input_key)
         ctx = b.get(self.context) if self.context is not None else None
         mask = b.get(f"masks.{self.stream}")
-        if mode & Mode.TRAINING:
-            labels = b.get(self.label_key)
-            origin_labels = b.get(self.origin_label_key)
-            preds, loss = self.head_forward(x, mask, labels, origin_labels, context=ctx)
-            return {self.pred_key: preds, self.loss_key: loss}
-        preds, _ = self.head_forward(x, mask, None, None, context=ctx)
-        return {self.pred_key: preds}
+        if not (mode & Mode.TRAINING):
+            preds, _ = self.head_forward(x, mask, None, None, context=ctx)
+            return {self.pred_key: preds}
+        labels, origins = b.get(self.label_key), b.get(self.origin_label_key)
+        preds, loss = self.head_forward(x, mask, labels, origins, context=ctx)
+        return {self.pred_key: preds, self.loss_key: loss}
 
     # -- output rendering ---------------------------------------------------
 
@@ -405,87 +341,55 @@ class VertexingTaskModule(_TaskModuleBase):
         """``["masks.<stream>"]`` — a vertexing head always requires a pad mask —
         plus the vertex-index label key in TEST when ``write_targets`` (never in ONNX).
         """
-        deps = [f"masks.{self.stream}"]
-        if self._emit_targets(mode):
-            deps.append(self.label_key)
-        return deps
+        return self._output_deps(mode, [self.label_key])
 
-    def get_output(self, b: Bundle, mode: Mode, run_name: str) -> list[OutputField]:
-        """ONNX: union-find -> flatten -> int8 ``[L]`` field under `VERTEX_INDEX`. H5 modes:
-        the int-cast union-find value, ``onnx_name=None``, prefix follows `prefix_vertex_column`.
+    def _output_values(self, b: Bundle, mode: Mode) -> list[Tensor]:
+        """Union-find vertex assignments: ONNX -> flattened int8 ``[L]``; H5 -> int-cast
+        (``-inf`` padding -> int32 min) plus, in TEST, the raw vertex-index label the
+        pairwise matching loss targets (negative = no vertex; padded positions ``-1``).
         """
         assert self.net is not None, "get_output before bind()"
-        fields = self.get_output_manifest(mode, run_name)
-        edge_scores = b.get(self.pred_key)
         mask = b.get(f"masks.{self.stream}")
+        vertices = mask_fill_flattened(get_node_assignment_jit(b.get(self.pred_key), mask), mask)
         if mode & Mode.ONNX:
-            vertex_indices = get_node_assignment_jit(edge_scores, mask)
-            vertex_list = mask_fill_flattened(vertex_indices, mask)
-            values = [vertex_list.reshape(-1).char()]
-        else:
-            # H5 (TEST): union-find then cast to int (-inf padding -> int32 -2147483648)
-            values = [self.run_inference(edge_scores, mask).int()]
-            if self._emit_targets(mode):
-                # the per-token vertex-index label the pairwise matching loss targets
-                # (raw indices, negative = no vertex); padded positions read -1
-                values.append(torch.masked_fill(b.get(self.label_key), mask, -1))
-        return [replace(field, value=value) for field, value in zip(fields, values, strict=True)]
+            return [vertices.reshape(-1).char()]
+        values = [vertices.int()]
+        if self._emit_targets(mode):
+            values.append(torch.masked_fill(b.get(self.label_key), mask, -1))
+        return values
 
     def get_output_manifest(self, mode: Mode, run_name: str) -> list[OutputField]:
         """`get_output` derives its fields from this list via ``replace(field, value=...)``."""
         del run_name
         if mode & Mode.ONNX:
-            return [
-                OutputField(
-                    h5_name=None,
-                    onnx_name=VERTEX_INDEX,
-                    dtype="int8",
-                    axis="per_token",
-                    final=True,
-                )
-            ]
+            return [OutputField(None, VERTEX_INDEX, "int8", "per_token", final=True)]
         fields = [
             OutputField(
-                h5_name=VERTEX_INDEX,
-                onnx_name=None,
-                dtype="i8",
-                axis="per_token",
-                final=True,
-                prefix=self.prefix_vertex_column,
+                VERTEX_INDEX, None, "i8", "per_token", final=True, prefix=self.prefix_vertex_column
             )
         ]
         if self._emit_targets(mode):
-            fields.append(self._target_field())
+            fields += self._target_fields("i4")
         return fields
 
 
-def _is_name_weighting(heavy: Sequence[Any], fake: Sequence[Any]) -> bool:
-    """Name-based iff ANY heavy/fake entry is a string; raises `ConfigError` if a
-    single role list mixes ids and names (fail at construction, not silently
-    half-resolved).
+def _origin_ids(role: str, entries: Sequence[Any]) -> tuple[int, ...] | None:
+    """One ``origin_weighting`` role list as integer origin ids in config order, or None
+    for a class-name list (resolved at setup). Raises `ConfigError` on a list mixing ids
+    and names, or on a non-int id (bool included) — at construction, never half-resolved.
     """
-    for role, entries in (("heavy", heavy), ("fake", fake)):
-        has_name = any(isinstance(e, str) for e in entries)
-        has_id = any(not isinstance(e, str) for e in entries)
-        if has_name and has_id:
+    is_name = [isinstance(e, str) for e in entries]
+    if any(is_name):
+        if not all(is_name):
             raise ConfigError(
                 f"VertexingTaskModule: origin_weighting {role!r} list mixes integer ids with "
                 f"class names ({list(entries)!r}) — use one or the other"
             )
-    return any(isinstance(e, str) for e in (*heavy, *fake))
-
-
-def _coerce_origin_ids(entries: Sequence[Any], role: str) -> tuple[int, ...]:
-    """Coerce an all-integer ``origin_weighting`` role list to a tuple of ids, in
-    config order; raises `ConfigError` on any non-int entry (bool included).
-    """
-    ids: list[int] = []
-    for e in entries:
-        if isinstance(e, bool) or not isinstance(e, int):
-            raise ConfigError(
-                f"VertexingTaskModule: origin_weighting {role!r} entries must be INTEGER origin "
-                f"ids or class NAMES (got {e!r} in {list(entries)!r}); v1's hardcoded ids are "
-                "heavy: [3, 4, 5], fake: [1]"
-            )
-        ids.append(int(e))
-    return tuple(ids)
+        return None
+    if bad := [e for e in entries if isinstance(e, bool) or not isinstance(e, int)]:
+        raise ConfigError(
+            f"VertexingTaskModule: origin_weighting {role!r} entries must be INTEGER origin "
+            f"ids or class NAMES (got {bad[0]!r} in {list(entries)!r}); v1's hardcoded ids are "
+            "heavy: [3, 4, 5], fake: [1]"
+        )
+    return tuple(int(e) for e in entries)

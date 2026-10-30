@@ -8,6 +8,7 @@ see `load_config` and `instantiate` for the two formats.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import shutil
 import subprocess
@@ -178,19 +179,16 @@ def load_config(
         if not isinstance(raw, dict):
             raise ConfigError(f"config file {one} must contain a mapping")
         raws.append(raw)
-    if len(paths) > 1:
-        # override files may carry any subset of keys, but at least one
-        # stacked file must be trainer-format
-        if not any(_is_trainer_format(raw) for raw in raws):
-            raise ConfigError(
-                f"repeated -c is supported for salt trainer configs only (deep-merged "
-                f"left-to-right, the fit/export stacking semantics) — none of "
-                f"{[str(p) for p in paths]} has top-level model:/data: blocks; toy "
-                "graph configs take exactly one -c"
-            )
-        return _load_fit_config(paths, set_overrides)
+    # only one stacked file need be trainer-format; the rest may be partial overrides
+    if len(paths) > 1 and not any(_is_trainer_format(raw) for raw in raws):
+        raise ConfigError(
+            f"repeated -c is supported for salt trainer configs only (deep-merged "
+            f"left-to-right, the fit/export stacking semantics) — none of "
+            f"{[str(p) for p in paths]} has top-level model:/data: blocks; toy "
+            "graph configs take exactly one -c"
+        )
     raw, path = raws[0], paths[0]
-    if _is_trainer_format(raw):
+    if len(paths) > 1 or _is_trainer_format(raw):
         return _load_fit_config(paths, set_overrides)
     if set_overrides:
         raise ConfigError(
@@ -243,8 +241,7 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
     cli = _parse_trainer_cli(paths, set_overrides)
     model, dm = cli.model, cli.datamodule
     # InputSamples is a config holder, not a graph node: compile batch_modules only
-    data_modules = dm.batch_modules
-    reader = dm.reader
+    data_modules, reader = dm.batch_modules, dm.reader
     for module in data_modules.values():
         if isinstance(module, Labels):
             module.bind_streams(reader.streams)
@@ -273,19 +270,16 @@ def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None)
                 f"sink node name {name!r} collides with a pipeline module — instance "
                 "names must be unique across the graph; rename the callback key"
             )
+    by_mode = prep.by_mode.items()
     return GraphConfig(
         modules={**data_modules, **prep.modules},
         sources={},
-        sinks={mode: tuple(ms.anchors) for mode, ms in prep.by_mode.items()},
+        sinks={mode: tuple(ms.anchors) for mode, ms in by_mode},
         schema=reader.label_universe(),
         reader=reader,
-        mode_errors={mode: ms.error for mode, ms in prep.by_mode.items() if ms.error},
-        mode_warnings={mode: ms.warning for mode, ms in prep.by_mode.items() if ms.warning},
-        sink_origins={
-            mode: ms.anchor_origins
-            for mode, ms in prep.by_mode.items()
-            if ms.anchor_origins is not None
-        },
+        mode_errors={mode: ms.error for mode, ms in by_mode if ms.error},
+        mode_warnings={mode: ms.warning for mode, ms in by_mode if ms.warning},
+        sink_origins={m: ms.anchor_origins for m, ms in by_mode if ms.anchor_origins is not None},
         model_modules=model_modules,
         mup_cfg=getattr(model, "mup_cfg", None),
     )
@@ -402,9 +396,7 @@ def _parse_spec(key: str, node: Mapping[str, Any] | None) -> TensorSpec:
     if "shape" in kwargs:
         kwargs["shape"] = tuple(kwargs["shape"])
     if "modes" in kwargs:
-        names = kwargs["modes"]
-        if isinstance(names, str):
-            names = [names]
+        names = [kwargs["modes"]] if isinstance(kwargs["modes"], str) else kwargs["modes"]
         kwargs["modes"] = reduce(or_, (_parse_mode(name) for name in names))
     try:
         return TensorSpec(**kwargs)
@@ -418,23 +410,21 @@ def _parse_sources(raw: Any, path: Path) -> NestedSpec:
     """
     if raw is None:
         return {}
-    flat: dict[str, TensorSpec] = {}
-    if isinstance(raw, dict):
-        items = list(raw.items())
-    elif isinstance(raw, list):
-        items = []
-        for entry in raw:
-            if isinstance(entry, str):
-                items.append((entry, None))
-            elif isinstance(entry, dict) and len(entry) == 1:
-                items.append(next(iter(entry.items())))
-            else:
-                raise ConfigError(
-                    f"config {path}: 'sources' list entries must be dotted keys or "
-                    f"single-pair mappings, got {entry!r}"
-                )
-    else:
+    if not isinstance(raw, (dict, list)):
         raise ConfigError(f"config {path}: 'sources' must be a mapping or list")
+    # every list entry is shape-checked before the first spec is parsed
+    items = list(raw.items()) if isinstance(raw, dict) else []
+    for entry in raw if isinstance(raw, list) else ():
+        if isinstance(entry, str):
+            items.append((entry, None))
+        elif isinstance(entry, dict) and len(entry) == 1:
+            items.append(next(iter(entry.items())))
+        else:
+            raise ConfigError(
+                f"config {path}: 'sources' list entries must be dotted keys or "
+                f"single-pair mappings, got {entry!r}"
+            )
+    flat: dict[str, TensorSpec] = {}
     for key, node in items:
         if node is not None and not isinstance(node, dict):
             raise ConfigError(f"config {path}: source {key!r} spec must be a mapping")
@@ -476,10 +466,8 @@ def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
     if raw is None:
         return None
     if isinstance(raw, str):
-        schema_path = Path(raw)
-        if not schema_path.is_absolute():
-            schema_path = path.parent / schema_path
-        return load_schema(schema_path).keys()
+        # an absolute `raw` survives the join unchanged; a relative one is config-relative
+        return load_schema(path.parent / raw).keys()
     if isinstance(raw, list) and all(isinstance(key, str) for key in raw):
         return tuple(raw)
     raise ConfigError(
@@ -491,9 +479,7 @@ def _modes_for(args: argparse.Namespace) -> tuple[Mode, ...]:
     """The requested primary mode(s) from ``--mode`` (all primary modes if
     unset).
     """
-    if getattr(args, "mode", None) is None:
-        return PRIMARY_MODES
-    return (Mode[args.mode.upper()],)
+    return PRIMARY_MODES if getattr(args, "mode", None) is None else (Mode[args.mode.upper()],)
 
 
 def _fail(message: str) -> int:
@@ -537,8 +523,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         # raises ConfigError -> formatted by main()
         from salt.model.validation import check_class_names
 
-        checked = check_class_names(cfg.modules, cfg.reader)
-        if checked:
+        if checked := check_class_names(cfg.modules, cfg.reader):
             console(f"OK class_names ↔ schema attrs: {checked} list(s) match, set and order")
     if cfg.model_modules is not None:
         # `model_modules` is set only by `_load_fit_config`, whose SaltModule
@@ -557,8 +542,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             )
         from salt.model.validation import validate_edge_port
 
-        n_edge = validate_edge_port(cfg.model_modules)
-        if n_edge:
+        if n_edge := validate_edge_port(cfg.model_modules):
             console(
                 f"OK edge port: {n_edge} edge encoder(s) — edge stream is Concat.streams[0] and "
                 "the attention backend is edge-compatible (no silent flash bypass)"
@@ -571,13 +555,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
     datasets = reader_stream_datasets(cfg.reader)
     for name, module in cfg.modules.items():
-        preflight = getattr(module, "preflight", None)
-        if not callable(preflight):
-            continue
-        try:
-            preflight(datasets=datasets)
-        except GraphError as err:
-            warnings.append(f"preflight of module {name!r}: {err}")
+        if callable(preflight := getattr(module, "preflight", None)):
+            try:
+                preflight(datasets=datasets)
+            except GraphError as err:
+                warnings.append(f"preflight of module {name!r}: {err}")
     for mode in _modes_for(args):
         if stored := cfg.mode_errors.get(mode):
             errors.append(stored)
@@ -593,8 +575,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         )
         for finding in deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks):
             line = f"[mode={mode.name}] {finding.module}/{finding.key}: {finding.reason}"
-            bucket = {"error": errors, "info": infos}.get(finding.severity, warnings)
-            bucket.append(line)
+            {"error": errors, "info": infos}.get(finding.severity, warnings).append(line)
     for info in infos:
         console(f"info: {info}")
     for warning in warnings:
@@ -719,17 +700,15 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     _print_onnx_static_caveat(cfg, mode)
     findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
     pruned = sorted({finding.module for finding in findings if finding.key == "*"})
-    widths = _resolve_widths(cfg)
-    dot_text = dot_source(plan, cfg.modules, pruned, widths=widths)
+    dot_text = dot_source(plan, cfg.modules, pruned, widths=_resolve_widths(cfg))
     out_path = Path(args.output)
     if out_path.parent != Path():
         out_path.parent.mkdir(parents=True, exist_ok=True)
     dot_path = out_path.with_suffix(".dot")
     dot_path.write_text(dot_text)
     console(f"wrote DOT to {dot_path}")
-    if out_path.suffix == ".dot":
-        return 0
-    _render_with_dot(dot_path, out_path)
+    if out_path.suffix != ".dot":
+        _render_with_dot(dot_path, out_path)
     return 0
 
 
@@ -743,15 +722,11 @@ def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
     """
     plans: list[Plan] = []
     for plan_mode in PRIMARY_MODES:
-        if plan_mode in cfg.mode_errors:
-            continue
-        try:
-            plans.append(_compile(cfg, plan_mode))
-        except GraphError:
-            # a non-requested mode that does not compile is irrelevant to the
-            # requested mode's widths — skip it (the requested mode is already
-            # compiled by the caller, so it is always represented).
-            continue
+        # skip non-requested modes that fail to compile (irrelevant to the widths);
+        # the requested mode is compiled by the caller, so it is always present
+        if plan_mode not in cfg.mode_errors:
+            with contextlib.suppress(GraphError):
+                plans.append(_compile(cfg, plan_mode))
     return dict(resolve_bind_schema(plans).widths)
 
 
@@ -771,10 +746,9 @@ def _render_with_dot(dot_path: Path, out_path: Path) -> None:
             "hitting this there is unexpected. See "
             "https://ftag-salt.docs.cern.ch/setup/#install-graphviz"
         )
-    png_path = out_path
     pdf_path = out_path.with_suffix(".pdf")
     renders = (
-        ([dot_bin, "-Tpng", "-Gdpi=150", str(dot_path), "-o", str(png_path)], png_path),
+        ([dot_bin, "-Tpng", "-Gdpi=150", str(dot_path), "-o", str(out_path)], out_path),
         ([dot_bin, "-Tpdf", str(dot_path), "-o", str(pdf_path)], pdf_path),
     )
     for cmd, target in renders:
@@ -807,27 +781,18 @@ def _cmd_why(args: argparse.Namespace) -> int:
         raise ConfigError(f"invalid --key {args.key!r}: {err}") from err
     key = KEY_SEP.join(key_parts)
     plan = _compile(cfg, mode)
-    found = _explain_present(plan, key, mode)
-    if found:
-        return 0
-    return _explain_absent(cfg, plan, key, mode)
+    return 0 if _explain_present(plan, key, mode) else _explain_absent(cfg, plan, key, mode)
 
 
 def _explain_present(plan: Plan, key: str, mode: Mode) -> bool:
     """Print producer/spec/consumers for a key that is in the plan; True if
     found (and explained).
     """
-    producer: str | None = None
-    spec: TensorSpec | None = None
     if key in plan.sources:
         producer, spec = SOURCES, plan.sources[key]
+    elif (step := next((s for s in plan.steps if key in s.produces), None)) is not None:
+        producer, spec = f"{step.name} ({type(step.module).__name__})", step.produces[key]
     else:
-        for step in plan.steps:
-            if key in step.produces:
-                producer = f"{step.name} ({type(step.module).__name__})"
-                spec = step.produces[key]
-                break
-    if producer is None or spec is None:
         return False
     consumers = sorted({edge.consumer for edge in plan.edges if edge.key == key})
     console(f"[mode={mode.name}] {key!r}")
@@ -867,32 +832,25 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
                     producers_in.setdefault(name, []).append(probe_mode)
                 else:
                     universe.add(pkey)
-    lines = [f"[mode={mode.name}] {key!r} is not in the plan."]
-    explained = False
+    lines = [f"[mode={mode.name}] {key!r} is not in the plan."]  # explained iff more follow
     for name, active_modes in producers_in.items():
         if mode in active_modes and name in pruned:
-            fix = (
-                f"  fix: add a sink or consumer that demands {key!r} in mode {mode.name}, "
-                "or remove the module"
-            )
             lines.extend((
                 f"  produced by {name!r}, but {name!r} is demand-pruned: {pruned[name]}",
-                fix,
+                f"  fix: add a sink or consumer that demands {key!r} in mode {mode.name}, "
+                "or remove the module",
             ))
-            explained = True
         elif mode not in active_modes:
             mode_names = "/".join(m.name for m in active_modes)
             lines.append(
                 f"  {name!r} produces {key!r} only in mode(s) {mode_names} — it is "
                 f"mode-gated out of {mode.name}"
             )
-            explained = True
     for name, pattern in sorted(set(wildcard_hits)):
         lines.append(
             f"  matches wildcard {pattern!r} of {name!r}, but nothing demands {key!r} in "
             f"mode {mode.name} — wildcard producers only materialise demanded keys"
         )
-        explained = True
     for (name, pattern), active_modes in sorted(gated_wildcards.items()):
         if (name, pattern) in set(wildcard_hits):
             continue  # already explained as undemanded in this mode
@@ -901,53 +859,19 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
             f"  matches wildcard {pattern!r} of {name!r}, which is active only in mode(s) "
             f"{mode_names} — it is mode-gated out of {mode.name}"
         )
-        explained = True
     src_flat = flatten_spec(cfg.sources)
     if key in src_flat and key not in plan.sources:
         active = [m.name for m in PRIMARY_MODES if src_flat[key].active_in(m)]
         lines.append(
             f"  sources provide {key!r} in mode(s) {'/'.join(active)} — gated out of {mode.name}"
         )
-        explained = True
-    if explained:
+    if len(lines) > 1:
         console("\n".join(lines))
         return 0
     universe |= set(cfg.schema or ())
     near = get_close_matches(key, sorted(universe), n=3, cutoff=SUGGESTION_CUTOFF)
     hint = f"\n  did you mean: {', '.join(repr(k) for k in near)}?" if near else ""
     return _fail(f"[mode={mode.name}] {key!r}: no module or source produces it in any mode.{hint}")
-
-
-# ---------------------------------------------------------------------------
-# graph resolve [--annotate]
-# ---------------------------------------------------------------------------
-
-
-def _cmd_resolve(args: argparse.Namespace) -> int:
-    """``salt graph resolve``: the writer-derived output manifest, eval + ONNX.
-    Prints the assembled manifest; with ``--annotate``, writes it into the
-    config as a refreshable comment block. Repeated ``-c`` deep-merges and the
-    annotation goes into the last (most specific) file.
-    """
-    paths = [Path(p) for p in args.config]
-    raws = []
-    for path in paths:
-        if not path.is_file():
-            return _fail(f"config file not found: {path}")
-        raws.append(yaml.safe_load(path.read_text()))
-    if not any(isinstance(raw, dict) and ("model" in raw or "data" in raw) for raw in raws):
-        return _fail(
-            "salt graph resolve needs a salt trainer config (top-level model:/data: "
-            "blocks) — toy graph configs have no writers block"
-        )
-    # there is no WriterCallback-based manifest (writers.modules) left for
-    # `salt graph resolve` to derive.
-    return _fail(
-        "salt graph resolve is no longer supported: the writers.modules "
-        "manifest block was removed; the eval columns and ONNX outputs are now declared "
-        "by the outputs: section + OnnxExportSink — inspect those directly "
-        "(see gn2v2-opendata.yaml for the canonical config pattern)"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1013,47 +937,25 @@ def _build_parser() -> argparse.ArgumentParser:
     graph = sub.add_parser("graph", help="static graph tooling")
     gsub = graph.add_subparsers(dest="graph_command", required=True)
 
-    validate = gsub.add_parser("validate", help="connectivity validation")
-    _add_config_arg(validate)
-    _add_mode_arg(validate, default=None)
-    validate.add_argument("--strict", action="store_true", help="promote warnings to errors")
-    validate.set_defaults(func=_cmd_validate)
-
-    dead = gsub.add_parser("deadcode", help="mode-aware dead-output report")
-    _add_config_arg(dead)
-    _add_mode_arg(dead, default=None)
-    dead.set_defaults(func=_cmd_deadcode)
-
-    plan = gsub.add_parser("plan", help="print the ordered plan table")
-    _add_config_arg(plan)
-    _add_mode_arg(plan, default="fit")
-    plan.set_defaults(func=_cmd_plan)
-
-    plot = gsub.add_parser("plot", help="render the graph via Graphviz DOT")
-    _add_config_arg(plot)
-    _add_mode_arg(plot, default="fit")
-    plot.add_argument("-o", "--output", required=True, help="output image path (.svg/.png/.dot)")
-    plot.set_defaults(func=_cmd_plot)
-
-    why = gsub.add_parser("why", help="explain one key's producer/consumers")
-    _add_config_arg(why)
-    _add_mode_arg(why, default="fit")
-    why.add_argument("--key", required=True, help="dotted bundle key to explain")
-    why.set_defaults(func=_cmd_why)
-
-    resolve = gsub.add_parser(
-        "resolve",
-        help="print the writer-derived output manifest (eval columns + ONNX outputs); "
-        "--annotate writes it into the config",
+    # the five compile-a-mode subcommands share -c/--set then --mode; the per-command
+    # extra flag is added after --mode (creation order = help/listing order)
+    sp: dict[str, argparse.ArgumentParser] = {}
+    for name, help_text, func, mode_default in (
+        ("validate", "connectivity validation", _cmd_validate, None),
+        ("deadcode", "mode-aware dead-output report", _cmd_deadcode, None),
+        ("plan", "print the ordered plan table", _cmd_plan, "fit"),
+        ("plot", "render the graph via Graphviz DOT", _cmd_plot, "fit"),
+        ("why", "explain one key's producer/consumers", _cmd_why, "fit"),
+    ):
+        sp[name] = gsub.add_parser(name, help=help_text)
+        _add_config_arg(sp[name])
+        _add_mode_arg(sp[name], default=mode_default)
+        sp[name].set_defaults(func=func)
+    sp["validate"].add_argument("--strict", action="store_true", help="promote warnings to errors")
+    sp["plot"].add_argument(
+        "-o", "--output", required=True, help="output image path (.svg/.png/.dot)"
     )
-    _add_config_arg(resolve)
-    resolve.add_argument(
-        "--annotate",
-        action="store_true",
-        help="rewrite the config file with the manifest comment block (refreshed in "
-        "place; with repeated -c the block goes into the LAST config file)",
-    )
-    resolve.set_defaults(func=_cmd_resolve)
+    sp["why"].add_argument("--key", required=True, help="dotted bundle key to explain")
 
     schema = sub.add_parser("schema", help="dataset schema artifact tooling")
     ssub = schema.add_subparsers(dest="schema_command", required=True)

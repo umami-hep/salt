@@ -154,9 +154,7 @@ class StepCheckpoint(_RunDirCheckpoint):
                 "unmonitored saves when save_top_k == 1, so any other positive "
                 "value would silently keep unbounded checkpoints on disk."
             )
-        interval = (
-            timedelta(seconds=train_time_interval) if train_time_interval is not None else None
-        )
+        interval = None if train_time_interval is None else timedelta(seconds=train_time_interval)
         super().__init__(
             monitor=None,
             filename="epoch={epoch:03d}-step={step}",

@@ -71,9 +71,8 @@ def _resolve_include(ref: str, source: Path, config_dir: Path) -> Path:
     (joining one onto a directory yields it unchanged).
     """
     tried = [source.parent / ref, config_dir / ref]
-    for path in tried:
-        if path.is_file():
-            return path
+    if (found := next((path for path in tried if path.is_file()), None)) is not None:
+        return found
     listed = "\n  ".join(str(p) for p in tried)
     raise IncludeError(f"{source}: include '{ref}' not found. Tried:\n  {listed}")
 
@@ -140,9 +139,7 @@ def expand_includes(config_path: str, config_dir: Path | None = None) -> str:
     """
     from salt.main import CONFIG_DIR  # local import: avoids a config_utils<->main cycle
 
-    root = Path(config_path)
-    config_dir = config_dir or CONFIG_DIR
-    merged, sources = _expand(root, config_dir, ())
+    merged, sources = _expand(Path(config_path), config_dir or CONFIG_DIR, ())
     if len(sources) == 1:
         return config_path  # nothing was included
 

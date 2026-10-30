@@ -71,6 +71,9 @@ class TransformerEncoder(SaltModelModule):
     """The encoder-layer norm placements the wrapper forwards. ``"none"`` is a
     residual-only v1 mode with no shipped v2 config — rejected loudly here."""
 
+    _FILM_LAYERS = ("encoder", "global")
+    """The FiLM ``layer`` placements the encoder hosts (``input`` lives on `StreamEmbed`)."""
+
     MUP_WIDTH_ARG = "dim"
     """The init_arg the muP shape-generation tooling (``salt mup-shapes``)
     sweeps for this module to produce the infshapes."""
@@ -184,7 +187,6 @@ class TransformerEncoder(SaltModelModule):
         self.mup = bool(mup)
         self.edges_key = edges
         self.edge_embed_dim = int(edge_embed_dim)
-        self.update_edges = bool(update_edges)
         self.encoder = Transformer(
             num_layers=num_layers,
             embed_dim=dim,
@@ -195,7 +197,7 @@ class TransformerEncoder(SaltModelModule):
             num_registers=num_registers,
             drop_registers=self.drop_registers,
             edge_embed_dim=self.edge_embed_dim,
-            update_edges=self.update_edges,
+            update_edges=bool(update_edges),
             attn_kwargs=attn_kwargs,
             dense_kwargs=dict(dense) if dense is not None else None,
             norm_type=norm_type,
@@ -212,40 +214,33 @@ class TransformerEncoder(SaltModelModule):
         self.out_dim = self.encoder.out_dim
         self.num_registers = num_registers
         self.num_layers = int(num_layers)
+        # FiLM configs by layer; one params key is shared by all entries (taken from any)
         self.params_key = "inputs.parameters"
-        self._encoder_film_cfg: dict[str, Any] | None = None
-        self._global_film_cfg: dict[str, Any] | None = None
-        self.featurewise_global: FeaturewiseTransformation | None = None
+        films: dict[str, dict[str, Any]] = {}
         for entry in featurewise or ():
             fw = dict(entry)
             layer = fw.get("layer")
-            # one params key is shared by all FiLM entries; take it from any entry
-            pk = fw.pop("parameters", None)
-            if pk is not None:
-                self.params_key = pk
-            if layer == "encoder":
-                if self._encoder_film_cfg is not None:
-                    raise ConfigError(
-                        "TransformerEncoder featurewise: at most one 'encoder'-layer FiLM entry "
-                        "(v1 replicates ONE config across all encoder layers, saltmodel.py:268-269)"
-                    )
-                self._encoder_film_cfg = fw
-            elif layer == "global":
-                if self._global_film_cfg is not None:
-                    raise ConfigError(
-                        "TransformerEncoder featurewise: at most one 'global'-layer FiLM entry"
-                    )
-                self._global_film_cfg = fw
-            elif layer == "input":
+            if (key := fw.pop("parameters", None)) is not None:
+                self.params_key = key
+            if layer == "input":
                 raise ConfigError(
                     "TransformerEncoder featurewise: layer 'input' belongs on StreamEmbed "
                     "(featurewise:), not the encoder — only 'encoder'/'global' here"
                 )
-            else:
+            if layer not in self._FILM_LAYERS:
                 raise ConfigError(
                     f"TransformerEncoder featurewise: each entry needs layer in "
                     f"{{'encoder', 'global'}}, got {layer!r}"
                 )
+            if layer in films:
+                # v1 replicates ONE encoder config across all layers (saltmodel.py:268-269)
+                raise ConfigError(
+                    f"TransformerEncoder featurewise: at most one {layer!r}-layer FiLM entry"
+                )
+            films[layer] = fw
+        self._encoder_film_cfg = films.get("encoder")
+        self._global_film_cfg = films.get("global")
+        self.featurewise_global: FeaturewiseTransformation | None = None
 
     @property
     def edge_stream(self) -> str | None:
@@ -253,28 +248,25 @@ class TransformerEncoder(SaltModelModule):
         if self.edges_key is None:
             return None
         # "edges.<stream>_emb" -> "<stream>": strip the namespace + _emb suffix
-        leaf = self.edges_key.split(KEY_SEP, 1)[1] if KEY_SEP in self.edges_key else self.edges_key
-        return leaf.removesuffix("_emb")
+        return self.edges_key.split(KEY_SEP, 1)[-1].removesuffix("_emb")
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``seq.x``/``seq.mask`` (+ edge-embed when `edges` is set) -> ``encoded.seq``."""
         del mode
-        produces: dict[str, TensorSpec] = {
-            "encoded.seq": TensorSpec(shape=("B", _ENC_LEN, self.out_dim), dtype="float32"),
-        }
+        produces = {"encoded.seq": TensorSpec(shape=("B", _ENC_LEN, self.out_dim), dtype="float32")}
         if not self.drop_registers:
             produces["masks.registers"] = TensorSpec(
                 shape=("B", self.num_registers), dtype="bool", kind="pad_mask"
             )
-        requires: dict[str, TensorSpec] = {
+        requires = {
             "seq.x": TensorSpec(shape=("B", _SEQ_LEN, self.dim), dtype="float32"),
             "seq.mask": TensorSpec(shape=("B", _SEQ_LEN), dtype="bool", kind="pad_mask"),
         }
         if self.edges_key is not None:
+            # both token axes share T:<stream> — the dynamic-T export prerequisite
             stream = self.edge_stream
             assert stream is not None  # edges_key implies edge_stream (config invariant)
             tlen = _stream_len(stream)
-            # both token axes share T:<stream> — the dynamic-T export prerequisite
             requires[self.edges_key] = TensorSpec(
                 shape=("B", tlen, tlen, self.edge_embed_dim), dtype="float32"
             )
@@ -283,30 +275,26 @@ class TransformerEncoder(SaltModelModule):
             requires[self.params_key] = TensorSpec(
                 shape=("B", sym_dim("P", self.name)), dtype="float32"
             )
-        return IO(
-            requires=unflatten_spec(requires),
-            produces=unflatten_spec(produces),
-        )
+        return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Build the optional encoder/global FiLM modules; validate the resolved edge width."""
-        if self._encoder_film_cfg is not None or self._global_film_cfg is not None:
+        enc_cfg, global_cfg = self._encoder_film_cfg, self._global_film_cfg
+        if enc_cfg is not None or global_cfg is not None:
             num_params = schema.width(self.params_key)
-            if self._encoder_film_cfg is not None:
+            if enc_cfg is not None:
                 # one FiLM per encoder layer, replicating the same config across all layers
                 for _ in range(self.num_layers):
                     film = FeaturewiseTransformation(
-                        num_params=num_params, num_features=self.dim, **self._encoder_film_cfg
+                        num_params=num_params, num_features=self.dim, **enc_cfg
                     )
                     film.name = self.name
-                    film.build()
                     self.encoder.featurewise.append(film)
-            if self._global_film_cfg is not None:
+            if global_cfg is not None:
                 self.featurewise_global = FeaturewiseTransformation(
-                    num_params=num_params, num_features=self.out_dim, **self._global_film_cfg
+                    num_params=num_params, num_features=self.out_dim, **global_cfg
                 )
                 self.featurewise_global.name = self.name
-                self.featurewise_global.build()
         if self.edges_key is None:
             return
         resolved = schema.width(self.edges_key)
@@ -324,8 +312,7 @@ class TransformerEncoder(SaltModelModule):
         Idempotent — a second call no-ops.
         """
         # EdgeAttention has no pluggable backend — it is ALWAYS raw torch
-        # attention (set_backend just warns) and already trace-safe; only
-        # switch the backend for the non-edge encoder
+        # attention and already trace-safe; only switch the non-edge encoder
         if self.edges_key is None:
             self.encoder.set_backend("torch-math")
         if self.mup:
@@ -341,29 +328,24 @@ class TransformerEncoder(SaltModelModule):
         # output_mult and width_mult scale only the linear term, not the bias
         # (MuReadout.forward: super().forward(output_mult * x / width_mult)).
         mult = float(proj.output_mult) / float(proj.width_mult())
-        has_bias = proj.bias is not None
-        folded = nn.Linear(proj.in_features, proj.out_features, bias=has_bias)
+        folded = nn.Linear(proj.in_features, proj.out_features, bias=proj.bias is not None)
         with torch.no_grad():
             folded.weight.copy_(proj.weight * mult)
-            if has_bias:
+            if proj.bias is not None:
                 folded.bias.copy_(proj.bias)
-        folded.to(proj.weight.device, proj.weight.dtype)
-        folded.eval()
-        self.encoder.out_proj = folded
+        self.encoder.out_proj = folded.to(proj.weight.device, proj.weight.dtype).eval()
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Encode the sequence; publishes the register mask too unless ``drop_registers``."""
         del mode
         # FRESH dicts: _add_registers INSERTS a "REGISTERS" key into both —
         # never hand it bundle-owned dicts.
-        xs: dict[str, Tensor] = {"seq": b.get("seq.x")}
-        pad: dict[str, Tensor] = {"seq": b.get("seq.mask")}
+        xs, pad = {"seq": b.get("seq.x")}, {"seq": b.get("seq.mask")}
         kwargs: dict[str, Tensor] = {}
         if self.edges_key is not None:
             kwargs["edge_x"] = b.get(self.edges_key)
         if len(self.encoder.featurewise) > 0:
-            # encoder-layer FiLM: thread the per-event parameters into the composed
-            # Transformer forward, which applies featurewise[i](params, x) per layer
+            # encoder-layer FiLM: the composed Transformer applies featurewise[i](params, x)
             kwargs["inputs"] = b.get(self.params_key)
         encoded, out_pad = self.encoder(xs, pad_mask=pad, **kwargs)
         if self.featurewise_global is not None:

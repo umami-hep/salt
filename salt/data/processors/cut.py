@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from salt.data.base import Processor
-from salt.data.readers.cuts import VALID_FIELD, Cut, _parse_cuts
+from salt.data.readers.cuts import VALID_FIELD, Cut, _first_seen_fields, _parse_cuts
 from salt.data.readers.stream import pad_fill
 from salt.graph.errors import ConfigError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
@@ -45,11 +45,7 @@ class _ConstituentCuts:
     @property
     def fields(self) -> tuple[str, ...]:
         """Bare field names referenced, deduplicated in first-seen order."""
-        seen: dict[str, None] = {}
-        for c in self.cuts:
-            for f in c.fields:
-                seen.setdefault(f, None)
-        return tuple(seen)
+        return _first_seen_fields(self.cuts)
 
     def keep(self, source: Mapping[str, Any] | np.ndarray) -> Any:
         """AND of every cut's keep mask over a constituent-shaped source; None when no cut."""
@@ -211,11 +207,8 @@ class ConstituentSelection(Processor):
         requires: dict[str, TensorSpec] = {}
         rewrites: dict[str, TensorSpec] = {}
         for stream, sel in self.streams.items():
-            needed: dict[str, None] = {}
-            for f in sel.cuts.fields:
-                needed.setdefault(f, None)
-            if sel.sort is not None:
-                needed.setdefault(sel.sort["var"], None)
+            sort_var = (sel.sort["var"],) if sel.sort is not None else ()
+            needed = dict.fromkeys((*sel.cuts.fields, *sort_var))
             requires[f"raw.{stream}"] = TensorSpec(kind="data", fields=tuple(needed) or None)
             requires[f"masks.{stream}"] = TensorSpec(dtype="bool", kind="pad_mask")
             shape = ("B", sel.pad_max) if sel.pad_max is not None else None

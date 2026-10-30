@@ -6,21 +6,16 @@ merges returns under write-once + declaration checks.
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from typing import Any, NoReturn, cast
 
 import torch
 
-from salt.graph.bundle import Bundle
-from salt.graph.errors import (
-    ConfigError,
-    DeclarationError,
-    MutationError,
-    UndeclaredAccessError,
-)
+from salt.graph.bundle import Bundle, _flatten_produced
+from salt.graph.errors import ConfigError, DeclarationError, MutationError, UndeclaredAccessError
 from salt.graph.planner import Plan, PlanStep
-from salt.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec, split_key
+from salt.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec
 
 __all__ = ["STEP_SCOPE_PREFIX", "Executor", "canonical_produced", "record_steps"]
 
@@ -34,7 +29,7 @@ class _StepRecording:
     enabled = False
 
 
-@contextlib.contextmanager
+@contextmanager
 def record_steps() -> Iterator[None]:
     """Wrap every plan step's module call in a ``torch.profiler.record_function``.
 
@@ -127,29 +122,23 @@ class Executor:
         Raises `KeyError` if the input bundle is missing a non-optional
         source leaf, `DeclarationError` on a malformed/mismatched return.
         """
+        mode = self.plan.mode
         missing = sorted(
-            key
-            for key, spec in self.plan.sources.items()
-            if not spec.optional and key not in bundle
+            k for k, s in self.plan.sources.items() if not s.optional and k not in bundle
         )
         if missing:
             raise KeyError(
-                f"input bundle is missing source leaves required by the {self.plan.mode.name} "
+                f"input bundle is missing source leaves required by the {mode.name} "
                 f"plan: {missing} — the caller provides every non-optional source"
             )
         for step in self._forward_steps:
             module = cast("Callable[[Any, Mode], Any]", self._modules[step.name])
-            view: Bundle | _ReadTrackedBundle = (
-                _ReadTrackedBundle(bundle, step.name, self.plan.mode, self._allowed[step.name])
-                if debug
-                else bundle
-            )
+            allowed = self._allowed[step.name]
+            view = _ReadTrackedBundle(bundle, step.name, mode, allowed) if debug else bundle
             versions = _tensor_versions(bundle) if debug else None
-            if _StepRecording.enabled:
-                with torch.profiler.record_function(f"{STEP_SCOPE_PREFIX}{step.name}"):
-                    produced = module(view, self.plan.mode)
-            else:
-                produced = module(view, self.plan.mode)
+            scope = f"{STEP_SCOPE_PREFIX}{step.name}"
+            with torch.profiler.record_function(scope) if _StepRecording.enabled else nullcontext():
+                produced = module(view, mode)
             if not isinstance(produced, dict):
                 raise DeclarationError(
                     f"module {step.name!r} returned {type(produced).__name__} — modules return "
@@ -157,18 +146,14 @@ class Executor:
                 )
             if versions is not None and (mutated := _first_mutated(bundle, versions)) is not None:
                 raise MutationError(
-                    f"[mode={self.plan.mode.name}] module {step.name!r} mutated bundle key "
+                    f"[mode={mode.name}] module {step.name!r} mutated bundle key "
                     f"{mutated!r} in place during debug execution — bundle leaves are read-only "
                     "for modules; clone before mutating (e.g. b.get(...).clone()) and return "
                     "new keys"
                 )
             expected = set(step.produces)
-            bundle.merge(
-                canonical_produced(produced, expected, step.name),
-                who=step.name,
-                expected=expected,
-                overwrite=set(step.rewrites),
-            )
+            nested = canonical_produced(produced, expected, step.name)
+            bundle.merge(nested, who=step.name, expected=expected, overwrite=set(step.rewrites))
         return bundle
 
 
@@ -241,8 +226,7 @@ class _ReadTrackedBundle:
         raises `UndeclaredAccessError` if `key` is undeclared, else behaves
         exactly like the plain bundle (including `KeyError` if absent).
         """
-        if key not in self._allowed:
-            self._undeclared(key)
+        self._require_declared(key)
         return self._bundle.get(key)
 
     def subtree(self, prefix: str) -> dict[str, Any]:
@@ -253,13 +237,12 @@ class _ReadTrackedBundle:
         leaf-valued `prefix` raises `KeyError` like the plain bundle.
         """
         head = prefix + KEY_SEP
-        if prefix not in self._allowed and not any(k.startswith(head) for k in self._allowed):
-            self._undeclared(prefix)
+        if not any(k.startswith(head) for k in self._allowed):
+            self._require_declared(prefix)
         out = self._bundle.subtree(prefix)
-        present = self._bundle.keys()
-        for key in present:
-            if key.startswith(head) and key not in self._allowed:
-                self._undeclared(key)
+        for key in self._bundle.keys():  # noqa: SIM118 - Bundle is not a Mapping
+            if key.startswith(head):
+                self._require_declared(key)
         return out
 
     def keys(self) -> list[str]:
@@ -273,8 +256,7 @@ class _ReadTrackedBundle:
         Probing an undeclared key raises `UndeclaredAccessError` —
         branching on an undeclared key is itself an undeclared dependence.
         """
-        if key not in self._allowed:
-            self._undeclared(key, verb="probed")
+        self._require_declared(key, verb="probed")
         return key in self._bundle
 
     def __len__(self) -> int:
@@ -283,28 +265,28 @@ class _ReadTrackedBundle:
     def __repr__(self) -> str:
         return f"ReadTrackedBundle(module={self._who!r}, keys={self.keys()})"
 
-    def set(self, key: str, value: Any) -> NoReturn:
+    def set(self, key: str, value: Any) -> NoReturn:  # noqa: ARG002 - blocked surface
         """Blocked: modules return produced keys; only the executor writes;
         always raises `UndeclaredAccessError`.
         """
-        del value
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} called set({key!r}, ...) on its "
             "bundle view — modules RETURN their produced keys; the executor merges them"
         )
 
-    def merge(self, produced: dict[str, Any], who: str = "", expected: Any = None) -> NoReturn:
+    def merge(self, produced: dict[str, Any], who: str = "", expected: Any = None) -> NoReturn:  # noqa: ARG002
         """Blocked: merging is executor-only; always raises `UndeclaredAccessError`."""
-        del produced, who, expected
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} called merge() on its bundle view "
             "— merging is executor-only; modules RETURN their produced keys"
         )
 
-    def _undeclared(self, key: str, verb: str = "read") -> NoReturn:
-        """Raise `UndeclaredAccessError` for `key`, naming the module, the
-        key, and the declaration to amend.
+    def _require_declared(self, key: str, verb: str = "read") -> None:
+        """Raise `UndeclaredAccessError` if `key` is not a declared read, naming the
+        module, the key, and the declaration to amend.
         """
+        if key in self._allowed:
+            return
         declared = ", ".join(sorted(self._allowed)) or "<none>"
         raise UndeclaredAccessError(
             f"[mode={self._mode.name}] module {self._who!r} {verb} bundle key {key!r} which is "
@@ -334,8 +316,7 @@ def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -
     spellings of one key), or keys that are simultaneously a leaf and a
     subtree.
     """
-    flat: dict[str, Any] = {}
-    _flatten_returned(produced, expected, who, "", flat)
+    flat = _flatten_produced(produced, expected, who, dotted=True)
     nested: dict[str, Any] = {}
     leaves: set[str] = set()
     for key, value in flat.items():
@@ -357,34 +338,3 @@ def canonical_produced(produced: dict[str, Any], expected: set[str], who: str) -
         node[parts[-1]] = value
         leaves.add(key)
     return nested
-
-
-def _flatten_returned(
-    produced: dict[str, Any], expected: set[str], who: str, prefix: str, flat: dict[str, Any]
-) -> None:
-    """Flatten a returned dict to dotted leaves, guided by the declaration.
-
-    Mirrors `Bundle.merge`'s flattening (dict values are structure unless
-    their dotted path is declared), but additionally accepts dotted keys at
-    any nesting level. Raises `DeclarationError` on non-string/malformed
-    keys, or a key produced more than once.
-    """
-    for name, value in produced.items():
-        if not isinstance(name, str):
-            raise DeclarationError(f"module {who!r} returned a non-str produced key {name!r}")
-        key = f"{prefix}{KEY_SEP}{name}" if prefix else name
-        try:
-            split_key(key)
-        except (TypeError, ValueError) as err:
-            raise DeclarationError(
-                f"module {who!r} returned an invalid produced key {key!r}: {err}"
-            ) from err
-        if isinstance(value, dict) and value and key not in expected:
-            _flatten_returned(value, expected, who, key, flat)
-            continue
-        if key in flat:
-            raise DeclarationError(
-                f"module {who!r} returned key {key!r} more than once (e.g. both nested and "
-                "dotted spellings) (write-once)"
-            )
-        flat[key] = value

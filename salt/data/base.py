@@ -6,15 +6,16 @@ transform). Both are `GraphModule`s compiled by the same kernel planner.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from difflib import get_close_matches
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from salt.data.readers.stream import OffsetIndex, StreamConfig, _truncate_pad
-from salt.graph.errors import ConfigError
+from salt.data.readers.stream import StreamConfig, _truncate_pad
+from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError
 from salt.graph.planner import PlanStep
 from salt.graph.spec import IO, KEY_SEP, UNNAMED, Mode
 from salt.schema import GroupSchema, Schema
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
     from salt.data.readers.cuts import GlobalObjectCuts
 
 __all__ = [
-    "OffsetIndex",
     "Processor",
     "Reader",
     "RowBlock",
@@ -80,6 +80,12 @@ def _require_root_deps(who: str, extra: str) -> None:
             "or directly:\n"
             "  pip install uproot awkward"
         ) from exc
+
+
+def _nearest_hint(word: str, choices: Iterable[str], n: int = 3) -> str:
+    """``"; nearest: a, b"`` for the closest `choices` to `word`, or ``""`` when none is close."""
+    near = get_close_matches(word, sorted(choices), n=n, cutoff=SUGGESTION_CUTOFF)
+    return f"; nearest: {', '.join(near)}" if near else ""
 
 
 @dataclass(frozen=True)
@@ -251,6 +257,12 @@ class Reader(SaltDatasetModule):
         """
         del stream
         return None
+
+    def _prepared_schema(self) -> Schema | None:
+        """The schema artifact, resolving `prepare` first when none is set yet."""
+        if self.schema is None:
+            self.prepare()
+        return self.schema
 
     def config_fingerprint(self) -> dict[str, Any]:
         """Everything about this reader's CONFIG that changes the rows or fields it serves.

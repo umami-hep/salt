@@ -49,21 +49,18 @@ class LossSum(SaltModelModule):
             Per-loss multipliers keyed like `losses`, default 1.0 each.
         """
         super().__init__()
-        self._loss_keys: tuple[str, ...] | None = (
-            tuple(_loss_key(k) for k in losses) if losses is not None else None
-        )
+        self._loss_keys: tuple[str, ...] | None = None
         self.weights = {_loss_key(k): float(v) for k, v in (weights or {}).items()}
-        if self._loss_keys is not None:
-            self._check_weight_keys()
+        if losses is not None:
+            self._set_loss_keys(tuple(_loss_key(k) for k in losses))
 
-    def _check_weight_keys(self) -> None:
-        """Reject weight entries that name no summed loss key."""
-        assert self._loss_keys is not None
-        if unknown := sorted(set(self.weights) - set(self._loss_keys)):
+    def _set_loss_keys(self, keys: tuple[str, ...]) -> None:
+        """Fix the summed loss keys; reject weight entries that name none of them."""
+        if unknown := sorted(set(self.weights) - set(keys)):
             raise ConfigError(
-                f"LossSum: weights for unknown loss keys {unknown} — summed keys are "
-                f"{list(self._loss_keys)}"
+                f"LossSum: weights for unknown loss keys {unknown} — summed keys are {list(keys)}"
             )
+        self._loss_keys = keys
 
     @property
     def narrowed(self) -> bool:
@@ -78,14 +75,13 @@ class LossSum(SaltModelModule):
 
         Returns all declared loss keys, in module-dict declaration order.
         """
-        keys: list[str] = []
-        for module in modules.values():
-            if isinstance(module, LossSum):
-                continue
-            for key, spec in flatten_spec(module.declare_io(mode).produces).items():
-                if key.startswith("losses.") and spec.active_in(mode):
-                    keys.append(key)
-        return tuple(keys)
+        return tuple(
+            key
+            for module in modules.values()
+            if not isinstance(module, LossSum)
+            for key, spec in flatten_spec(module.declare_io(mode).produces).items()
+            if key.startswith("losses.") and spec.active_in(mode)
+        )
 
     def narrow(self, loss_keys: Iterable[str]) -> None:
         """Fix the concrete loss-key list (framework-side ``losses.**`` narrowing).
@@ -106,8 +102,7 @@ class LossSum(SaltModelModule):
                 f"LossSum {self.name!r}: narrowed to an empty loss-key list — no module "
                 "declares a losses.* produce"
             )
-        self._loss_keys = keys
-        self._check_weight_keys()
+        self._set_loss_keys(keys)
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare the narrowed loss keys -> ``loss.total`` (TRAINING only); raises if unfixed."""

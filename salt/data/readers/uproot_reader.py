@@ -16,7 +16,7 @@ import numpy as np
 
 from salt.data.base import Reader, RowBlock, WorkerCtx, _require_root_deps
 from salt.data.readers.cuts import VALID_FIELD, GlobalObjectCuts
-from salt.data.readers.stream import OffsetIndex, StreamConfig
+from salt.data.readers.stream import StreamConfig, covering_range
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, sym_dim, unflatten_spec
 from salt.schema import GroupSchema, Schema
@@ -174,7 +174,7 @@ class UprootReader(Reader):
         self._open_trees: dict[str, Any] = {}
 
     def _validate_links(self) -> None:
-        return
+        """Subclass hook for extra cross-group config invariants; the base has none."""
 
     @classmethod
     def _parse_group(
@@ -284,21 +284,16 @@ class UprootReader(Reader):
         return self._table[0].path
 
     def schema_group(self, stream: str) -> GroupSchema | None:
-        if self.schema is None:
-            self.prepare()
-        if self.schema is None or stream not in self.groups:
-            return None
-        return self.schema.groups.get(stream)
+        schema = self._prepared_schema()
+        return schema.groups.get(stream) if schema is not None and stream in self.groups else None
 
     def label_universe(self) -> tuple[str, ...] | None:
-        if self.schema is None:
-            self.prepare()
-        if self.schema is None:
+        if (schema := self._prepared_schema()) is None:
             return None
         return tuple(
             f"labels.{stream}.{fieldname}"
             for stream in self.groups
-            for fieldname in self.schema.groups[stream].fields
+            for fieldname in schema.groups[stream].fields
             if fieldname != "valid"
         )
 
@@ -320,16 +315,8 @@ class UprootReader(Reader):
         }
 
     def __getstate__(self) -> dict[str, Any]:
-        state = self.__dict__.copy()
-        state.update({
-            "_table": None,
-            "_num_rows": None,
-            "_mult": {},
-            "_read_fields": {},
-            "_open_trees": {},
-            "schema": None,
-        })
-        return state
+        state = self.__dict__ | dict.fromkeys(("_table", "_num_rows"))
+        return state | {"_mult": {}, "_read_fields": {}, "_open_trees": {}, "schema": None}
 
     def prepare(self) -> None:
         """Build the entry -> row-offset index (post-cut) and the schema. Idempotent."""
@@ -379,17 +366,25 @@ class UprootReader(Reader):
         self, t: Any, avail: set[str], path: Path, stream: str, cfg: Any, n: int
     ) -> dict[str, str]:
         """Presence-check a stream's branches + capture per-field dtypes; ``valid`` for jagged."""
-        fdtypes: dict[str, str] = {}
-        for fieldname, bare in cfg.branches.items():
-            branch = self._on_disk(cfg, bare)
-            if branch not in avail:
-                raise SchemaError(
-                    f"group {stream!r}: branch {branch!r} (field {fieldname!r}) not "
-                    f"in {path.name!r}; tree {self.tree!r} has {len(avail)} branches"
-                )
-            fdtypes[fieldname] = self._branch_dtype(t, branch, n)
+        on_disk = {f: self._on_disk(cfg, bare) for f, bare in cfg.branches.items()}
+        tail = f"{path.name!r}; tree {self.tree!r} has {len(avail)} branches"
+        fdtypes = self._present_dtypes(t, avail, on_disk, n, f"group {stream!r}: branch", tail)
         if cfg.jagged:
             fdtypes["valid"] = "bool"
+        return fdtypes
+
+    def _present_dtypes(
+        self, t: Any, avail: set[str], on_disk: dict[str, str], n: int, head: str, tail: str
+    ) -> dict[str, str]:
+        """Per field, in order: `SchemaError` if its on-disk branch is absent, else its dtype.
+
+        The message is ``{head} {branch!r} (field {field!r}) not in {tail}``.
+        """
+        fdtypes: dict[str, str] = {}
+        for fieldname, branch in on_disk.items():
+            if branch not in avail:
+                raise SchemaError(f"{head} {branch!r} (field {fieldname!r}) not in {tail}")
+            fdtypes[fieldname] = self._branch_dtype(t, branch, n)
         return fdtypes
 
     def _branch_dtype(self, t: Any, branch: str, n_events: int) -> str:
@@ -426,8 +421,7 @@ class UprootReader(Reader):
             carriers = [carrier] if need else []
         for cfg in carriers:
             for fieldname, bare in cfg.branches.items():
-                arr = t[self._on_disk(cfg, bare)].array(library="ak")
-                arr = ak.flatten(arr, axis=1) if self.unroll is not None else arr
+                arr = self._to_rows(t[self._on_disk(cfg, bare)].array(library="ak"))
                 row_scalars.setdefault(fieldname, ak.to_numpy(arr))
         for cf in cut_fields:
             if cf in row_scalars:
@@ -437,10 +431,7 @@ class UprootReader(Reader):
             branch = self._on_disk(carrier, cf)
             if branch not in avail:
                 raise SchemaError(f"row-cut field {cf!r} -> branch {branch!r} not in {path.name!r}")
-            arr = t[branch].array(library="ak")
-            row_scalars[cf] = (
-                ak.to_numpy(arr) if self.unroll is None else ak.to_numpy(ak.flatten(arr, axis=1))
-            )
+            row_scalars[cf] = ak.to_numpy(self._to_rows(t[branch].array(library="ak")))
         for agg in cut_aggs:
             cfg = self.groups[agg.stream]
             needed = list(dict.fromkeys(f for f in agg.fields if f != VALID_FIELD)) or [
@@ -448,9 +439,7 @@ class UprootReader(Reader):
             ]
             n = int(t.num_entries)
             raw = self._read_branches(t, list(self._direct_branches(cfg, needed).values()), 0, n)
-            shared = {
-                b: (ak.flatten(a, axis=1) if self.unroll is not None else a) for b, a in raw.items()
-            }
+            shared = {b: self._to_rows(a) for b, a in raw.items()}
             cols = self._group_block(t, cfg, needed, 0, n, shared)
             if cfg.pad_max is not None:
                 cols = {f: c[:, : cfg.pad_max] for f, c in cols.items()}
@@ -474,10 +463,7 @@ class UprootReader(Reader):
 
         cfg = self.groups[stream]
         branch = self._on_disk(cfg, next(iter(cfg.branches.values())))
-        arr = t[branch].array(library="ak")
-        if self.unroll is not None:
-            arr = ak.flatten(arr, axis=1)
-        counts = ak.to_numpy(ak.num(arr, axis=1))
+        counts = ak.to_numpy(ak.num(self._to_rows(t[branch].array(library="ak")), axis=1))
         if kept.size == 0 or counts.size == 0:
             return 0
         return int(counts[kept].max())
@@ -523,33 +509,22 @@ class UprootReader(Reader):
             if lo >= hi:
                 continue
             cum = np.concatenate([[0], np.cumsum(entry.per_row_kept)])
-            e0, e1, row_off = OffsetIndex.covering_range(cum, lo - file_lo, hi - file_lo)
+            e0, e1, row_off = covering_range(cum, lo - file_lo, hi - file_lo)
             orig_cum = np.concatenate([[0], np.cumsum(entry.orig_counts)])
-            in_block = (
-                entry.kept[(entry.kept >= orig_cum[e0]) & (entry.kept < orig_cum[e1])]
-                - orig_cum[e0]
-            )
-            sel = in_block[row_off : row_off + (hi - lo)]
+            window = entry.kept[(entry.kept >= orig_cum[e0]) & (entry.kept < orig_cum[e1])]
+            sel = (window - orig_cum[e0])[row_off : row_off + (hi - lo)]
             t = self._tree(entry.path)
             raw = self._read_branches(t, union, e0, e1) if union else {}
-            shared = {
-                br: (ak.flatten(a, axis=1) if self.unroll is not None else a)
-                for br, a in raw.items()
-            }
+            shared = {br: self._to_rows(a) for br, a in raw.items()}
             for s, fields in wanted.items():
                 block = self._group_block(t, self.groups[s], fields, e0, e1, shared)
                 for f in fields:
                     chunks[s][f].append(block[f][sel])
         out: dict[str, np.ndarray] = {}
         for stream, cfg in self.groups.items():
-            fields = wanted[stream]
+            fields, parts = wanted[stream], chunks[stream]
             cols = {
-                f: (
-                    ak.concatenate(chunks[stream][f])
-                    if len(chunks[stream][f]) > 1
-                    else chunks[stream][f][0]
-                )
-                for f in fields
+                f: ak.concatenate(parts[f]) if len(parts[f]) > 1 else parts[f][0] for f in fields
             }
             gschema = self.schema.groups[stream] if self.schema is not None else None
             if cfg.jagged:
@@ -590,11 +565,15 @@ class UprootReader(Reader):
         import uproot
 
         key = str(path)
-        tree = self._open_trees.get(key)
-        if tree is None:
-            tree = uproot.open(f"{key}:{self.tree}")
-            self._open_trees[key] = tree
+        if (tree := self._open_trees.get(key)) is None:
+            tree = self._open_trees[key] = uproot.open(f"{key}:{self.tree}")
         return tree
+
+    def _to_rows(self, arr: Any) -> Any:
+        """Flatten the entry axis away under ``unroll`` (``[entry][obj]`` -> ``[row]``)."""
+        import awkward as ak
+
+        return ak.flatten(arr, axis=1) if self.unroll is not None else arr
 
     def _direct_branches(self, cfg: Any, fields: list[str]) -> dict[str, str]:
         return {f: self._on_disk(cfg, cfg.branches[f]) for f in fields}

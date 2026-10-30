@@ -106,20 +106,14 @@ class ConfusionMatrix(Callback):
         del trainer
         if stage != "fit":
             return
-        self.truth_labels = []
-        self.pred_labels = []
+        self.truth_labels, self.pred_labels = [], []
         modules = getattr(pl_module, "_graph_modules", None)
         stream, label, class_names = self._resolve_task(modules)
         if isinstance(self.class_names_override, dict):
-            self.task_class_names = [
-                self.class_names_override.get(name, name) for name in class_names
-            ]
+            self.task_class_names = [self.class_names_override.get(n, n) for n in class_names]
         else:
             self.task_class_names = list(self.class_names_override or class_names)
-        self.requires = (
-            f"preds.{stream}.{self.task_name}",
-            f"labels.{stream}.{label}",
-        )
+        self.requires = (f"preds.{stream}.{self.task_name}", f"labels.{stream}.{label}")
 
     def on_validation_batch_end(
         self,
@@ -135,28 +129,15 @@ class ConfusionMatrix(Callback):
         bundle: Bundle = outputs["bundle"]
         pred_key, label_key = self.requires
         pred_labels_batch = torch.argmax(bundle.get(pred_key), dim=-1)
-        truth_labels_batch = bundle.get(label_key)
         # extend iterates dim 0: scalars for [B], rows for [B, T]
-        self.truth_labels.extend(truth_labels_batch)
+        self.truth_labels.extend(bundle.get(label_key))
         self.pred_labels.extend(pred_labels_batch)
 
     def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """Stash the epoch's values, log to Comet when attached, reset."""
         del pl_module
-        self.last_truth_labels = self.truth_labels
-        self.last_pred_labels = self.pred_labels
-        self.last_matrix, self.last_ignored = self.confusion_counts(
-            self.truth_labels, self.pred_labels, len(self.task_class_names)
-        )
-        if isinstance(trainer.logger, CometLogger):
-            trainer.logger.experiment.log_confusion_matrix(
-                y_true=self.truth_labels,
-                y_predicted=self.pred_labels,
-                labels=self.task_class_names,
-                epoch=trainer.current_epoch,
-            )
-        self.truth_labels = []
-        self.pred_labels = []
+        n_classes = len(self.task_class_names)
+        self.last_ignored = _flush_epoch(self, trainer, n_classes, self.task_class_names)
 
     @staticmethod
     def confusion_counts(
@@ -202,3 +183,24 @@ class ConfusionMatrix(Callback):
             t[valid] * num_classes + p[valid], minlength=num_classes * num_classes
         ).reshape(num_classes, num_classes)
         return matrix, int((~valid).sum())
+
+
+def _flush_epoch(
+    cb: Any, trainer: Trainer, num_classes: int, labels: list[str], as_lists: bool = False
+) -> int:
+    """Shared epoch end of both confusion-matrix callbacks: stash ``last_*``, log to Comet,
+    reset accumulators; returns the dropped (out-of-range) entry count.
+    """
+    cb.last_truth_labels, cb.last_pred_labels = cb.truth_labels, cb.pred_labels
+    cb.last_matrix, ignored = ConfusionMatrix.confusion_counts(
+        cb.truth_labels, cb.pred_labels, num_classes
+    )
+    if isinstance(trainer.logger, CometLogger):
+        y_true, y_predicted = cb.truth_labels, cb.pred_labels
+        if as_lists:
+            y_true, y_predicted = torch.cat(y_true).tolist(), torch.cat(y_predicted).tolist()
+        trainer.logger.experiment.log_confusion_matrix(
+            y_true=y_true, y_predicted=y_predicted, labels=labels, epoch=trainer.current_epoch
+        )
+    cb.truth_labels, cb.pred_labels = [], []
+    return ignored
