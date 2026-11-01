@@ -11,7 +11,7 @@ import yaml
 from salt.cli import load_config
 from salt.graph.errors import ConfigError
 from salt.graph.planner import compile_plan
-from salt.graph.spec import IO, Mode, SinkModule, TensorSpec, unflatten_spec
+from salt.graph.spec import IO, Mode, SinkModule, TensorSpec, flatten_spec, unflatten_spec
 from salt.main import SaltCLI
 from salt.model.base import SaltModelModule
 from salt.model.saltmodule import SaltModule
@@ -19,9 +19,9 @@ from salt.model.sink_prep import is_section_sink
 from salt.outputs import (
     H5OutputSink,
     InputCopyWriter,
-    JSONLOutputSink,
     OnnxExportSink,
     PadMaskWriter,
+    is_test_persistence_sink,
 )
 from salt.outputs.sinks.sink import ALL_MODES, Node, RuntimeSink
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
@@ -58,6 +58,13 @@ def _section() -> dict:
         "h5_output": H5OutputSink(),
         "pad_mask": PadMaskWriter(streams=["tracks"]),
     }
+
+
+class _AuxSink(RuntimeSink):
+    """An auxiliary runtime sink: rides alongside the H5 sink, never the TEST anchor."""
+
+    def is_test_sink(self) -> bool:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +147,37 @@ def test_duck_typed_sink_is_partitioned_without_subclassing_node():
             return IO(requires={}, produces={})
 
     assert is_section_sink(_DuckSink()) is True
+
+
+class TestOutputSinkPromotion:
+    @pytest.mark.parametrize("cls", [H5OutputSink, OnnxExportSink])
+    def test_shipped_sinks_subclass_the_public_base(self, cls):
+        """Every shipped sink derives from the documented extension point."""
+        assert issubclass(cls, Node)
+
+    @pytest.mark.parametrize("cls", [H5OutputSink])
+    def test_sinks_with_a_lifecycle_subclass_runtime_sink(self, cls):
+        """A sink the test loop drives per batch carries the lifecycle base."""
+        assert issubclass(cls, RuntimeSink)
+
+    def test_the_onnx_manifest_is_declare_only(self):
+        """Export runs no test loop, so its node has no lifecycle to inherit."""
+        assert not issubclass(OnnxExportSink, RuntimeSink)
+
+    def test_base_marks_terminal_and_defaults_to_empty_io(self):
+        """The base is a terminal node declaring nothing until a subclass overrides."""
+        sink = RuntimeSink()
+        assert sink.is_sink() is True
+        assert flatten_spec(sink.declare_io(Mode.TEST).requires) == {}
+        assert sink.is_test_sink() is False  # empty TEST requires
+
+    def test_shared_selector_picks_only_the_primary_test_sink(self):
+        """`is_test_persistence_sink` is the one selector runtime + graph tooling share."""
+        assert is_test_persistence_sink(H5OutputSink()) is True
+        assert is_test_persistence_sink(OnnxExportSink()) is False
+        assert is_test_persistence_sink(_AuxSink()) is False
+        # a duck-typed sink WITHOUT is_test_sink still counts as the primary
+        assert is_test_persistence_sink(SimpleNamespace(writer_demand=lambda *_a, **_k: {})) is True
 
 
 # ---------------------------------------------------------------------------
@@ -315,16 +353,16 @@ def test_onnx_sink_does_not_count_as_a_persistence_sink():
 
 def test_section_declared_auxiliary_sink_must_state_its_modes():
     """An auxiliary sink rides alongside the persistence sink, so it declares when it runs."""
-    aux = JSONLOutputSink()
-    aux.name = "jsonl"
+    aux = _AuxSink()
+    aux.name = "aux"
     cli, model = _wiring([_seeded_h5("h5_output"), aux], section_sinks=[aux])
     with pytest.raises(ConfigError, match="without a `modes:` list"):
         SaltCLI._validate_wired_sinks(cli, model)  # noqa: SLF001
 
 
 def test_section_declared_auxiliary_sink_with_modes_is_accepted():
-    aux = JSONLOutputSink(modes=["test"])
-    aux.name = "jsonl"
+    aux = _AuxSink(modes=["test"])
+    aux.name = "aux"
     cli, model = _wiring([_seeded_h5("h5_output"), aux], section_sinks=[aux])
     SaltCLI._validate_wired_sinks(cli, model)  # noqa: SLF001
 

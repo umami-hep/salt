@@ -10,7 +10,13 @@ import numpy as np
 from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 
-from salt.callbacks._plot_io import CLASS_COLOURS, log_figures, write_comet_experiment_json
+from salt.callbacks._plot_io import (
+    CLASS_COLOURS,
+    _candidates_error,
+    _require_graph_dict,
+    log_figures,
+    write_comet_experiment_json,
+)
 from salt.graph.errors import ConfigError
 from salt.model.modules.norm import MaskedInputNormaliser, Normaliser
 from salt.model.modules.tasks import ClassificationTaskModule
@@ -166,20 +172,18 @@ class InputNormalisationPlotter(Callback):
         self._reset()
 
     def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
-        if not isinstance(model_modules, dict):
-            raise ConfigError(f"{_PREFIX} needs a LightningModule with a graph-module dict")
+        _require_graph_dict(model_modules, _PREFIX)
         if not isinstance(norm := model_modules.get(self.normaliser), _NORMS):
             found = sorted(k for k, v in model_modules.items() if isinstance(v, _NORMS))
             msg = f"normaliser {self.normaliser!r} names no Normaliser/MaskedInputNormaliser module"
-            raise ConfigError(f"{_PREFIX}: {msg}. Configured candidates: {found or '<none>'}")
+            raise _candidates_error(_PREFIX, msg, found)
         seq, g = [s for s in norm.streams if s != norm.global_object], norm.global_object
         demand = (*[f"inputs.{s}" for s in norm.streams], *[f"masks.{s}" for s in seq])
         tasks = {k: v for k, v in model_modules.items() if isinstance(v, ClassificationTaskModule)}
         found = sorted(k for k, v in tasks.items() if v.stream == g and v.label_map is None)
         if self.class_task is not None and self.class_task not in found:
             msg = f"class_task {self.class_task!r} names no ClassificationTaskModule on stream "
-            msg += f"{g!r} without label_map. Configured candidates: {found or '<none>'}"
-            raise ConfigError(f"{_PREFIX}: {msg}")
+            raise _candidates_error(_PREFIX, f"{msg}{g!r} without label_map", found)
         return demand if self.class_task is None else (*demand, tasks[self.class_task].label_key)
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:

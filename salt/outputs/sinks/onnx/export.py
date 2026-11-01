@@ -148,8 +148,8 @@ def compile_onnx_plan(
             "compile_onnx_plan needs a folded OnnxExportSink in model.modules — "
             "the off-graph reduce manifest was retired. "
             "Declare an OnnxExportSink naming the conversion outputs.* leaves; the "
-            "conversion nodes (ClassProbs/MaskFormerObjects/"
-            "Combination) own the math inside the traced graph."
+            "conversion nodes (a RunTaskOutput whose modes: include 'export', or "
+            "MaskFormerObjects / Combination) own the math inside the traced graph."
         )
     # the folded OnnxExportSink anchors its conversion leaves as a terminal node
     # (the planner pulls them in), so no flat `sinks=` are needed.
@@ -617,9 +617,10 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         raise ConfigError(
             f"config {config_path} has no OnnxExportSink — the ONNX output manifest and the "
             "export contract are declared by an OnnxExportSink in the outputs: section, "
-            "naming the conversion outputs.* leaves the folded nodes mint (ClassProbs/"
-            "MaskFormerObjects/Combination). Add the conversion nodes + the "
-            "OnnxExportSink to the run config, or stack an override file carrying only the "
+            "naming the conversion outputs.* leaves the folded nodes mint (a RunTaskOutput "
+            "whose modes: include 'export', or MaskFormerObjects / Combination). Add the "
+            "conversion nodes + the OnnxExportSink to the run config, or stack an override "
+            "file carrying only the "
             f"sink as a second config:\n  salt export --ckpt_path {ckpt_path} "
             f"-c {config_path} -c my_export_sink.yaml"
         )

@@ -20,6 +20,7 @@ from salt.data.readers import ftag1lite_categories as categories
 from salt.data.readers.cuts import GlobalObjectCuts
 from salt.data.readers.stream import covering_range, stage_file
 from salt.data.readers.uproot_reader import UprootReader
+from salt.data.sharding import _interval
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.planner import Sinks
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
@@ -590,11 +591,6 @@ class FTAG1LITEReader(Reader):
         return out
 
 
-def _interval(index: int, n_shards: int, n_rows: int) -> tuple[int, int]:
-    """Shard `index`'s ``[floor(i*N/S), floor((i+1)*N/S))``; the intervals tile ``[0, N)``."""
-    return (index * n_rows) // n_shards, ((index + 1) * n_rows) // n_shards
-
-
 def _global_cut(rows: list[int], n_shards: int, seed: int) -> list[dict[int, tuple[int, int]]]:
     """``owner`` rank cut: `rows` in a `seed`-only permutation, cut into `n_shards` intervals."""
     n_groups = len(rows)
@@ -1077,10 +1073,18 @@ class FTAG1LITEStreamingDataset(IterableSaltDataset):
             f"max_live_streams to null or >= {n_groups_here} ({n_groups_here}*{rows} rows)."
         )
 
-    def _shard_batches(self, n_shards: int, shard_id: int) -> int:
-        """Exact batches of shard `shard_id`; under `drop_last` the minimum over all shards."""
+    def _shard_batches(
+        self,
+        n_shards: int,
+        shard_id: int,
+        assignment: Sequence[Mapping[int, tuple[int, int]]] | None = None,
+    ) -> int:
+        """Exact batches of shard `shard_id`; under `drop_last` the minimum over all shards.
+        `__iter__` passes the `assignment` it already holds instead of recomputing it.
+        """
         blocks, _rows = self._resolve_layout()
-        assignment = self._assignment(n_shards, self._rank_worker()[2])
+        if assignment is None:
+            assignment = self._assignment(n_shards, self._rank_worker()[2])
         self._check_live_streams(len(assignment[shard_id]), blocks, n_shards, shard_id)
         per_shard = shard_row_counts(assignment)
         if self.drop_last:
@@ -1105,7 +1109,7 @@ class FTAG1LITEStreamingDataset(IterableSaltDataset):
         mine = _partition(blocks, assignment[shard_id], self.block_rows)
         if not mine:
             return
-        n_batches = self._shard_batches(n_shards, shard_id)  # also the live-stream check
+        n_batches = self._shard_batches(n_shards, shard_id, assignment)  # + live-stream check
         _LOG.info(
             f"ftag1lite streaming: world={world} rank={rank} workers={n_workers} "
             f"worker={worker_id} -> shard {shard_id}/{n_shards} scope={self.shard_scope} "

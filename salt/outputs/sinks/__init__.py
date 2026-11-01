@@ -7,7 +7,6 @@ their ``outputs.*`` leaves and puts them somewhere lives here.
 from __future__ import annotations
 
 from salt.outputs.sinks.h5_sink import H5OutputSink
-from salt.outputs.sinks.jsonl_sink import JSONLOutputSink
 from salt.outputs.sinks.onnx_sink import OnnxExportLeaf, OnnxExportSink
 from salt.outputs.sinks.registry import iter_sinks, register_sink, sink_registry
 from salt.outputs.sinks.sink import (
@@ -21,7 +20,6 @@ from salt.outputs.sinks.sink import (
 
 __all__ = [
     "H5OutputSink",
-    "JSONLOutputSink",
     "Node",
     "OnnxExportLeaf",
     "OnnxExportSink",

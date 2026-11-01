@@ -81,7 +81,7 @@ def test_combination_runs_inside_the_executor():
     """The combination is a normal plan node run by the executor (per-batch TEST / trace ONNX)."""
 
     class _Probs:
-        """A toy producer minting the source prob leaf (stands in for ClassProbs)."""
+        """A toy producer minting the source `[B, C]` prob leaf."""
 
         name = "probs"
 

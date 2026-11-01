@@ -80,25 +80,27 @@ is missing three things.
 ### 1. A conversion node
 
 The network's task heads emit raw logits. A consumer wants probabilities, so
-the softmax has to live *inside* the exported graph. That means it is a graph
-module like any other:
+the softmax has to live *inside* the exported graph. A `RunTaskOutput` whose
+`modes:` include `export` runs each listed task's `get_output()` in the traced
+graph (a softmax for a classification head, an argmax for a per-token one):
 
 ```yaml
-model:
-  init_args:
-    modules:
-      jet_probs:
-        class_path: salt.outputs.ClassProbs
-        init_args: {task: jets_classification, stream: jets}
+outputs:
+  jets_out:
+    class_path: salt.outputs.RunTaskOutput
+    init_args: {tasks: [jets_classification], modes: [export]}
 ```
+
+Omitting `modes:` means both `test` and `export`, which is what most shipped
+configs do.
 
 ### 2. An export sink
 
 The sink assembles the **output manifest** — which graph values become ONNX
 outputs, and what each one is called. It NAMES nothing itself: every module
 minting `outputs.*` leaves declares its own names and dtypes through
-`manifest_fields(mode)`, and the sink collects them. `ClassProbs` inherits
-`pb`/`pc`/`pu` from its source task, `Combination` names itself, and
+`manifest_fields(mode)`, and the sink collects them. `RunTaskOutput` inherits
+`pb`/`pc`/`pu` from the task, `Combination` names itself, and
 `MaskFormerObjects` derives `leading_objects_<target>` from the regression
 task's `targets`, and `MFLeadVertexDecorator` names its jet-level
 `lead_vertex_<x>` scalars from its `outputs:` map (`MFv2_lead_vertex_pt`,

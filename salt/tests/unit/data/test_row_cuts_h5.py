@@ -14,7 +14,7 @@ import pytest
 from salt.data import GlobalObjectCuts, H5StructuredReader
 from salt.data.base import WorkerCtx
 from salt.graph.spec import Mode
-from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 
 READ_FIELDS = {"jets": {"pt": "t", "flavour_label": "t"}, "tracks": {"d0": "t"}}
 
@@ -22,10 +22,7 @@ READ_FIELDS = {"jets": {"pt": "t", "flavour_label": "t"}, "tracks": {"d0": "t"}}
 @pytest.fixture(scope="module")
 def dummy(tmp_path_factory) -> Path:
     base = tmp_path_factory.mktemp("row_cuts")
-    nd, cd = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_dummy_norm_dict(nd, cd)
-    path = base / "data.h5"
-    write_dummy_file(path, nd)
+    path, _, _ = dummy_h5(base, name="data.h5")
     return path
 
 

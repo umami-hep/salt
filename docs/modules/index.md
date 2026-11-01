@@ -271,8 +271,8 @@ them is a static check over the compiled plan.
   [`cli.md#salt-graph-why`](../cli.md#salt-graph-why) for the full output
   shape.
 - `salt graph plan -c cfg.yaml` prints the ordered plan table for a mode.
-- `salt graph plot -c cfg.yaml -o graph.svg` renders the compiled graph via
-  Graphviz.
+- `salt graph plot -c cfg.yaml -o graph.png` renders the compiled graph via
+  Graphviz (`graph.dot` + `graph.png` + `graph.pdf`).
 - `--set KEY=VALUE` on any of the above supplies a required `init_arg`
   data-free, when a module needs one to construct but the value itself does
   not matter for the check you are running.
@@ -292,30 +292,21 @@ around them the next time one appears.
 
 ### Liveness: every module must reach a sink
 
-A configured module that nothing ever consumes is treated differently
-depending on what kind of config you are running, and the difference
-matters.
-
-**A standalone toy `modules:` config with no `sinks:`** (the shape
-[`tutorials/custom_modules.md`](../tutorials/custom_modules.md) uses for
-isolated checks) never prunes: `sink_list is None` short-circuits demand
-pruning (`salt/graph/planner.py:460`), so every configured module stays
-alive and compiles. An unconsumed output only surfaces as an info- or
-warning-level finding from `deadcode()` (`salt/graph/planner.py:265-330`),
-which never raises.
-
-**A trainer config** always has sinks: `loss.total` anchors FIT/VAL, and
-`preds.*` plus writer demand anchor TEST/ONNX (see the anchor errors below).
-A module whose outputs reach no sink in **any** of the four primary modes is
-a hard error, not a warning:
+`salt graph` and the runtime both compile trainer configs, and a trainer
+config always has sinks: `loss.total` anchors FIT/VAL, and `preds.*` plus
+writer demand anchor TEST/ONNX (see the anchor errors below). A module whose
+outputs reach no sink in **any** of the four primary modes is a hard error,
+not a warning:
 
 ```text
 module '{name}' ({Class}) is dead in every mode (FIT/VAL/TEST/ONNX): no port is active, or its outputs reach no sink in any mode — a configured module must do something; remove it or wire a consumer
 ```
 
 (`AllModesDeadError`, `salt/graph/planner.py:1159-1163`.) Wire a consumer
-before you add a module, or expect this the moment you move from a toy
-`modules:` check to a real trainer config.
+before you add a module: there is no standalone check of a module whose
+output nothing reads yet. A module that is alive in some modes but not in
+the one being compiled is only demand-pruned there, reported as a
+warning-level (info-level in ONNX) finding by `salt graph deadcode`.
 
 ### The catalogue
 
@@ -417,8 +408,11 @@ its `declare_io` promised for that mode, most often a produce that is gated
 to a mode but returned unconditionally. Fix: match the return to the
 mode-gated `IO`, exactly (see [above](#reading-and-writing-the-bundle)).
 
-**8. `UndeclaredAccessError` / `MutationError`**, `model.init_args.debug: true`
-only (`salt/graph/executor.py:323-333`, `:179-183`).
+**8. `UndeclaredAccessError` / `MutationError`**, raised on guarded batches:
+the sanity-check batches, the first FIT/VAL/TEST batch (re-armed on resume)
+and each data worker's first batch, or every batch with the top-level
+`debug: true` (see [NaNs](../training.md#nans))
+(`salt/graph/executor.py:323-333`, `:179-183`).
 
 ```text
 [mode={MODE}] module '{name}' read bundle key '{key}' which is not in its declared requires — declared: {keys}. fix: amend '{name}'.declare_io to require '{key}' (optional=True if consumed-if-present), or drop the access
@@ -428,9 +422,9 @@ only (`salt/graph/executor.py:323-333`, `:179-183`).
 [mode={MODE}] module '{name}' mutated bundle key '{key}' in place during debug execution — bundle leaves are read-only for modules; clone before mutating (e.g. b.get(...).clone()) and return new keys
 ```
 
-Cause: your module read or wrote a key it never declared. Both checks are
-debug-only, so a config without `debug: true` never raises them and the
-mistake goes unnoticed until you turn debug on. Fix: amend `declare_io` to
+Cause: your module read or wrote a key it never declared. Both checks run
+automatically on the guarded batches at start-up, and `debug: true` extends
+them to every batch. Fix: amend `declare_io` to
 require the key (`optional=True` if the read is conditional), or clone
 before mutating.
 
@@ -444,7 +438,8 @@ RunTaskOutput needs a non-empty 'tasks' list — name the task instances whose g
 Cause: `tasks: []` has no placeholder form; a `RunTaskOutput` with nothing
 to name is rejected at construction, before any graph work. Fix: name at
 least one task instance, or drop the `outputs:` section entirely and check
-the graph with the toy `modules:` format instead (see
+FIT alone with `salt graph validate --mode fit`, which anchors on
+`loss.total` rather than on predictions (see
 [`configuration.md#the-minimum-graph-that-compiles`](../configuration.md#the-minimum-graph-that-compiles)
 and [`outputs.md#declaring-outputs-the-outputs-section`](../outputs.md#declaring-outputs-the-outputs-section)).
 

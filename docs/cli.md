@@ -20,10 +20,10 @@ container) fixes both; afterwards `salt` works from any directory.
 python -c "
 from pathlib import Path
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
-from salt.testing.inputs import write_dummy_file
+from salt.testing.datagen import SALT_V1_SCHEMA, write_dataset
 Path('/tmp/v2').mkdir(parents=True, exist_ok=True)
 write_parity_norm_dict('/tmp/v2/norm_dict.yaml', '/tmp/v2/class_dict.yaml')
-write_dummy_file('/tmp/v2/train.h5', '/tmp/v2/norm_dict.yaml')
+write_dataset('/tmp/v2/train.h5', SALT_V1_SCHEMA)
 "
 
 salt fit --config salt/configs/gn2v2-opendata.yaml \
@@ -235,7 +235,7 @@ checkpoint it read:
 `{sample}` comes from the test file's stem, with `--data.test_suff`
 appended when it is set (so re-running against the same test file with a
 different suffix never overwrites the previous output). The test plan and
-graph artifacts (`plan_test.txt`, `resolved_io.yaml`, `graph_test.svg`)
+graph artifacts (`plan_test.txt`, `resolved_io.yaml`, `graph_test.{dot,png,pdf}`)
 land in the same directory as the eval H5; see [What a run
 writes](#what-a-run-writes).
 
@@ -391,8 +391,8 @@ command is the offline twin of the network Athena will run.
 
 ## salt graph
 
-All `salt graph` subcommands accept both the trainer configs used by
-`fit`/`test` and a small toy-graph format, and none of them touch data.
+All `salt graph` subcommands accept the trainer configs used by
+`fit`/`test`, and none of them touch data.
 Saved run `config.yaml` files round-trip directly
 (`salt graph plot -c <run_dir>/config.yaml ...`, the run-surface
 `ckpt_path` key is accepted and ignored). `-c` is repeatable for trainer
@@ -407,7 +407,7 @@ placeholder value works.
 salt graph validate -c salt/configs/gn2v2-opendata.yaml \
   --set model.modules.norm.init_args.norm_dict=unused.yaml
 salt graph plan -c <cfg> --mode fit
-salt graph plot -c <cfg> --mode fit -o graph.svg
+salt graph plot -c <cfg> --mode fit -o graph.png
 salt graph why  -c <cfg> --mode fit --key encoded.seq
 salt graph deadcode -c <cfg>
 ```
@@ -459,11 +459,17 @@ directly, run `salt export --manifest -c <cfg>` (no checkpoint needed), or
 consult the manifest table in the export-time `plan_onnx.txt`.
 
 `salt graph plot` writes the Graphviz `.dot` source (a port-card layout,
-modules coloured by namespace) and rasterises it to a PNG with a sibling
-PDF by shelling out to the `dot` binary baked into the salt container.
-There is no matplotlib fallback path; a missing `dot` raises a clear,
-actionable error, and the `.dot` file is still written so you can render
-it manually later.
+modules coloured by namespace, feature dims shown as their statically
+resolved widths) and rasterises it to a PNG (150 dpi) and a PDF by
+shelling out to the `dot` binary baked into the salt container. `-o` is a
+stem: `-o graph.dot` writes the DOT only; `-o graph.png`, `-o graph.pdf`
+or `-o graph` all write `graph.dot`, `graph.png` and `graph.pdf`; any
+other suffix (e.g. `-o graph.svg`) is a `ConfigError`, because the render
+always produces the PNG + PDF pair. There is no matplotlib fallback path;
+a missing `dot` raises a clear, actionable error, and the `.dot` file is
+still written so you can render it manually later. The training-time
+`GraphArtifacts` callback uses the same render (see [What a run
+writes](#what-a-run-writes)).
 
 ### salt graph why
 
@@ -574,8 +580,13 @@ the demand-narrowed per-group read columns, and, for a test run, the
 writer-sinks table (writer instance to consumed keys); `resolved_io.yaml`,
 a machine-readable dump of, per mode, the plan's sources and every
 module's flattened requires/produces with resolved specs; and
-`graph_<stage>.{dot,svg}` plus `graph_<stage>_dataset.{dot,svg}`, the
-rendered graph images.
+`graph_<stage>.{dot,png,pdf}` plus `graph_<stage>_dataset.{dot,png,pdf}`
+(`<stage>` is `fit` or `test`; validation shares the fit graph), the
+rendered graph images. These are the same render as `salt graph plot`:
+the DOT carries the statically resolved feature widths (e.g.
+`(B, T:tracks, 16)`) and the demand-pruned modules as dashed cards, and
+`dot` rasterises it to a 150 dpi PNG and a PDF. Without the `dot` binary
+the run continues with a warning and only the `.dot` files.
 
 A fit run's directory — `<run_dir>` = `<root>/<name>_<ts>/` or
 `<root>/<name>_<suffix>/` with `--log_suffix`, see [Where outputs
@@ -586,8 +597,7 @@ land](#quickstart) — ends up holding:
 ├── config.yaml
 ├── plan_fit.txt, plan_val.txt
 ├── resolved_io.yaml
-├── graph_fit.{dot,svg}, graph_fit_dataset.{dot,svg}
-├── graph_val.{dot,svg}, graph_val_dataset.{dot,svg}
+├── graph_fit.{dot,png,pdf}, graph_fit_dataset.{dot,png,pdf}
 └── ckpts/
     ├── epoch=000-step=1000-loss=0.45123.ckpt   # epoch-end (Checkpoint)
     ├── epoch=000-step=500.ckpt                 # intra-epoch (StepCheckpoint, opt-in)

@@ -1,9 +1,9 @@
 # Shared jet (global) feature list -- a VARIABLE-SUPERSET of every test-suite
 # config mapped to recipes whose jets group is the global_object.
 #
-# Authoritative source: salt/utils/inputs.py write_dummy_file `jet_vars`
-# (the 39 float f4 fields) + the 3 int labels (flavour_label,
-# HadronConeExclTruthLabelID, HadronGhostInitialTruthLabelPdgId). Every real
+# Kept in sync with the jets group of ../salt-v1-schema.yaml: the 39 float f4
+# fields + the 3 int labels (flavour_label, HadronConeExclTruthLabelID,
+# HadronGhostInitialTruthLabelPdgId). Every real
 # detector/regression/label name a mapped config declares is present here, so
 # SaltDataset.check_file / process_labels never KeyError.
 #
@@ -15,9 +15,9 @@
 #  - mass / sample_weight     : regression denominators / per-task weight
 #  - HadronConeExclTruthLabelID : dips jets label + regression_multi_target sel_label
 #  - HadronGhostInitialTruthLabelPdgId : GN3V01 jets_charge label
-#  - flavour_label flag fan-out: default 3 (+taus for GN2.yaml), make_xbb->4, is_gn3->6
+#  - flavour_label flag fan-out: default 3 (+taujets via inc_taus), make_xbb->4, is_gn3->6
 
-# --- float f4 distribution features (inputs.py:458-498 jet_vars) ---
+# --- float f4 distribution features ---
 - { name: pt,          type: distribution, dtype: f4, dist: lognormal }
 - { name: eta,         type: distribution, dtype: f4, dist: normal }
 - { name: mass,        type: distribution, dtype: f4, dist: lognormal }
@@ -62,10 +62,10 @@
 - { name: Xbb2020v3_Top,   type: distribution, dtype: f4 }
 - { name: Xbb2020v3_QCD,   type: distribution, dtype: f4 }
 
-# --- int i4 labels (inputs.py:552-574) ---
-# flavour_label flag fan-out (classes_by_flag mirrors write_dummy_file's
-# make_xbb / is_gn3 / default ladder; class_names_append_if appends 'taus' for
-# GN2.yaml via inc_taus).
+# --- int i4 labels ---
+# flavour_label flag fan-out (classes_by_flag: make_xbb > is_gn3 > default;
+# class_names_append_if appends 'taujets' via inc_taus). Class names are the
+# ones the shipped configs declare in class_names (check_class_names compares).
 - name: flavour_label
   type: label
   dtype: i4
@@ -73,20 +73,20 @@
   # jets_classification head output_size: 4 + use_class_dict: True (the only
   # default-flavour config that reads the flavour_label class_dict; its weight
   # list length must equal output_size or CrossEntropyLoss raises a weight-size
-  # RuntimeError). write_dummy_file draws only [0,1,2] by default (taus declared
-  # but undrawn -> zero count -> 0.0 weight), exactly like the legacy length-4
-  # default class_dict. make_xbb / is_gn3 override the set via classes_by_flag.
+  # RuntimeError). Only [0,1,2] are drawn by default (taus declared but
+  # undrawn -> zero count -> 0.0 weight), a length-4 default class_dict.
+  # make_xbb / is_gn3 override the set via classes_by_flag.
   classes: [0, 1, 2, 3]
   sample_classes: [0, 1, 2]
   class_names: [bjets, cjets, ujets]
   class_names_append_if:
-    inc_taus: [taus]
+    inc_taus: [taujets]
   classes_by_flag:
     make_xbb: [0, 1, 2, 3]
     is_gn3:   [0, 1, 2, 3, 4, 5]
   class_names_by_flag:
     make_xbb: [hbb, hcc, top, qcd]
-    is_gn3:   [ghostsplitbjets, ghostsplitcjets, ghostsplitsjets, ghostsplitudjets, ghostsplitgjets, ghostsplittaujets]
+    is_gn3:   [ghostbjets, ghostcjets, ghostsjets, ghostudjets, ghostgjets, ghosttaujets]
 - name: HadronConeExclTruthLabelID
   type: label
   dtype: i4

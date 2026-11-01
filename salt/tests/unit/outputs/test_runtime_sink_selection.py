@@ -90,13 +90,12 @@ def cutover_data(tmp_path_factory):
         Labels,
     )
     from salt.schema import dump_schema, save_schema  # noqa: PLC0415
-    from salt.testing.inputs import write_dummy_file  # noqa: PLC0415
+    from salt.tests._fixtures.dummy_h5 import dummy_h5  # noqa: PLC0415
 
     base = tmp_path_factory.mktemp("runtime_sink_b2")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
-    h5_path = base / "pp_output_test.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base, name="pp_output_test.h5")
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return SimpleNamespace(

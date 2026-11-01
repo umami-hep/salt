@@ -21,6 +21,7 @@ from salt.callbacks.kinematic_reweight_plotter import KinematicReweightPlotter, 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.model.modules.kinematic_weight import KinematicWeight
+from salt.tests.unit.callbacks.conftest import make_trainer
 
 inf = math.inf
 CLASS_NAMES = ["bjets", "cjets", "ujets"]
@@ -63,11 +64,6 @@ def stub_pl_module(w_max: float = 50.0, target: str = "inclusive") -> SimpleName
     modules = {"kinematic_weight": kw, "prior": prior, "norm": SimpleNamespace()}
     controller = SimpleNamespace(schedule=schedule, current_stage_index=0)
     return SimpleNamespace(_graph_modules=modules, training_controller=controller)
-
-
-def make_trainer(**overrides) -> SimpleNamespace:
-    base = {"logger": None, "current_epoch": 0, "global_step": 30, "is_global_zero": True}
-    return SimpleNamespace(**{**base, "sanity_checking": False, **overrides})
 
 
 def make_bundle(seed, n=300, *, w_scale=1.0, n_bad=0, n_cats=3, skew=False) -> Bundle:

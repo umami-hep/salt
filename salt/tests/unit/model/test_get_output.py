@@ -23,8 +23,8 @@ from salt.model.modules.tasks import (
     VertexingTaskModule,
     _TaskModuleBase,  # noqa: PLC2701 - base default under test
 )
-from salt.outputs import ClassProbs
 from salt.outputs.output_schema import VERTEX_INDEX, OutputField, pascal_case
+from salt.tests._fixtures.producers import FixtureProducer
 from salt.utils.tensor_utils import masked_softmax
 from salt.utils.union_find import (
     get_node_assignment,
@@ -83,7 +83,7 @@ def _fields_by_h5(fields):
 
 
 def test_global_get_output_value_matches_class_probs_producer():
-    """Global head: each `OutputField.value` == the per-class column of `ClassProbs`."""
+    """Global head: each `OutputField.value` == the per-class column of a softmax producer."""
     torch.manual_seed(0)
     module = _bind_classification(
         _STREAM_J, "flavour_label", ["bjets", "cjets", "ujets"], sequence=False
@@ -91,7 +91,7 @@ def test_global_get_output_value_matches_class_probs_producer():
     logits = torch.randn(7, 3)
 
     # (a) producer ORACLE: full [B, C] softmax leaf
-    producer = ClassProbs(task=module.name, stream=_STREAM_J, name="out")
+    producer = FixtureProducer(module.name, _STREAM_J, "out", softmax=True)
     producer.name = "p"
     producer_out = producer.forward(_pred_bundle(module, logits.clone()), Mode.TEST)[
         f"outputs.{_STREAM_J}.out"
@@ -157,7 +157,7 @@ def test_global_get_output_onnx_names_are_literal_class_suffixes():
 
 
 def test_global_get_output_bce_uses_sigmoid():
-    """Global BCE head: ``get_output`` sigmoids (matches ``ClassProbs(bce=True)``)."""
+    """Global BCE head: ``get_output`` sigmoids the logits."""
     torch.manual_seed(3)
     module = _bind_classification(
         _STREAM_J,
@@ -168,11 +168,7 @@ def test_global_get_output_bce_uses_sigmoid():
     )
     logits = torch.randn(6, 1)
 
-    producer = ClassProbs(task=module.name, stream=_STREAM_J, name="out", bce=True)
-    producer.name = "p"
-    oracle = producer.forward(_pred_bundle(module, logits.clone()), Mode.TEST)[
-        f"outputs.{_STREAM_J}.out"
-    ]
+    oracle = torch.sigmoid(logits)
 
     (field,) = module.get_output(_pred_bundle(module, logits.clone()), Mode.TEST, _RUN)
     torch.testing.assert_close(field.value, oracle[..., 0], rtol=0, atol=_FLOAT_TOL)

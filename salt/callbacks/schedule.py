@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from lightning.pytorch import LightningModule, Trainer
 
     from salt.model.multistage_training import TrainingController
-    from salt.schedule import StageConfig
 
 log = get_logger(__name__)
 
@@ -209,7 +208,23 @@ class TrainingScheduleCallback(Callback):
                     f"global step {rec['global_step']} (epoch {rec['epoch']}), before its "
                     "sample target"
                 )
-            self._save_sample_stop_after_checkpoint(trainer, controller, stage)
+            # Deferred write: a checkpoint saved inside `on_train_batch_end` resumes as
+            # RESTARTED_MID_EPOCH, skipping the `on_train_epoch_start` resume seam and
+            # over-stepping the stage's OneCycleLR; written here it resumes at the NEXT epoch.
+            # `global_step` cannot move after `should_stop`, so `-step=` is the boundary step.
+            pending = controller.stop_after_record
+            if pending is None or not trainer.should_stop:
+                return
+            path = _stop_after_dir(trainer) / (
+                f"stop_after={stage.name}-step={trainer.global_step:06d}.ckpt"
+            )
+            trainer.save_checkpoint(path)  # strategy-aware: rank 0 writes; safe on every rank
+            log.info(
+                f"training_schedule: stop_after={stage.name!r} checkpoint written at train-epoch "
+                f"end (global step {pending['global_step']}, epoch {pending['epoch']}). "
+                f"Continue with: salt fit --config <run config.yaml> --ckpt_path {path} "
+                "(drop training_schedule.stop_after)"
+            )
             return
         if self._target_stage_index(trainer, controller, trainer.current_epoch + 1) <= stop_idx:
             return
@@ -224,31 +239,6 @@ class TrainingScheduleCallback(Callback):
             f"(global step {rec['global_step']}); ending the fit before stage "
             f"{schedule.stages[stop_idx + 1].name!r}. Continue with: salt fit --config "
             f"<run config.yaml> --ckpt_path {path} (drop training_schedule.stop_after)"
-        )
-
-    @staticmethod
-    def _save_sample_stop_after_checkpoint(
-        trainer: Trainer, controller: TrainingController, stage: StageConfig
-    ) -> None:
-        """Deferred write of a sample-stage `stop_after` checkpoint. A checkpoint
-        saved inside `on_train_batch_end` resumes as Lightning's RESTARTED_MID_EPOCH,
-        which skips the `on_train_epoch_start` resume seam and over-steps the stage's
-        OneCycleLR; written here it resumes at the NEXT epoch (the rest of the stop
-        epoch is discarded). `global_step` cannot move after `should_stop`, so the
-        ``-step=`` name is the boundary step. No-op unless a stop record is pending.
-        """
-        rec = controller.stop_after_record
-        if rec is None or not trainer.should_stop:
-            return
-        path = _stop_after_dir(trainer) / (
-            f"stop_after={stage.name}-step={trainer.global_step:06d}.ckpt"
-        )
-        trainer.save_checkpoint(path)  # strategy-aware: rank 0 writes; safe on every rank
-        log.info(
-            f"training_schedule: stop_after={stage.name!r} checkpoint written at train-epoch "
-            f"end (global step {rec['global_step']}, epoch {rec['epoch']}). Continue with: "
-            f"salt fit --config <run config.yaml> --ckpt_path {path} "
-            "(drop training_schedule.stop_after)"
         )
 
     def on_validation_end(self, trainer: Trainer, pl_module: LightningModule) -> None:

@@ -18,7 +18,7 @@ from salt.data.base import Reader, SaltDatasetModule, WorkerCtx, _nearest_hint
 from salt.data.processors.labels import Labels
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, MutationError, SchemaError
-from salt.graph.executor import canonical_produced
+from salt.graph.executor import ReadTrackedBundle, canonical_produced, declared_reads
 from salt.graph.planner import Plan, Sinks, compile_plan
 from salt.graph.spec import KEY_SEP, Mode, TensorSpec
 
@@ -27,7 +27,14 @@ __all__ = ["MODEL_VISIBLE_NAMESPACES", "_PlanRunner"]
 MODEL_VISIBLE_NAMESPACES = ("inputs", "masks", "labels", "meta")
 """Bundle namespaces converted at the numpy->torch boundary."""
 
-_DERIVED_ATTRS = ("_plan", "_read_fields", "_bound_pid", "_exec_steps", "_boundary_keys")
+_DERIVED_ATTRS = (
+    "_plan",
+    "_read_fields",
+    "_bound_pid",
+    "_guard_pending",
+    "_exec_steps",
+    "_boundary_keys",
+)
 """Attributes rebuilt from the config by `_recompute_derived`, dropped when pickling."""
 
 
@@ -62,8 +69,11 @@ class _PlanRunner:
         Base seed for read-time augmentations when not running in a dataloader
         worker (workers use torch's per-worker seed), by default 42.
     debug : bool, optional
-        Assert at the torch boundary that no leaf aliases a reusable reader
-        buffer, by default False.
+        Guard EVERY batch, by default False: each processor reads through a
+        `ReadTrackedBundle` (an undeclared read raises `UndeclaredAccessError`)
+        and the torch boundary asserts no leaf aliases a reusable reader buffer
+        (`MutationError`). Off, only the first batch after each per-process bind
+        (each dataloader worker's first batch) gets the read tracking.
     sink_origins : Mapping[str, str] | None, optional
         Demanded-key -> demander description, used only to improve error
         messages, by default None.
@@ -127,14 +137,23 @@ class _PlanRunner:
         exactly `_DERIVED_ATTRS`), so this is the single place that decides what
         the two paths have to agree on.
 
-        The loop caches turn the frozen plan into a step sequence plus the
-        model-visible boundary key list once, instead of per batch.
+        The loop caches turn the frozen plan into a step sequence (with each
+        processor's guarded-read allowlist) plus the model-visible boundary key
+        list once, instead of per batch.
         """
         self._plan: Plan = self._compile()
         self._read_fields: dict[str, dict[str, str]] = self._collect_read_fields()
         self._bound_pid: int | None = None
+        self._guard_pending = False
         self._exec_steps = tuple(
-            (s.name, s.module, isinstance(s.module, Reader), set(s.produces), set(s.rewrites))
+            (
+                s.name,
+                s.module,
+                isinstance(s.module, Reader),
+                set(s.produces),
+                set(s.rewrites),
+                declared_reads(s.module, s, self._mode),
+            )
             for s in self._plan.steps
         )
         # dedupe by key, keeping the LAST occurrence in plan order — a
@@ -237,7 +256,9 @@ class _PlanRunner:
         }
 
     def _maybe_bind(self) -> None:
-        """Bind all plan modules once per worker process (pid-guarded for fork inheritance)."""
+        """Bind all plan modules once per worker process (pid-guarded for fork inheritance)
+        and arm the guard for that process's first batch.
+        """
         pid = os.getpid()
         if self._bound_pid == pid:
             return
@@ -254,6 +275,7 @@ class _PlanRunner:
             if isinstance(module, SaltDatasetModule):
                 module.bind(replace(ctx, step=step))
         self._bound_pid = pid
+        self._guard_pending = True
 
     def _run_plan(self, rows: slice, raw: dict[str, np.ndarray] | None = None) -> dict[str, Any]:
         """Run every plan step for one batch and cross the torch boundary.
@@ -263,16 +285,20 @@ class _PlanRunner:
         out of them); ``None`` means call the reader for `rows` (the map-style
         path). Processors receive `rows` unchanged — they ignore it (`Features`
         and `Labels` both ``del rows``), so the two paths produce the same
-        object.
+        object. A guarded batch (``debug``, or the first after a bind) hands
+        each processor a `ReadTrackedBundle`; the reader step is never wrapped.
         """
+        guard = self._debug or self._guard_pending
+        self._guard_pending = False
         bundle = Bundle()
-        for name, module, is_reader, expected, rewrites in self._exec_steps:
+        for name, module, is_reader, expected, rewrites, allowed in self._exec_steps:
             if is_reader:
                 produced = (
                     raw if raw is not None else module.read(rows, self._mode)  # type: ignore[attr-defined]
                 )
             else:
-                produced = module.process(bundle, rows, self._mode)  # type: ignore[attr-defined]
+                view = ReadTrackedBundle(bundle, name, self._mode, allowed) if guard else bundle
+                produced = module.process(view, rows, self._mode)  # type: ignore[attr-defined]
             bundle.merge(
                 canonical_produced(produced, expected, name),
                 who=name,

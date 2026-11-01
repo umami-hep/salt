@@ -10,6 +10,7 @@ from salt.graph.errors import (
     DeclarationError,
     KeyCollisionError,
     MutationError,
+    NonFiniteError,
     UndeclaredAccessError,
 )
 from salt.graph.executor import (
@@ -337,6 +338,109 @@ class TestMutationDetection:
         plan = compile_plan(modules, Mode.FIT, SRC_X)
         out = Executor(plan).run(input_bundle(), debug=True)
         assert torch.allclose(out.get("preds.x"), out.get("embed.x") + 1.0)
+
+    def test_inplace_mutation_of_inference_tensor_caught_in_debug(self):
+        # validation/test run under inference_mode: no version counter, compared by value
+        modules = self.modules(lambda b, mode: {"preds.x": b.get("embed.x").add_(1.0)})
+        plan = compile_plan(modules, Mode.FIT, SRC_X)
+        with torch.inference_mode(), pytest.raises(MutationError, match="'mut'.*'embed.x'"):
+            Executor(plan).run(input_bundle(), debug=True)
+
+    def test_untouched_inference_tensors_pass_in_debug(self):
+        modules = self.modules(lambda b, mode: {"preds.x": b.get("embed.x") + 1.0})
+        plan = compile_plan(modules, Mode.FIT, SRC_X)
+        with torch.inference_mode():
+            out = Executor(plan).run(input_bundle(), debug=True)
+        assert out.get("embed.x").is_inference()
+        assert torch.equal(out.get("preds.x"), out.get("embed.x") + 1.0)
+
+
+# debug mode: per-module non-finite localisation
+
+
+class TestNonFinite:
+    @staticmethod
+    def plan(head_fn, head_produces=None, mode=Mode.TEST):
+        """embed (x * 2) -> head (head_fn) -> tail (+ 1): NaN in head must be named first."""
+        embed = ToyModule(
+            "embed",
+            requires={"inputs.x": ts()},
+            produces={"embed.x": ts()},
+            fn=lambda b, mode: {"embed.x": b.get("inputs.x") * 2.0},
+        )
+        head = ToyModule(
+            "head",
+            requires={"embed.x": ts()},
+            produces=head_produces or {"preds.x": ts()},
+            fn=head_fn,
+        )
+        tail = ToyModule(
+            "tail",
+            requires={"preds.x": ts()},
+            produces={"preds.y": ts()},
+            fn=lambda b, mode: {"preds.y": b.get("preds.x") + 1.0},
+        )
+        return compile_plan(mods(embed, head, tail), mode, SRC_X)
+
+    def test_names_the_first_non_finite_module(self):
+        plan = self.plan(lambda b, mode: {"preds.x": b.get("embed.x") * torch.nan})
+        with pytest.raises(NonFiniteError) as exc:
+            Executor(plan).run(input_bundle(), debug=True)
+        assert str(exc.value) == (
+            "[mode=TEST] module 'head' produced non-finite values in 'preds.x' "
+            "(NaN 8, +Inf 0, -Inf 0 of 8); inputs it read were all finite"
+        )
+
+    def test_reports_already_non_finite_inputs(self):
+        plan = self.plan(lambda b, mode: {"preds.x": b.get("embed.x") + 1.0})
+        x = torch.ones(2, 4)
+        x[0, 0] = torch.nan
+        # sources are not scanned: the first producer of a non-finite leaf is named
+        with pytest.raises(NonFiniteError, match=r"module 'embed'.*NaN 1,") as exc:
+            Executor(plan).run(input_bundle(x), debug=True)
+        assert str(exc.value).endswith("inputs it read were already non-finite: ['inputs.x']")
+
+    def test_inf_detected_with_counts(self):
+        values = torch.tensor([torch.nan, torch.inf, -torch.inf, 1.0])
+        plan = self.plan(lambda b, mode: {"preds.x": values.clone()})
+        with pytest.raises(NonFiniteError, match=r"\(NaN 1, \+Inf 1, -Inf 1 of 4\)"):
+            Executor(plan).run(input_bundle(), debug=True)
+
+    def test_finite_false_leaf_is_skipped(self):
+        plan = self.plan(
+            lambda b, mode: {"preds.x": b.get("embed.x") * torch.nan},
+            head_produces={"preds.x": ts(finite=False)},
+        )
+        # the head's NaN is declared; the tail's (finite=True) output then reports it
+        with pytest.raises(NonFiniteError, match="module 'tail'") as exc:
+            Executor(plan).run(input_bundle(), debug=True)
+        assert "already non-finite: ['preds.x']" in str(exc.value)
+
+    def test_label_kind_is_never_scanned(self):
+        plan = self.plan(
+            lambda b, mode: {"preds.x": b.get("embed.x"), "aux.target": torch.full((2,), torch.nan)},
+            head_produces={"preds.x": ts(), "aux.target": ts(kind="label")},
+        )
+        out = Executor(plan).run(input_bundle(), debug=True)
+        assert torch.isnan(out.get("aux.target")).all()
+
+    def test_loss_kind_is_scanned(self):
+        plan = self.plan(
+            lambda b, mode: {"preds.x": b.get("embed.x"), "losses.head": torch.tensor(torch.inf)},
+            head_produces={"preds.x": ts(), "losses.head": ts(kind="loss", modes=Mode.TRAINING)},
+            mode=Mode.FIT,
+        )
+        with pytest.raises(NonFiniteError, match=r"\[mode=FIT\] module 'head'.*'losses.head'"):
+            Executor(plan).run(input_bundle(), debug=True)
+
+    def test_non_debug_run_passes(self):
+        plan = self.plan(lambda b, mode: {"preds.x": b.get("embed.x") * torch.nan})
+        out = Executor(plan).run(input_bundle())
+        assert torch.isnan(out.get("preds.y")).all()
+
+    def test_finite_flag_must_be_bool(self):
+        with pytest.raises(TypeError, match="finite must be bool"):
+            TensorSpec(finite=1)
 
 
 # optional ports (consumed if present, absent = omitted)

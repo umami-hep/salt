@@ -17,7 +17,7 @@ from salt.model.modules.norm import Normaliser
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
 from salt.schema import dump_schema, save_schema
-from salt.testing.inputs import write_dummy_file
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     ORIGIN_CLASSES,
@@ -282,8 +282,7 @@ class TestEndToEndRemappedFit:
         """A real fit resolves 'tracks'->'tracks_ghost' through SaltModule.setup/on_fit_start."""
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)
-        h5 = tmp_path / "pp_output_train.h5"
-        write_dummy_file(h5, nd)
+        h5, _, _ = dummy_h5(tmp_path)
         rekey(nd, "tracks", "tracks_ghost")
         schema_path = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5), schema_path)

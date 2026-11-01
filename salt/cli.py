@@ -1,25 +1,19 @@
 r"""``salt graph``/``salt schema`` — static graph tooling CLI.
 
-Validates, plans, and renders module graphs from either trainer configs
-(``model:``/``data:``) or toy configs (``modules:``/``sources:``/``sinks:``);
-see `load_config` and `instantiate` for the two formats.
+Validates, plans, and renders the module graph of a salt trainer config
+(``model:``/``data:``, adapted run-free through `SaltCLI` — see `load_config`).
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
-import importlib
-import shutil
-import subprocess
 import sys
 import warnings
 import warnings as stdlib_warnings  # stable handle; `warnings` is shadowed by a local list
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from difflib import get_close_matches
-from functools import reduce
-from operator import or_
 from pathlib import Path
 from typing import Any
 
@@ -27,27 +21,23 @@ import yaml
 
 from salt.graph.errors import SUGGESTION_CUTOFF, ConfigError, GraphError
 from salt.graph.planner import SOURCES, Plan, Sinks, compile_plan, deadcode
-from salt.graph.render import dot_source, plan_table
+from salt.graph.render import graph_dot, plan_table, pruned_modules, render_image
 from salt.graph.spec import (
     KEY_SEP,
     PRIMARY_MODES,
     GraphModule,
     Mode,
     NestedSpec,
-    TensorSpec,
     _has_wildcard,
     _pattern_matches,
     flatten_spec,
     split_key,
-    unflatten_spec,
 )
 from salt.model.bind import resolve_bind_schema
-from salt.schema import dump_schema, load_schema, save_schema
+from salt.schema import dump_schema, save_schema
 from salt.utils.logging import console
 
-__all__ = ["GraphConfig", "instantiate", "load_config", "main"]
-
-_SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"})
+__all__ = ["GraphConfig", "load_config", "main"]
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +47,12 @@ _SPEC_KEYS = frozenset({"shape", "dtype", "kind", "modes", "optional", "fields"}
 
 @dataclass
 class GraphConfig:
-    """A loaded graph config: live modules plus planner boundary inputs.
+    """A loaded trainer config's pipeline graph: live modules plus planner inputs.
 
-    `reader` is set only for trainer configs (the adapter path) — it carries
-    the schema artifact for the validate-time class-names check.
+    `modules` combines ``data.modules`` and the model-side modules (plus the
+    folded sink nodes); `sources` is empty (the reader is the source node).
+    `schema` is the reader's label universe (None without a schema artifact);
+    `reader` carries that artifact for the validate-time class-names check.
     `mode_errors` carries per-mode config errors found while deriving sinks
     (TEST dead-preds errors, ONNX export-block resolution errors):
     ``validate``/``deadcode`` report them as error-level findings for that
@@ -88,78 +80,38 @@ class GraphConfig:
     mup_cfg: dict[str, Any] | None = None
 
 
-def instantiate(class_path: str, init_args: Mapping[str, Any] | None = None) -> Any:
-    """Instantiate ``pkg.mod.Class(**init_args)`` from a dotted class path.
-
-    Returns
-    -------
-    Any
-        The new instance.
-
-    Raises
-    ------
-    ConfigError
-        On unimportable modules, missing attributes, or ctor errors.
-    """
-    if not isinstance(class_path, str) or "." not in class_path:
-        raise ConfigError(
-            f"class_path must be a dotted import path like 'pkg.mod.Class', got {class_path!r}"
-        )
-    module_name, _, attr = class_path.rpartition(".")
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as err:
-        raise ConfigError(
-            f"cannot import module {module_name!r} for class_path {class_path!r}: {err}"
-        ) from err
-    try:
-        cls = getattr(module, attr)
-    except AttributeError as err:
-        raise ConfigError(f"module {module_name!r} has no attribute {attr!r}") from err
-    try:
-        return cls(**dict(init_args or {}))
-    except (TypeError, ValueError) as err:
-        raise ConfigError(f"instantiating {class_path!r} failed: {err}") from err
-
-
-def _is_trainer_format(raw: Mapping[str, Any]) -> bool:
-    """Whether a parsed YAML mapping is a trainer config: a top-level
-    ``model:``/``data:`` mapping without the toy ``modules:`` key.
-    """
-    return "modules" not in raw and ("model" in raw or "data" in raw)
-
-
 def load_config(
     path: str | Path | Sequence[str | Path], set_overrides: Sequence[str] | None = None
 ) -> GraphConfig:
-    """Load and instantiate a graph config (both formats — module docstring).
+    """Load a salt trainer config (stack) as one full-pipeline `GraphConfig`.
 
-    A top-level ``model:``/``data:`` mapping is a trainer config and is
-    adapted through `SaltCLI` (`_load_fit_config`); a top-level ``modules:``
-    mapping is the toy format. Instance names are assigned from the
-    module-dict keys (names must match config keys; the planner re-checks
-    this invariant).
+    Every file is read as YAML first, so a missing, invalid or non-mapping
+    file fails naming it; at least one must carry top-level ``model:``/
+    ``data:`` blocks (the fit surface). The stack is then parsed run-free
+    through `SaltCLI` and adapted by `_load_fit_config`.
 
     Parameters
     ----------
     path : str | Path | Sequence[str | Path]
-        The config YAML, or a stack of trainer configs (deep-merged
-        left-to-right through the real `SaltCLI` surface — the repeatable
-        ``-c`` flag). Toy graphs take exactly one config.
+        The config YAML, or a stack of configs deep-merged left-to-right
+        through the real `SaltCLI` surface (the repeatable ``-c`` flag); only
+        one member need be a full trainer config, the rest may be partial
+        overrides.
     set_overrides : Sequence[str] | None, optional
         ``KEY=VALUE`` entries forwarded to the trainer parser (the ``--set``
-        CLI flag) — trainer configs only, by default None.
+        CLI flag), by default None.
 
     Returns
     -------
     GraphConfig
-        Live modules plus parsed sources/sinks/schema.
+        Live pipeline modules plus the derived per-mode sinks and the
+        reader's label universe.
 
     Raises
     ------
     ConfigError
-        On unreadable files or structurally invalid configs, or a config
-        stack with no trainer-format member.
+        On an unreadable or invalid file, a stack with no ``model:``/``data:``
+        member, or a trainer-parse failure.
     """
     # local import: avoids a cli<->config_utils cycle
     from salt.utils.config_utils import expand_includes
@@ -179,48 +131,19 @@ def load_config(
         if not isinstance(raw, dict):
             raise ConfigError(f"config file {one} must contain a mapping")
         raws.append(raw)
-    # only one stacked file need be trainer-format; the rest may be partial overrides
-    if len(paths) > 1 and not any(_is_trainer_format(raw) for raw in raws):
-        raise ConfigError(
-            f"repeated -c is supported for salt trainer configs only (deep-merged "
-            f"left-to-right, the fit/export stacking semantics) — none of "
-            f"{[str(p) for p in paths]} has top-level model:/data: blocks; toy "
-            "graph configs take exactly one -c"
+    if not any("model" in raw or "data" in raw for raw in raws):
+        removed = any("modules" in raw for raw in raws)
+        hint = (
+            "; the standalone modules:/sources:/sinks: graph format was removed — put the "
+            "modules under a trainer config's data.modules / model.init_args.modules"
+            if removed
+            else ""
         )
-    raw, path = raws[0], paths[0]
-    if len(paths) > 1 or _is_trainer_format(raw):
-        return _load_fit_config(paths, set_overrides)
-    if set_overrides:
         raise ConfigError(
-            f"--set overrides apply to salt trainer configs only ({path} is a toy graph config)"
+            f"config {' + '.join(str(p) for p in paths)} is not a salt trainer config: "
+            f"salt graph needs top-level 'model:'/'data:' blocks (the fit surface){hint}"
         )
-    modules_raw = raw.get("modules")
-    if not isinstance(modules_raw, dict) or not modules_raw:
-        raise ConfigError(
-            f"config file {path} must declare either a salt trainer config "
-            "(top-level 'model:'/'data:' blocks, the fit surface) or a toy graph "
-            "config (a non-empty 'modules' mapping of name -> {class_path, init_args})"
-        )
-    modules: dict[str, GraphModule] = {}
-    for name, node in modules_raw.items():
-        if not isinstance(node, dict) or "class_path" not in node:
-            raise ConfigError(
-                f"module {name!r} must be a mapping with 'class_path' (and optional 'init_args')"
-            )
-        instance = instantiate(node["class_path"], node.get("init_args"))
-        try:
-            instance.name = name
-        except AttributeError as err:
-            raise ConfigError(
-                f"cannot assign instance name {name!r} on {node['class_path']!r}: {err}"
-            ) from err
-        modules[str(name)] = instance
-    return GraphConfig(
-        modules=modules,
-        sources=_parse_sources(raw.get("sources"), path),
-        sinks=_parse_sinks(raw.get("sinks"), path),
-        schema=_parse_schema(raw.get("schema"), path),
-    )
+    return _load_fit_config(paths, set_overrides)
 
 
 def _load_fit_config(paths: Sequence[Path], set_overrides: Sequence[str] | None) -> GraphConfig:
@@ -373,108 +296,6 @@ def _static_onnx_export_sink(cli: Any) -> Any | None:
     return next((sink for sink in sinks if isinstance(sink, OnnxExportSink)), None)
 
 
-def _parse_mode(name: str) -> Mode:
-    """Parse a mode name to a `Mode` flag (may be composite for sinks
-    mappings); raises `ConfigError` on an unknown name.
-    """
-    if isinstance(name, str) and name.upper() in Mode.__members__:
-        return Mode[name.upper()]
-    valid = "/".join(member.lower() for member in Mode.__members__)
-    raise ConfigError(f"unknown mode {name!r}: expected one of {valid}")
-
-
-def _parse_spec(key: str, node: Mapping[str, Any] | None) -> TensorSpec:
-    """Build a `TensorSpec` for source `key` from a plain YAML mapping (empty/
-    absent -> the default spec); raises `ConfigError` on an unknown/invalid
-    spec key.
-    """
-    kwargs = dict(node or {})
-    if unknown := set(kwargs) - _SPEC_KEYS:
-        raise ConfigError(
-            f"source {key!r}: unknown spec key(s) {sorted(unknown)} — expected {sorted(_SPEC_KEYS)}"
-        )
-    if "shape" in kwargs:
-        kwargs["shape"] = tuple(kwargs["shape"])
-    if "modes" in kwargs:
-        names = [kwargs["modes"]] if isinstance(kwargs["modes"], str) else kwargs["modes"]
-        kwargs["modes"] = reduce(or_, (_parse_mode(name) for name in names))
-    try:
-        return TensorSpec(**kwargs)
-    except (TypeError, ValueError) as err:
-        raise ConfigError(f"source {key!r}: invalid spec: {err}") from err
-
-
-def _parse_sources(raw: Any, path: Path) -> NestedSpec:
-    """Parse the ``sources:`` section to a `NestedSpec` (empty when absent);
-    raises `ConfigError` on malformed entries or clashing dotted keys.
-    """
-    if raw is None:
-        return {}
-    if not isinstance(raw, (dict, list)):
-        raise ConfigError(f"config {path}: 'sources' must be a mapping or list")
-    # every list entry is shape-checked before the first spec is parsed
-    items = list(raw.items()) if isinstance(raw, dict) else []
-    for entry in raw if isinstance(raw, list) else ():
-        if isinstance(entry, str):
-            items.append((entry, None))
-        elif isinstance(entry, dict) and len(entry) == 1:
-            items.append(next(iter(entry.items())))
-        else:
-            raise ConfigError(
-                f"config {path}: 'sources' list entries must be dotted keys or "
-                f"single-pair mappings, got {entry!r}"
-            )
-    flat: dict[str, TensorSpec] = {}
-    for key, node in items:
-        if node is not None and not isinstance(node, dict):
-            raise ConfigError(f"config {path}: source {key!r} spec must be a mapping")
-        flat[str(key)] = _parse_spec(str(key), node)
-    try:
-        return unflatten_spec(flat)
-    except (TypeError, ValueError) as err:
-        raise ConfigError(f"config {path}: invalid 'sources' keys: {err}") from err
-
-
-def _parse_sinks(raw: Any, path: Path) -> Sinks:
-    """Parse the ``sinks:`` section to the planner `Sinks` type: None when
-    absent, a flat key list, or a ``{Mode: keys}`` per-mode mapping. Raises
-    `ConfigError` on malformed entries.
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, list):
-        if not all(isinstance(key, str) for key in raw):
-            raise ConfigError(f"config {path}: 'sinks' list entries must be dotted keys")
-        return list(raw)
-    if isinstance(raw, dict):
-        sinks: dict[Mode, tuple[str, ...]] = {}
-        for mode_name, keys in raw.items():
-            if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
-                raise ConfigError(
-                    f"config {path}: sinks for mode {mode_name!r} must be a list of dotted keys"
-                )
-            sinks[_parse_mode(mode_name)] = tuple(keys)
-        return sinks
-    raise ConfigError(f"config {path}: 'sinks' must be a list or a mode -> keys mapping")
-
-
-def _parse_schema(raw: Any, path: Path) -> tuple[str, ...] | None:
-    """Parse the ``schema:`` section to a flat ``group.field`` key tuple, or
-    None when unconfigured. Raises `ConfigError` on malformed entries (a bad
-    schema file raises `SchemaError`).
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        # an absolute `raw` survives the join unchanged; a relative one is config-relative
-        return load_schema(path.parent / raw).keys()
-    if isinstance(raw, list) and all(isinstance(key, str) for key in raw):
-        return tuple(raw)
-    raise ConfigError(
-        f"config {path}: 'schema' must be a schema.yaml path or a flat list of dotted keys"
-    )
-
-
 def _modes_for(args: argparse.Namespace) -> tuple[Mode, ...]:
     """The requested primary mode(s) from ``--mode`` (all primary modes if
     unset).
@@ -515,8 +336,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     errors: list[str] = []
     if cfg.schema is None:
         warnings.append(
-            "field spellings cannot be checked statically (no 'schema:' in the config); "
-            "a misspelled key will fail at the first batch"
+            "field spellings cannot be checked statically (the reader has no schema "
+            "artifact); a misspelled key will fail at the first batch"
         )
     if cfg.reader is not None:
         # default-on class-names <-> schema-attrs cross-check (set AND order);
@@ -686,22 +507,29 @@ def _print_onnx_static_caveat(cfg: GraphConfig, mode: Mode) -> None:
 # ---------------------------------------------------------------------------
 
 
+_PLOT_IMAGE_SUFFIXES = frozenset({".png", ".pdf", ""})
+
+
 def _cmd_plot(args: argparse.Namespace) -> int:
-    """``salt graph plot``: render the mode graph. Emits Graphviz DOT
-    (port-card layout) next to the requested output, then shells out to
-    ``dot`` (baked into the salt container) to rasterise a PNG + sibling PDF
-    — the authoritative graph image, no matplotlib path. A missing/failing
-    ``dot`` raises `GraphError` (via `_render_with_dot`).
+    """``salt graph plot``: render the mode graph. ``-o`` is a stem: ``x.dot`` writes the
+    Graphviz DOT only; ``x.png``/``x.pdf``/``x`` write ``x.dot`` and rasterise it to
+    ``x.png`` + ``x.pdf`` with ``dot`` (`render_image`, strict: a missing/failing ``dot``
+    raises `GraphError`); any other suffix is a `ConfigError`.
     """
+    out_path = Path(args.output)
+    if out_path.suffix != ".dot" and out_path.suffix not in _PLOT_IMAGE_SUFFIXES:
+        raise ConfigError(
+            "salt graph plot -o accepts .dot, .png, .pdf or no suffix "
+            f"(got {out_path.suffix!r}): the Graphviz render always writes <stem>.png + "
+            "<stem>.pdf next to <stem>.dot"
+        )
     cfg = load_config(args.config, args.set)
     mode = Mode[args.mode.upper()]
     _require_mode_ok(cfg, mode)
     plan = _compile(cfg, mode)
     _print_onnx_static_caveat(cfg, mode)
-    findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
-    pruned = sorted({finding.module for finding in findings if finding.key == "*"})
-    dot_text = dot_source(plan, cfg.modules, pruned, widths=_resolve_widths(cfg))
-    out_path = Path(args.output)
+    pruned = pruned_modules(cfg.modules, plan)
+    dot_text = graph_dot(plan, cfg.modules, pruned=pruned, widths=_resolve_widths(cfg))
     if out_path.parent != Path():
         out_path.parent.mkdir(parents=True, exist_ok=True)
     dot_path = out_path.with_suffix(".dot")
@@ -731,33 +559,11 @@ def _resolve_widths(cfg: GraphConfig) -> dict[str, int]:
 
 
 def _render_with_dot(dot_path: Path, out_path: Path) -> None:
-    """Rasterise the DOT sidecar to a PNG (``out_path``) and a sibling PDF via
-    the ``dot`` binary. Raises `GraphError` when ``dot`` is not on PATH, or a
-    ``dot`` invocation fails (stderr surfaced in the message).
+    """Strict `render_image` to ``<out_path stem>.{png,pdf}``, printing each written image
+    (the CLI report line; shared with ``salt merge-config --merged.plots``).
     """
-    dot_bin = shutil.which("dot")
-    if dot_bin is None:
-        raise GraphError(
-            "the Graphviz `dot` binary was not found on PATH — cannot render the "
-            f"graph image. The DOT source was written to {dot_path}; render it "
-            f"later, e.g. `dot -Tpng {dot_path} -o {out_path}`. On a native "
-            "install (uv/conda), install Graphviz separately as a system "
-            "package; the prebuilt salt containers already include it, so "
-            "hitting this there is unexpected. See "
-            "https://ftag-salt.docs.cern.ch/setup/#install-graphviz"
-        )
-    pdf_path = out_path.with_suffix(".pdf")
-    renders = (
-        ([dot_bin, "-Tpng", "-Gdpi=150", str(dot_path), "-o", str(out_path)], out_path),
-        ([dot_bin, "-Tpdf", str(dot_path), "-o", str(pdf_path)], pdf_path),
-    )
-    for cmd, target in renders:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise GraphError(
-                f"`dot` failed to render {target} (exit {result.returncode}): "
-                f"{result.stderr.strip() or '(no stderr)'}"
-            )
+    images = render_image(dot_path, out_path.with_suffix(""), strict=True)
+    for target in images or ():
         console(f"wrote {target.suffix.lstrip('.').upper()} to {target} (graphviz/dot)")
 
 
@@ -859,12 +665,6 @@ def _explain_absent(cfg: GraphConfig, plan: Plan, key: str, mode: Mode) -> int:
             f"  matches wildcard {pattern!r} of {name!r}, which is active only in mode(s) "
             f"{mode_names} — it is mode-gated out of {mode.name}"
         )
-    src_flat = flatten_spec(cfg.sources)
-    if key in src_flat and key not in plan.sources:
-        active = [m.name for m in PRIMARY_MODES if src_flat[key].active_in(m)]
-        lines.append(
-            f"  sources provide {key!r} in mode(s) {'/'.join(active)} — gated out of {mode.name}"
-        )
     if len(lines) > 1:
         console("\n".join(lines))
         return 0
@@ -904,17 +704,16 @@ def _add_config_arg(parser: argparse.ArgumentParser) -> None:
         "--config",
         required=True,
         action="append",
-        help="config YAML (salt trainer config or toy graph). Repeatable: trainer "
-        "configs deep-merge left-to-right (the salt fit/export stacking semantics); "
-        "toy graphs take exactly one",
+        help="salt trainer config YAML. Repeatable: configs deep-merge left-to-right "
+        "(the salt fit/export stacking semantics)",
     )
     parser.add_argument(
         "--set",
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help="dotted override forwarded to the trainer parser (repeatable; trainer configs "
-        "only) — supplies required init_args data-free, e.g. "
+        help="dotted override forwarded to the trainer parser (repeatable) — supplies "
+        "required init_args data-free, e.g. "
         "model.modules.norm.init_args.norm_dict=unused.yaml",
     )
 
@@ -953,7 +752,10 @@ def _build_parser() -> argparse.ArgumentParser:
         sp[name].set_defaults(func=func)
     sp["validate"].add_argument("--strict", action="store_true", help="promote warnings to errors")
     sp["plot"].add_argument(
-        "-o", "--output", required=True, help="output image path (.svg/.png/.dot)"
+        "-o",
+        "--output",
+        required=True,
+        help="output stem: x.dot writes DOT only; x.png, x.pdf or x writes x.dot + x.png + x.pdf",
     )
     sp["why"].add_argument("--key", required=True, help="dotted bundle key to explain")
 

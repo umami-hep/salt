@@ -160,9 +160,9 @@ Leaving any one of these pieces out raises a specific, named error:
 | the `outputs:` section, or a task missing from `RunTaskOutput.tasks` | TEST compilation fails; `ConfigError`: no module produces a `preds.*` key in mode TEST |
 | `tasks: []` as a placeholder | `ConfigError` at construction: `RunTaskOutput` needs a non-empty `tasks` list (full rule at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section)) |
 | `class_path: salt.model.SaltModule` under `model:` | the model is parsed in subclass mode (`salt/main.py:452`), so a bare `init_args` block is rejected |
-| a module whose output nothing consumes | `AllModesDeadError` in a trainer config; only a warning in a toy `modules:` config |
+| a module whose output nothing consumes | `AllModesDeadError` |
 
-`RunTaskOutput.tasks` must name at least one existing task instance. There is no empty or placeholder form for it, and a config with no task head cannot declare an `outputs:` section at all, because there is nothing for that section to name. Check a graph with no task head using the toy `modules:` format instead (below), not by writing an empty `outputs:` section. The full `RunTaskOutput` rule, including the merge-replaces-lists warning, is at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section).
+`RunTaskOutput.tasks` must name at least one existing task instance. There is no empty or placeholder form for it, and a config with no task head cannot declare an `outputs:` section at all, because there is nothing for that section to name. Check a graph with no task head with `salt graph validate --mode fit` instead (see [salt graph](cli.md#salt-graph)), not by writing an empty `outputs:` section. The full `RunTaskOutput` rule, including the merge-replaces-lists warning, is at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section).
 
 Which pieces matter depends on the mode. FIT and VAL only need the data half (a reader, `Features`, `Labels`) plus a `LossSum` producing `loss.total`, because those two modes anchor on that key. TEST and ONNX additionally need at least one task head and an `outputs:` section naming it, because those two modes anchor on a `preds.*` key instead, see [`salt graph`](cli.md#salt-graph) for the command that checks each mode on its own.
 
@@ -185,7 +185,7 @@ Each step either passes or names exactly the missing piece from the table above,
 
 ## The blocks of a config
 
-A salt config has up to six top-level blocks. `base.yaml` supplies defaults for most of them; a run config states only what it changes.
+A salt config has up to seven top-level blocks. `base.yaml` supplies defaults for most of them; a run config states only what it changes.
 
 ### `data:`
 
@@ -204,7 +204,7 @@ Configures `SaltDataModule`. `data.modules` is a dict of named `SaltDatasetModul
 | `prefetch_factor` | batches prefetched per worker; unset derives one (`2` for the map-style path, more for `iterable`, see [Dataloading performance](training.md#dataloading-performance)) |
 | `multiprocessing_context` | worker start method: `fork`, `spawn`, or `forkserver` |
 | `seed` | base augmentation seed for non-worker reads, default `42` |
-| `debug` | enable the boundary non-aliasing assertion |
+| `debug` | not settable here: linked from the top-level [`debug:`](#debug) key (data-side read tracking on every batch + the boundary non-aliasing assertion) |
 | `iterable` | stream a large corpus with `IterableSaltDataset` instead of the map-style dataset, default `false`; the streaming-specific keys below only matter when this is on |
 | `block_rows` | rows per reader call when `iterable`, default `16384` |
 | `interleave_block` | rows per turn of the per-shard round robin when `iterable`, default `1` |
@@ -261,11 +261,17 @@ A dict of named callbacks, deep-merged the same way as `data.modules` and `model
 | `progress` | `salt.callbacks.ProgressBar` | training progress bar |
 | `lr_monitor` | `lightning.pytorch.callbacks.LearningRateMonitor` | logs the learning rate; dropped automatically when no logger is attached (it hard-raises on a logger-less trainer), or delete it explicitly with `lr_monitor: null` |
 | `model_summary` | `lightning.pytorch.callbacks.ModelSummary` | prints the module tree at fit start |
-| `artifacts` | `salt.callbacks.GraphArtifacts` | writes `plan_<mode>.txt` and `graph_<stage>.{dot,svg}` into the trainer log dir at fit/test start |
+| `artifacts` | `salt.callbacks.GraphArtifacts` | writes `plan_<mode>.txt`, `resolved_io.yaml` and `graph_<stage>.{dot,png,pdf}` (+ `graph_<stage>_dataset.*`) at fit/test start — into the trainer log dir on fit, next to the checkpoint on test |
 
 ### `name:`
 
 A plain string naming the run, default `"salt"` when unset. It becomes the Comet experiment name through the `COMET_EXPERIMENT_NAME` environment variable (an already-set value wins).
+
+### `debug:`
+
+A boolean, default `false`. `true` guards **every** batch, model and data side: each module reads the bundle through a read-tracking view (an undeclared read raises `UndeclaredAccessError`, an in-place edit of a bundle tensor `MutationError`), every newly produced `data`/`loss` leaf is scanned for NaN/Inf (`NonFiniteError`, naming the module), and the dataset boundary asserts no leaf aliases a reader buffer. With `false` the model-side checks still run on the sanity-check batches and on the first FIT/VAL/TEST batch after each fit/validation/test start, and each dataloader worker's first batch is still read-tracked. It is slow; see [NaNs](training.md#nans).
+
+This is the only switch: it is linked to `model.init_args.debug` and `data.debug`, and setting either of those directly (in a config file or with `--model.init_args.debug` / `--data.debug`) is rejected by the parser. A saved run `config.yaml` carries only the top-level key.
 
 ## Deleting and overriding
 

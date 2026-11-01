@@ -59,7 +59,7 @@ from salt.main import main as salt_main
 from salt.outputs.sinks.onnx import make_session
 from salt.schema import dump_schema, load_schema, save_schema
 from salt.testing.datagen import compute_norm_dict, load_pipeline
-from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 
 RECIPES_DIR = Path(__file__).resolve().parents[3] / "testing" / "datagen" / "recipes"
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
@@ -537,28 +537,22 @@ def _recipe_context(recipe: str, tmp_path_factory) -> dict[str, Path]:
 
 
 def _build_default_dummy(tmp_path_factory) -> dict[str, Path]:
-    """The plain 3-class ``write_dummy_file`` fixture — rows 11-12."""
+    """The plain 3-class salt-v1 ``dummy_h5`` fixture (computed norm/class dicts) — rows 11-12."""
     out = tmp_path_factory.mktemp("dummy_default")
-    nd, cd = out / "norm_dict.yaml", out / "class_dict.yaml"
-    write_dummy_norm_dict(nd, cd)
-    h5 = out / "pp_output_train.h5"
-    write_dummy_file(h5, nd)
+    h5, nd, cd = dummy_h5(out)
     schema = out / "schema.yaml"
     save_schema(dump_schema(h5), schema)
     return {"h5": h5, "schema": schema, "norm": nd, "class_dict": cd}
 
 
 def _build_taus_dummy(tmp_path_factory) -> dict[str, Path]:
-    """The 4-class (incl. taujets) ``write_dummy_file`` fixture — the GN3_baseline family.
+    """The 4-class (incl. taujets) salt-v1 ``dummy_h5`` fixture — the GN3_baseline family.
 
-    The "taus" flavour: same 3-class norm/class dict as the default builder,
-    but the H5 itself carries a fourth ``taujets`` flavour_label value.
+    The "taus" flavour: the default file and dicts, but the jets ``flavour_label``
+    class-name attr carries a fourth ``taujets`` entry (values stay 0-2).
     """
     out = tmp_path_factory.mktemp("dummy_taus")
-    nd, cd = out / "norm_dict.yaml", out / "class_dict.yaml"
-    write_dummy_norm_dict(nd, cd)
-    h5 = out / "pp_output_train.h5"
-    write_dummy_file(h5, nd, inc_taus=True)
+    h5, nd, cd = dummy_h5(out, inc_taus=True)
     schema = out / "schema.yaml"
     save_schema(dump_schema(h5), schema)
     return {"h5": h5, "schema": schema, "norm": nd, "class_dict": cd}
@@ -581,20 +575,16 @@ def _build_regression_dummy(tmp_path_factory) -> dict[str, Path]:
     raw = _yaml.safe_load(nd.read_text())
     raw["jets"]["mass"] = {"mean": round(0.1 * 3, 6), "std": round(1.0 + 0.05 * 3, 6)}
     nd.write_text(_yaml.dump(raw, sort_keys=False))
-    h5 = out / "pp_output_train.h5"
-    write_dummy_file(h5, nd)
+    h5, _, _ = dummy_h5(out)
     schema = out / "schema.yaml"
     save_schema(dump_schema(h5), schema)
     return {"h5": h5, "schema": schema, "norm": nd, "class_dict": cd}
 
 
 def _build_gn3_dummy(tmp_path_factory) -> dict[str, Path]:
-    """The 6-class GN3 ``write_dummy_file`` fixture — rows 13-14."""
+    """The 6-class GN3 salt-v1 ``dummy_h5`` fixture (computed norm/class dicts) — rows 13-14."""
     out = tmp_path_factory.mktemp("dummy_gn3")
-    nd, cd = out / "norm_dict.yaml", out / "class_dict.yaml"
-    write_dummy_norm_dict(nd, cd, is_gn3=True)
-    h5 = out / "pp_output_train.h5"
-    write_dummy_file(h5, nd, is_gn3=True)
+    h5, nd, cd = dummy_h5(out, is_gn3=True)
     schema = out / "schema.yaml"
     save_schema(dump_schema(h5), schema)
     return {"h5": h5, "schema": schema, "norm": nd, "class_dict": cd}
@@ -799,6 +789,8 @@ def _trainer_args(root: Path) -> list[str]:
         "--trainer.limit_val_batches=2",
         "--trainer.num_sanity_val_steps=0",
         "--trainer.log_every_n_steps=1",
+        # every batch runs the module-contract + non-finite guard (2+2 batches per row)
+        "--debug=true",
         # base ships a default-ON CometLogger; off so no offline archive lands
         "--trainer.logger=false",
         # null-delete the base ProgressBar: the stock enable_progress_bar=false

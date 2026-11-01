@@ -239,7 +239,9 @@ class TensorSpec:
 
     `shape` mixes concrete ints and symbolic dim strings (``("B", "T:tracks", 23)``);
     None means unconstrained. `fields` carries last-dim column names so column
-    lookups resolve by name, never by YAML list position arithmetic.
+    lookups resolve by name, never by YAML list position arithmetic. `finite`
+    False opts a leaf whose contract includes NaN/Inf out of the debug
+    non-finite scan (`NonFiniteError`); it is not part of the plan hash.
     """
 
     shape: tuple[int | str, ...] | None = None
@@ -248,6 +250,7 @@ class TensorSpec:
     modes: Mode = Mode.ALL
     optional: bool = False
     fields: tuple[str, ...] | None = None
+    finite: bool = True
 
     def __post_init__(self) -> None:
         if self.shape is not None:
@@ -276,6 +279,8 @@ class TensorSpec:
             raise ValueError("modes must not be empty: a port active in no mode is dead")
         if not isinstance(self.optional, bool):
             raise TypeError(f"optional must be bool, got {type(self.optional).__name__}")
+        if not isinstance(self.finite, bool):
+            raise TypeError(f"finite must be bool, got {type(self.finite).__name__}")
         if self.fields is not None:
             if isinstance(self.fields, str):
                 raise TypeError(

@@ -1,0 +1,42 @@
+# NEGATIVE TEST FIXTURE: identical to toy_trainer.yaml except head.embed_key is
+# typo'd ('embed.y' instead of 'embed.x'). The config parses, then `salt graph
+# validate` must fail with a ConnectivityError naming the consumer ('head'), the
+# missing key, and the did-you-mean suggestion ('embed.x').
+name: toy_graph
+
+data:
+  batch_size: 8
+  num_workers: 0
+  modules:
+    reader:
+      class_path: salt.tests._fixtures.toys.ToyReader
+      init_args: {n_features: 8, n_classes: 3}
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          x: [f0, f1, f2, f3, f4, f5, f6, f7]
+    labels:
+      class_path: salt.data.Labels
+
+model:
+  class_path: salt.model.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-4, max: 1.0e-3, end: 1.0e-5, pct_start: 0.1}
+    modules:
+      embed:
+        class_path: salt.tests._fixtures.toys.ToyEmbed
+        init_args: {in_dim: 8, out_dim: 16}
+      head:
+        class_path: salt.tests._fixtures.toys.ToyHead
+        init_args: {in_dim: 16, n_classes: 3, embed_key: embed.y}  # <-- typo
+      loss:
+        class_path: salt.model.modules.LossSum
+
+outputs:
+  writer:
+    class_path: salt.tests._fixtures.toys.ToyWriter
+    init_args: {key: preds.x}
+
+trainer:
+  logger: false

@@ -18,7 +18,7 @@ EXEMPT: dict[str, str] = {
 
 # Whole subtrees exempt with a single justification.
 EXEMPT_TREES: dict[str, str] = {
-    "salt/testing": "test-support code (canned inputs + datagen); exercised by its consumers",
+    "salt/testing": "test-support code (datagen); exercised by its consumers",
 }
 
 # Sources whose dedicated coverage lives at a non-mirror position. Every listed
@@ -54,11 +54,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/unit/data/test_manifest.py",
     ),
     "salt/data/dtypes.py": ("salt/tests/unit/data/test_row_cuts_h5.py",),
-    # _PlanRunner is the shared base of both dataset classes
-    "salt/data/plan_runner.py": (
-        "salt/tests/unit/data/test_iterable_dataset.py",
-        "salt/tests/unit/data/test_manifest.py",
-    ),
     # map-style batch sampler engaged by every fit/test lifecycle run
     "salt/data/samplers.py": ("salt/tests/unit/graph/test_graph_cli.py",),
     "salt/data/sharding.py": ("salt/tests/unit/data/test_iterable_dataset.py",),

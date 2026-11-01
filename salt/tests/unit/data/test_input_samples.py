@@ -18,7 +18,7 @@ from salt.data import (
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode
 from salt.schema import dump_schema, save_schema
-from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]
@@ -40,10 +40,7 @@ N_JETS = 1000
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("input_samples")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_dummy_norm_dict(nd_path, cd_path)
-    h5_path = base / "pp_output_train.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, nd_path, _ = dummy_h5(base)
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}

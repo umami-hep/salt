@@ -285,19 +285,13 @@ class ClassificationTaskModule(_TaskModuleBase):
             and isinstance(self.loss, torch.nn.CrossEntropyLoss)
             and self.loss.reduction == "mean"
         )
-        if preds.ndim == 3:
-            # sequence head: put the class axis in place, [B, T, C] -> [B, C, T]
-            seq_preds = preds.permute(0, 2, 1)
-            if masked_mean:
-                loss = self._masked_ce_mean(seq_preds, labels)
-            else:
-                loss = self.loss(seq_preds, labels)
-        elif isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
+        if preds.ndim != 3 and isinstance(self.loss, torch.nn.BCEWithLogitsLoss):
             loss = self.loss(preds.squeeze(-1), labels.float())
-        elif masked_mean:
-            loss = self._masked_ce_mean(preds, labels)
-        else:
-            loss = self.loss(preds, labels)
+        else:  # a sequence head puts the class axis in place: [B, T, C] -> [B, C, T]
+            logits = preds.permute(0, 2, 1) if preds.ndim == 3 else preds
+            loss = (
+                self._masked_ce_mean(logits, labels) if masked_mean else self.loss(logits, labels)
+            )
         if sample_weights is None:
             return loss
         w_row = sample_weights * (labels != -1).to(loss.dtype)

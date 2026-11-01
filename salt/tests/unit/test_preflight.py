@@ -87,13 +87,12 @@ class TestSaltModulePreflights:
         # ConfigError from the preflight at fit start (NOT a bare
         # FileNotFoundError from inside materialise)
         from salt.schema import dump_schema, save_schema
+        from salt.tests._fixtures.dummy_h5 import dummy_h5
         from salt.tests.unit.model.test_saltmodule import build_datamodule, build_model, make_trainer
-        from salt.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)
-        h5 = tmp_path / "pp_output_train.h5"
-        write_dummy_file(h5, nd)
+        h5, _, _ = dummy_h5(tmp_path)
         schema = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5), schema)
         data = {"dir": tmp_path, "h5": h5, "nd": nd, "schema": schema}
@@ -116,12 +115,9 @@ class TestSaltModulePreflights:
         # dict must stay exit 0 (warning only), --strict promotes it
         from salt.cli import main as cli_main
         from salt.schema import dump_schema, save_schema
-        from salt.testing.inputs import write_dummy_file
+        from salt.tests._fixtures.dummy_h5 import dummy_h5
 
-        nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
-        write_parity_norm_dict(nd, cd)
-        h5 = tmp_path / "pp_output_train.h5"
-        write_dummy_file(h5, nd)
+        h5, _, _ = dummy_h5(tmp_path)
         schema = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5), schema)
         args = [

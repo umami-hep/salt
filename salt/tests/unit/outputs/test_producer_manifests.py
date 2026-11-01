@@ -9,63 +9,15 @@ import pytest
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode
 from salt.outputs import (
-    ClassProbs,
     Combination,
     MaskFormerObjects,
     MFLeadVertexDecorator,
 )
 from salt.outputs.sinks.sink import collect_manifest_fields
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
 
 pytestmark = pytest.mark.cpu_always
 
 _MF_TARGETS = ("pt", "Lxy", "deta", "dphi", "mass")
-
-
-@pytest.fixture
-def gn2v2_modules(tmp_path):
-    """The GN2v2 model modules (a global `jets_classification` + per-token `track_origin`)."""
-    write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
-    return build_gn2v2_modules(tmp_path / "norm_dict.yaml")
-
-
-def _bound(node, modules, name="producer"):
-    """Name a producer and bind the model modules it resolves names from."""
-    node.name = name
-    node.bind_model_modules(modules)
-    return node
-
-
-# -- TaskOutput and its pre-wired subclasses ---------------------------------
-
-
-def test_class_probs_names_come_from_the_task(gn2v2_modules):
-    """`ClassProbs` mints one global float32 field per class, named by the source task."""
-    node = _bound(ClassProbs(task="jets_classification", stream="jets"), gn2v2_modules)
-    fields = node.manifest_fields(Mode.ONNX)
-    assert [key for key, _ in fields] == [node.output_key] * 3
-    assert [f.resolved_onnx_name for _, f in fields] == ["pb", "pc", "pu"]
-    assert {f.onnx_dtype for _, f in fields} == {"float32"}
-    assert {f.axis for _, f in fields} == {"global"}
-
-
-@pytest.mark.parametrize("mode", [Mode.FIT, Mode.VAL, Mode.TEST])
-def test_task_output_is_onnx_only(gn2v2_modules, mode):
-    """The eval-H5 side rides the section's RunTaskOutput, so these declare ONNX only."""
-    node = _bound(ClassProbs(task="jets_classification", stream="jets"), gn2v2_modules)
-    assert node.manifest_fields(mode) == []
-
-
-def test_task_output_unbound_modules_is_a_named_error():
-    node = ClassProbs(task="jets_classification", stream="jets")
-    with pytest.raises(ConfigError, match="no model modules bound"):
-        node.manifest_fields(Mode.ONNX)
-
-
-def test_task_output_missing_task_names_the_candidates(gn2v2_modules):
-    node = _bound(ClassProbs(task="typo_task", stream="jets"), gn2v2_modules)
-    with pytest.raises(ConfigError, match="'typo_task' is not a model module"):
-        node.manifest_fields(Mode.ONNX)
 
 
 # -- Combination -------------------------------------------------------------

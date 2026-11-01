@@ -504,6 +504,8 @@ class SaltCLI(LightningCLI):
     top-level namespaces:
 
     - ``name:`` — run name, linked to ``model.init_args.name``.
+    - ``debug:`` — the one guard switch, linked to ``model.init_args.debug``
+      and ``data.debug`` (neither is settable on its own).
     - ``callbacks:`` — dict-keyed, deep-mergeable; assembled into
       ``trainer.callbacks`` ahead of the stock list entries (``None`` values
       are filtered = deleted).
@@ -567,7 +569,7 @@ class SaltCLI(LightningCLI):
         """
 
     def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
-        """Add the salt top-level namespaces and the run-name link."""
+        """Add the salt top-level namespaces and the run-name and debug links."""
         parser.add_argument(
             "--name",
             type=str,
@@ -671,7 +673,20 @@ class SaltCLI(LightningCLI):
                 help="accepted-and-ignored on the run-free parse surface so saved run "
                 "configs round-trip into the salt graph tooling",
             )
+        parser.add_argument(
+            "--debug",
+            type=bool,
+            default=False,
+            help="guard EVERY batch with the module-contract check (undeclared reads, in-place "
+            "mutation) and per-module non-finite localisation, model AND data side. Off: only "
+            "the sanity-check batches, the first FIT/VAL/TEST batch (re-armed on resume) and "
+            "each data worker's first batch are guarded. Slow.",
+        )
         parser.link_arguments("name", "model.init_args.name")
+        # ONE switch: the linked targets are not settable on their own, and
+        # jsonargparse strips them from the saved config.yaml (like `name`)
+        parser.link_arguments("debug", "model.init_args.debug")
+        parser.link_arguments("debug", "data.debug")
         # the top-level outputs: section is NOT a link_arguments compute
         # (subclass-mode model targets grab the whole namespace) — it is
         # composed onto the instantiated model in `instantiate_classes` below.
@@ -689,9 +704,7 @@ class SaltCLI(LightningCLI):
         the leak-free injection point: `self.config`/the saved ``config.yaml``
         never sees it.
         """
-        config = self.config[self.subcommand] if self.subcommand else self.config
-        if config.get("compile") and hasattr(model, "enable_compile"):
-            model.enable_compile()
+        self._maybe_compile(model)
         if self._resume_ckpt_path:
             kwargs["ckpt_path"] = self._resume_ckpt_path
         self.trainer.fit(model, **kwargs)
@@ -702,10 +715,14 @@ class SaltCLI(LightningCLI):
             raise ConfigError(
                 "salt validate needs --ckpt_path: validating fresh weights is meaningless"
             )
+        self._maybe_compile(model)
+        self.trainer.validate(model, **kwargs)
+
+    def _maybe_compile(self, model: Any) -> None:
+        """Record the ``--compile`` request on `model` (see `SaltModule.enable_compile`)."""
         config = self.config[self.subcommand] if self.subcommand else self.config
         if config.get("compile") and hasattr(model, "enable_compile"):
             model.enable_compile()
-        self.trainer.validate(model, **kwargs)
 
     def instantiate_trainer(self, **kwargs: Any) -> Trainer:
         """Assemble ``callbacks:`` dict values (YAML order, ``None`` filtered)
@@ -851,7 +868,7 @@ class SaltCLI(LightningCLI):
                 f"{len(persistence)} TEST persistence sinks are wired ({names}) — exactly one "
                 "may anchor the TEST boundary demand. Keep one, and make any additional sink "
                 "auxiliary by overriding `is_test_sink()` to return False (see "
-                "salt.outputs.JSONLOutputSink and docs/outputs.md)."
+                "docs/outputs.md)."
             )
         for sink in getattr(model, "_section_sinks", ()):
             auxiliary = isinstance(sink, RuntimeSink) and not is_test_persistence_sink(sink)

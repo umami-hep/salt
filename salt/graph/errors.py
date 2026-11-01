@@ -13,6 +13,7 @@ __all__ = [
     "KeyCollisionError",
     "KindError",
     "MutationError",
+    "NonFiniteError",
     "SchemaError",
     "ShapeError",
     "UndeclaredAccessError",
@@ -126,7 +127,21 @@ class MutationError(GraphError):
     Bundle keys are write-once, but key-level checks cannot see ``tensor.add_``
     style in-place edits that corrupt an upstream key for later consumers.
     Under ``run(debug=True)`` the executor snapshots ``torch.Tensor._version``
-    for every bundle leaf around each step and raises this error — naming the
-    module and the key — when a version counter bumps. Read-time mutation is
-    sanctioned only inside the reader, never in graph modules.
+    for every bundle leaf around each step (by value, for the declared reads
+    that are inference tensors, which carry no version counter) and raises
+    this error — naming the module and the key — when a leaf changed. Read-time
+    mutation is sanctioned only inside the reader, never in graph modules.
+    """
+
+
+class NonFiniteError(GraphError):
+    """A module produced NaN/Inf under debug execution.
+
+    Under ``run(debug=True)`` the executor scans, after each step, the leaves
+    the step newly produced whose spec is ``kind`` ``data``/``loss`` with
+    ``TensorSpec.finite`` set and whose value is a floating tensor. The
+    message names the mode, the module, the key, the NaN/+Inf/-Inf counts,
+    and whether the inputs the module read were already non-finite.
+    ``label``/``meta``/``pad_mask`` leaves are never scanned; a leaf whose
+    contract includes NaN opts out with ``finite=False``.
     """

@@ -6,7 +6,7 @@ import pytest
 
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode
-from salt.outputs import H5OutputSink, JSONLOutputSink, OnnxExportSink, OutputField
+from salt.outputs import H5OutputSink, OnnxExportSink, OutputField
 from salt.outputs.sinks.sink import collect_manifest_fields
 
 pytestmark = pytest.mark.cpu_always
@@ -80,7 +80,7 @@ def test_a_zero_match_pattern_names_the_pattern_and_the_keys():
 
 def test_an_empty_consumes_list_points_at_the_delete_syntax():
     """An empty list is not "take nothing" — the section deletes an entry with null."""
-    for cls in (OnnxExportSink, H5OutputSink, JSONLOutputSink):
+    for cls in (OnnxExportSink, H5OutputSink):
         with pytest.raises(ConfigError, match="empty list"):
             cls(consumes=[])
 

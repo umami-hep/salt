@@ -42,7 +42,7 @@ from salt.outputs import H5OutputSink, OnnxExportSink, PadMaskWriter, SinkContex
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.run_task_output import RunTaskOutput
 from salt.schema import dump_schema, save_schema
-from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import (  # noqa: PLC2701 - shared test fixtures
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -313,7 +313,6 @@ class TestInferenceCoreLoop:
         H5 columns (spot-checked against a direct adapter call), pads read 0.
         """
         torch.manual_seed(42)
-        nd = tmp_path / "nd.yaml"
         section = _section(tmp_path)
         modules = section["run_tasks"]._model_modules  # noqa: SLF001 - fixture reuse
         export_sink = OnnxExportSink()
@@ -338,8 +337,7 @@ class TestInferenceCoreLoop:
         feature_fields = {f"inputs.{s}": tuple(v) for s, v in variables.items()}
         adapter = OnnxAdapter(plan, resolved, feature_fields)
         # the dummy file + the inference (label-free) dataset demand
-        h5_path = tmp_path / "pp_output_test_core.h5"
-        write_dummy_file(h5_path, nd)
+        h5_path, _, _ = dummy_h5(tmp_path, name="pp_output_test_core.h5")
         schema = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5_path), schema)
         copy_leaves = section["inputs_copy"].copy_leaves(Mode.ONNX)
@@ -470,10 +468,7 @@ class TestUnlabelledDatasetPath:
     @pytest.fixture(scope="class")
     def stripped(self, tmp_path_factory) -> dict[str, Path]:
         base = tmp_path_factory.mktemp("inference_stripped")
-        nd = base / "norm_dict.yaml"
-        write_dummy_norm_dict(nd, base / "class_dict.yaml")
-        labelled = base / "labelled.h5"
-        write_dummy_file(labelled, nd)
+        labelled, _, _ = dummy_h5(base, name="labelled.h5")
         stripped = base / "stripped.h5"
         with h5py.File(labelled) as fin, h5py.File(stripped, "w") as fout:
             for name, ds in fin.items():
@@ -531,7 +526,7 @@ class TestNumTestRowCap:
     """
 
     # ftag's H5Writer hardcodes 100-row chunks (a file under 100 rows fails
-    # dataset creation) and write_dummy_file always writes 1000 jets, so both
+    # dataset creation) and the salt-v1 dummy_h5 file always holds 1000 jets, so both
     # constants must sit in [100, 1000].
     N = 128
     M = 256
@@ -543,8 +538,7 @@ class TestNumTestRowCap:
         base = tmp_path_factory.mktemp("rowcap_data")
         nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
         write_parity_norm_dict(nd_path, cd_path)
-        h5_path = base / "pp_output_test_rowcap.h5"
-        write_dummy_file(h5_path, nd_path)
+        h5_path, _, _ = dummy_h5(base, name="pp_output_test_rowcap.h5")
         schema_path = base / "schema.yaml"
         save_schema(dump_schema(h5_path), schema_path)
         return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}

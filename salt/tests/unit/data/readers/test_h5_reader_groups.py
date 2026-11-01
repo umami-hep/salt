@@ -11,8 +11,7 @@ import salt
 from salt.data import H5StructuredReader
 from salt.graph.errors import SchemaError
 from salt.schema import dump_schema
-from salt.testing.inputs import write_dummy_file
-from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 
 
 def _shipped_groups() -> dict:
@@ -33,10 +32,7 @@ class TestGN3EPCLV01ReaderGroups:
         """H5StructuredReader resolves the shipped 'global' group against a schema with no
         literal 'global' H5 group, via dataset: jets.
         """
-        nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
-        write_parity_norm_dict(nd, cd)
-        h5 = tmp_path / "pp_output_train.h5"
-        write_dummy_file(h5, nd)
+        h5, _, _ = dummy_h5(tmp_path)
         schema = dump_schema(h5)
         assert "global" not in schema.groups  # precondition: no literal 'global' H5 group
 
@@ -53,10 +49,7 @@ class TestGN3EPCLV01ReaderGroups:
         """Without dataset: jets, the reader hunts a literal 'global' H5 group — the N9 failure
         mode the config fix removes.
         """
-        nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
-        write_parity_norm_dict(nd, cd)
-        h5 = tmp_path / "pp_output_train.h5"
-        write_dummy_file(h5, nd)
+        h5, _, _ = dummy_h5(tmp_path)
         schema = dump_schema(h5)
 
         groups = _shipped_groups()

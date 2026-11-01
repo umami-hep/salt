@@ -272,11 +272,11 @@ subtree, or a descent through an existing leaf; it never returns `None`
 (`salt/graph/bundle.py:46-61`). Probe a require declared `optional=True`
 with `key in b`, which calls `split_key` first, so a malformed key raises
 `TypeError`/`ValueError` rather than reading as `False`
-(`salt/graph/bundle.py:91-96`, `salt/graph/spec.py:89-104`). Under
-`model.init_args.debug: true`, reading or probing a key you did not declare
-raises `UndeclaredAccessError`, and mutating a bundle leaf in place raises
-`MutationError` (`salt/graph/executor.py:323-333`, `:179-183`); the debug
-checks run only under that flag, not by default.
+(`salt/graph/bundle.py:91-96`, `salt/graph/spec.py:89-104`). On a guarded
+batch (the sanity-check batches, the first FIT/VAL/TEST batch, or every batch
+with the top-level `debug: true`), reading or probing a key you did not
+declare raises `UndeclaredAccessError`, and mutating a bundle leaf in place
+raises `MutationError` (`salt/graph/executor.py:323-333`, `:179-183`).
 
 A worked `optional=True` example, end to end: declare the key as optional in
 `declare_io`, probe it with `in` in `forward`, and branch on the result.
@@ -321,8 +321,7 @@ here because there is nothing to override: a model module that needs to be a
 sink is not a model module, it is an `outputs:` section writer.
 
 A configured module whose outputs reach no sink in any mode is not silently
-dropped: it raises `AllModesDeadError`. The full liveness rule, including
-the toy-config regime where the same situation is only a warning, is at
+dropped: it raises `AllModesDeadError`. The full liveness rule is at
 [Liveness: every module must reach a
 sink](index.md#liveness-every-module-must-reach-a-sink).
 

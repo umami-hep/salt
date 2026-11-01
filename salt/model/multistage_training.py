@@ -213,20 +213,6 @@ class TrainingController:
         self.current_stage_index = new_index
         stage = self.schedule.stages[new_index]
         self._apply_stage_freeze(stage)
-        self._freeze_accumulators(stage, global_step, epoch)
-        if self.schedule.has_sample_stages or self.schedule.has_early_stop:
-            self.stage_start_step = global_step
-            self.stage_start_epoch = epoch
-            self.pending_early_advance = False
-            self.boundary_records.append(
-                boundary_record(stage.name, new_index, global_step, epoch, reason)
-            )
-            self.early_stop_tracker = self._make_early_stop_tracker(stage)
-        if self.stage_listener is not None:
-            self.stage_listener(new_index)
-
-    def _freeze_accumulators(self, stage: StageConfig, global_step: int, epoch: int) -> None:
-        """Freeze every duck-typed ``freeze_accumulators`` module; `RuntimeError` if unfrozen."""
         for name, module in self.net.items():
             freeze = getattr(module, "freeze_accumulators", None)
             if not callable(freeze):
@@ -238,6 +224,16 @@ class TrainingController:
                     f"freeze_accumulators() at the boundary into stage {stage.name!r} (epoch "
                     f"{epoch}, global step {global_step}) — refusing to run on unfrozen statistics"
                 )
+        if self.schedule.has_sample_stages or self.schedule.has_early_stop:
+            self.stage_start_step = global_step
+            self.stage_start_epoch = epoch
+            self.pending_early_advance = False
+            self.boundary_records.append(
+                boundary_record(stage.name, new_index, global_step, epoch, reason)
+            )
+            self.early_stop_tracker = self._make_early_stop_tracker(stage)
+        if self.stage_listener is not None:
+            self.stage_listener(new_index)
 
     def resolve_step_targets(self, trainer: Any) -> None:
         """Resolve each sample stage's per-rank step target N once, broadcast from rank 0."""

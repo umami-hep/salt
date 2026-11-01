@@ -13,7 +13,7 @@ from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
 from salt.graph.spec import Mode
 from salt.schema import dump_schema, save_schema
-from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]
@@ -232,10 +232,7 @@ def test_declare_io_rewrites_carry_pad_max_shape():
 @pytest.fixture(scope="module")
 def h5_data(tmp_path_factory) -> dict[str, object]:
     base = tmp_path_factory.mktemp("cut_h5")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_dummy_norm_dict(nd_path, cd_path)
-    h5_path = base / "data.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base, name="data.h5")
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {"file": h5_path, "schema": schema_path}
@@ -249,11 +246,13 @@ def _h5_reader(data: dict[str, object]) -> H5StructuredReader:
 
 def test_dataset_plan_orders_sel_between_reader_and_downstream(h5_data):
     """`sel` runs after `reader` and before `features`/`labels`; shapes + byte parity hold."""
+    # dphi is uniform[0, 1) in the salt-v1 schema, so the cut keeps every valid
+    # track by construction and pad_max alone shapes the output
     ds = SaltDataset(
         modules={
             "reader": _h5_reader(h5_data),
             "sel": ConstituentSelection(
-                streams={"tracks": {"cuts": ["d0 < 3.5"], "pad_max": 10}}
+                streams={"tracks": {"cuts": ["dphi < 3.5"], "pad_max": 10}}
             ),
             "features": Features(variables={"jets": JET_VARS, "tracks": TRACK_VARS}),
             "labels": Labels(),
@@ -270,8 +269,8 @@ def test_dataset_plan_orders_sel_between_reader_and_downstream(h5_data):
     assert batch["masks"]["tracks"].shape == (128, 10)
 
     pre_cut = np.array(ds.reader.read(slice(0, 128), Mode.TEST)["raw.tracks"], copy=True)
-    assert np.all(pre_cut["d0"][pre_cut[VALID_FIELD]] < 3.5)  # trivial precondition of the cut
-    expected = _manual_select(pre_cut, [("d0", "<", 3.5)], 10, None)
+    assert np.all(pre_cut["dphi"][pre_cut[VALID_FIELD]] < 3.5)  # trivial precondition of the cut
+    expected = _manual_select(pre_cut, [("dphi", "<", 3.5)], 10, None)
     expected_inputs = s2u(expected[TRACK_VARS], dtype=np.float32)
     np.testing.assert_array_equal(np.asarray(batch["inputs"]["tracks"]), expected_inputs)
 

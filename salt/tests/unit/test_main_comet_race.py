@@ -18,9 +18,9 @@ from jsonargparse import _postponed_annotations as pa  # noqa: PLC2701 - the pat
 
 import salt.main
 from salt.schema import dump_schema, save_schema
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
-from salt.testing.inputs import write_dummy_file
 
 _RACE_MESSAGE = "changed size during iteration"
 _PATCH_RETRIES = 40  # salt.main._patch_jsonargparse_sys_modules_race retry budget
@@ -131,8 +131,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("salt_comet_race")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
-    h5_path = base / "pp_output_train.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base)
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {"h5": h5_path, "nd": nd_path, "schema": schema_path}

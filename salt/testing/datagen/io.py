@@ -1,21 +1,25 @@
 """Public IO + dict-derivation functions for the schema-driven generator:
-``write_h5``, ``compute_norm_dict``, ``compute_class_dict`` (stats from
-produced data, field roles and lengths from the schema).
+``write_h5``, ``compute_norm_dict``, ``compute_class_dict`` (stats from produced
+data, field roles and lengths from the schema) and the one-call ``write_dataset``.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
 import numpy as np
+import yaml
 
+from .engine import generate_data
 from .schema import (
     DistributionField,
     LabelField,
     Schema,
     as_schema,
+    load_schema,
 )
 
 # Deliberately standalone (not salt.utils.logging.get_logger): this package is kept
@@ -206,3 +210,57 @@ def compute_class_dict(
         if group_out:
             out[g.name] = group_out
     return out
+
+
+# --------------------------------------------------------------------------- #
+# write_dataset
+# --------------------------------------------------------------------------- #
+def write_dataset(
+    h5_path: str | Path,
+    schema: str | Path | dict | Schema,
+    *,
+    flags: dict[str, bool] | None = None,
+    norm_dict_path: str | Path | None = None,
+    class_dict_path: str | Path | None = None,
+    seed: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Generate a synthetic dataset from ``schema`` and write it to ``h5_path``.
+
+    Optionally also writes the norm and class dicts computed from the generated
+    arrays (``compute_norm_dict`` / ``compute_class_dict``) as YAML.
+
+    Parameters
+    ----------
+    h5_path : str | Path
+        Output HDF5 file.
+    schema : str | Path | dict | Schema
+        A schema YAML/JSON path (e.g. ``SALT_V1_SCHEMA``), a raw schema dict, or a
+        parsed ``Schema``.
+    flags : dict[str, bool] | None, optional
+        Build-time switches the schema resolves (``make_xbb``, ``is_gn3``,
+        ``inc_taus``, ``inc_params``), by default ``None`` (none set).
+    norm_dict_path : str | Path | None, optional
+        Where to write the per-feature mean/std YAML, by default ``None`` (not written).
+    class_dict_path : str | Path | None, optional
+        Where to write the per-label class-weight YAML, by default ``None`` (not written).
+    seed : int | None, optional
+        Overrides the schema's seed, by default ``None`` (the schema's own seed).
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        The written ``{group: structured array}`` mapping.
+    """
+    sch = load_schema(schema)
+    if seed is not None:
+        sch = replace(sch, seed=seed)
+    flags = dict(flags or {})
+    data = generate_data(sch, flags)
+    write_h5(data, h5_path, attrs={"_flags": flags}, schema=sch)
+    if norm_dict_path is not None:
+        norm_dict = compute_norm_dict(data, sch)
+        Path(norm_dict_path).write_text(yaml.safe_dump(norm_dict, sort_keys=False))
+    if class_dict_path is not None:
+        class_dict = compute_class_dict(data, sch, flags)
+        Path(class_dict_path).write_text(yaml.safe_dump(class_dict, sort_keys=False))
+    return data

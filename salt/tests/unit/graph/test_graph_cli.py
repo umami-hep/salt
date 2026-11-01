@@ -1,8 +1,5 @@
-"""``salt graph`` (validate/plan/execute/plot/why) against the toy fixture configs.
-
-Renamed from ``test_end_to_end.py``: this is not an end-to-end anything — it
-never trains a model or touches a shipped config — it is the graph kernel's
-own CLI surface, exercised against ``salt/tests/_fixtures/configs/toy*.yaml``.
+"""``salt graph`` (validate/plan/execute/plot/why) against the toy trainer fixture configs
+(``salt/tests/_fixtures/configs/toy_trainer*.yaml``) — the graph kernel's own CLI surface.
 """
 
 from pathlib import Path
@@ -12,16 +9,19 @@ import torch
 
 from salt.cli import load_config
 from salt.cli import main as cli_main
+from salt.data import MODEL_VISIBLE_NAMESPACES
+from salt.data.base import SaltDatasetModule
 from salt.graph.bundle import Bundle
 from salt.graph.errors import AllModesDeadError
 from salt.graph.executor import Executor
-from salt.graph.planner import SINKS, SOURCES, Edge, compile_plan, deadcode
-from salt.graph.spec import Mode
+from salt.graph.planner import SINKS, Edge, compile_plan, deadcode
+from salt.graph.spec import PRIMARY_MODES, Mode, unflatten_spec
+from salt.model.bind import resolve_bind_schema
 from salt.tests._fixtures.toys import ToyDead
 
 CONFIG_DIR = Path(__file__).parent.parent.parent / "_fixtures" / "configs"
-TOY_CFG = str(CONFIG_DIR / "toy.yaml")
-BROKEN_CFG = str(CONFIG_DIR / "toy_broken.yaml")
+TOY_CFG = str(CONFIG_DIR / "toy_trainer.yaml")
+BROKEN_CFG = str(CONFIG_DIR / "toy_trainer_broken.yaml")
 
 
 def _plan(cfg, mode):
@@ -30,6 +30,43 @@ def _plan(cfg, mode):
 
 def _deadcode(cfg, mode):
     return deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
+
+
+def _model_plan(cfg, mode):
+    """The model-side plan `SaltModule.compile_mode` builds: the model modules (+ the
+    folded sink) over the dataset boundary — the data steps' model-visible produces.
+    """
+    data_side = {name for name, m in cfg.modules.items() if isinstance(m, SaltDatasetModule)}
+    boundary = {
+        key: spec
+        for step in _plan(cfg, mode).steps
+        if step.name in data_side
+        for key, spec in step.produces.items()
+        if key.split(".", 1)[0] in MODEL_VISIBLE_NAMESPACES
+    }
+    model_side = {name: m for name, m in cfg.modules.items() if name not in data_side}
+    return compile_plan(model_side, mode, unflatten_spec(boundary), sinks=cfg.sinks)
+
+
+def _boundary_bundle(plan, n=5):
+    """A seeded bundle carrying every source leaf of `plan` (batch size `n`)."""
+    gen = torch.Generator().manual_seed(0)
+    nested: dict = {}
+    for key, spec in plan.sources.items():
+        if spec.kind == "pad_mask":
+            value = torch.zeros(n, dtype=torch.bool)
+        elif spec.kind == "label":
+            value = torch.randint(3, (n,), generator=gen)
+        elif spec.kind == "meta":
+            value = torch.tensor([0, n])
+        else:  # inputs.x: one column per declared field
+            value = torch.randn(n, len(spec.fields), generator=gen)
+        *parents, leaf = key.split(".")
+        node = nested
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[leaf] = value
+    return Bundle(nested)
 
 
 # validate
@@ -46,7 +83,7 @@ class TestValidate:
         captured = capsys.readouterr()
         for mode in ("FIT", "VAL", "TEST", "ONNX"):
             assert f"OK [mode={mode}]" in captured.out
-        # schema is configured, so the only warnings are the known fit/val dead preds
+        # the reader carries a schema artifact, so field spellings are checked
         assert "cannot be checked statically" not in captured.err
 
 
@@ -57,25 +94,28 @@ class TestPlans:
     def test_fit_plan_contains_loss_path(self):
         cfg = load_config(TOY_CFG)
         plan = _plan(cfg, Mode.FIT)
-        # deterministic topo order: Kahn, ties broken by config declaration
-        # order — toy.yaml declares source, embed, labels, head
-        assert plan.module_names == ("source", "embed", "labels", "head")
-        assert "losses.total" in plan.step("head").produces
-        assert "labels.x" in plan.step("labels").produces  # narrowed from labels.*
-        assert Edge("labels", "labels.x", "head") in plan.edges
-        assert Edge("head", "losses.total", SINKS) in plan.edges
-        assert Edge(SOURCES, "raw.x", "labels") in plan.edges
-        assert plan.sources.keys() == {"raw.x"}
+        # deterministic topo order: Kahn, ties broken by declaration order —
+        # data.modules (reader, features, labels) then model.modules
+        assert plan.module_names == ("reader", "features", "labels", "embed", "head", "loss")
+        assert "losses.x" in plan.step("head").produces
+        assert "labels.x.y" in plan.step("labels").produces  # narrowed from labels.**
+        assert Edge("labels", "labels.x.y", "head") in plan.edges
+        assert Edge("head", "losses.x", "loss") in plan.edges
+        assert Edge("loss", "loss.total", SINKS) in plan.edges
+        assert Edge("reader", "raw.x", "labels") in plan.edges
+        assert not plan.sources  # the reader is the source node
 
     @pytest.mark.parametrize("mode", [Mode.TEST, Mode.ONNX])
     def test_test_and_onnx_plans_have_no_loss_path(self, mode):
         cfg = load_config(TOY_CFG)
         plan = _plan(cfg, mode)
-        assert "labels" not in plan.module_names
+        # Labels narrows to nothing: kept as a no-op terminal consumer of raw.x
+        assert not plan.step("labels").produces
         produced = {key for step in plan.steps for key in step.produces}
-        assert not any(key.startswith(("losses.", "labels.")) for key in produced)
+        assert not any(key.startswith(("losses.", "loss.", "labels.")) for key in produced)
         assert "preds.x" in produced
-        assert Edge("head", "preds.x", SINKS) in plan.edges
+        # TEST anchors on the writer sink, ONNX on every preds.* key
+        assert Edge("head", "preds.x", "writer" if mode is Mode.TEST else SINKS) in plan.edges
 
     def test_writer_is_test_only(self):
         cfg = load_config(TOY_CFG)
@@ -89,47 +129,49 @@ class TestPlans:
         assert _plan(first, Mode.FIT).plan_hash != _plan(first, Mode.TEST).plan_hash
 
 
-# execution — debug read tracking on
+# execution of the model-side plan — debug read tracking on
 
 
 class TestExecution:
     def test_fit_plan_executes_loss_path(self):
         cfg = load_config(TOY_CFG)
-        plan = _plan(cfg, Mode.FIT)
-        bundle = Bundle({"raw": {"x": torch.randn(5, 8)}})
+        plan = _model_plan(cfg, Mode.FIT)
+        bundle = _boundary_bundle(plan)
         out = Executor(plan).run(bundle, debug=True)
         assert out is bundle  # run returns the same bundle
         assert set(out.keys()) == {
-            "raw.x",
             "inputs.x",
             "masks.x",
-            "labels.x",
+            "labels.x.y",
             "embed.x",
             "preds.x",
-            "losses.total",
+            "losses.x",
+            "loss.total",
         }
         preds = out.get("preds.x")
         assert preds.shape == (5, 3)
         assert torch.allclose(preds.sum(dim=-1), torch.ones(5))  # softmax rows
-        loss = out.get("losses.total")
+        loss = out.get("loss.total")
         assert loss.shape == ()
         assert torch.isfinite(loss)
         assert loss.item() >= 0.0  # cross entropy
 
     def test_test_plan_executes_and_writer_collects(self):
         cfg = load_config(TOY_CFG)
-        plan = _plan(cfg, Mode.TEST)
-        out = Executor(plan).run(Bundle({"raw": {"x": torch.randn(5, 8)}}), debug=True)
-        assert "losses.total" not in out
-        assert "labels.x" not in out
+        plan = _model_plan(cfg, Mode.TEST)
+        out = Executor(plan).run(_boundary_bundle(plan), debug=True)
+        assert "losses.x" not in out
+        assert "labels.x.y" not in out
         writer = cfg.modules["writer"]
+        assert writer.collected == []  # a sink node: the executor never calls it
+        writer.consume(out)  # the driver hands it each executed bundle
         assert len(writer.collected) == 1
         assert writer.collected[0].shape == (5, 3)
 
     def test_missing_source_raises_keyerror(self):
         cfg = load_config(TOY_CFG)
-        plan = _plan(cfg, Mode.FIT)
-        with pytest.raises(KeyError, match=r"raw\.x"):
+        plan = _model_plan(cfg, Mode.FIT)
+        with pytest.raises(KeyError, match=r"inputs\.x"):
             Executor(plan).run(Bundle())
 
 
@@ -181,30 +223,36 @@ class TestPlot:
         dot = (tmp_path / "graph.dot").read_text()
         assert "digraph salt_core_fit {" in dot
         # port-card nodes: each consumed/produced key is a card row with its shape
-        assert '"source" [label=<' in dot
+        assert '"reader" [label=<' in dot
         assert '"head" [label=<' in dot
         assert "raw.x" in dot
-        assert "(B, 8)" in dot
         assert "inputs.x" in dot
         assert "embed.x" in dot
         assert "(B, 16)" in dot
         assert "masks.x" in dot
         assert "(B)" in dot
-        assert "labels.x" in dot
-        assert "losses.total" in dot
+        assert "labels.x.y" in dot
+        assert "losses.x" in dot
+        assert "loss.total" in dot
         # deduped node -> node edges (no per-key edge labels)
-        assert '"<sources>" -> "source";' in dot
-        assert '"<sources>" -> "labels";' in dot
-        assert '"source" -> "embed";' in dot
+        assert '"reader" -> "features";' in dot
+        assert '"reader" -> "labels";' in dot
+        assert '"features" -> "embed";' in dot
         assert '"embed" -> "head";' in dot
         assert '"labels" -> "head";' in dot
-        assert '"head" -> "<sinks>";' in dot
+        assert '"head" -> "loss";' in dot
+        assert '"loss" -> "<sinks>";' in dot
         # kind-coloured rows: labels orange, losses red, preds blue
         assert "#b5651d" in dot  # label kind
         assert "#c0392b" in dot  # loss kind
         assert "#1f6fb2" in dot  # preds kind
         # writer is TEST-gated: absent from the FIT graph entirely
         assert '"writer"' not in dot
+        # inputs.x carries Features' fields but no shape (rows render the producer's
+        # spec), so its 8-wide feature contract is checked on the static resolution
+        cfg = load_config(TOY_CFG)
+        widths = resolve_bind_schema([_plan(cfg, mode) for mode in PRIMARY_MODES]).widths
+        assert widths["inputs.x"] == 8
 
 
 # why (the debugging story)
@@ -212,7 +260,7 @@ class TestPlot:
 
 class TestWhy:
     def test_fit_only_loss_explained_in_test_mode(self, capsys):
-        rc = cli_main(["graph", "why", "-c", TOY_CFG, "--mode", "test", "--key", "losses.total"])
+        rc = cli_main(["graph", "why", "-c", TOY_CFG, "--mode", "test", "--key", "losses.x"])
         assert rc == 0
         out = capsys.readouterr().out
         assert "not in the plan" in out
@@ -220,18 +268,18 @@ class TestWhy:
         assert "FIT/VAL" in out
 
     def test_fit_only_wildcard_label_explained_in_test_mode(self, capsys):
-        rc = cli_main(["graph", "why", "-c", TOY_CFG, "--mode", "test", "--key", "labels.x"])
+        rc = cli_main(["graph", "why", "-c", TOY_CFG, "--mode", "test", "--key", "labels.x.y"])
         assert rc == 0
         out = capsys.readouterr().out
         assert "not in the plan" in out
-        assert "matches wildcard 'labels.*' of 'labels'" in out
-        assert "mode-gated" in out
+        assert "matches wildcard 'labels.**' of 'labels'" in out
+        assert "nothing demands" in out  # Labels is demand-gated, active in every mode
 
     def test_narrowed_label_present_in_fit_mode(self, capsys):
-        rc = cli_main(["graph", "why", "-c", TOY_CFG, "--mode", "fit", "--key", "labels.x"])
+        rc = cli_main(["graph", "why", "-c", TOY_CFG, "--mode", "fit", "--key", "labels.x.y"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "producer:  labels (ToyWildcardLabels)" in out
+        assert "producer:  labels (Labels)" in out
         assert "kind=label" in out
         assert "head" in out  # consumer
 

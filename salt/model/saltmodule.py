@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any
+from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
+from typing import Any, NoReturn
 
 import lightning
+import torch
 from lightning.pytorch.trainer.states import TrainerFn
 from torch import nn
 from torch.optim import Optimizer
@@ -19,7 +22,13 @@ from torch.optim import Optimizer
 from salt.data.datamodule import SaltDataModule
 from salt.data.dataset import SaltDataset
 from salt.graph.bundle import Bundle
-from salt.graph.errors import ConfigError
+from salt.graph.errors import (
+    ConfigError,
+    GraphError,
+    MutationError,
+    NonFiniteError,
+    UndeclaredAccessError,
+)
 from salt.graph.executor import Executor
 from salt.graph.planner import SOURCES, Plan, compile_plan
 from salt.graph.spec import Mode, SinkModule, TensorSpec, flatten_spec, unflatten_spec
@@ -64,6 +73,9 @@ CKPT_KEY = "salt_core"
 _LOG = get_logger(__name__)
 
 _LRS_REQUIRED = ("initial", "max", "end", "pct_start")
+_GUARDED_MODES = (Mode.FIT, Mode.VAL, Mode.TEST)
+# the errors only a guarded run raises (any other GraphError is raised alike unguarded)
+_GUARD_ERRORS = (UndeclaredAccessError, MutationError, NonFiniteError)
 _OPTIMIZERS = ("AdamW", "lion", "lion-pytorch", "HybridMuonAdamW")
 
 
@@ -139,8 +151,13 @@ class SaltModule(lightning.LightningModule):
     name : str, optional
         Model name (run naming/metadata), by default ``"salt"``.
     debug : bool, optional
-        Run the executor in debug mode (read tracking + in-place mutation
-        detection), by default False. Slow — tests only.
+        Guard EVERY batch with the executor's debug checks (undeclared reads,
+        in-place mutation, per-module `NonFiniteError` localisation), by
+        default False. Off, the sanity-check batches and the first FIT/VAL/TEST
+        batch after each fit/validation/test start are still guarded. Linked
+        from the top-level ``debug:`` key (not directly settable through the
+        CLI). ``salt export``/``salt inference`` run their own executor and are
+        never guarded. Slow.
 
     Raises
     ------
@@ -255,6 +272,11 @@ class SaltModule(lightning.LightningModule):
         self._init_loaded_modules: set[str] = set()
         self._compile_kwargs: dict[str, Any] | None = None
         self._compiled = False
+        # automatic module-contract guard: the next batch of each mode runs the
+        # executor's debug checks (re-armed by `_arm_guard`); the pre-forward RNG
+        # state lets a non-finite loss be replayed
+        self._guard_pending: dict[Mode, bool] = dict.fromkeys(_GUARDED_MODES, True)
+        self._pre_forward_rng: dict[str, Any] | None = None
         # CLI path passes outputs=None and composes via instantiate_classes
         if outputs:
             self.compose_output_section({key: w for key, w in outputs.items() if w is not None})
@@ -468,12 +490,8 @@ class SaltModule(lightning.LightningModule):
         for mode, plan in plans.items():
             self._executors[mode] = Executor(plan)
         skipped = sorted(set(self.plans[Mode.FIT].module_names) - set(plans[Mode.FIT].module_names))
-        _LOG.info(
-            "training_schedule stage %r (%d): skipping %s",
-            stage.name,
-            index,
-            f"[{', '.join(skipped)}]" if skipped else "nothing",
-        )
+        what = f"[{', '.join(skipped)}]" if skipped else "nothing"
+        _LOG.info("training_schedule stage %r (%d): skipping %s", stage.name, index, what)
 
     def _check_frozen_losses(self) -> None:
         """Per stage and active loss, log the frozen share of its upstream params; error at 100%."""
@@ -579,6 +597,12 @@ class SaltModule(lightning.LightningModule):
         """
         if self._compile_kwargs is None or self._compiled:
             return
+        if not hasattr(torch.compiler, "set_stance"):
+            raise ConfigError(
+                "--compile needs torch.compiler.set_stance (torch >= 2.6) so the automatic "
+                "module-contract guard can run the guarded batches eagerly; this torch lacks "
+                "it — run without --compile"
+            )
         for module in self._graph_modules.values():
             if isinstance(module, nn.Module):
                 module.compile(**self._compile_kwargs)
@@ -676,7 +700,9 @@ class SaltModule(lightning.LightningModule):
         PARTIAL, so materialise is SELECTIVE: exactly the config modules that
         received no checkpoint weights are materialised (a newly-added
         `Normaliser` reads its norm_dict; retained modules keep loaded stats).
+        Re-arms the first-batch guard first, so a resumed fit is guarded too.
         """
+        self._arm_guard()
         if self.materialised or self.loaded_from_checkpoint:
             return
         targets = self._graph_modules
@@ -717,6 +743,13 @@ class SaltModule(lightning.LightningModule):
         """Run the compiled plan for `mode` over a batch: adopts a dict batch into
         a `Bundle` (or reuses one), and returns the bundle with the mode's
         produces merged in. Raises `ConfigError` if `mode`'s plan wasn't compiled.
+
+        The run is GUARDED (executor ``debug=True``: undeclared reads, in-place
+        mutation, `NonFiniteError`) when `debug` is set, on every sanity-check
+        batch, and on the mode's first batch since the last fit/validation/test
+        start (or construction). A guard failure (`UndeclaredAccessError`,
+        `MutationError`, `NonFiniteError`) goes through `_localise_non_finite`:
+        the batch is saved and a `RuntimeError` raised.
         """
         executor = self._executors.get(mode)
         if executor is None:
@@ -725,36 +758,155 @@ class SaltModule(lightning.LightningModule):
                 "compile_mode() first"
             )
         bundle = batch if isinstance(batch, Bundle) else Bundle(dict(batch))
-        return executor.run(bundle, debug=self.debug)
+        guard = (
+            self.debug
+            or self._guard_pending.pop(mode, False)
+            or bool(getattr(getattr(self, "_trainer", None), "sanity_checking", False))
+        )
+        if not guard:
+            return executor.run(bundle)
+        try:
+            with self._guard_context():
+                return executor.run(bundle, debug=True)
+        except _GUARD_ERRORS as err:
+            self._localise_non_finite(batch, mode, err)
+            raise  # unreachable: the handler always raises
+
+    def on_validation_start(self) -> None:
+        """Re-arm the first-batch guard (see `forward`)."""
+        self._arm_guard()
+
+    def on_test_start(self) -> None:
+        """Re-arm the first-batch guard (see `forward`)."""
+        self._arm_guard()
+
+    def _arm_guard(self) -> None:
+        """Guard the next FIT, VAL and TEST batch."""
+        self._guard_pending = dict.fromkeys(_GUARDED_MODES, True)
+
+    def _guard_context(self) -> AbstractContextManager[Any]:
+        """Run a guarded batch eagerly under ``--compile``: the read-tracking view never
+        reaches dynamo, so the compiled code is neither invalidated nor recompiled.
+        """
+        return torch.compiler.set_stance("force_eager") if self._compiled else nullcontext()
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> dict[str, Any]:
         """One FIT step: run the plan, log losses, return ``{"loss": total,
-        "bundle": Bundle}``; raises `RuntimeError` on a NaN total loss.
+        "bundle": Bundle}``; a non-finite total goes through `_localise_non_finite`.
         """
         del batch_idx
+        self._snapshot_rng()
         bundle = self(batch, Mode.FIT)
         total = bundle.get("loss.total")
-        if total.isnan():
-            raise RuntimeError(
-                "Loss is NaN - check dataset for NaNs or infs. "
-                "See 'docs/training.md - NaNs' for more info."
-            )
+        if not torch.isfinite(total):
+            self._localise_non_finite(batch, Mode.FIT, f"loss.total = {total.item()}")
         self._log_losses(bundle, stage="train")
         return {"loss": total, "bundle": bundle}
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> dict[str, Any]:
         """One VAL step — mirrors `training_step` with the VAL plan."""
         del batch_idx
+        self._snapshot_rng()
         bundle = self(batch, Mode.VAL)
+        total = bundle.get("loss.total")
+        if not torch.isfinite(total):
+            self._localise_non_finite(batch, Mode.VAL, f"loss.total = {total.item()}")
         self._log_losses(bundle, stage="val")
-        return {"loss": bundle.get("loss.total"), "bundle": bundle}
+        return {"loss": total, "bundle": bundle}
 
     def test_step(self, batch: dict[str, Any], batch_idx: int) -> Bundle:
         """One TEST step: runs the TEST plan, returning the executed bundle
         (``preds.*`` + ``meta.rows`` for writers).
         """
         del batch_idx
+        self._snapshot_rng()
         return self(batch, Mode.TEST)
+
+    # -- non-finite / contract failure handling ------------------------------------
+
+    def _snapshot_rng(self) -> None:
+        """Record the pre-forward RNG state (CPU, plus CUDA once initialised) for a replay."""
+        cuda = None
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            cuda = torch.cuda.get_rng_state_all()
+        self._pre_forward_rng = {"cpu": torch.get_rng_state(), "cuda": cuda}
+
+    def _localise_non_finite(
+        self, batch: Mapping[str, Any] | Bundle, mode: Mode, reason: str | GraphError
+    ) -> NoReturn:
+        """The ONE failure handler: save the batch, then raise `RuntimeError`.
+
+        `reason` is a `GraphError` from a guarded run (re-raised with the save
+        note) or a non-finite ``loss.total`` description. A non-finite loss is
+        replayed once with ``debug=True`` under ``no_grad``, from the
+        pre-forward RNG state, inside the trainer precision plugin's
+        ``forward_context`` and with the module training flags as they are, so
+        `NonFiniteError` names the first module that produced NaN/Inf; a finite
+        replay reports that the failure was not reproduced, and any state the
+        replay could not restore is listed. A failed save or replay never masks
+        the original failure. No ``torch.distributed`` collective runs here: a
+        rank-local failure must not hang its peers, which abort through the
+        process group's error handling once this rank raises.
+        """
+        saved = self._save_failing_batch(batch, mode)
+        guard_error = reason if isinstance(reason, GraphError) else None
+        if guard_error is not None:  # already localised by the guarded run itself
+            raise RuntimeError(f"{guard_error}; {saved}") from guard_error
+        missing: list[str] = []
+        rng = self._pre_forward_rng
+        if rng is None:
+            missing.append("no pre-forward RNG snapshot")
+        else:
+            torch.set_rng_state(rng["cpu"])
+            if rng["cuda"] is not None:
+                torch.cuda.set_rng_state_all(rng["cuda"])
+        plugin = getattr(getattr(self, "_trainer", None), "precision_plugin", None)
+        if plugin is None:
+            missing.append("no trainer precision context")
+        precision = nullcontext() if plugin is None else plugin.forward_context()
+        unreproduced = f"; state not reproduced: {', '.join(missing)}" if missing else ""
+        replay = batch.data if isinstance(batch, Bundle) else batch
+        try:
+            with torch.no_grad(), self._guard_context(), precision:
+                self._executors[mode].run(Bundle(dict(replay)), debug=True)
+        except NonFiniteError as err:
+            raise RuntimeError(f"{err}{unreproduced}; {saved}") from err
+        except Exception as err:
+            raise RuntimeError(
+                f"[mode={mode.name}] {reason}; the diagnostic re-run raised "
+                f"{type(err).__name__}: {err}{unreproduced}; {saved}"
+            ) from err
+        raise RuntimeError(
+            f"[mode={mode.name}] loss.total is non-finite but a diagnostic forward re-run was "
+            "finite; the failure was not reproduced and its origin is unresolved. Stochastic "
+            "execution, mutable state, precision context, or earlier optimizer updates may "
+            f"contribute ({reason}{unreproduced}); {saved}"
+        )
+
+    def _save_failing_batch(self, batch: Mapping[str, Any] | Bundle, mode: Mode) -> str:
+        """``torch.save`` the batch (+ RNG state, step, mode) as
+        ``non_finite_batch_<mode>_step<N>_rank<R>.pt`` under the trainer's
+        ``default_root_dir`` (the run dir; ``log_dir`` is avoided because it
+        broadcasts) or the cwd; returns the message tail — the path, or the save
+        failure.
+        """
+        trainer = getattr(self, "_trainer", None)
+        step = int(getattr(trainer, "global_step", 0) or 0)
+        rank = int(getattr(trainer, "global_rank", 0) or 0)
+        root = Path(getattr(trainer, "default_root_dir", None) or Path.cwd())
+        path = root / f"non_finite_batch_{mode.name.lower()}_step{step}_rank{rank}.pt"
+        payload = {
+            "batch": batch.data if isinstance(batch, Bundle) else dict(batch),
+            "rng": self._pre_forward_rng,
+            "global_step": step,
+            "mode": mode.name,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(payload, path)
+        except Exception as err:  # noqa: BLE001 - a save failure must not mask the real one
+            return f"saving the batch to {path} failed ({type(err).__name__}: {err})"
+        return f"batch saved to {path}"
 
     def _log_losses(self, bundle: Bundle, stage: str) -> None:
         """Log ``{stage}/loss`` and ``{stage}/{task}_loss``.
@@ -850,8 +1002,7 @@ class SaltModule(lightning.LightningModule):
 
         self.loaded_from_checkpoint = True
         trainer = getattr(self, "_trainer", None)  # None on a bare instance (no __init__ ran)
-        fn = getattr(getattr(trainer, "state", None), "fn", None)
-        if fn == TrainerFn.VALIDATING:
+        if getattr(getattr(trainer, "state", None), "fn", None) == TrainerFn.VALIDATING:
             self._restore_fit_progress_for_validate(checkpoint)
         payload = checkpoint.get(CKPT_KEY)
         if payload is None:

@@ -1,4 +1,4 @@
-# NO_FIXTURE: no soft-muon global stream in write_dummy_file.
+# NO_FIXTURE: no soft-muon global stream in the salt-v1 datagen schema.
 config: GN2/GN2emu.yaml
 fit: false
 xfail:

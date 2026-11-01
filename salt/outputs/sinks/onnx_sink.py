@@ -155,7 +155,7 @@ class OnnxExportSink(Node):
                 "OnnxExportSink no longer accepts an explicit `outputs:` OnnxExportLeaf list — "
                 "the ONNX tuple is collected from the producers' own manifests. A module that "
                 "mints outputs.* leaves names them by implementing manifest_fields(mode) "
-                "(RunTaskOutput does it for the section's tasks; ClassProbs / "
+                "(RunTaskOutput does it for the section's tasks; "
                 "Combination / MaskFormerObjects do it for the model graph). Use `consumes:` "
                 "(fnmatch patterns over the leaf key) to narrow what this sink takes."
             )
@@ -268,7 +268,7 @@ class OnnxExportSink(Node):
                 "Mode.ONNX field. Sources searched: "
                 f"{self._manifest_source_names()}. Wire a RunTaskOutput whose `modes:` include "
                 "'export' in the outputs: section, or a conversion producer "
-                "(ClassProbs / Combination / MaskFormerObjects) in model.modules."
+                "(MaskFormerObjects / Combination) in model.modules."
             )
         self._validate_leaves(leaves)
         self._leaves = tuple(leaves)

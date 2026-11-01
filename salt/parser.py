@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
+import yaml
 from lightning.pytorch.cli import LightningArgumentParser
 
 from salt.graph.errors import ConfigError
@@ -78,6 +80,68 @@ def _expand_config_includes(args: list[Any]) -> list[Any]:
     return out
 
 
+_DIRECT_MODEL_DEBUG = (
+    "model.init_args.debug is not directly settable: set the top-level `debug:` key "
+    "(--debug=true), which is linked to model.init_args.debug and data.debug"
+)
+
+
+def _model_sets_debug(model: Any) -> bool:
+    """True when a ``model:`` mapping sets ``debug`` itself or under ``init_args``."""
+    if not isinstance(model, dict):
+        return False
+    init_args = model.get("init_args")
+    return "debug" in model or (isinstance(init_args, dict) and "debug" in init_args)
+
+
+def _load_yaml_value(value: Any, *, allow_file: bool) -> Any:
+    """`yaml.safe_load` a CLI value (or the file it names); None when unparsable."""
+    if not isinstance(value, str):
+        return None
+    try:
+        is_file = allow_file and Path(value).is_file()
+    except (OSError, ValueError):
+        is_file = False
+    try:
+        return yaml.safe_load(Path(value).read_text() if is_file else value)
+    except (OSError, yaml.YAMLError):
+        return None
+
+
+def _reject_direct_model_debug(args: list[Any]) -> None:
+    """Raise `ConfigError` when `args` set ``model.init_args.debug`` directly.
+
+    The subclass-mode ``model.init_args.*`` keys are dynamic, so jsonargparse
+    accepts a direct value and the parse-time ``debug`` link then silently
+    overwrites it — a second, ignored knob. It has to be rejected on the raw
+    args, before parsing: CLI flags, ``--model``/``--model.init_args`` JSON
+    blocks, and ``--config``/``-c`` files or inline YAML.
+    """
+    i = 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        if not isinstance(arg, str):
+            continue
+        key, eq, raw = arg.partition("=")
+        value: str | None = raw
+        if not eq and key in {"--model", "--model.init_args", "--config", "-c"}:
+            value = args[i] if i < len(args) else None
+        if key in {"--model.init_args.debug", "--model.debug"}:
+            raise ConfigError(_DIRECT_MODEL_DEBUG)
+        if key == "--model":
+            hit = _model_sets_debug(_load_yaml_value(value, allow_file=False))
+        elif key == "--model.init_args":
+            block = _load_yaml_value(value, allow_file=False)
+            hit = isinstance(block, dict) and "debug" in block
+        elif key in {"--config", "-c"}:
+            cfg = _load_yaml_value(value, allow_file=True)
+            hit = isinstance(cfg, dict) and _model_sets_debug(cfg.get("model"))
+        else:
+            hit = False
+        if hit:
+            raise ConfigError(_DIRECT_MODEL_DEBUG)
+
+
 class DeepMergeParser(LightningArgumentParser):
     """`LightningArgumentParser` with cross-config-file dict-merge semantics.
 
@@ -135,6 +199,7 @@ class DeepMergeParser(LightningArgumentParser):
         schedule_overrides: list[tuple[str, Any]] = []
         if isinstance(args, Sequence) and not isinstance(args, str):
             args = _expand_config_includes(list(args))
+            _reject_direct_model_debug(args)
             args, schedule_overrides = _extract_schedule_cli_overrides(list(args))
             normalised: list[Any] = []
             for arg in args:

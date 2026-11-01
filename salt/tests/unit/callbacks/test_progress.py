@@ -18,13 +18,12 @@ class TestProgressBar:
         # base.yaml ships checkpoint (Checkpoint) + progress (ProgressBar); the
         # CLI assembles both into trainer.callbacks (run=False, no fit)
         from salt.schema import dump_schema, save_schema
+        from salt.tests._fixtures.dummy_h5 import dummy_h5
         from salt.tests.unit.test_main import make_cli
-        from salt.testing.inputs import write_dummy_file
 
         nd, cd = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
         write_parity_norm_dict(nd, cd)
-        h5 = tmp_path / "pp_output_train.h5"
-        write_dummy_file(h5, nd)
+        h5, _, _ = dummy_h5(tmp_path)
         schema = tmp_path / "schema.yaml"
         save_schema(dump_schema(h5), schema)
         cli = make_cli({"dir": tmp_path, "h5": h5, "nd": nd, "schema": schema})

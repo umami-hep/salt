@@ -22,10 +22,20 @@ from salt.outputs.sinks.onnx.reduces import get_maskformer_outputs
 from salt.utils.mask_utils import indices_from_mask
 
 
-def _specs(dtypes: Mapping[str, str], modes: Mode) -> NestedSpec:
-    """``{key: dtype}`` -> the nested mode-gated spec (a ``bool`` leaf is the pad mask)."""
+def _specs(
+    dtypes: Mapping[str, str], modes: Mode, non_finite: frozenset[str] = frozenset()
+) -> NestedSpec:
+    """``{key: dtype}`` -> the nested mode-gated spec (a ``bool`` leaf is the pad mask);
+    `non_finite` keys are NaN by contract (``finite=False``).
+    """
     return unflatten_spec({
-        k: TensorSpec(shape=None, dtype=d, kind="pad_mask" if d == "bool" else "data", modes=modes)
+        k: TensorSpec(
+            shape=None,
+            dtype=d,
+            kind="pad_mask" if d == "bool" else "data",
+            modes=modes,
+            finite=k not in non_finite,
+        )
         for k, d in dtypes.items()
     })
 
@@ -233,7 +243,10 @@ class MaskFormerObjects(SaltModelModule):
             produces = {self.leading_key: "float32", self.index_key: "int8", **vertices}
         else:
             return IO(requires={}, produces={})
-        return IO(requires=_specs(requires, gate), produces=_specs(produces, gate))
+        # null objects' regression is NaN (`get_maskformer_outputs`), hence the
+        # vertex regression and the ONNX leading-object leaves are finite=False
+        nan = frozenset((self.vertices_regression_key, self.leading_key))
+        return IO(requires=_specs(requires, gate), produces=_specs(produces, gate, nan))
 
     def derived_widths(self, widths: Mapping[str, int]) -> dict[str, int]:
         """Width-resolve the leaves: index collapses to 1, leading + vertex regression
@@ -433,8 +446,9 @@ class MFLeadVertexDecorator(SaltModelModule):
                 shape=None, dtype="float32", kind="data", modes=gated
             ),
         }
+        # finite=False: NaN where no vertex qualifies is the declared semantic (nan_ok)
         produces = {
-            key: TensorSpec(shape=None, dtype="float32", kind="data", modes=gated)
+            key: TensorSpec(shape=None, dtype="float32", kind="data", modes=gated, finite=False)
             for key in self.output_keys
         }
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))

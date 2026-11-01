@@ -26,6 +26,7 @@ from salt.graph.spec import Mode
 from salt.model.bind import ResolvedSchema
 from salt.model.modules.norm import MaskedInputNormaliser, Normaliser
 from salt.model.modules.tasks import ClassificationTaskModule
+from salt.tests.unit.callbacks.conftest import make_trainer
 
 FIELDS = {"inputs.jets": ("pt", "eta"), "inputs.tracks": ("d0", "z0")}
 SCHEMA = ResolvedSchema(widths={"inputs.jets": 2, "inputs.tracks": 2}, fields=FIELDS)
@@ -76,11 +77,6 @@ def stub_pl_module(norm, schema=SCHEMA) -> SimpleNamespace:
     mods = {"norm": norm, "other": SimpleNamespace(), "task": task("jets"), "wrong": task("tracks")}
     mods["mapped"] = task("jets", label_map={0: 0, 1: 1, 2: 2})
     return SimpleNamespace(_graph_modules=mods, schema=schema)
-
-
-def make_trainer(**overrides) -> SimpleNamespace:
-    base = {"logger": None, "current_epoch": 0, "global_step": 30, "is_global_zero": True}
-    return SimpleNamespace(**{**base, "sanity_checking": False, **overrides})
 
 
 def run_epoch(cb, pl_module, bundles, **trainer_kw) -> Plotter:

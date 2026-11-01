@@ -3,7 +3,7 @@
 # dips, regression, nan_regression, regression_gaussian, regression_multi_target,
 # regression_weighted, flow, no_global_inputs, param_concat, param_featurewise.
 #
-# Streams emitted (matching salt/utils/inputs.py write_dummy_file groups):
+# Streams emitted (the salt-v1-schema.yaml group set, minus truth_hadrons/parameters):
 #   jets, tracks, tracks_dr, tracks_ghost (GN3 input_map remaps tracks->tracks_ghost),
 #   flows AND flow (GN3 uses 'flows', flow.yaml uses 'flow'), electrons.
 # The jets group carries the union of plain-jet / global-block (softMuon_*) /
@@ -23,8 +23,8 @@ modules:
       max_items: 40
       min_valid: 1
       fields: track_features.yaml
-  # tracks_dr / tracks_ghost: identical-schema duplicate groups the dummy writer
-  # emits (inputs.py:676-677) and the GN3 input_map remaps `tracks`->`tracks_ghost`.
+  # tracks_dr / tracks_ghost: identical-schema duplicate groups (salt-v1-schema.yaml
+  # aliases) -- the GN3 input_map remaps `tracks`->`tracks_ghost`.
   - class_path: salt.testing.datagen.modules.Tracks
     init_args:
       name: tracks_dr
@@ -42,8 +42,8 @@ modules:
       name: flows
       max_items: 40
       fields: flow_features.yaml
-  # 'flow' (singular): flow.yaml declares group 'flow'; the dummy writer
-  # duplicates flows->flow (inputs.py:681). Both names must be present.
+  # 'flow' (singular): flow.yaml declares group 'flow'; salt-v1-schema.yaml
+  # aliases flows->flow. Both names must be present.
   - class_path: salt.testing.datagen.modules.Flows
     init_args:
       name: flow

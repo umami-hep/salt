@@ -64,20 +64,21 @@ SMALL: dict[str, Any] = {
 # The input surface the salt fixture generators actually write.
 #
 # The shipped config names the two track significances the way the ATLAS
-# open-data sample does (`lifetimeSigned*`); `write_dummy_file` derives its track
-# block from the parity norm dict, i.e. from `TRACK_VARIABLES`, which uses the
-# v1 GN2 names (`IP3D_signed_*`). A config demanding a field the fixture file
-# does not carry fails at schema resolution, so the derived config declares the
-# variables the fixture provides — this list, not the shipped one, is what the
-# suites' width assertions (19 track features) are anchored to.
+# open-data sample does (`lifetimeSigned*`). The salt-v1 datagen file
+# (`_fixtures/dummy_h5.py`) carries both those and the v1 GN2 names
+# (`IP3D_signed_*`), but the parity norm dict the suites normalise with
+# (`write_parity_norm_dict`) only has stats for `TRACK_VARIABLES`, the v1 names,
+# and a Normaliser variable missing from the norm dict fails the preflight. So
+# the derived config declares the variables the parity norm dict provides —
+# this list, not the shipped one, is what the suites' width assertions (19
+# track features) are anchored to.
 #
-# The shipped config's `inputs_copy` writer now lists the SHIPPED feature names
-# (`pt_btagJes`/`eta_btagJes` + the full open-data track list) — names this
-# fixture's dummy file does not carry. `derive()` deep-merges arbitrary
-# top-level keys (lists REPLACE, not merge), so this patch overrides
-# `outputs.inputs_copy.init_args.variables` with fixture-present names too,
-# keeping `test_input_copies_precede_task_columns` meaningful (a copied column
-# must actually exist ahead of the task columns, not just be declared).
+# The shipped config's `inputs_copy` writer lists the SHIPPED feature names
+# (`pt_btagJes`/`eta_btagJes` + the full open-data track list). `derive()`
+# deep-merges arbitrary top-level keys (lists REPLACE, not merge), so this patch
+# overrides `outputs.inputs_copy.init_args.variables` with derived-input names
+# too, keeping `test_input_copies_precede_task_columns` meaningful (a copied
+# column must actually exist ahead of the task columns, not just be declared).
 FIXTURE_VARIABLES: dict[str, Any] = {
     "data": {
         "modules": {

@@ -63,6 +63,11 @@ class RegressionTaskModule(_TaskModuleBase):
     flag — it runs over the label bundle before the task forward.
     """
 
+    finite_outputs = False
+    """`RunTaskOutput` marks this head's ``outputs.*`` field leaves ``finite=False``: the
+    de-scaled columns are NaN at padded positions and the TEST target columns are raw
+    labels (NaN by design). The raw ``preds.*`` leaf stays scanned."""
+
     def __init__(
         self,
         stream: str,

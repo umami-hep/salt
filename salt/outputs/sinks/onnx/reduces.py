@@ -69,6 +69,7 @@ def get_maskformer_outputs(objects: Mapping[str, Tensor]) -> tuple[Tensor, Tenso
     expanded_null = null_preds.unsqueeze(-1).expand(-1, -1, masks.size(-1))
     masks = masks & ~expanded_null
     null_reg = null_preds.unsqueeze(-1).expand_as(regression)
+    # NaN by contract: `MaskFormerObjects` declares the leaves fed from this finite=False
     regression = torch.where(null_reg, torch.full_like(regression, torch.nan), regression)
 
     # leading object = highest regression[0] (e.g. pT); Athena's argsort mishandles
