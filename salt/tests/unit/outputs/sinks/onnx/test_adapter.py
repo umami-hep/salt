@@ -31,10 +31,10 @@ from salt.outputs.sinks.onnx import (
 )
 from salt.outputs.sinks.onnx.config import default_athena_name
 from salt.outputs import (
-    ClassProbs,
     OnnxExportLeaf,
     OnnxExportSink,
     OutputField,
+    RunTaskOutput,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -86,7 +86,9 @@ def gn2_folded_modules(tmp_path):
     """The GN2 module dict + the folded conversion nodes + OnnxExportSink."""
     modules = build_gn2v2_modules(tmp_path / "norm_dict.yaml")
     modules.update({
-        "jet_probs": _named(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
+        "jet_probs": _named(
+            RunTaskOutput(tasks=["jets_classification"], modes=["export"]), "jet_probs"
+        ),
         "onnx_export": _named(OnnxExportSink(), "onnx_export"),
     })
     bind_producers(modules)
@@ -470,7 +472,7 @@ class TestExportModeProtocol:
     def _compiled(self, tmp_path, *, materialise: bool):
         modules = build_flash_gn2_modules(tmp_path)
         modules["jet_probs"] = _named(
-            ClassProbs(task="jets_classification", stream="jets"), "jet_probs"
+            RunTaskOutput(tasks=["jets_classification"], modes=["export"]), "jet_probs"
         )
         modules["onnx_export"] = _named(OnnxExportSink(), "onnx_export")
         bind_producers(modules)

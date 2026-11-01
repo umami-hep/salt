@@ -6,6 +6,7 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from itertools import pairwise
 from typing import Any, Literal
 
@@ -32,11 +33,11 @@ _SPARSE = "KinematicWeight %r: %d of %d cells hold fewer than %d jets (%.3f of a
 _FROZEN = "KinematicWeight %r: q_f frozen at global step %d (epoch %d) from %d jets: %s%s"
 
 
-def _check(*rules: tuple[bool, str]) -> None:
-    """Raise a `ConfigError` for the first violated ``(bad, message)`` rule, in order."""
+def _check(prefix: str, *rules: tuple[bool, str]) -> None:
+    """Raise a `ConfigError` ``"<prefix>: <message>"`` for the first violated rule, in order."""
     for bad, msg in rules:
         if bad:
-            raise ConfigError(f"KinematicWeight: {msg}")
+            raise ConfigError(f"{prefix}: {msg}")
 
 
 def _all_reduce(t: Tensor) -> None:
@@ -259,12 +260,13 @@ class KinematicWeight(SaltModelModule):
         chain_exponents: Sequence[float] | None = None,
     ) -> None:
         super().__init__()
+        check = partial(_check, "KinematicWeight")
         acc = "the accumulate form (q_f: null + n_classes)"
         xor = (
             "give exactly one of q_f (a configured target marginal) or n_classes (accumulate "
             "q_f from stage-1 train batches), got "
         )
-        _check(
+        check(
             (mode not in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
             (target not in _TARGETS, f"target must be one of {_TARGETS}, got {target!r}"),
             (not 0 < p_floor < 1, f"p_floor must satisfy 0 < p_floor < 1, got {p_floor}"),
@@ -296,7 +298,7 @@ class KinematicWeight(SaltModelModule):
         )
         if q_f is not None:
             q = [float(x) for x in q_f]
-            _check(
+            check(
                 (len(q) < 2, f"q_f must have at least 2 entries, got {len(q)}"),
                 (any(x <= 0 for x in q), f"q_f entries must all be > 0, got {q}"),
                 (abs(sum(q) - 1.0) > 1e-3, f"q_f must sum to 1 (within 1e-3), got {sum(q)}"),

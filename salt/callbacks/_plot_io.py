@@ -1,4 +1,4 @@
-"""Shared Comet/disk/warn-once figure I/O for the plotter callbacks."""
+"""Shared figure I/O (Comet/disk/warn-once) and `fit_val_demand` rejections for the plotters."""
 
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ import numpy as np
 from lightning import Trainer
 from lightning.pytorch.loggers.comet import CometLogger
 
+from salt.graph.errors import ConfigError
 from salt.utils.logging import get_logger
 
-CLASS_COLOURS = tuple(f"C{i}" for i in range(10))  # tab10, shared by both plotter callbacks
+CLASS_COLOURS = tuple(f"C{i}" for i in range(10))  # tab10, shared by the plotter callbacks
 
 
 def _safe(fn: Any) -> Any:
@@ -28,6 +29,17 @@ def _json_safe(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_json_safe(v) for v in obj]
     return None if isinstance(obj, float) and not np.isfinite(obj) else obj
+
+
+def _require_graph_dict(model_modules: Any, prefix: str) -> None:
+    """`ConfigError` unless `fit_val_demand` got the LightningModule's graph-module dict."""
+    if not isinstance(model_modules, dict):
+        raise ConfigError(f"{prefix} needs a LightningModule with a graph-module dict")
+
+
+def _candidates_error(prefix: str, msg: str, found: list[str]) -> ConfigError:
+    """A `fit_val_demand` rejection naming the configured modules that would have fit."""
+    return ConfigError(f"{prefix}: {msg}. Configured candidates: {found or '<none>'}")
 
 
 def log_figures(

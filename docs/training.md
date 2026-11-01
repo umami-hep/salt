@@ -266,6 +266,11 @@ keeps every module instance, plan step and `state_dict` key unchanged, so a
 checkpoint written under `--compile` loads into an uncompiled model with no
 repair step.
 
+The batches the [module-contract guard](#nans) checks run eagerly under
+`torch.compiler.set_stance("force_eager")`, so they neither reach nor
+recompile the compiled code; `--compile` therefore needs torch 2.6 or later and
+fails at setup on an older torch.
+
 !!! warning "Measure before you enable it: compilation is not free, and the answer depends on the model"
 
     On a GN2-sized model `--compile` was **slower than eager on every
@@ -495,9 +500,100 @@ GPU.
 
 ### NaNs
 
-Salt automatically checks that your normalisation parameters are finite (see
-`salt.model.modules.Normaliser`). You may still encounter `nan` values in
-your outputs and losses. Here are some mitigation strategies you can try:
+Salt stops a run at the first NaN or Inf it can attribute to a module, and
+tells you which module it was. Two mechanisms do this.
+
+**The module-contract guard.** On a *guarded* batch the executor runs in
+debug mode: every module reads the bundle through a read-tracking view, and
+after each step the leaves that step just produced are scanned for NaN/Inf.
+Guarded batches are:
+
+- the sanity-check batches Lightning runs before training
+  (`trainer.num_sanity_val_steps`, 2 by default);
+- the first FIT, VAL and TEST batch after every fit, validation or test
+  start — so a resumed fit, and a run with the sanity check turned off, are
+  still guarded;
+- on the data side, the first batch of every dataloader worker process
+  (persistent workers stay unguarded after their first batch).
+
+The same guard also enforces the module contract: a module that reads a key
+it did not declare raises `UndeclaredAccessError`, and one that edits a bundle
+tensor in place raises `MutationError` (see
+[the module reference](modules/index.md)). Because the guard runs
+automatically, these can stop a normal run at start-up, which is the point.
+
+Set the top-level `debug: true` (`--debug=true` on the command line) to guard
+**every** batch, model and data side. It is slow; use it to chase a NaN that
+appears mid-training. It is one switch: `model.init_args.debug` and
+`data.debug` are linked from it and cannot be set on their own.
+
+A non-finite leaf on a guarded batch raises `NonFiniteError`:
+
+```
+[mode=FIT] module 'encoder' produced non-finite values in 'embed.tracks' (NaN 12, +Inf 0, -Inf 0 of 40960); inputs it read were all finite
+```
+
+It names the mode, the first module whose output went non-finite, the leaf,
+the NaN/+Inf/-Inf counts out of the leaf's element count, and the inputs.
+`all finite` means the module itself produced the NaN. `already non-finite:
+[...]` lists the keys it read that were already bad, so look upstream of them
+(a non-finite label read by a loss lands here). Only `data` and `loss` leaves
+holding floating-point values are scanned; `label`, `meta` and `pad_mask`
+leaves never are, since NaN is a legitimate label value.
+
+**The every-step loss check.** `training_step` and `validation_step` check
+that `loss.total` is finite on every batch, guarded or not. When it is not,
+salt replays that batch once with the guard on, under `torch.no_grad()`, from
+the RNG state saved just before the failing forward and inside the same
+precision context, so the `NonFiniteError` above names the module. If the
+replay comes out finite, the error says so: the failure was not reproduced
+(stochastic execution, mutable module state, the precision context or earlier
+optimizer updates can all contribute) and the batch is saved for you to
+investigate. Either way training stops. `test_step` has no loss; it is
+covered by its first-batch guard and the output sinks' own NaN checks.
+
+Every such failure saves the batch it happened on as
+`non_finite_batch_<mode>_step<N>_rank<R>.pt` in the run directory
+(`trainer.default_root_dir`), and the error message ends with the path. Load it
+with
+
+```python
+import torch
+
+saved = torch.load("non_finite_batch_fit_step1234_rank0.pt", map_location="cpu", weights_only=False)
+saved["batch"]  # the model-visible batch: {"inputs": ..., "masks": ..., "labels": ...}
+saved["rng"], saved["global_step"], saved["mode"]
+```
+
+A save failure (full disk, read-only directory) is appended to the error
+message and never hides the original error.
+
+**Leaves that are NaN by design** opt out of the scan with
+`TensorSpec(..., finite=False)` in their module's `declare_io`. Three shipped
+producers do: the regression head's de-scaled TEST outputs (NaN at padded
+positions; its target columns are the raw labels), the `MFLeadVertexDecorator`
+outputs (NaN where no vertex qualifies), and the MaskFormer null-object
+regression leaves (`MaskFormerObjects`' vertex regression and leading-object
+outputs). `InputCopyWriter` outputs are verbatim label copies and are marked the
+same way. The raw `preds.*` of every head are always scanned.
+
+Some limits:
+
+- `salt export` and `salt inference` are never guarded: they run their own
+  executor, and a read-tracking view cannot be traced. The same module classes
+  are guarded on the first TEST batch of `salt test`.
+- Under `--compile`, guarded batches run eagerly
+  (`torch.compiler.set_stance("force_eager")`): the compiled code is not
+  invalidated or recompiled, and the guard still runs. A torch without
+  `set_stance` (older than 2.6) makes `--compile` fail at setup rather than
+  skip the guard.
+- With several GPUs, the failing rank raises without any collective call, so it
+  cannot hang its peers; they abort through the process group's error
+  handling. The saved file name carries the rank.
+
+`Features` already refuses non-finite inputs at load time (see
+`non_finite_to_num` and `ignore_finite_checks`), and `Normaliser` checks that
+your normalisation parameters are finite. If a run still produces NaNs, try:
 
 - Make sure you have pulled the latest changes from `main`.
 - Make doubly sure that your inputs are finite, even after applying
@@ -515,6 +611,8 @@ your outputs and losses. Here are some mitigation strategies you can try:
   for more info.
 - Apply [gradient clipping](https://lightning.ai/docs/pytorch/stable/advanced/training_tricks.html#gradient-clipping)
   to negate the effects of exploding gradients.
-- [Auto detect gradient anomalies](https://lightning.ai/docs/pytorch/stable/debug/debugging_intermediate.html#detect-autograd-anomalies).
+- [Auto detect gradient anomalies](https://lightning.ai/docs/pytorch/stable/debug/debugging_intermediate.html#detect-autograd-anomalies):
+  the guard localises NaNs in the forward pass only, so a NaN that first
+  appears in the gradients needs this.
 - If you are running on multiple GPUs, try running on a single GPU with
   `--trainer.devices=1`.

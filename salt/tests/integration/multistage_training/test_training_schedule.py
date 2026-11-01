@@ -118,7 +118,7 @@ from salt.model.saltmodule import CKPT_KEY, SaltModule
 from salt.optim import HybridMuonAdamW
 from salt.schedule import TrainingSchedule, boundary_record
 from salt.schema import dump_schema, save_schema
-from salt.testing.inputs import write_dummy_file
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
     TRACK_VARIABLES,
@@ -146,8 +146,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("schedule")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
-    h5_path = base / "pp_output_train.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base)
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}

@@ -161,8 +161,8 @@ def is_test_persistence_sink(sink: Any) -> bool:
     static graph tooling (`salt.cli`) use, so a config resolves the same sink
     either way. True for a primary sink like `H5OutputSink`; False for an
     ONNX-only sink (`OnnxExportSink`, empty TEST requires) and for an
-    auxiliary sink that opts out (`JSONLOutputSink`). A duck-typed object
-    without ``is_test_sink`` counts as one.
+    auxiliary sink that overrides `is_test_sink()` to return False. A
+    duck-typed object without ``is_test_sink`` counts as one.
     """
     is_test_sink = getattr(sink, "is_test_sink", None)
     return True if not callable(is_test_sink) else bool(is_test_sink())
@@ -226,8 +226,7 @@ class Node:
       implementation answers True whenever ``declare_io(Mode.TEST).requires``
       is non-empty, which is right for a primary sink and for an ONNX-only
       node (empty TEST requires -> False). An AUXILIARY sink that rides
-      alongside the primary H5 sink must override it to return False — see
-      `JSONLOutputSink`.
+      alongside the primary H5 sink must override it to return False.
 
     Attributes
     ----------
@@ -446,8 +445,8 @@ class RuntimeSink(Node):
     """A terminal node that also consumes batches: the lifecycle lives here.
 
     Adds the four driver-called methods to `Node`. `H5OutputSink` writes the
-    eval H5, and `JSONLOutputSink` (in ``salt/outputs/sinks/jsonl_sink.py``) is the
-    worked example of a third format. Subclass this to add a format of your
+    eval H5; an auxiliary sink that overrides `is_test_sink()` to return False
+    can write a second format beside it. Subclass this to add a format of your
     own; see ``docs/outputs.md``.
 
     The lifecycle is driver-independent — the Lightning test loop reaches it

@@ -1,24 +1,35 @@
-"""Tests for `salt.graph.render`: plan table, DOT source, and the CLI dot render."""
+"""Tests for `salt.graph.render`: plan table, DOT source, pruned set, and the dot render."""
 
 from __future__ import annotations
 
+import logging
 import shutil
+from pathlib import Path
 
 import pytest
 
 from salt.cli import load_config
 from salt.cli import main as cli_main
-from salt.graph.planner import compile_plan
+from salt.graph.errors import GraphError
+from salt.graph.planner import compile_plan, deadcode
 from salt.graph.spec import IO, PRIMARY_MODES, Mode, TensorSpec, unflatten_spec
 from salt.model.bind import resolve_bind_schema
-from salt.graph.render import _shape_str, dot_source, plan_table  # noqa: PLC2701
-from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels
+from salt.graph.render import (  # noqa: PLC2701
+    _shape_str,
+    dot_source,
+    plan_table,
+    pruned_modules,
+    render_image,
+)
+from salt.tests._fixtures.toys import ToyEmbed, ToyHead, ToySource, ToyWildcardLabels, ToyWriter
 from salt.tests._fixtures.gn2v2_test_config import small_config
 
 # the in-repo test-scale GN2v2 config (16-dim, no machine paths) — the static
 # width resolution needs no data file, only a placeholder norm_dict
 _DUMMY_CFG = str(small_config())
 _NORM_PLACEHOLDER = ["model.modules.norm.init_args.norm_dict=unused.yaml"]
+# the toy trainer config: its TEST-only writer sink is mode-gated out of FIT
+_TOY_TRAINER_CFG = str(Path(__file__).parents[2] / "_fixtures" / "configs" / "toy_trainer.yaml")
 
 
 @pytest.fixture(scope="module")
@@ -35,8 +46,8 @@ def plan():
         modules,
         Mode.FIT,
         sources=unflatten_spec({"raw.x": TensorSpec(shape=("B", 8), dtype="float32")}),
-        schema=("labels.x",),
-        sinks=["losses.total"],
+        schema=("labels.x.y",),
+        sinks=["losses.x"],
     )
 
 
@@ -52,7 +63,7 @@ class TestPlanTable:
     def test_narrowed_wildcards_section(self, plan):
         text = plan_table(plan)
         assert "narrowed wildcards [mode=FIT]:" in text
-        assert "labels: labels.x" in text
+        assert "labels: labels.x.y" in text
 
 
 class TestDotSource:
@@ -67,7 +78,7 @@ class TestDotSource:
         assert "<I>out</I>" in dot
         assert "embed.x" in dot
         assert "(B, 16)" in dot
-        assert "losses.total" in dot
+        assert "losses.x" in dot
         # deduped node -> node edges (no per-key edge labels)
         assert '"<sources>" -> "source";' in dot
         assert '"embed" -> "head";' in dot
@@ -276,3 +287,85 @@ class TestPlotCliStaticWidths:
         text = out.read_text()
         assert "(B, T:tracks, 19)" in text   # concrete feature dim, B/T symbolic
         assert "F:norm" not in text          # the symbolic feature dim is gone
+
+
+def _compiled(cfg, mode):
+    return compile_plan(
+        cfg.modules, mode, cfg.sources, schema=cfg.schema,
+        sinks=cfg.sinks, sink_origins=cfg.sink_origins.get(mode),
+    )
+
+
+class TestPrunedModules:
+    """`pruned_modules` (plan + modules only) == `deadcode`'s ``key == "*"`` modules."""
+
+    @pytest.mark.parametrize(
+        ("config", "overrides", "mode"),
+        [
+            (_DUMMY_CFG, _NORM_PLACEHOLDER, Mode.FIT),
+            (_DUMMY_CFG, _NORM_PLACEHOLDER, Mode.TEST),
+            (_TOY_TRAINER_CFG, None, Mode.FIT),
+            (_TOY_TRAINER_CFG, None, Mode.TEST),
+        ],
+        ids=["gn2v2-fit", "gn2v2-test", "toy-fit", "toy-test"],
+    )
+    def test_set_difference_equals_deadcode_star(self, config, overrides, mode):
+        cfg = load_config([config], overrides)
+        plan = _compiled(cfg, mode)
+        findings = deadcode(cfg.modules, mode, cfg.sources, cfg.schema, cfg.sinks)
+        expected = sorted({finding.module for finding in findings if finding.key == "*"})
+        assert pruned_modules(cfg.modules, plan) == expected
+
+    def test_mode_gated_module_is_not_pruned(self):
+        # the TEST-only writer is folded into every mode's modules but has no FIT-active
+        # port: absent from the FIT plan, yet mode-gated, not demand-pruned
+        cfg = load_config([_TOY_TRAINER_CFG])
+        plan = _compiled(cfg, Mode.FIT)
+        writers = [name for name, module in cfg.modules.items() if isinstance(module, ToyWriter)]
+        assert writers
+        for name in writers:
+            assert name not in plan.module_names
+            assert name not in pruned_modules(cfg.modules, plan)
+
+
+def _dot_file(tmp_path, text="digraph g { a -> b; }\n"):
+    dot_path = tmp_path / "g.dot"
+    dot_path.write_text(text)
+    return dot_path
+
+
+def test_render_image_strict_raises_without_dot(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda *_args, **_kwargs: None)
+    dot_path = _dot_file(tmp_path)
+    with pytest.raises(GraphError, match="salt container"):
+        render_image(dot_path, tmp_path / "g", strict=True)
+    assert not (tmp_path / "g.png").exists()
+
+
+def test_render_image_lenient_warns_and_returns_none(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(shutil, "which", lambda *_args, **_kwargs: None)
+    dot_path = _dot_file(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="salt"):
+        assert render_image(dot_path, tmp_path / "g", strict=False) is None
+    hint = f"dot -Tpng {dot_path} -o {tmp_path / 'g.png'}"
+    assert any(hint in record.getMessage() for record in caplog.records)
+    assert not (tmp_path / "g.png").exists()
+
+
+@pytest.mark.skipif(not _HAS_DOT, reason="graphviz `dot` binary not on PATH")
+def test_render_image_png_pdf(tmp_path):
+    png, pdf = render_image(_dot_file(tmp_path), tmp_path / "g", strict=True)
+    assert (png, pdf) == (tmp_path / "g.png", tmp_path / "g.pdf")
+    assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert pdf.read_bytes()[:5] == b"%PDF-"
+
+
+@pytest.mark.skipif(not _HAS_DOT, reason="graphviz `dot` binary not on PATH")
+def test_render_image_failed_render(tmp_path, caplog):
+    # a DOT syntax error: strict surfaces dot's failure, lenient warns and returns None
+    dot_path = _dot_file(tmp_path, "digraph g { a -> ; }\n")
+    with pytest.raises(GraphError, match="failed to render"):
+        render_image(dot_path, tmp_path / "g", strict=True)
+    with caplog.at_level(logging.WARNING, logger="salt"):
+        assert render_image(dot_path, tmp_path / "g", strict=False) is None
+    assert any("failed to render" in record.getMessage() for record in caplog.records)

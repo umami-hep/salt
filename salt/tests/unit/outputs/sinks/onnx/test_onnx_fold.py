@@ -38,11 +38,11 @@ from salt.outputs.sinks.onnx import (
     resolve_export_config,
 )
 from salt.outputs import (
-    ClassProbs,
     Combination,
     MaskFormerObjects,
     MFLeadVertexDecorator,
     OnnxExportSink,
+    RunTaskOutput,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
     JET_VARIABLES,
@@ -51,6 +51,7 @@ from salt.tests._fixtures.gn2v2_fixture import (
     compile_gn2v2,
     write_parity_norm_dict,
 )
+from salt.tests._fixtures.producers import FixtureProducer
 from salt.tests._fixtures.v2_builders import (
     MASKFORMER_WRITER_REG_TARGETS,
     build_maskformer_writer_modules,
@@ -88,9 +89,16 @@ def _export_cfg() -> ExportConfig:
 # (salt/tests/integration/pipeline/test_pipeline.py) + unit get_output tests.
 
 
+def _jet_probs() -> RunTaskOutput:
+    """The export-only `RunTaskOutput` minting the jets head's pb/pc/pu."""
+    jp = RunTaskOutput(tasks=["jets_classification"], modes=["export"])
+    jp.name = "jet_probs"
+    return jp
+
+
 def _folded_gn2_export(tmp_path):
     """A deterministically-weighted GN2 export through the folded conversion nodes
-    (ClassProbs pb/pc/pu); no per-token or vertexing node.
+    (RunTaskOutput pb/pc/pu); no per-token or vertexing node.
     """
     write_parity_norm_dict(tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights
@@ -98,8 +106,7 @@ def _folded_gn2_export(tmp_path):
     # TEST plan keeps the track_origin head (demand-pruned from the ONNX plan) bindable,
     # as in production multi-plan binding.
     test_plan = compile_gn2v2(modules, Mode.TEST)
-    jp = ClassProbs(task="jets_classification", stream="jets")
-    jp.name = "jet_probs"
+    jp = _jet_probs()
     sink = OnnxExportSink()
     sink.name = "onnx_export"
     modules.update({"jet_probs": jp, "onnx_export": sink})
@@ -116,21 +123,23 @@ def _folded_gn2_export(tmp_path):
 
 @pytest.fixture(scope="module")
 def folded(tmp_path_factory):
-    """A deterministically-weighted GN2 export through the FOLDED path (ClassProbs +
+    """A deterministically-weighted GN2 export through the FOLDED path (RunTaskOutput +
     Combination + sink)."""
     tmp = tmp_path_factory.mktemp("onnx_fold")
     write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
     torch.manual_seed(42)  # deterministic non-trivial weights
     modules = build_gn2v2_modules(tmp / "norm_dict.yaml")
     test_plan = compile_gn2v2(modules, Mode.TEST)  # keeps the pruned track_origin head bindable
-    jet_probs = ClassProbs(task="jets_classification", stream="jets")
-    jet_probs.name = "jet_probs"
-    pbc = Combination(source="outputs.jets.jets_classification", name="pbc", terms={0: 1.0, 1: 1.0})
+    # a Combination reads ONE [B, C] probs leaf (RunTaskOutput mints per-class leaves)
+    jet_softmax = FixtureProducer("jets_classification", "jets", "jet_softmax", softmax=True)
+    jet_softmax.name = "jet_softmax"
+    pbc = Combination(source="outputs.jets.jet_softmax", name="pbc", terms={0: 1.0, 1: 1.0})
     pbc.name = "pbc"
     export_sink = OnnxExportSink()
     export_sink.name = "onnx_export"
     modules.update({
-        "jet_probs": jet_probs,
+        "jet_probs": _jet_probs(),
+        "jet_softmax": jet_softmax,
         "pbc": pbc,
         "onnx_export": export_sink,
     })

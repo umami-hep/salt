@@ -3,23 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
-from salt.graph.errors import ConfigError
 from salt.model.base import ModuleGroup, SaltModelModule
-from salt.model.modules.kinematic_weight import KinematicWeight
+from salt.model.modules.kinematic_weight import KinematicWeight, _check
 from salt.model.modules.tasks import ClassificationTaskModule
 
 __all__ = ["IterativeReweighting"]
 
 _OWNED: tuple[str, ...] = ("eta", "chain", "chain_exponents")
-
-
-def _check(*rules: tuple[bool, str]) -> None:
-    """Raise a `ConfigError` for the first violated ``(bad, message)`` rule, in order."""
-    for bad, msg in rules:
-        if bad:
-            raise ConfigError(f"IterativeReweighting: {msg}")
 
 
 class IterativeReweighting(ModuleGroup):
@@ -78,9 +71,10 @@ class IterativeReweighting(ModuleGroup):
         weight_name: str = "kinematic_weight",
     ) -> None:
         super().__init__()
+        check = partial(_check, "IterativeReweighting")
         n = n_iterations
-        _check((type(n) is not int or n < 1, f"n_iterations must be a non-bool int >= 1: {n!r}"))
-        _check(
+        check((type(n) is not int or n < 1, f"n_iterations must be a non-bool int >= 1: {n!r}"))
+        check(
             (
                 type(avg_last) is not int or not 1 <= avg_last <= n,
                 f"avg_last must be a non-bool int in [1, n_iterations={n}], got {avg_last!r}",
@@ -92,7 +86,7 @@ class IterativeReweighting(ModuleGroup):
         loss, target = prior.get("loss"), weight.get("target", "inclusive")
         loss_args = (loss.get("init_args") or {}) if isinstance(loss, Mapping) else {}
         owned = [k for k in _OWNED if k in weight]
-        _check(
+        check(
             (
                 weight.get("task_name", prior_name) != prior_name,
                 f"weight task_name {weight.get('task_name')!r} must equal {prior_name=!r}",

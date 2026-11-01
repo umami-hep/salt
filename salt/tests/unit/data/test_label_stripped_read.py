@@ -22,7 +22,7 @@ from salt.graph.spec import Mode
 from salt.model.bind import ResolvedSchema
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.schema import dump_schema, save_schema
-from salt.testing.inputs import write_dummy_file, write_dummy_norm_dict
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 
 JET_VARS = ["pt_btagJes", "eta_btagJes"]
 TRACK_VARS = ["d0", "z0SinTheta", "dphi", "deta"]
@@ -57,10 +57,7 @@ def _strip_labels(src: Path, dst: Path) -> None:
 @pytest.fixture(scope="module")
 def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("stripped")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_dummy_norm_dict(nd_path, cd_path)
-    labelled = base / "labelled.h5"
-    write_dummy_file(labelled, nd_path)
+    labelled, _, _ = dummy_h5(base, name="labelled.h5")
     stripped = base / "stripped.h5"
     _strip_labels(labelled, stripped)
     schemas: dict[str, Path] = {}

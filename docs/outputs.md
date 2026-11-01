@@ -71,8 +71,9 @@ set one.
 A few graph artifacts land in the same directory, describing the plan that was
 executed rather than the predictions: `plan_test.txt` (the executed TEST plan,
 with the sink's demand table), `resolved_io.yaml` (every module's resolved
-requires/produces), and `graph_test.*` / `graph_test_dataset.*` renders. They
-are diagnostics — nothing downstream reads them.
+requires/produces), and the `graph_test.{dot,png,pdf}` /
+`graph_test_dataset.{dot,png,pdf}` renders. They are diagnostics — nothing
+downstream reads them.
 
 The file's **groups** mirror your reader's streams — a `jets` group, a `tracks`
 group, and so on, each a structured array with one row per jet (or event). Each
@@ -175,7 +176,7 @@ RunTaskOutput needs a non-empty 'tasks' list — name the task instances whose g
 
 (`salt/outputs/run_task_output.py:126-129`.) A config with no task head
 therefore cannot declare an `outputs:` section at all; check a graph like
-that with the standalone toy `modules:` format instead, see
+that in FIT alone with `salt graph validate --mode fit`, see
 [`cli.md#salt-graph`](cli.md#salt-graph).
 
 The related failure runs later, at TEST compile time, not at parse time: a
@@ -194,10 +195,9 @@ section:
 ```yaml
 outputs:
   run_tasks: {class_path: salt.outputs.RunTaskOutput, init_args: {tasks: [...]}}
-  jsonl:
-    class_path: salt.outputs.JSONLOutputSink
-    init_args:
-      modes: [test]
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args: {model_name: GN2v2}
 ```
 
 A sink is **excluded from the ordering**: entries are partitioned by type, so
@@ -547,10 +547,9 @@ list of fnmatch patterns over the dotted leaf key that narrows that collection:
 
 ```yaml
 outputs:
-  jsonl:
-    class_path: salt.outputs.JSONLOutputSink
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
     init_args:
-      modes: [test]
       consumes: [outputs.jets.*]
 ```
 
@@ -605,65 +604,40 @@ outputs:
 `sys.path` — run from the directory holding it, or set `PYTHONPATH` (with
 apptainer: `--env PYTHONPATH=/path/to/dir`).
 
-### Worked example: `JSONLOutputSink`
+### What a real sink has to get right
 
-Salt ships a small, tested example of exactly this:
-[`salt/outputs/sinks/jsonl_sink.py`](https://gitlab.cern.ch/aft/algorithms/salt/-/blob/main/salt/outputs/sinks/jsonl_sink.py).
-`JSONLOutputSink` writes the eval columns as newline-delimited JSON — one JSON
-object per jet — beside the eval H5. It is deliberately minimal, but it is a
-real sink that exercises the whole lifecycle, and it is the file to copy when
-you write your own.
+An auxiliary sink — one that writes a second format beside the eval H5 — is
+the common case for a sink of your own. These are the things it has to get
+right, and the reasons they are not optional (the [CSV worked
+example](#worked-example-a-csv-sink) below puts most of them into code):
 
-```yaml
-outputs:
-  jsonl:
-    class_path: salt.outputs.JSONLOutputSink
-    init_args:
-      modes: [test]                       # required: it is an auxiliary sink
-      columns: [GN2_pb, GN2_pc, GN2_pu]   # omit for every column the section mints
-```
-
-Stack that on a config that already has an `outputs:` section and the entry
-deep-merges into it, beside the writers.
-
-Run `salt test` with that stacked on your config (pass `--ckpt_path`
-explicitly when you stack a second `--config`) and you get, next to the eval
-H5:
-
-```json
-{"GN2_pb": 0.9231, "GN2_pc": 0.0512, "GN2_pu": 0.0257}
-{"GN2_pb": 0.0143, "GN2_pc": 0.1120, "GN2_pu": 0.8737}
-```
-
-What it demonstrates, point by point — these are the things a real sink has to
-get right, and the reasons they are not optional:
-
-- **It derives its schema from the bound `outputs:` section**, not from its own
-  config. `bind_output_section()` is called on every wired sink that exposes
-  it, before any `declare_io` resolution; the sink then walks the
-  section's `RunTaskOutput.manifest_fields(Mode.TEST)` for exactly the names,
-  dtypes and order the H5 sink uses. Deriving from the section is what
-  guarantees your file and the eval H5 agree.
-- **It is an auxiliary sink** — `is_test_sink()` returns `False`, so
-  `H5OutputSink` stays the demand anchor and you get *both* files from one
-  `salt test`. Because its columns come from the same section, every leaf it
-  reads is one the primary sink already demanded, so it never widens the plan.
-  A sink meant to *replace* the H5 file rather than accompany it would leave
-  `is_test_sink()` alone.
-- **Deterministic output paths.** It renders the same `{ckpt_dir}` /
+- **Derive the schema from the bound `outputs:` section**, not from the sink's
+  own config. `bind_output_section()` is called on every wired sink that
+  exposes it, before any `declare_io` resolution; walk the section's
+  `RunTaskOutput.manifest_fields(Mode.TEST)` for exactly the names, dtypes and
+  order the H5 sink uses. Deriving from the section is what guarantees your
+  file and the eval H5 agree.
+- **Override `is_test_sink()` to return `False`**, so `H5OutputSink` stays the
+  demand anchor and you get *both* files from one `salt test`. Because the
+  columns come from the same section, every leaf the sink reads is one the
+  primary sink already demanded, so it never widens the plan. Such a sink must
+  also state `modes: [test]` when declared in the section. A sink meant to
+  *replace* the H5 file rather than accompany it would leave `is_test_sink()`
+  alone.
+- **Deterministic output paths.** Render the same `{ckpt_dir}` /
   `{ckpt_stem}` / `{sample}` template the H5 sink uses, so re-running an
   evaluation overwrites the same file rather than accumulating.
-- **Explicit overwrite behaviour.** `overwrite: false` refuses to clobber an
-  existing file instead of truncating it.
+- **Explicit overwrite behaviour.** Decide whether an existing file is
+  truncated or refused, and make the refusal a `ConfigError` rather than a
+  silent clobber when the template is not checkpoint-unique.
 - **NumPy conversion is the sink's job.** Producers emit torch tensors, always;
   the sink calls `.detach().cpu().numpy()` and converts. Do not expect numpy
   from the graph.
 - **NaN handling is explicit.** Padded and invalid positions are `NaN`, and
-  your format may not have a `NaN` literal. In JSON's case `json.dumps` would
-  emit a non-standard `NaN` token that most parsers reject, so the sink maps
-  every non-finite float to `null` and then calls `json.dumps(...,
-  allow_nan=False)` so anything that slipped through raises instead of silently
-  writing a corrupt file. Whatever your format is, decide this explicitly.
+  your format may not have a `NaN` literal (JSON has none: `json.dumps` would
+  emit a non-standard `NaN` token most parsers reject). Map non-finite values
+  to whatever your format uses for "missing", and make anything that slips
+  through raise instead of silently writing a corrupt file.
 - **Cleanup is idempotent.** `close_if_open()` runs on every exit path and is
   safe to call twice. That takes *two* Lightning hooks, not one: an exception
   raised inside the test loop unwinds past `teardown`, and `on_exception` is
@@ -694,7 +668,7 @@ The flat column name is then `f"{run_name}_{field.h5_name}"` when
 `field.prefix` else `field.h5_name`, with `run_name` read from `ctx.run_name`
 at `open_schema`.
 
-### A second worked example: a CSV sink
+### Worked example: a CSV sink
 
 Putting those together — a complete sink writing one CSV row per jet, with a
 header derived from the section:
@@ -844,7 +818,7 @@ Notes for sink authors:
 - **Per-token leaves are `[B, L]` / `[B, L, C]`** at the model's (possibly
   truncated) sequence length. The H5 sink re-expands them to the source file's
   length because a fixed HDF5 dataset shape demands it; a format without that
-  constraint (like JSONL) need not.
+  constraint (like CSV or JSON) need not.
 - **A single-suffix leaf may be collapsed.** A column with one suffix can
   arrive as `[B]` / `[B, L]` rather than `[B, 1]` / `[B, L, 1]`. Handle both.
 
@@ -857,7 +831,6 @@ Notes for sink authors:
 | `salt.outputs.SinkContext` | the run facts `open_schema` receives |
 | `salt.outputs.H5OutputSink` | the eval-H5 sink (implicit on `salt test`) |
 | `salt.outputs.OnnxExportSink` | the ONNX tuple sink (implicit on `salt export`) |
-| `salt.outputs.JSONLOutputSink` | the worked example: newline-delimited JSON |
 | `salt.outputs.OutputSectionWriter` | base class for an `outputs:` section writer |
 | `salt.outputs.RunTaskOutput` | section writer running tasks' `get_output()` |
 | `salt.outputs.InputCopyWriter` | section writer for source-file input copies |

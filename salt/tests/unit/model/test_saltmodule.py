@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,10 +16,10 @@ from torch import nn
 
 from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.graph.bundle import Bundle
-from salt.graph.errors import ConfigError
+from salt.graph.errors import ConfigError, NonFiniteError
 from salt.graph.spec import IO, Mode
 from salt.model.base import ModuleGroup, SaltModelModule
-from salt.model.modules import KinematicWeight
+from salt.model.modules import GlobalAttentionPooling, KinematicWeight
 from salt.model.modules.losses import LossGLS, LossSum
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.outputs import RunTaskOutput
@@ -30,8 +31,8 @@ from salt.tests._fixtures.gn2v2_fixture import (
     TRACK_VARIABLES,
     write_parity_norm_dict,
 )
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import ORIGIN_CLASSES, build_gn2v2_modules
-from salt.testing.inputs import write_dummy_file
 
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 TASKS = ["jets_classification", "track_origin", "track_vertexing"]
@@ -52,8 +53,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("saltmodule")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
-    h5_path = base / "pp_output_train.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base)
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
@@ -86,6 +86,7 @@ def make_trainer(**kwargs) -> Trainer:
     kwargs.setdefault("max_epochs", 1)
     kwargs.setdefault("limit_train_batches", 2)
     kwargs.setdefault("limit_val_batches", 2)
+    kwargs.setdefault("num_sanity_val_steps", 1)
     return Trainer(
         accelerator="cpu",
         devices=1,
@@ -94,7 +95,6 @@ def make_trainer(**kwargs) -> Trainer:
         enable_progress_bar=False,
         enable_model_summary=False,
         log_every_n_steps=1,
-        num_sanity_val_steps=1,
         **kwargs,
     )
 
@@ -1035,3 +1035,102 @@ class TestStagePlanPruning:
         )
         with pytest.raises(ConfigError, match="losses.jets_classification"):
             make_trainer().fit(model, build_datamodule(data))
+
+
+class _PoisonedPool(GlobalAttentionPooling):
+    """GN2v2 pooling whose output is poisoned (``+ value``) on chosen (mode, call) pairs."""
+
+    def __init__(self, poison, value: float) -> None:
+        super().__init__(input="encoded.seq", out="pooled.global")
+        self.poison = poison
+        self.value = value
+        self.calls: dict[Mode, int] = {}
+
+    def forward(self, b, mode):
+        out = super().forward(b, mode)
+        self.calls[mode] = n = self.calls.get(mode, 0) + 1
+        if self.poison(mode, n):
+            out = {key: value + self.value for key, value in out.items()}
+        return out
+
+
+SAVED = re.compile(r"batch saved to (\S+\.pt)$")
+
+
+class TestNonFiniteLoss:
+    """Every-step finite-loss check: localised by a debug replay, batch saved."""
+
+    @staticmethod
+    def fit_failure(data, tmp_path, poison, value=torch.nan, **trainer_kwargs) -> RuntimeError:
+        modules = build_gn2v2_modules(data["nd"])
+        modules["pool"] = _PoisonedPool(poison, value)
+        modules["loss"] = LossSum()
+        trainer_kwargs.setdefault("num_sanity_val_steps", 0)
+        trainer = make_trainer(default_root_dir=tmp_path, **trainer_kwargs)
+        with pytest.raises(RuntimeError) as info:
+            trainer.fit(SaltModule(modules, lrs=LRS), build_datamodule(data))
+        return info.value
+
+    def test_nan_loss_replay_names_module_and_saves_batch(self, data, tmp_path):
+        # FIT call 1 is the guarded first batch (clean); call 2 poisons the loss and
+        # the replay (call 3) reproduces it under debug
+        err = self.fit_failure(data, tmp_path, lambda mode, n: mode is Mode.FIT and n >= 2)
+        msg = str(err)
+        assert isinstance(err.__cause__, NonFiniteError)
+        assert "[mode=FIT] module 'pool' produced non-finite values in 'pooled.global'" in msg
+        assert "inputs it read were all finite" in msg
+        path = Path(SAVED.search(msg).group(1))
+        assert path == tmp_path / "non_finite_batch_fit_step1_rank0.pt"
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        assert set(payload) == {"batch", "rng", "global_step", "mode"}
+        assert (payload["mode"], payload["global_step"]) == ("FIT", 1)
+        assert "inputs" in payload["batch"]
+        assert payload["rng"]["cpu"] is not None
+
+    def test_guarded_first_batch_fails_directly(self, data, tmp_path):
+        err = self.fit_failure(data, tmp_path, lambda mode, n: mode is Mode.FIT)
+        assert isinstance(err.__cause__, NonFiniteError)
+        assert "module 'pool' produced non-finite values" in str(err)
+        assert Path(SAVED.search(str(err)).group(1)).name == "non_finite_batch_fit_step0_rank0.pt"
+
+    def test_inf_is_detected(self, data, tmp_path):
+        err = self.fit_failure(
+            data, tmp_path, lambda mode, n: mode is Mode.FIT and n >= 2, value=torch.inf
+        )
+        assert re.search(r"module 'pool'.*\(NaN 0, \+Inf [1-9]\d*, -Inf 0 of \d+\)", str(err))
+
+    def test_validation_step_is_checked(self, data, tmp_path):
+        err = self.fit_failure(data, tmp_path, lambda mode, n: mode is Mode.VAL and n >= 2)
+        assert isinstance(err.__cause__, NonFiniteError)
+        assert "[mode=VAL] module 'pool' produced non-finite values" in str(err)
+        assert "non_finite_batch_val_step" in str(err)
+
+    def test_finite_replay_reports_not_reproduced(self, data, tmp_path):
+        # one-shot poison: the replay (call 3) is clean
+        err = self.fit_failure(data, tmp_path, lambda mode, n: mode is Mode.FIT and n == 2)
+        msg = str(err)
+        assert "loss.total is non-finite but a diagnostic forward re-run was finite" in msg
+        assert "the failure was not reproduced and its origin is unresolved" in msg
+        assert "loss.total = nan" in msg
+        assert err.__cause__ is None
+        assert Path(SAVED.search(msg).group(1)).is_file()
+
+    def test_save_failure_preserves_the_original_error(self, data, tmp_path, monkeypatch):
+        def refuse(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(torch, "save", refuse)
+        err = self.fit_failure(data, tmp_path, lambda mode, n: mode is Mode.FIT and n >= 2)
+        msg = str(err)
+        assert "[mode=FIT] module 'pool' produced non-finite values in 'pooled.global'" in msg
+        assert "failed (OSError: disk full)" in msg
+        assert not list(tmp_path.glob("non_finite_batch_*"))
+
+    def test_handler_calls_no_distributed_collective(self, data, tmp_path, monkeypatch):
+        def collective(*_args, **_kwargs):
+            raise AssertionError("the failure handler called a torch.distributed collective")
+
+        for name in ("all_reduce", "barrier", "broadcast", "broadcast_object_list", "all_gather"):
+            monkeypatch.setattr(torch.distributed, name, collective, raising=False)
+        err = self.fit_failure(data, tmp_path, lambda mode, n: mode is Mode.FIT and n >= 2)
+        assert "module 'pool' produced non-finite values" in str(err)

@@ -23,7 +23,13 @@ from lightning import Callback, LightningModule, Trainer
 from lightning.pytorch.trainer.states import TrainerFn
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 
-from salt.callbacks._plot_io import CLASS_COLOURS, log_figures, write_comet_experiment_json
+from salt.callbacks._plot_io import (
+    CLASS_COLOURS,
+    _candidates_error,
+    _require_graph_dict,
+    log_figures,
+    write_comet_experiment_json,
+)
 from salt.graph.errors import ConfigError
 from salt.model.modules.kinematic_weight import KinematicWeight, VariableSpec
 
@@ -244,13 +250,12 @@ class KinematicReweightPlotter(Callback):
         self._reset()
 
     def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
-        if not isinstance(model_modules, dict):
-            raise ConfigError(f"{_PREFIX} needs a LightningModule with a graph-module dict")
+        _require_graph_dict(model_modules, _PREFIX)
         kw = model_modules.get(self.weight_module)
         if not isinstance(kw, KinematicWeight):
             found = sorted(k for k, v in model_modules.items() if isinstance(v, KinematicWeight))
             msg = f"weight_module {self.weight_module!r} does not name a KinematicWeight module"
-            raise ConfigError(f"{_PREFIX}: {msg}. Configured candidates: {found or '<none>'}")
+            raise _candidates_error(_PREFIX, msg, found)
         if kw.variables is None:
             raise ConfigError(f"{_PREFIX}: {self.weight_module!r} configures no variables to plot")
         self._plots = [_parse_plot(plot, kw.variables) for plot in self._plot_cfgs]
@@ -333,16 +338,12 @@ class KinematicReweightPlotter(Callback):
                 hists, figures[fkey], extra = _figure(*args, w_max=self.w_max)
                 plots[fkey] = {"edges": edges.tolist(), "classes": hists, **extra}
         if getattr(trainer, "is_global_zero", True):
-            self._log(trainer, figures, metrics, {"class_names": self.class_names, "plots": plots})
+            payload: dict[str, Any] = {**metrics, "class_names": self.class_names, "plots": plots}
+            kw: dict[str, Any] = {"prefix": self.figure_name, "output_dir": self.output_dir}
+            kw |= {"who": _PREFIX, "warned": self._warned_nowhere}
+            self._warned_nowhere = log_figures(trainer, figures, metrics, payload, **kw)
         self.last_metrics, self.last_plots, self.last_figures = metrics, plots, figures
         self._reset()
-
-    def _log(self, trainer: Trainer, figures: dict, metrics: dict, extra: dict) -> None:
-        payload, w = {**metrics, **extra}, self._warned_nowhere
-        name, out = self.figure_name, self.output_dir
-        self._warned_nowhere = log_figures(
-            trainer, figures, metrics, payload, prefix=name, output_dir=out, who=_PREFIX, warned=w
-        )
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         del pl_module

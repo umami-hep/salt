@@ -166,7 +166,10 @@ class SaltDataModule(lightning.LightningDataModule):
     seed : int, optional
         Base augmentation seed for non-worker reads, by default 42.
     debug : bool, optional
-        Enable the boundary non-aliasing assertion.
+        Guard EVERY batch (read tracking on each processor + the boundary
+        non-aliasing assertion), by default False; off, each dataloader
+        worker's first batch is still read-tracked. Linked from the top-level
+        ``debug:`` key and not directly settable through the CLI.
     iterable : bool, optional
         Build `IterableSaltDataset` (sequential, sharded streaming) instead of
         the map-style `SaltDataset`, by default False. The streaming path reads

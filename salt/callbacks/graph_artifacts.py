@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
@@ -13,9 +11,11 @@ import yaml
 from lightning import Callback, LightningModule, Trainer
 
 from salt.data.dataset import SaltDataset
+from salt.graph.errors import GraphError
 from salt.graph.planner import Plan
-from salt.graph.render import dot_source, plan_table
+from salt.graph.render import graph_dot, plan_table, pruned_modules, render_image
 from salt.graph.spec import Mode, TensorSpec
+from salt.model.bind import resolve_bind_schema
 from salt.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
@@ -31,13 +31,16 @@ class GraphArtifacts(Callback):
       the ordered step table for both the dataset plan and the model plan.
     - ``resolved_io.yaml`` — machine-readable: per mode, the plan sources
       and every module's flattened requires/produces with resolved specs.
-    - ``graph_<stage>.dot`` + ``graph_<stage>.<image_format>`` (and
-      ``graph_<stage>_dataset.*`` when a `SaltDataModule` is attached):
-      Graphviz DOT rasterised via the ``dot`` binary, kept alongside for
-      manual re-rendering.
+    - ``graph_<stage>.{dot,png,pdf}`` (``<stage>`` = ``fit`` / ``test``; VAL
+      shares the FIT graph), plus ``graph_<stage>_dataset.{dot,png,pdf}`` when
+      a `SaltDataModule` is attached: the same render as ``salt graph plot``
+      (`salt.graph.render.graph_dot` with the statically resolved feature
+      widths, PNG at 150 dpi + PDF via `salt.graph.render.render_image`); the
+      DOT is kept for manual re-rendering.
 
-    Never fails a run: a LightningModule without compiled plans, or a
-    missing/failing ``dot`` binary, degrade to a warning / DOT-only output.
+    Never fails a run: a LightningModule without compiled plans, unresolvable
+    widths, or a missing/failing ``dot`` binary degrade to a warning (DOT
+    without widths / DOT-only output).
 
     Parameters
     ----------
@@ -45,13 +48,10 @@ class GraphArtifacts(Callback):
         Artifact directory, by default None — the trainer log dir on the
         fit path, and the checkpoint's directory on the test path (so eval
         outputs land next to the checkpoint and the eval H5).
-    image_format : str, optional
-        Graph image suffix (``svg``/``png``/``pdf``), by default ``svg``.
     """
 
-    def __init__(self, output_dir: str | None = None, image_format: str = "svg") -> None:
+    def __init__(self, output_dir: str | None = None) -> None:
         self.output_dir = output_dir
-        self.image_format = image_format.lstrip(".")
 
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """Write fit+val plan tables and the FIT graph before training starts."""
@@ -87,14 +87,13 @@ class GraphArtifacts(Callback):
             (out_dir / f"plan_{mode_name}.txt").write_text(self._plan_text(plan, dataset))
         (out_dir / "resolved_io.yaml").write_text(self._resolved_io(trainer, plans, mode_names))
         # one graph per stage: FIT (VAL is identical) / TEST
+        widths = _widths(plans)
         plan = plans[Mode[stage.upper()]]
         modules = getattr(pl_module, "_graph_modules", None) or {}
-        pruned = sorted(set(modules) - set(plan.module_names))
-        self._render(plan, modules, pruned, out_dir / f"graph_{stage}")
+        self._render(plan, modules, widths, out_dir / f"graph_{stage}")
         dataset = self._stage_dataset(trainer, stage)
         if dataset is not None:
-            pruned = sorted(set(dataset.modules) - set(dataset.plan.module_names))
-            self._render(dataset.plan, dataset.modules, pruned, out_dir / f"graph_{stage}_dataset")
+            self._render(dataset.plan, dataset.modules, widths, out_dir / f"graph_{stage}_dataset")
         _LOG.info(f"wrote graph/plan artifacts to {out_dir}")
 
     @staticmethod
@@ -141,27 +140,15 @@ class GraphArtifacts(Callback):
             payload[mode_name] = section
         return yaml.safe_dump(payload, sort_keys=False)
 
+    @staticmethod
     def _render(
-        self, plan: Plan, modules: Mapping[str, Any], pruned: list[str], base: Path
+        plan: Plan, modules: Mapping[str, Any], widths: Mapping[str, int] | None, base: Path
     ) -> None:
-        """Write DOT + image for one plan via the `dot` binary; a missing/failing ``dot``
-        degrades to a DOT-only hint (never crashes the run).
-        """
-        dot_path = base.with_suffix(".dot")
-        dot_path.write_text(dot_source(plan, modules, pruned))
-        img_path = base.with_suffix(f".{self.image_format}")
-        hint = f"render manually with: dot -T{self.image_format} {dot_path} -o {img_path}"
-        dot_bin = shutil.which("dot")
-        if dot_bin is None:
-            _LOG.warning(f"graphviz `dot` not on PATH — wrote {dot_path} only; {hint}")
-            return
-        cmd = [dot_bin, f"-T{self.image_format}", str(dot_path), "-o", str(img_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            _LOG.warning(
-                f"`dot` failed to render {img_path} (exit {result.returncode}): "
-                f"{result.stderr.strip() or '(no stderr)'} — wrote {dot_path} only; {hint}"
-            )
+        """Write ``<base>.dot`` and render ``<base>.{png,pdf}`` (non-strict: never raises)."""
+        dot_path = base.with_name(f"{base.name}.dot")
+        pruned = pruned_modules(modules, plan)
+        dot_path.write_text(graph_dot(plan, modules, pruned=pruned, widths=widths))
+        render_image(dot_path, base, strict=False)
 
     @staticmethod
     def _stage_dataset(trainer: Trainer, mode_name: str) -> SaltDataset | None:
@@ -172,6 +159,17 @@ class GraphArtifacts(Callback):
         attr = {"fit": "train_dset", "val": "val_dset", "test": "test_dset"}[mode_name]
         dataset = getattr(dm, attr, None)
         return dataset if hasattr(dataset, "plan") and hasattr(dataset, "read_fields") else None
+
+
+def _widths(plans: Mapping[Mode, Plan]) -> dict[str, int] | None:
+    """Static feature widths unified over every compiled plan (as ``salt graph plot``); None
+    with a warning when they do not resolve — the graphs then keep symbolic feature dims.
+    """
+    try:
+        return dict(resolve_bind_schema(list(plans.values())).widths)
+    except GraphError as err:
+        _LOG.warning(f"GraphArtifacts: widths not resolved, graphs keep symbolic dims: {err}")
+        return None
 
 
 def _spec_dict(spec: TensorSpec) -> dict[str, Any]:

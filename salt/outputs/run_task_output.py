@@ -202,9 +202,12 @@ class RunTaskOutput(OutputSectionWriter):
             requires[task.pred_key] = TensorSpec(shape=None, dtype=None, kind="data")
             for dep in task.output_time_requires(mode):
                 requires.setdefault(dep, _dep_spec(dep))
+            # NaN-by-contract fields (`nan_ok`, or a head declaring `finite_outputs = False`)
+            # are exempt from the debug non-finite scan
+            finite = getattr(task, "finite_outputs", True)
             for field in task.get_output_manifest(mode, "salt"):
                 produces[self.field_leaf_key(task, field)] = TensorSpec(
-                    shape=None, dtype=None, kind="data"
+                    shape=None, dtype=None, kind="data", finite=finite and not field.nan_ok
                 )
         return IO(requires=unflatten_spec(requires), produces=unflatten_spec(produces))
 

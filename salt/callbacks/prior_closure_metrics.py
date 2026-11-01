@@ -11,7 +11,12 @@ import torch
 from lightning import Callback, LightningModule, Trainer
 from scipy.stats import entropy  # H of (unnormalised) class masses, 0 log 0 = 0
 
-from salt.callbacks._plot_io import CLASS_COLOURS, log_figures, write_comet_experiment_json
+from salt.callbacks._plot_io import (
+    CLASS_COLOURS,
+    _require_graph_dict,
+    log_figures,
+    write_comet_experiment_json,
+)
 from salt.graph.errors import ConfigError
 from salt.model.modules.kinematic_weight import KinematicWeight
 
@@ -90,8 +95,7 @@ class PriorClosureMetrics(Callback):
         self.last_figures: dict[str, Any] = {}
 
     def fit_val_demand(self, model_modules: Any) -> tuple[str, ...]:
-        if not isinstance(model_modules, dict):
-            raise ConfigError(f"{_PREFIX} needs a LightningModule with a graph-module dict")
+        _require_graph_dict(model_modules, _PREFIX)
         kws = {k: v for k, v in model_modules.items() if isinstance(v, KinematicWeight)}
         nn = [n for n, v in kws.items() if v.mode == "nn"]
         nn.sort(key=lambda n: int(t) if (t := n.rpartition("_")[2]).isdigit() else np.inf)

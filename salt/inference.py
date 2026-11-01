@@ -17,7 +17,7 @@ import torch
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError, GraphError
 from salt.graph.spec import Mode
-from salt.outputs.input_copy_writer import InputCopyWriter
+from salt.outputs.input_copy_writer import InputCopyWriter, _label_key
 from salt.outputs.sinks.onnx.adapter import OnnxAdapter
 from salt.outputs.sinks.onnx.config import (
     ExportConfig,
@@ -67,7 +67,7 @@ def inference_demand(
         if entry.sequence:
             demand.append(f"masks.{stream_of_input_port(entry.port)}")
     for stream, var in copy_leaves:
-        key = f"labels.{stream}.{var}"
+        key = _label_key(stream, var)
         if key not in demand:
             demand.append(key)
     return [*demand, "meta.rows"]
@@ -223,8 +223,7 @@ def _consume_batch(
     for stream in sink._mask_streams:  # noqa: SLF001 - same-package sink drive
         out.set(f"outputs.{stream}.mask", bundle_in.get(f"masks.{stream}"))
     for col in copy_columns:
-        var = col.key.split(".")[2]
-        out.set(col.key, bundle_in.get(f"labels.{col.stream}.{var}"))
+        out.set(col.key, bundle_in.get(_label_key(col.stream, col.key.split(".")[2])))
     sink.consume(out)
 
 

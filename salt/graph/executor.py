@@ -13,11 +13,24 @@ from typing import Any, NoReturn, cast
 import torch
 
 from salt.graph.bundle import Bundle, _flatten_produced
-from salt.graph.errors import ConfigError, DeclarationError, MutationError, UndeclaredAccessError
+from salt.graph.errors import (
+    ConfigError,
+    DeclarationError,
+    MutationError,
+    NonFiniteError,
+    UndeclaredAccessError,
+)
 from salt.graph.planner import Plan, PlanStep
 from salt.graph.spec import KEY_SEP, GraphModule, Mode, SinkModule, flatten_spec
 
-__all__ = ["STEP_SCOPE_PREFIX", "Executor", "canonical_produced", "record_steps"]
+__all__ = [
+    "STEP_SCOPE_PREFIX",
+    "Executor",
+    "ReadTrackedBundle",
+    "canonical_produced",
+    "declared_reads",
+    "record_steps",
+]
 
 STEP_SCOPE_PREFIX = "salt.step/"
 """Prefix of the profiler scope name wrapping each plan step (`record_steps`)."""
@@ -88,6 +101,7 @@ class Executor:
         self.plan = plan
         self._modules: dict[str, GraphModule] = {}
         self._allowed: dict[str, frozenset[str]] = {}
+        self._scanned: dict[str, tuple[str, ...]] = {}
         # sink steps stay in `plan.steps` (render + demand) but are partitioned
         # OUT of the per-batch forward loop: a sink produces no tensor and is
         # never called.
@@ -95,7 +109,8 @@ class Executor:
         for step in plan.steps:
             module = step.module
             self._modules[step.name] = module
-            self._allowed[step.name] = _declared_reads(module, step, plan.mode)
+            self._allowed[step.name] = declared_reads(module, step, plan.mode)
+            self._scanned[step.name] = _scanned_keys(step)
             if _is_sink(module):
                 # a terminal sink: no tensor forward, no callable requirement —
                 # its consume/flush lifecycle is driven by the Lightning bridge
@@ -111,13 +126,16 @@ class Executor:
         """Execute the plan's steps in order over `bundle` and return it.
 
         The caller provides every non-optional plan source leaf in
-        `bundle`. With ``debug=True`` each module gets a read-tracking
-        bundle view: an access outside its declared requires raises
-        `UndeclaredAccessError`, and in-place mutation of an existing
-        tensor (detected via ``torch.Tensor._version`` snapshots) raises
-        `MutationError` (non-tensor leaves aren't covered). The
-        returned-keys-vs-declaration check is always on; write-once
-        collisions propagate from `Bundle.merge` as `KeyCollisionError`.
+        `bundle`. With ``debug=True`` each module gets a `ReadTrackedBundle`:
+        an access outside its declared requires raises
+        `UndeclaredAccessError`; in-place mutation of an existing tensor
+        raises `MutationError` (version-counter snapshots; declared reads
+        that are inference tensors are compared by value; non-tensor leaves
+        aren't covered); and a newly produced floating ``data``/``loss`` leaf
+        with ``TensorSpec.finite`` holding NaN/Inf raises `NonFiniteError`
+        naming the module. The returned-keys-vs-declaration check is always
+        on; write-once collisions propagate from `Bundle.merge` as
+        `KeyCollisionError`.
 
         Raises `KeyError` if the input bundle is missing a non-optional
         source leaf, `DeclarationError` on a malformed/mismatched return.
@@ -134,17 +152,17 @@ class Executor:
         for step in self._forward_steps:
             module = cast("Callable[[Any, Mode], Any]", self._modules[step.name])
             allowed = self._allowed[step.name]
-            view = _ReadTrackedBundle(bundle, step.name, mode, allowed) if debug else bundle
-            versions = _tensor_versions(bundle) if debug else None
+            view = ReadTrackedBundle(bundle, step.name, mode, allowed) if debug else None
+            snapshot = _mutation_snapshot(bundle, allowed) if debug else None
             scope = f"{STEP_SCOPE_PREFIX}{step.name}"
             with torch.profiler.record_function(scope) if _StepRecording.enabled else nullcontext():
-                produced = module(view, mode)
+                produced = module(bundle if view is None else view, mode)
             if not isinstance(produced, dict):
                 raise DeclarationError(
                     f"module {step.name!r} returned {type(produced).__name__} — modules return "
                     "their declared produces as a dict of newly produced keys"
                 )
-            if versions is not None and (mutated := _first_mutated(bundle, versions)) is not None:
+            if snapshot is not None and (mutated := _first_mutated(bundle, snapshot)) is not None:
                 raise MutationError(
                     f"[mode={mode.name}] module {step.name!r} mutated bundle key "
                     f"{mutated!r} in place during debug execution — bundle leaves are read-only "
@@ -154,54 +172,143 @@ class Executor:
             expected = set(step.produces)
             nested = canonical_produced(produced, expected, step.name)
             bundle.merge(nested, who=step.name, expected=expected, overwrite=set(step.rewrites))
+            if view is not None:
+                _check_finite(bundle, view, self._scanned[step.name])
         return bundle
 
 
-def _tensor_versions(bundle: Bundle) -> dict[str, int]:
-    """Snapshot the in-place version counter of every tensor leaf (debug only).
+_SCANNED_KINDS = frozenset({"data", "loss"})
+"""Spec kinds the debug non-finite scan covers (``label``/``meta``/``pad_mask`` never)."""
 
-    ``torch.Tensor._version`` is torch's autograd in-place version counter —
-    private but stable, and the cheapest torch-native mutation detector
-    (integer reads, no data copies).
+
+def _scanned_keys(step: PlanStep) -> tuple[str, ...]:
+    """The step's produced keys the debug non-finite scan covers (kind data/loss, finite)."""
+    return tuple(k for k, s in step.produces.items() if s.kind in _SCANNED_KINDS and s.finite)
+
+
+def _is_non_finite(value: Any) -> bool:
+    """Whether `value` is a floating tensor holding NaN/Inf (ints, bools, non-tensors: never)."""
+    return (
+        isinstance(value, torch.Tensor)
+        and value.is_floating_point()
+        and not bool(torch.isfinite(value).all())
+    )
+
+
+def _check_finite(bundle: Bundle, view: ReadTrackedBundle, keys: tuple[str, ...]) -> None:
+    """Raise `NonFiniteError` for the first of `keys` (just produced by ``view``'s module)
+    holding NaN/Inf, naming the counts and the already non-finite inputs it read.
     """
-    return {
-        key: value._version  # noqa: SLF001 - torch's in-place version counter
-        for key in bundle.keys()  # noqa: SIM118 - Bundle is not a Mapping
-        if isinstance(value := bundle.get(key), torch.Tensor)
-    }
+    for key in keys:
+        value = bundle.get(key)
+        if not _is_non_finite(value):
+            continue
+        counts = (torch.isnan(value), torch.isposinf(value), torch.isneginf(value))
+        n_nan, n_pinf, n_ninf = (int(c.sum()) for c in counts)
+        bad = [k for k in sorted(view.reads) if _is_non_finite(bundle.get(k))]
+        inputs = f"already non-finite: {bad}" if bad else "all finite"
+        raise NonFiniteError(
+            f"[mode={view.mode.name}] module {view.who!r} produced non-finite values in "
+            f"{key!r} (NaN {n_nan}, +Inf {n_pinf}, -Inf {n_ninf} of {value.numel()}); inputs "
+            f"it read were {inputs}"
+        )
 
 
-def _first_mutated(bundle: Bundle, versions: dict[str, int]) -> str | None:
-    """Find the first pre-step tensor leaf whose version counter bumped."""
-    for key, version in versions.items():
-        if bundle.get(key)._version != version:  # noqa: SLF001
+def _mutation_snapshot(bundle: Bundle, allowed: frozenset[str]) -> dict[str, int | torch.Tensor]:
+    """Snapshot every tensor leaf before a step (debug only).
+
+    Normal tensors: ``torch.Tensor._version``, torch's autograd in-place
+    version counter — private but stable, and the cheapest torch-native
+    mutation detector (integer reads, no data copies). Inference tensors
+    (Lightning runs validation/test under ``inference_mode``) carry no
+    version counter, so the ones the step may read are cloned and compared
+    by value instead — a module can only reach a tensor it read.
+    """
+    out: dict[str, int | torch.Tensor] = {}
+    for key in bundle.keys():  # noqa: SIM118 - Bundle is not a Mapping
+        value = bundle.get(key)
+        if not isinstance(value, torch.Tensor):
+            continue
+        if not value.is_inference():
+            out[key] = value._version  # noqa: SLF001 - torch's in-place version counter
+        elif key in allowed:
+            out[key] = value.clone()
+    return out
+
+
+def _first_mutated(bundle: Bundle, snapshot: dict[str, int | torch.Tensor]) -> str | None:
+    """Find the first pre-step tensor leaf whose version counter bumped or value changed."""
+    for key, before in snapshot.items():
+        after = bundle.get(key)
+        if isinstance(before, int):
+            if after._version != before:  # noqa: SLF001
+                return key
+        elif not _same_values(before, after):
             return key
     return None
 
 
-def _declared_reads(module: GraphModule, step: PlanStep, mode: Mode) -> frozenset[str]:
-    """Compute the keys `module` may read in `mode` (the debug-view allowlist).
+def _same_values(before: torch.Tensor, after: torch.Tensor) -> bool:
+    """Bitwise-style equality of a value snapshot, NaN positions compared as equal."""
+    if before.shape != after.shape or before.dtype != after.dtype:
+        return False
+    if not before.is_floating_point():
+        return torch.equal(before, after)
+    return bool(((before == after) | (before.isnan() & after.isnan())).all())
+
+
+def declared_reads(module: GraphModule, step: PlanStep, mode: Mode) -> frozenset[str]:
+    """Compute the keys `module` may read in `mode` — the `ReadTrackedBundle` allowlist.
 
     The union of the step's bound requires and every mode-active declared
     require — including optional ports the planner dropped for lack of a
     producer, so a module probing them with ``in`` sees a normal absence
-    instead of an `UndeclaredAccessError`.
+    instead of an `UndeclaredAccessError`. Shared by the model executor and
+    the dataset plan runner.
+
+    Parameters
+    ----------
+    module : GraphModule
+        The step's module (its ``declare_io(mode)`` is consulted).
+    step : PlanStep
+        The compiled plan step (its bound ``requires``).
+    mode : Mode
+        The plan's primary mode.
+
+    Returns
+    -------
+    frozenset[str]
+        The dotted keys the module may read or probe.
     """
     io = module.declare_io(mode)
     declared = {key for key, spec in flatten_spec(io.requires).items() if spec.active_in(mode)}
     return frozenset(declared | set(step.requires))
 
 
-class _ReadTrackedBundle:
-    """Read-tracking bundle view handed to modules under ``run(debug=True)``.
+class ReadTrackedBundle:
+    """Read-tracking bundle view handed to a module on a guarded (debug) run.
 
     Duck-types `Bundle`'s read surface (``get``/``subtree``/``keys``/``in``/
     ``len``). Access outside the module's declared requires raises
     `UndeclaredAccessError`; mutation and raw payload access are blocked —
-    modules return their produces, only the executor merges.
+    modules return their produces, only the executor merges. Every leaf read
+    through ``get``/``subtree`` is recorded in `reads` (the `NonFiniteError`
+    input report). Used by ``Executor.run(debug=True)`` and by the dataset
+    plan runner's guarded batches.
+
+    Parameters
+    ----------
+    bundle : Bundle
+        The run bundle to wrap.
+    who : str
+        The module instance name (named in every error).
+    mode : Mode
+        The running mode (named in every error).
+    allowed : frozenset[str]
+        The declared reads (`declared_reads`).
     """
 
-    __slots__ = ("_allowed", "_bundle", "_mode", "_who")
+    __slots__ = ("_allowed", "_bundle", "_mode", "_who", "reads")
 
     def __init__(self, bundle: Bundle, who: str, mode: Mode, allowed: frozenset[str]) -> None:
         """Wrap `bundle` for module `who`, allowing reads of `allowed` keys only."""
@@ -209,6 +316,17 @@ class _ReadTrackedBundle:
         self._who = who
         self._mode = mode
         self._allowed = allowed
+        self.reads: set[str] = set()
+
+    @property
+    def who(self) -> str:
+        """The wrapped module's instance name."""
+        return self._who
+
+    @property
+    def mode(self) -> Mode:
+        """The running mode."""
+        return self._mode
 
     @property
     def data(self) -> NoReturn:
@@ -227,7 +345,9 @@ class _ReadTrackedBundle:
         exactly like the plain bundle (including `KeyError` if absent).
         """
         self._require_declared(key)
-        return self._bundle.get(key)
+        value = self._bundle.get(key)
+        self.reads.add(key)
+        return value
 
     def subtree(self, prefix: str) -> dict[str, Any]:
         """Return the nested dict under `prefix`, checking every leaf is declared.
@@ -240,9 +360,10 @@ class _ReadTrackedBundle:
         if not any(k.startswith(head) for k in self._allowed):
             self._require_declared(prefix)
         out = self._bundle.subtree(prefix)
-        for key in self._bundle.keys():  # noqa: SIM118 - Bundle is not a Mapping
-            if key.startswith(head):
-                self._require_declared(key)
+        leaves = [key for key in self._bundle.keys() if key.startswith(head)]  # noqa: SIM118
+        for key in leaves:
+            self._require_declared(key)
+        self.reads.update(leaves)
         return out
 
     def keys(self) -> list[str]:

@@ -46,9 +46,9 @@ mkdir data
 python -c "
 from pathlib import Path
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
-from salt.testing.inputs import write_dummy_file
+from salt.testing.datagen import SALT_V1_SCHEMA, write_dataset
 write_parity_norm_dict('data/norm_dict.yaml', 'data/class_dict.yaml')
-write_dummy_file('data/train.h5', 'data/norm_dict.yaml')
+write_dataset('data/train.h5', SALT_V1_SCHEMA)
 "
 ```
 
@@ -121,66 +121,47 @@ Two things worth pointing out on a first `declare_io`:
   symbolic one, because a `Processor` computes its own output width itself:
   there is nothing here for the planner to unify.
 
-Now check it without touching real data. Salt's graph tooling accepts a
-lightweight config, a flat `modules:` mapping with no `data:`/`model:`
-split, for exactly this kind of isolated check:
+You cannot check `LogPt` on its own yet. `salt graph` reads full trainer
+configs only (top-level `data:` and `model:` blocks), and a trainer config
+derives a demand sink for every mode: `loss.total` in FIT/VAL, the
+`preds.*` / writer demand in TEST/ONNX. A module whose output reaches none of
+them in any mode is a hard `AllModesDeadError` at compile time, not a
+warning, and right now nothing reads `inputs.jets_logpt`. So the first check
+waits until step 4's model module consumes the key; step 5 wires both into
+one `config.yaml` and validates the whole pipeline, still without opening a
+data file:
 
-```yaml
-# graph_check.yaml
-modules:
-  reader:
-    class_path: salt.data.H5StructuredReader
-    init_args:
-      groups:
-        jets: {global_object: true}
-      filename: data/train.h5
-  logpt:
-    class_path: my_modules.processors.LogPt
+```bash
+salt graph validate -c config.yaml
 ```
 
-This config has no `salt.data.Features` module, and that is specific to
+This prints one `OK [mode=<MODE>] <N> steps, <M> edges, plan_hash=<hash>` line
+per primary mode, the same shape as the MNIST tutorials' `salt graph
+validate` output ([cli.md salt graph](../cli.md#salt-graph) has the full
+format). Add `--set KEY=VALUE` (repeatable) to check a variant without
+editing the file, for example `--set data.batch_size=64`. The liveness rule
+and its exact error text are at
+[`modules/index.md#liveness-every-module-must-reach-a-sink`](../modules/index.md#liveness-every-module-must-reach-a-sink).
+
+That config has no `salt.data.Features` module, and that is specific to
 this example, not a general pattern: `LogPt` reads `raw.jets` directly and
 mints its own `inputs.jets_logpt`, so nothing else needs to produce
 `inputs.*` here. A config with a normaliser or embed reading a
 `Features`-derived column still needs `Features` in `data.modules`; see the
 [minimum graph that compiles](../configuration.md#the-minimum-graph-that-compiles).
 
-```bash
-salt graph validate -c graph_check.yaml
-```
-
-This prints one `OK [mode=<MODE>] <N> steps, <M> edges, plan_hash=<hash>` line
-per primary mode, the same shape as the MNIST tutorials' `salt graph
-validate` output ([cli.md salt graph](../cli.md#salt-graph) has the full
-format). With only a reader and a processor and nothing consuming
-`inputs.jets_logpt` yet, expect a warning-level unconsumed-output finding
-alongside the `OK` lines; that finding goes away once step 4's model module
-consumes the key. That warning, and not a hard failure, is specific to
-`graph_check.yaml` being a standalone toy `modules:` config with no
-`sinks:`: the planner skips demand pruning entirely when no sink list is
-given (`salt/graph/planner.py:460`), so every configured module compiles
-and an unconsumed output only ever surfaces through the non-raising
-`deadcode()` warning path. In a full trainer config, sinks are derived
-(`loss.total` for FIT/VAL, `preds.*` and writer demand for TEST/ONNX), and
-the same unconsumed output is a hard `AllModesDeadError` instead, not a
-warning; wire a consumer before you add a module in that setting. See
-[`modules/index.md#liveness-every-module-must-reach-a-sink`](../modules/index.md#liveness-every-module-must-reach-a-sink)
-for both regimes side by side.
-
-Now ask salt why the new key exists. This is the first real use of
-`salt graph why` in these docs ([cli.md salt graph why](../cli.md#salt-graph-why)
+Once it validates, ask salt why the new key exists. This is the first real
+use of `salt graph why` in these docs ([cli.md salt graph why](../cli.md#salt-graph-why)
 has the full command reference):
 
 ```bash
-salt graph why -c graph_check.yaml --key inputs.jets_logpt
+salt graph why -c config.yaml --key inputs.jets_logpt
 ```
 
 For a key that is present, this prints four lines: the key itself, its
 `producer:` (here, `logpt (LogPt)`), its `spec:` (`kind=data,
-shape=('B', 1), dtype=float32`), and its `consumers:`. For this config that
-last line reads `none`, because nothing reads `inputs.jets_logpt` yet. That
-is expected at this point in the tutorial, not a bug: `salt graph why` is
-telling you exactly what step 4 is about to fix.
+shape=('B', 1), dtype=float32`), and its `consumers:`, here `norm`, the
+`MaskedInputNormaliser` step 5 puts in front of step 4's embed.
 
 ## 3. A reader for a different format
 
@@ -462,14 +443,14 @@ Then render it as an image, exactly as [MNIST part 2](mnist_cnn.md#7-finale-rend
 does:
 
 ```bash
-salt graph plot -c config.yaml -o graph.svg
+salt graph plot -c config.yaml -o graph.png
 ```
 
-`salt graph plot` writes a DOT sidecar next to the requested path, then
-shells out to Graphviz `dot`. The rendered file is a PNG regardless of the
-extension you pass (the `dot -Tpng` invocation names its output after
-whatever path you gave), plus a sibling `graph.pdf`; pass `-o graph.png`
-instead if you would rather the filename matched the format.
+`salt graph plot` treats `-o` as a stem: it writes the DOT source to
+`graph.dot`, then shells out to Graphviz `dot` to render `graph.png` and
+`graph.pdf` next to it. `-o graph.pdf` or a bare `-o graph` write the same
+three files, `-o graph.dot` writes the DOT only, and any other suffix
+(`-o graph.svg`, say) is rejected with a `ConfigError`.
 
 Finally, smoke-test the wiring against real data without training a full
 run. The flag is always spelled with its namespace, `--trainer.fast_dev_run`,

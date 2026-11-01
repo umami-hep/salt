@@ -34,9 +34,9 @@ from salt.outputs import (
     OutputColumn,
     OutputField,
     PadMaskWriter,
-    TaskOutput,
 )
 from salt.outputs.sinks.onnx.config import sanitised_model_name
+from salt.tests._fixtures.producers import FixtureProducer
 
 # stub helpers
 
@@ -330,7 +330,7 @@ def _dead_preds_plan(*, include_dead: bool):
         "track_task",
         produces={"preds.tracks.track_origin": TensorSpec(shape=("B", "L", 5), dtype="float32")},
     )
-    producer = TaskOutput(task="track_origin", stream="tracks")
+    producer = FixtureProducer(task="track_origin", stream="tracks")
     producer.name = "track_origin_output"
 
     class _Sink:

@@ -1,11 +1,14 @@
-"""Plan rendering: `plan_table` (ordered step table) and `dot_source`
-(Graphviz DOT text) for a compiled `Plan`.
+"""Plan rendering for a compiled `Plan`: `plan_table` (ordered step table), `dot_source`/
+`graph_dot` (Graphviz DOT text) and `render_image` (DOT -> PNG + PDF via the ``dot`` binary).
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from typing import TYPE_CHECKING
 
+from salt.graph.errors import GraphError
 from salt.graph.planner import SINKS, SOURCES, Plan
 from salt.graph.spec import (
     KEY_SEP,
@@ -15,14 +18,18 @@ from salt.graph.spec import (
     is_symbolic_dim,
     split_symbolic_dim,
 )
+from salt.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from pathlib import Path
 
     from salt.graph.planner import PlanStep
-    from salt.graph.spec import GraphModule
+    from salt.graph.spec import GraphModule, Mode
 
-__all__ = ["dot_source", "plan_table"]
+__all__ = ["dot_source", "graph_dot", "plan_table", "pruned_modules", "render_image"]
+
+_LOG = get_logger(__name__)
 
 # Symbolic dim families that are genuinely data-dependent (batch, per-stream
 # token length, encoder layer length, merged seq length) and so stay symbolic
@@ -291,6 +298,140 @@ def dot_source(
     lines.extend(f"  {_quote(producer)} -> {_quote(consumer)};" for producer, consumer in pairs)
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+def graph_dot(
+    plan: Plan,
+    modules: Mapping[str, GraphModule] | None,
+    *,
+    pruned: Iterable[str] = (),
+    widths: Mapping[str, int] | None = None,
+    title: str | None = None,
+) -> str:
+    """The DOT text ``salt graph plot`` and `salt.callbacks.GraphArtifacts` render.
+
+    Parameters
+    ----------
+    plan : Plan
+        The compiled plan to draw.
+    modules : Mapping[str, GraphModule] | None
+        Module instances (labels the `pruned` cards with their class).
+    pruned : Iterable[str], optional
+        Demand-pruned module names (see `pruned_modules`), by default ().
+    widths : Mapping[str, int] | None, optional
+        Resolved per-key feature widths (`salt.model.bind.resolve_bind_schema`), by default None.
+    title : str | None, optional
+        Graph caption, by default None.
+
+    Returns
+    -------
+    str
+        The `dot_source` text for these arguments.
+    """
+    return dot_source(plan, modules, pruned, widths=widths, title=title)
+
+
+def pruned_modules(modules: Mapping[str, GraphModule], plan: Plan) -> list[str]:
+    """Sorted names of the demand-pruned modules of `plan` — the `deadcode` ``key == "*"`` set.
+
+    A configured module is pruned when it has a port active in ``plan.mode`` yet is
+    not a plan step. A module with no active port in that mode (e.g. a TEST-only
+    writer in FIT) is mode-gated, not pruned, and is left out — exactly as the
+    planner never makes it a node.
+
+    Parameters
+    ----------
+    modules : Mapping[str, GraphModule]
+        Every module the plan was compiled from.
+    plan : Plan
+        The compiled plan.
+
+    Returns
+    -------
+    list[str]
+        Pruned module names, sorted.
+    """
+    live = set(plan.module_names)
+    return sorted(
+        name
+        for name, module in modules.items()
+        if name not in live and _active_in(module, plan.mode)
+    )
+
+
+def _active_in(module: GraphModule, mode: Mode) -> bool:
+    """Whether any requires/produces/rewrites leaf of `module` is active in `mode` (the
+    planner's node test, `salt.graph.planner._collect_nodes`).
+    """
+    io = module.declare_io(mode)
+    trees = (io.requires, io.produces, getattr(io, "rewrites", {}))
+    return any(spec.active_in(mode) for tree in trees for spec in flatten_spec(tree).values())
+
+
+# ---------------------------------------------------------------------------
+# DOT -> PNG + PDF via the Graphviz `dot` binary
+# ---------------------------------------------------------------------------
+
+
+def render_image(dot_path: Path, stem: Path, *, strict: bool) -> tuple[Path, Path] | None:
+    """Rasterise `dot_path` to ``<stem>.png`` (150 dpi) and ``<stem>.pdf`` with Graphviz ``dot``.
+
+    Silent on success; the caller reports the written paths.
+
+    Parameters
+    ----------
+    dot_path : Path
+        The DOT source file (already written).
+    stem : Path
+        Output path without suffix; ``.png``/``.pdf`` are appended.
+    strict : bool
+        True (``salt graph plot``): a missing ``dot`` or a failed render raises.
+        False (the training callback): either logs a warning with the manual
+        command and returns None — never raises.
+
+    Returns
+    -------
+    tuple[Path, Path] | None
+        ``(png, pdf)``, or None when a non-strict render did not complete.
+
+    Raises
+    ------
+    GraphError
+        With `strict`, when ``dot`` is not on PATH or a ``dot`` invocation fails
+        (its stderr surfaced in the message).
+    """
+    png, pdf = stem.with_name(f"{stem.name}.png"), stem.with_name(f"{stem.name}.pdf")
+    hint = f"render manually with: dot -Tpng {dot_path} -o {png}"
+    dot_bin = shutil.which("dot")
+    if dot_bin is None:
+        if strict:
+            raise GraphError(
+                "the Graphviz `dot` binary was not found on PATH — cannot render the "
+                f"graph image. The DOT source was written to {dot_path}; render it "
+                f"later, e.g. `dot -Tpng {dot_path} -o {png}`. On a native "
+                "install (uv/conda), install Graphviz separately as a system "
+                "package; the prebuilt salt containers already include it, so "
+                "hitting this there is unexpected. See "
+                "https://ftag-salt.docs.cern.ch/setup/#install-graphviz"
+            )
+        _LOG.warning(f"graphviz `dot` not on PATH — wrote {dot_path} only; {hint}")
+        return None
+    renders = (
+        ([dot_bin, "-Tpng", "-Gdpi=150", str(dot_path), "-o", str(png)], png),
+        ([dot_bin, "-Tpdf", str(dot_path), "-o", str(pdf)], pdf),
+    )
+    for cmd, target in renders:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            failure = (
+                f"`dot` failed to render {target} (exit {result.returncode}): "
+                f"{result.stderr.strip() or '(no stderr)'}"
+            )
+            if strict:
+                raise GraphError(failure)
+            _LOG.warning(f"{failure}; {hint}")
+            return None
+    return png, pdf
 
 
 # ---------------------------------------------------------------------------

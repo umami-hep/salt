@@ -22,7 +22,7 @@ from salt.schema import (
 
 @pytest.fixture
 def h5_path(tmp_path):
-    """A tiny structured H5 file modeled on salt.testing.inputs.write_dummy_file."""
+    """A tiny structured H5 file modeled on the salt-v1 datagen schema (SALT_V1_SCHEMA)."""
     path = tmp_path / "train.h5"
     jets_dtype = np.dtype([("pt", "f4"), ("eta", "f4"), ("flavour_label", "i4")])
     tracks_dtype = np.dtype([("d0", "f4"), ("ftagTruthOriginLabel", "i4"), ("valid", "?")])

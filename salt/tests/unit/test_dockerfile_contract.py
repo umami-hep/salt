@@ -42,7 +42,7 @@ def test_apt_line_installs_graphviz():
     assert "graphviz" in tokens, (
         "setup/Dockerfile's apt-get install line is missing `graphviz` — without the `dot` "
         "binary, salt fit's graph render degrades to .dot-only "
-        "(salt/callbacks/graph_artifacts.py::_render)"
+        "(salt/graph/render.py::render_image)"
     )
 
 

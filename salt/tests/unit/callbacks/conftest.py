@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from salt.graph.bundle import Bundle
 
 
 LRS = {"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1}
+
+
+def make_trainer(**overrides) -> SimpleNamespace:
+    base = {"logger": None, "current_epoch": 0, "global_step": 30, "is_global_zero": True}
+    return SimpleNamespace(**{**base, "sanity_checking": False, **overrides})
 
 
 def make_matched_bundle(seed: int = 5, batch: int = 6, m: int = 5, n_cls: int = 3, t: int = 10):

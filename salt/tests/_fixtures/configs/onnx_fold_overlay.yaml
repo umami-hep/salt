@@ -1,19 +1,24 @@
 # TEST FIXTURE — not a shipped config. Overlay on salt/configs/gn2v2-opendata.yaml
-# exercising the folded ONNX export path: a ClassProbs softmax and a Combination
-# (pbc = pb+pc) minted in-graph, each naming its own ONNX output through its
-# manifest. No shipped config uses this shape, so it lives here rather than in
-# salt/configs.
+# exercising the folded ONNX export path: an export-only RunTaskOutput (pb/pc/pu)
+# and a Combination (pbc = pb+pc) minted in-graph, each naming its own ONNX output
+# through its manifest. No shipped config uses this shape, so it lives here rather
+# than in salt/configs.
 
 model:
   modules:
-    # the folded ONNX conversion producers (the base runs get_output for H5 only)
+    # the folded ONNX conversion producers (the outputs: section below writes H5 only)
     jet_probs:
-      class_path: salt.outputs.ClassProbs
-      init_args: {task: jets_classification, stream: jets}
+      class_path: salt.outputs.RunTaskOutput
+      init_args: {tasks: [jets_classification], modes: [export]}
+    # a Combination reads ONE [B, C] probs leaf; RunTaskOutput mints per-class
+    # leaves, so the pbc source is this test-only softmax copy
+    jet_softmax:
+      class_path: salt.tests._fixtures.producers.FixtureProducer
+      init_args: {task: jets_classification, stream: jets, name: jet_softmax, softmax: true}
     pbc:
       class_path: salt.outputs.Combination
       init_args:
-        source: outputs.jets.jets_classification
+        source: outputs.jets.jet_softmax
         name: pbc
         terms: {0: 1.0, 1: 1.0} # pbc = pb + pc
 

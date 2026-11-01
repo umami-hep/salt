@@ -119,8 +119,8 @@ and `deadcode`, all of which read config only and touch no data.
 ## Run-dir artifacts
 
 See [What a run writes](cli.md#what-a-run-writes) for the per-stage plan
-tables, `resolved_io.yaml`, and the graph renders every `salt fit`/`salt
-test` writes.
+tables, `resolved_io.yaml`, and the graph renders (`graph_<stage>.{dot,png,pdf}`,
+the same render as `salt graph plot`) every `salt fit`/`salt test` writes.
 
 ## Metrics callbacks
 

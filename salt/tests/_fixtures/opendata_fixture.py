@@ -2,8 +2,7 @@
 
 Unlike ``gn2v2_fixture`` (v1 ``IP3D_signed_*`` track names, used by 14 shipped
 configs), the open-data config uses ``lifetimeSigned*`` names, 4 jet classes (taujets)
-and an explicit ``InputSamples``. Uses only APIs present at ``f1b7664``: the study's
-parity probe loads this file by path under that pinned tree.
+and an explicit ``InputSamples``.
 """
 
 from __future__ import annotations
@@ -15,8 +14,8 @@ from pathlib import Path
 import yaml
 
 from salt.schema import dump_schema, save_schema
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import ELECTRON_VARIABLES, JET_VARIABLES
-from salt.testing.inputs import write_dummy_file
 
 __all__ = [
     "OPENDATA_CLASS_NAMES",
@@ -87,10 +86,9 @@ def build_opendata_data(base: Path) -> dict[str, Path]:
     base.mkdir(parents=True, exist_ok=True)
     nd, cd = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_opendata_norm_dict(nd, cd)
-    h5 = base / "pp_output_opendata.h5"
     # inc_taus=True is LOAD-BEARING: it writes the 4-entry flavour_label attr that
-    # check_class_names needs; jets/tracks columns come from the (opendata) norm dict.
-    write_dummy_file(h5, nd, inc_taus=True)
+    # check_class_names needs; the salt-v1 track superset carries the lifetimeSigned* names.
+    h5, _, _ = dummy_h5(base, name="pp_output_opendata.h5", inc_taus=True)
     schema = base / "schema.yaml"
     save_schema(dump_schema(h5), schema)
     return {"dir": base, "h5": h5, "nd": nd, "cd": cd, "schema": schema}

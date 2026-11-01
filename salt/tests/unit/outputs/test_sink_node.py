@@ -23,6 +23,7 @@ from salt.outputs import H5OutputSink
 from salt.graph.render import dot_source
 from salt.model.sink_prep import assert_no_dead_preds
 from salt.tests._fixtures.gn2v2_test_config import small_config
+from salt.tests._fixtures.producers import FixtureProducer
 
 # this file is at salt/tests/unit/outputs/ — the configs live at salt/configs/
 _CONFIGS = Path(__file__).parents[3] / "configs"
@@ -234,15 +235,13 @@ class _Stub:
 
 def _folded_test_plan(*, include_dead):
     """Compile a TEST plan: a converted track pred (+ optionally a DEAD jet pred)."""
-    from salt.outputs import TaskOutput  # noqa: PLC0415 - test-local
-
     pred_key = "preds.tracks.track_origin"
     out_key = "outputs.tracks.track_origin"
     dead_pred = "preds.jets.jets_classification"
     track_task = _Stub(
         "track_task", produces={pred_key: TensorSpec(shape=("B", "L", 5), dtype="float32")}
     )
-    producer = TaskOutput(task="track_origin", stream="tracks")
+    producer = FixtureProducer(task="track_origin", stream="tracks")
     producer.name = "track_origin_output"
     # a minimal terminal sink demanding the converted leaf (the implicit H5 sink
     # resolves its columns from a bound section, not an explicit table — this

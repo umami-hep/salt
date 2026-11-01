@@ -51,6 +51,13 @@ def _norm_specs(
     return specs
 
 
+def _normed_fields(
+    streams: Sequence[str], fields: Mapping[str, tuple[str, ...]]
+) -> dict[str, tuple[str, ...]]:
+    """Propagate ``inputs.<stream>`` column names to ``normed.<stream>`` (column-preserving)."""
+    return {f"normed.{s}": fields[f"inputs.{s}"] for s in streams if f"inputs.{s}" in fields}
+
+
 def _via(stream: str, key: str) -> str:
     """``" (stream '<stream>')"`` when the dataset key differs from the stream, else ``""``."""
     return f" (stream {stream!r})" if key != stream else ""
@@ -161,10 +168,7 @@ class Normaliser(SaltModelModule):
         )
 
     def derived_fields(self, fields: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
-        """Propagate ``inputs.<stream>`` column names to ``normed.<stream>`` (column-preserving)."""
-        return {
-            f"normed.{s}": fields[f"inputs.{s}"] for s in self.streams if f"inputs.{s}" in fields
-        }
+        return _normed_fields(self.streams, fields)
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate normalisation buffers (means/stds per stream); raises if bound twice."""
@@ -348,10 +352,7 @@ class MaskedInputNormaliser(SaltModelModule):
         )
 
     def derived_fields(self, fields: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
-        """Propagate ``inputs.<stream>`` column names to ``normed.<stream>`` (column-preserving)."""
-        return {
-            f"normed.{s}": fields[f"inputs.{s}"] for s in self.streams if f"inputs.{s}" in fields
-        }
+        return _normed_fields(self.streams, fields)
 
     def bind(self, schema: ResolvedSchema) -> None:
         """Allocate the running-stat buffers (identity init); raises if bound twice."""

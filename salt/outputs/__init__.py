@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from salt.outputs.combination import Combination
-from salt.outputs.conversion_ops import ClassProbsOp, ConversionOp
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.outputs.maskformer import (
     MaskFormerObjects,
@@ -20,7 +19,6 @@ from salt.outputs.output_schema import (
 from salt.outputs.pad_mask_writer import PadMaskWriter
 from salt.outputs.run_task_output import OutputSectionWriter, RunTaskOutput
 from salt.outputs.sinks.h5_sink import H5OutputSink
-from salt.outputs.sinks.jsonl_sink import JSONLOutputSink
 from salt.outputs.sinks.onnx_sink import OnnxExportLeaf, OnnxExportSink
 from salt.outputs.sinks.registry import iter_sinks, register_sink, sink_registry
 from salt.outputs.sinks.sink import (
@@ -29,16 +27,11 @@ from salt.outputs.sinks.sink import (
     SinkContext,
     is_test_persistence_sink,
 )
-from salt.outputs.task_output import ClassProbs, TaskOutput
 
 __all__ = [
-    "ClassProbs",
-    "ClassProbsOp",
     "Combination",
-    "ConversionOp",
     "H5OutputSink",
     "InputCopyWriter",
-    "JSONLOutputSink",
     "MFLeadVertexDecorator",
     "MaskFormerObjects",
     "Node",
@@ -53,7 +46,6 @@ __all__ = [
     "RunTaskOutput",
     "RuntimeSink",
     "SinkContext",
-    "TaskOutput",
     "is_test_persistence_sink",
     "iter_sinks",
     "register_sink",

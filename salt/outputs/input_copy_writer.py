@@ -19,6 +19,11 @@ _NEEDS_FIELD_LIST = (
 )
 
 
+def _label_key(stream: str, var: str) -> str:
+    """The ``labels.<stream>.<var>`` leaf a copied field is read from."""
+    return f"labels.{stream}.{var}"
+
+
 class InputCopyWriter(OutputSectionWriter):
     """The ``outputs:`` section input-copy writer.
 
@@ -163,12 +168,14 @@ class InputCopyWriter(OutputSectionWriter):
         """The ``outputs.<stream>.<var>`` leaf for one copied field."""
         return f"outputs.{stream}.{var}"
 
-    def copy_leaves(self, mode: Mode) -> list[tuple[str, str]]:
-        """The ``(stream, var)`` pairs copied in `mode` (empty when not `runs_in_mode`)."""
-        if not self.runs_in_mode(mode):
-            return []
+    def _pairs(self) -> list[tuple[str, str]]:
+        """Every copied ``(stream, var)`` pair in column order (`ConfigError` while unresolved)."""
         self._require_resolved()
         return [(s, v) for s, vs in self.variables.items() for v in vs]
+
+    def copy_leaves(self, mode: Mode) -> list[tuple[str, str]]:
+        """The ``(stream, var)`` pairs copied in `mode` (empty when not `runs_in_mode`)."""
+        return self._pairs() if self.runs_in_mode(mode) else []
 
     def declare_io(self, mode: Mode) -> IO:
         """Require ``labels.<stream>.<var>`` -> produce ``outputs.<stream>.<var>`` in TEST.
@@ -180,31 +187,23 @@ class InputCopyWriter(OutputSectionWriter):
         if not self.runs_in_mode(mode) or not (mode & Mode.TEST):
             return IO(requires={}, produces={})
         pairs = self.copy_leaves(mode)
-        req = {
-            f"labels.{s}.{v}": TensorSpec(shape=None, dtype=None, kind="label") for s, v in pairs
-        }
+        req = {_label_key(s, v): TensorSpec(shape=None, dtype=None, kind="label") for s, v in pairs}
+        # finite=False: a verbatim label copy keeps label semantics (NaN is a valid label
+        # value; labels are never scanned for non-finite values)
         prod = {
-            self.output_key(s, v): TensorSpec(shape=None, dtype=None, kind="data") for s, v in pairs
+            self.output_key(s, v): TensorSpec(shape=None, dtype=None, kind="data", finite=False)
+            for s, v in pairs
         }
         return IO(requires=unflatten_spec(req), produces=unflatten_spec(prod))
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
         """Clone each demanded ``labels.<stream>.<var>`` leaf into ``outputs.<stream>.<var>``."""
         del mode
-        self._require_resolved()
-        return {
-            self.output_key(s, v): b.get(f"labels.{s}.{v}").clone()
-            for s, vs in self.variables.items()
-            for v in vs
-        }
+        return {self.output_key(s, v): b.get(_label_key(s, v)).clone() for s, v in self._pairs()}
 
     def manifest_fields(self, mode: Mode) -> list[tuple[str, OutputField]]:
         """The copied columns' manifest entries, bare-named (`prefix=False`), `dtype=None`."""
-        if not self.runs_in_mode(mode):
-            return []
-        self._require_resolved()
         return [
             (self.output_key(s, v), OutputField(h5_name=v, dtype=None, prefix=False, final=True))
-            for s, vs in self.variables.items()
-            for v in vs
+            for s, v in self.copy_leaves(mode)
         ]

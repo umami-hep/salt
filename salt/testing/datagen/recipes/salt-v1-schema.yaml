@@ -1,29 +1,26 @@
-# salt-v1-schema.yaml -- SCHEMA-FORMAT doc (n_samples/seed/groups/fields),
-# consumed by parity.py via salt.testing.datagen.schema.load_schema
-# (plain yaml.safe_load + parse_schema -- NOT the pipeline recipe loader, so the
-# feature lists are INLINED here rather than referenced).
+# salt-v1-schema.yaml -- SCHEMA-FORMAT doc (n_samples/seed/groups/fields) loaded by
+# salt.testing.datagen.load_schema (plain yaml.safe_load + parse_schema -- NOT the
+# pipeline recipe loader, so the feature lists are INLINED here rather than
+# referenced). Exported as salt.testing.datagen.SALT_V1_SCHEMA; consumed by
+# salt.testing.datagen.write_dataset and the test fixture salt/tests/_fixtures/dummy_h5.py.
 #
-# It reconstructs salt.utils.inputs.write_dummy_file as a SUPERSET supporting all
-# flag combinations the parity gate uses: make_xbb / inc_taus / inc_params /
-# is_gn3. Field lists are the same variable-supersets the pipeline recipes encode
-# (recipes/feature_lists/*.yaml) -- the faithful source of truth -- but here they
-# live in ONE flat schema the engine's generate_data() drives directly.
+# The synthetic salt-v1 training file: ONE flat schema the engine's generate_data()
+# drives directly, supporting the build-time flags make_xbb / inc_taus / inc_params /
+# is_gn3. Field lists are the same variable-supersets as recipes/feature_lists/*.yaml
+# (keep the two in sync -- in particular jets.flavour_label's class names, which must
+# equal the class_names the shipped configs declare). Pinned by
+# salt/tests/unit/testing/test_datagen_v1_schema.py.
 #
-# Distinct from the pipeline recipes (flavour_tagger.yaml / maskformer_truth_hadron.yaml):
-# those drive the modular Pipeline; this drives the schema engine for the parity
-# drop-in. AUTO-GENERATED from the feature_lists by tools; edit the feature_lists
-# and regenerate, or edit here directly.
-#
-# Group map -> write_dummy_file:
-#   jets         : global; jet_vars f4 + flavour_label/HadronConeExclTruthLabelID/
+# Group map:
+#   jets         : global; 39 f4 features + flavour_label/HadronConeExclTruthLabelID/
 #                  HadronGhostInitialTruthLabelPdgId labels; HadronConeExclTruthLabelLxy
 #                  NaN where flavour_label==0; sample_weight uniform.
-#   tracks       : constituent max 40, min_valid 1; TRACK_VARS f4 + 3 labels +
+#   tracks       : constituent max 40, min_valid 1; 32 f4 features + 3 labels +
 #                  ftagTruthParentBarcode LINK -> truth_hadrons.barcode (maskformer).
-#   tracks_dr / tracks_ghost : alias_of tracks (dummy writer duplicates them).
-#   flows        : constituent max 40; FLOW_VARS.   flow : alias_of flows.
-#   electrons    : constituent max 10, mask_invalid false; ELECTRON_VARS + 2 labels.
-#   truth_hadrons: constituent max 5, min_valid 1; HADRON_VARS + barcode id + flavour label.
+#   tracks_dr / tracks_ghost : alias_of tracks (GN3 configs read tracks_ghost).
+#   flows        : constituent max 40; 5 f4 features.   flow : alias_of flows.
+#   electrons    : constituent max 10, mask_invalid false; 29 f4 features + 2 labels.
+#   truth_hadrons: constituent max 5, min_valid 1; 5 f4 features + barcode id + flavour label.
 #   parameters   : global, emit_if inc_params; carries ['mass'].
 n_samples: 1000
 seed: 42
@@ -184,7 +181,7 @@ groups:
     - ujets
     class_names_append_if:
       inc_taus:
-      - taus
+      - taujets
     classes_by_flag:
       make_xbb:
       - 0
@@ -205,12 +202,12 @@ groups:
       - top
       - qcd
       is_gn3:
-      - ghostsplitbjets
-      - ghostsplitcjets
-      - ghostsplitsjets
-      - ghostsplitudjets
-      - ghostsplitgjets
-      - ghostsplittaujets
+      - ghostbjets
+      - ghostcjets
+      - ghostsjets
+      - ghostudjets
+      - ghostgjets
+      - ghosttaujets
   - name: HadronConeExclTruthLabelID
     type: label
     dtype: i4

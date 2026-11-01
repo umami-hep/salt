@@ -354,7 +354,7 @@ salt fit artifacts: checkpoints in run/ckpts
 ```
 
 `run/` now contains the fully-resolved `config.yaml`, one checkpoint per epoch
-in `ckpts/`, and rendered graph plots (`graph_fit.svg` — your reader is the
+in `ckpts/`, and rendered graph plots (`graph_fit.png` / `graph_fit.pdf` — your reader is the
 root node).
 
 !!! note "Large validation loss values are expected"

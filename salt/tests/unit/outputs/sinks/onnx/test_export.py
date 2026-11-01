@@ -273,18 +273,18 @@ def two_stream(tmp_path_factory):
             ),
         ],
     )
-    # folded path: the jets head's softmax folds into a ClassProbs node; the two
-    # per-token argmax aux leaves ride an export-only RunTaskOutput (the shipped
-    # per-token export path); the sink names all outputs.
-    from salt.outputs import ClassProbs
-
+    # folded path: the jets head's softmax and the two per-token argmax aux leaves
+    # each ride an export-only RunTaskOutput (the shipped export path); the sink
+    # names all outputs.
     def _n(node, name):
         node.name = name
         return node
 
     origin_tasks = ["track_origin", "electron_origin"]
     modules.update({
-        "jet_probs": _n(ClassProbs(task="jets_classification", stream="jets"), "jet_probs"),
+        "jet_probs": _n(
+            RunTaskOutput(tasks=["jets_classification"], modes=["export"]), "jet_probs"
+        ),
         "origin_out": _n(RunTaskOutput(tasks=origin_tasks, modes=["export"]), "origin_out"),
         "onnx_export": _n(OnnxExportSink(), "onnx_export"),
     })
@@ -365,14 +365,13 @@ def _real_cli_run(tmp_path_factory, config_path: Path, label: str) -> SimpleName
 
     from salt.main import main as salt_main
     from salt.schema import dump_schema, save_schema
-    from salt.testing.inputs import write_dummy_file
+    from salt.tests._fixtures.dummy_h5 import dummy_h5
     from salt.utils.config_utils import disable_logger_in_config
 
     tmp_path = tmp_path_factory.mktemp(label)
     nd_path, cd_path = tmp_path / "norm_dict.yaml", tmp_path / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
-    h5_path = tmp_path / "dummy_test_file_ttbar.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(tmp_path, name="dummy_test_file_ttbar.h5")
     schema_path = tmp_path / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
 

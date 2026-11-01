@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib
 import io
@@ -43,15 +44,15 @@ from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
 from salt.outputs.input_copy_writer import InputCopyWriter
 from salt.schema import dump_schema, save_schema
+from salt.tests._fixtures.dummy_h5 import dummy_h5
 from salt.tests._fixtures.gn2v2_fixture import write_parity_norm_dict
 from salt.tests._fixtures.gn2v2_test_config import small_config
-from salt.testing.inputs import write_dummy_file
 from salt.utils.config_utils import disable_logger_in_config
 
 DUMMY_CFG = small_config()
 NAME = yaml.safe_load(DUMMY_CFG.read_text())["name"]
 OPENDATA_CFG = CONFIG_DIR / "gn2v2-opendata.yaml"
-TOY_GRAPH_CFG = Path(__file__).parent.parent / "_fixtures" / "configs" / "toy.yaml"
+TOY_GRAPH_CFG = Path(__file__).parent.parent / "_fixtures" / "configs" / "toy_trainer.yaml"
 GN2V2_MODULES = {
     "norm",
     "track_embed",
@@ -99,8 +100,7 @@ def data(tmp_path_factory) -> dict[str, Path]:
     base = tmp_path_factory.mktemp("salt_cli")
     nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
     write_parity_norm_dict(nd_path, cd_path)
-    h5_path = base / "pp_output_train.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base)
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
@@ -169,6 +169,39 @@ class TestParseAndInstantiate:
         section = cli.model._output_section  # noqa: SLF001
         assert set(section) == {"inputs_copy", "run_tasks", "pad_mask"}
         assert section["run_tasks"].is_run_task_output()
+
+
+# the ONE top-level debug switch (linked to model.init_args.debug + data.debug)
+
+
+def test_debug_links_model_and_data(data):
+    cli = make_cli(data, extra=["--debug=true"])
+    assert cli.config.debug is True
+    assert cli.model.debug is True
+    assert cli.datamodule.debug is True
+    off = make_cli(data)
+    assert (off.config.debug, off.model.debug, off.datamodule.debug) == (False, False, False)
+
+
+@pytest.mark.parametrize("flag", ["--model.init_args.debug=true", "--data.debug=true"])
+def test_model_debug_not_directly_settable(data, flag):
+    with pytest.raises((SystemExit, argparse.ArgumentError, ConfigError)):
+        make_cli(data, extra=[flag])
+
+
+def test_debug_round_trips_through_the_printed_config(data, tmp_path, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        make_cli(data, extra=["--debug=true", "--print_config"])
+    assert excinfo.value.code == 0
+    printed = capsys.readouterr().out
+    dumped = yaml.safe_load(printed)
+    # only the top-level key is written; the linked targets are stripped
+    assert dumped["debug"] is True
+    assert "debug" not in dumped["data"]
+    assert "debug" not in dumped["model"]["init_args"]
+    again = SaltCLI(args=["--config", write_yaml(tmp_path, "printed.yaml", printed)], run=False)
+    assert again.model.debug is True
+    assert again.datamodule.debug is True
 
 
 # --print_config round-trip
@@ -825,18 +858,6 @@ class TestGraphFitConfigAdapter:
         assert "DIFFERENT ORDER" in err
         assert "model.modules.jets_classification" in err
 
-    def test_set_rejected_for_toy_configs(self, capsys):
-        rc = main([
-            "graph",
-            "validate",
-            "-c",
-            str(TOY_GRAPH_CFG),
-            "--set",
-            "model.modules.x.init_args.y=1",
-        ])
-        assert rc == 1
-        assert "trainer configs only" in capsys.readouterr().err
-
     def test_validate_onnx_sinks_derive_from_writers(self, capsys):
         # the unified-manifest happy path: ONNX validates green with sinks
         # from the writers (the shipped config carries NO export.outputs)
@@ -982,8 +1003,7 @@ def fanout_data(tmp_path_factory) -> dict[str, Path]:
     # left untouched even when --class_dict is also supplied
     cd_explicit = base / "class_dict_explicit.yaml"
     write_parity_norm_dict(base / "_throwaway_nd.yaml", cd_explicit)
-    h5_path = base / "pp_output_train.h5"
-    write_dummy_file(h5_path, nd_path)
+    h5_path, _, _ = dummy_h5(base)
     schema_path = base / "schema.yaml"
     save_schema(dump_schema(h5_path), schema_path)
     return {

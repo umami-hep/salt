@@ -423,12 +423,9 @@ def _step_stage_min_pct_start(total_steps: int) -> float:
     wide, not 2 — a 2-step floor collapses to a single-step up-phase, invisible
     under the one-batch lag between ``scheduler.step()`` and a per-batch LR read.
     """
-    if total_steps <= 0:
+    if total_steps <= 0 or 3.0 / total_steps > 1.0 - 1.0 / total_steps:  # < 4 steps: be legal
         return 0.75
-    low = 3.0 / total_steps
-    if low > 1.0 - 1.0 / total_steps:  # fewer than 4 steps: just be legal
-        return 0.75
-    return low
+    return 3.0 / total_steps
 
 
 def resolve_lr_scheduler_class(class_path: str) -> type:
