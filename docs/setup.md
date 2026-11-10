@@ -147,6 +147,7 @@ Salt requires Python 3.11 to 3.14.
     You may also wish to bind the directories containing your training files.
 
     Please note that if you want an editable install, you need to run the installation command below each time you open a new apptainer shell.
+    Afterwards, activate the created environment with `source .venv/bin/activate`, otherwise the preinstalled salt from `/salt/` is used.
 
 
 ### Install the salt package

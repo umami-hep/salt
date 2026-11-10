@@ -24,23 +24,29 @@ We strongly recommend to follow the tutorial on a computer with a GPU to benefit
 
 Before we begin, make sure you have the software package installed on your system. If not, please make sure you have read the documentation on [setup](setup.md) and followed it to install `salt`.
 
+For this tutorial, install salt from your clone of the repository with `uv sync`, as described in [Install the salt package](setup.md#install-the-salt-package), for example inside the Salt image.
+Salt checks that the code you train with has no uncommitted changes and records the commit hash for each training, which is why the tutorial asks you to commit your changes.
+The salt which comes preinstalled in the image under `/salt/` does not know about your clone, so it neither checks nor records your commits.
+If you run `uv sync` inside the image, activate the environment afterwards with `source .venv/bin/activate`.
+
 
 ## Step 2: Obtaining the training dataset
 
 The basis of this tutorial is the "Top quark pair events for heavy flavour tagging and vertexing at the LHC" dataset. It contains jets from top anti-top decays. The event and parton shower are simulated in Pythia 8 with a centre of mass energy of 13 TeV, with detector response modelled in the Delphes framework. The detector response is modelled on the ATLAS detector, and a mean pileup of 50 was used. The dataset with additional information is available here: https://zenodo.org/records/10371998
 
-Create a directory at a location with sufficient free disk space. The unpacked dataset corresponds to 28 GB disk space. The compressed file which is downloaded corresponds to a size of 14 GB.
+Create a directory at a location with sufficient free disk space. The dataset needs about 15 GB of disk space.
 
 Execute the following commands to download all files to a directory which you will need to define (replace `<path to directory>` with the path to the directory of your choice).
 
 ```bash
 export TUTORIAL_DATA=<path to directory>
 mkdir -p $TUTORIAL_DATA
-cd $TUTORIAL_DATA
-curl -o $TUTORIAL_DATA/tutorialdata.zip "https://zenodo.org/api/records/10371998/files-archive"
-unzip $TUTORIAL_DATA/tutorialdata.zip -d $TUTORIAL_DATA
-rm $TUTORIAL_DATA/tutorialdata.zip
+for f in pp_output_train.h5 pp_output_val.h5 pp_output_test_ttbar.h5 norm_dict.yaml class_dict.yaml; do
+    curl -fL -o $TUTORIAL_DATA/$f "https://zenodo.org/records/10371998/files/$f?download=1"
+done
 ```
+
+The download takes a few minutes, most of it for the training file. You can compare the files with the MD5 checksums given on the [Zenodo record](https://zenodo.org/records/10371998).
 
 After you completed the download, you should have the following files downloaded to your directory:
 
@@ -60,7 +66,7 @@ The `h5` files contain (among others) the following datasets which are relevant 
 
 Trainings are run using configuration files. A configuration file has been prepared for this tutorial which defines the model, the training and validation datasets, as well as the corresponding `class_dict.yaml` and `norm_dict.yaml` files. Further, the hyperparameters of the model and configuration for steering the training, such as batch size and number of workers and CPU/GPU usage are defined.
 
-You need to modify the file and replace these sections
+You need to modify `salt/configs/tutorial.yaml` and replace these sections
 
 ```
   train_file: <path to directory>/pp_output_train.h5
@@ -72,18 +78,20 @@ You need to modify the file and replace these sections
 with the path you downloaded the files in the previous step.
 
 After you modified the file, you need to commit the changes. We suggest to open a new branch for this.
+Only add the config, so that other files in your clone (e.g. `uv.lock` or plots) are not committed by accident.
 
 ```bash
 git checkout -b tutorial
-git add .
+git add salt/configs/tutorial.yaml
 git commit -m "update tutorial.yaml"
 ```
 
 Read the documentation for [training](training.md) with salt.
 
 Salt provides the option to use [Comet.ml](https://www.comet.com/) as an online ML logging tool. To set it up you should take a look at [(Optional) Set up logging](tutorial-Xbb.md#2-optional-set-up-logging).
+Comet is optional: without a Comet API key, salt logs offline and you don't need to change anything.
 
-First, you should run a test training which will run over a small number of training and validation batches and then exit without writing any output. This will show you if you have everything set up correctly.
+First, you should run a test training which will run over a small number of training and validation batches and then exit without writing any checkpoints (it leaves an empty `logs/GN2_<timestamp>` directory behind, which you can delete). This will show you if you have everything set up correctly.
 Assuming you start in the `salt` main directory, you first need to navigate to the `salt` subdirectory which hosts the configuration file directory `configs`.
 
 ```bash
@@ -107,8 +115,12 @@ salt fit --config configs/tutorial.yaml
     ```
 
     You should commit your changes with `git` before running the training.
+    This check only works if you installed salt from your clone, see [Step 1](#step-1-installation).
 
-The process of training might take some time. Typically, after 10 minutes the 20 epochs should have finished and you will see a directory created in `logs/GN2_<timestamp>`. It contains the checkpoints for each epoch in a subdirectory `logs/GN2_<timestamp>/ckpts` with the filenames encoding the epoch and corresponding loss evaluated on the validation sample. Ideally, you should see the validation loss decreasing with increasing epoch.
+To keep the turnaround short, the tutorial config only uses 100,000 of the 13.5 million training jets (`num_train`), and 10,000 jets for validation and testing (`num_val`, `num_test`).
+On a GPU, the 20 epochs finish within a few minutes.
+To train on the full sample, add `--data.num_train -1` to the command.
+After the training, you will see a directory created in `logs/GN2_<timestamp>`. It contains the checkpoints for each epoch in a subdirectory `logs/GN2_<timestamp>/ckpts` with the filenames encoding the epoch and corresponding loss evaluated on the validation sample. Ideally, you should see the validation loss decreasing with increasing epoch.
 
 ## Step 4: Evaluating the result
 
@@ -116,17 +128,18 @@ For evaluating the performance of the trained algorithm, you need to process the
 
 Read the documentation for [evaluation](evaluation.md) with salt.
 
-You can run the test loop on the `pp_` dataset by executing the following command. Remember to replace the <timestamp> with the appropriate string corresponding to the directory name and `<path to directory>` with the path to the directory where you downloaded the dataset.
+You can run the test loop on the `pp_` dataset by executing the following command from the same `salt` subdirectory as the training. This evaluates the first 10,000 jets of the test file, add `--data.num_test -1` to evaluate all of them. Remember to replace the <timestamp> with the appropriate string corresponding to the directory name and `<path to directory>` with the path to the directory where you downloaded the dataset.
 
 ```bash
 salt test --config logs/GN2_<timestamp>/config.yaml --data.test_file <path to directory>/pp_output_test_ttbar.h5
 ```
 
-As a result, you will find in the directory `logs/GN2_<timestamp>/ckpts/` a `.h5` file which is the test dataset file with the output scores of the trained model appended to it.
+As a result, you will find in the directory `logs/GN2_<timestamp>/ckpts/` a `.h5` file (ending in `__test_ttbar.h5`) which is the test dataset file with the output scores of the trained model appended to it.
+`salt test` prints the checkpoint it uses (e.g. `epoch=019-val_loss=0.71884.ckpt`). Copy the file name from there, as the epoch is written with three digits.
 
 You can use the [puma](https://github.com/umami-hep/puma) plotting software and helper tools in [atlas-ftag-tools](https://github.com/umami-hep/atlas-ftag-tools/) to rapidly create plots to quantify the performance of the trained network.
 
-An example script is provided here. You should have installed the dependencies `numpy`, `pandas`, `atlas-ftag-tools`, and `puma-hep` as part of the `salt` installation.
+An example script is provided here. The dependencies `numpy`, `pandas`, `atlas-ftag-tools`, and `puma-hep` come with the `salt` installation. Run it from the same directory as `salt test`.
 
 ??? info "Example plotting script to obtain ROC curve `plot_roc.py` "
 
@@ -135,9 +148,9 @@ An example script is provided here. You should have installed the dependencies `
     import pandas as pd
     from ftag.hdf5 import H5Reader
     from puma import Roc, RocPlot
-    from puma.metrics import calc_rej
+    from ftag.utils import calculate_rejection
 
-    fname = "logs/GN2_<timestamp>/ckpts/epoch=<best epoch>-val_loss=<loss>__test_pp_output_test_ttbar.h5"
+    fname = "logs/GN2_<timestamp>/ckpts/epoch=<best epoch>-val_loss=<loss>__test_ttbar.h5"
     reader = H5Reader(fname, batch_size=1_000)
     df = pd.DataFrame(reader.load({"jets": ["pt", "eta", "flavour", "GN2_pu", "GN2_pc", "GN2_pb"]}, num_jets=10_000)['jets'])
 
@@ -156,13 +169,15 @@ An example script is provided here. You should have installed the dependencies `
     n_jets_light = sum(is_light)
     n_jets_c = sum(is_c)
 
-    gn2_ujets_rej = calc_rej(discs_gn2[is_b], discs_gn2[is_light], sig_eff)
-    gn2_cjets_rej = calc_rej(discs_gn2[is_b], discs_gn2[is_c], sig_eff)
+    gn2_ujets_rej = calculate_rejection(discs_gn2[is_b], discs_gn2[is_light], sig_eff)
+    gn2_cjets_rej = calculate_rejection(discs_gn2[is_b], discs_gn2[is_c], sig_eff)
 
     plot_roc = RocPlot(
         n_ratio_panels=2,
         ylabel="Background rejection",
         xlabel="$b$-jet efficiency",
+        atlas_brand=None,
+        atlas_first_tag="Delphes simulation",
         atlas_second_tag="$\\sqrt{s}=13$ TeV, ttbar jets \ntutorial sample, $f_{c}=0.018$",
         figsize=(6.5, 6),
         y_scale=1.4,
@@ -190,18 +205,21 @@ An example script is provided here. You should have installed the dependencies `
         reference=True,
     )
 
-    plot_roc.set_ratio_class(1, "ujets")
-    plot_roc.set_ratio_class(2, "cjets")
+    plot_roc.set_ratio_class(1, "ujets", "Light-jets")
+    plot_roc.set_ratio_class(2, "cjets", "$c$-jets")
     plot_roc.draw()
     plot_roc.savefig("roc.png", transparent=False)
     ```
+
+    The script reads 10,000 jets (`num_jets=10_000`), so the curves are noisy at low $b$-jet efficiency.
+    If you evaluated the full test file with `--data.num_test -1`, increase `num_jets` to use all of it.
 
 
 ## Step 5: Modification of the model via the configuration file
 
 In this step you will modify the model by editing the configuration file. Note that in salt everything required for the training and the model definition is defined in the configuration file.
 
-Look for the following lines and comment them out or remove them:
+Look for the `const_origin` and `const_vertexing` tasks in `configs/tutorial.yaml` and comment them out or remove them. They look like this (the formatting in the file differs slightly):
 
 ```yaml
             - class_path: salt.models.ClassificationTask
@@ -238,10 +256,10 @@ Look for the following lines and comment them out or remove them:
 
 This will remove the auxiliary tasks operating on the tracks associated to the jets. As a consequence, you should observe inferior performance.
 
-Commit your changes with git 
+Commit your changes with git
 
 ```bash
-git add .
+git add configs/tutorial.yaml
 git commit -m "deactivate auxiliary tasks"
 ```
 
@@ -267,13 +285,13 @@ Now you can compare the performance between the two models with the following sc
     import pandas as pd
     from ftag.hdf5 import H5Reader
     from puma import Roc, RocPlot
-    from puma.metrics import calc_rej
+    from ftag.utils import calculate_rejection
 
-    fname_default = "logs/GN2_<timestamp>/ckpts/epoch=<best epoch>-val_loss=<loss>__test_pp_output_test_ttbar.h5"
+    fname_default = "logs/GN2_<timestamp>/ckpts/epoch=<best epoch>-val_loss=<loss>__test_ttbar.h5"
     reader_default = H5Reader(fname_default, batch_size=1_000)
     df_default = pd.DataFrame(reader_default.load({"jets": ["pt", "eta", "flavour", "GN2_pu", "GN2_pc", "GN2_pb"]}, num_jets=10_000)['jets'])
 
-    fname_ablation = "logs/GN2_<new timestamp>/ckpts/epoch=<best epoch>-val_loss=<loss>__test_pp_output_test_ttbar.h5"
+    fname_ablation = "logs/GN2_<new timestamp>/ckpts/epoch=<best epoch>-val_loss=<loss>__test_ttbar.h5"
     reader_ablation = H5Reader(fname_ablation, batch_size=1_000)
     df_ablation = pd.DataFrame(reader_ablation.load({"jets": ["pt", "eta", "flavour", "GN2_pu", "GN2_pc", "GN2_pb"]}, num_jets=10_000)['jets'])
 
@@ -296,17 +314,19 @@ Now you can compare the performance between the two models with the following sc
     n_jets_light = sum(is_light)
     n_jets_c = sum(is_c)
 
-    gn2_default_ujets_rej = calc_rej(discs_gn2_default[is_b], discs_gn2_default[is_light], sig_eff)
-    gn2_default_cjets_rej = calc_rej(discs_gn2_default[is_b], discs_gn2_default[is_c], sig_eff)
+    gn2_default_ujets_rej = calculate_rejection(discs_gn2_default[is_b], discs_gn2_default[is_light], sig_eff)
+    gn2_default_cjets_rej = calculate_rejection(discs_gn2_default[is_b], discs_gn2_default[is_c], sig_eff)
 
-    gn2_ablation_ujets_rej = calc_rej(discs_gn2_ablation[is_b], discs_gn2_ablation[is_light], sig_eff)
-    gn2_ablation_cjets_rej = calc_rej(discs_gn2_ablation[is_b], discs_gn2_ablation[is_c], sig_eff)
+    gn2_ablation_ujets_rej = calculate_rejection(discs_gn2_ablation[is_b], discs_gn2_ablation[is_light], sig_eff)
+    gn2_ablation_cjets_rej = calculate_rejection(discs_gn2_ablation[is_b], discs_gn2_ablation[is_c], sig_eff)
 
 
     plot_roc = RocPlot(
         n_ratio_panels=2,
         ylabel="Background rejection",
         xlabel="$b$-jet efficiency",
+        atlas_brand=None,
+        atlas_first_tag="Delphes simulation",
         atlas_second_tag="$\\sqrt{s}=13$ TeV, ttbar jets \ntutorial sample, $f_{c}=0.018$",
         figsize=(6.5, 6),
         y_scale=1.4,
@@ -355,8 +375,8 @@ Now you can compare the performance between the two models with the following sc
         ),
     )
 
-    plot_roc.set_ratio_class(1, "ujets")
-    plot_roc.set_ratio_class(2, "cjets")
+    plot_roc.set_ratio_class(1, "ujets", "Light-jets")
+    plot_roc.set_ratio_class(2, "cjets", "$c$-jets")
     plot_roc.draw()
     plot_roc.savefig("roc_ablation.png", transparent=False)
     ```
@@ -379,4 +399,4 @@ To obtain the metadata of your onnx model, do
 get_onnx_metadata logs/GN2_<timestamp>/network.onnx
 ```
 The script already includes a quick validation test between the scores produced by the PyTorch model and the ONNX model. 
-We also recommend you to verify your ONNX model in Athena. More information about this can be found in [Athena Validation](export.md#athena-validation)
+For models trained on ATLAS samples, we also recommend you to verify your ONNX model in Athena. More information about this can be found in [Athena Validation](export.md#athena-validation). This does not apply to the model from this tutorial, which is trained on a Delphes sample.
