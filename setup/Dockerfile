@@ -12,7 +12,7 @@ WORKDIR /salt
 
 # add some packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git openssh-client ca-certificates h5utils wget vim nano build-essential jq krb5-user \
+    git openssh-client ca-certificates h5utils hdf5-tools wget vim nano build-essential jq krb5-user python3-tk \
     && rm -rf /var/lib/apt/lists/*
 
 # install uv for Python package management

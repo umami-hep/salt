@@ -229,11 +229,11 @@ To verify your installation, you can run the [test suite](contributing.md#test-s
     If you set up with conda/mamba, you can run
 
     ```bash
-    mamba install h5utils
+    mamba install hdf5
     ```
 
     to install the `h5ls` command.
-    The `h5utils` is already present in the docker image.
+    The `h5ls` command is already present in the docker image.
 
 ### Install FlashAttention
 FlashAttention is an attention algorithm which greatly reduces the computational overhead of the attention mechanism of
