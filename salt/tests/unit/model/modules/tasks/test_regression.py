@@ -38,14 +38,6 @@ def _bind_reg_module(task: RegressionTaskModule, schema_widths: dict[str, int]) 
     task.bind(ResolvedSchema(widths=schema_widths))
 
 
-def _bundle(leaves: dict[str, torch.Tensor]) -> Bundle:
-    """A bundle holding `leaves` under their dotted keys."""
-    b = Bundle()
-    for key, value in leaves.items():
-        b.set(key, value)
-    return b
-
-
 class TestRegressionTaskModule:
     def test_targets_required(self):
         with pytest.raises(ConfigError, match="targets is required"):
@@ -151,7 +143,7 @@ class TestRegressionTaskModule:
             task.bind(schema)
 
     def test_fit_forward_parity_norm_params(self, norm_paths):
-        """FIT preds are RAW/scaled and loss == v1 head, scaled space (norm_params)."""
+        """FIT preds are the raw head output; loss = weight * MSE in norm_params-scaled space."""
         targets = ("R10TruthLabel_R22v1_TruthJetMass", "R10TruthLabel_R22v1_TruthJetPt")
         task = RegressionTaskModule(
             stream="jets",
@@ -175,12 +167,11 @@ class TestRegressionTaskModule:
         out = Executor(fit).run(b, debug=True)
         v2_pred = out.get("preds.jets.regression")
         v2_loss = out.get("losses.regression")
-        # call the head math directly (the folded forward on the pooled input) for the reference
-        pooled = out.get("pooled.global")
-        ref = task.forward(_bundle({"pooled.global": pooled, **labels}), Mode.FIT)
-        ref_pred, ref_loss = ref["preds.jets.regression"], ref["losses.regression"]
-        assert torch.allclose(v2_pred, ref_pred, atol=1e-6)  # FIT preds are raw/scaled
-        assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
+        raw = task.net(out.get("pooled.global"), None)
+        assert torch.allclose(v2_pred, raw, atol=1e-6)  # FIT preds are raw/scaled
+        y = torch.stack([labels[f"labels.jets.{t}"] for t in targets], dim=1)
+        scaled = (y - torch.tensor([1.0, 2.0])) / torch.tensor([3.0, 4.0])
+        assert torch.allclose(v2_loss, 0.5 * ((raw - scaled) ** 2).mean(), atol=1e-6)
 
     def test_test_descale_uses_label_denominator(self, norm_paths):
         """TEST forward = RAW scaled preds; get_output de-scales via LABEL denom."""
@@ -365,7 +356,7 @@ class TestRegressionTaskModule:
             _bind_reg_module(task, {"pooled.global": 16})
 
     def test_gaussian_fit_forward_parity_and_nll_loss(self, norm_paths):
-        """FIT preds are the RAW [B, 2R] head output; loss == v1 gaussian NLL."""
+        """FIT preds are the RAW [B, 2R] head output; loss = weight * Gaussian NLL."""
         targets = ("HadronConeExclTruthLabelPt",)
         task = RegressionTaskModule(
             stream="jets",
@@ -391,11 +382,13 @@ class TestRegressionTaskModule:
         v2_pred = out.get("preds.jets.regression")
         v2_loss = out.get("losses.regression")
         assert v2_pred.shape == (B, 2)  # means ‖ raw variances
-        pooled = out.get("pooled.global")
-        ref = task.forward(_bundle({"pooled.global": pooled, **labels}), Mode.FIT)
-        ref_pred, ref_loss = ref["preds.jets.regression"], ref["losses.regression"]
-        assert torch.allclose(v2_pred, ref_pred, atol=1e-6)
-        assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
+        raw = task.net(out.get("pooled.global"), None)
+        assert torch.allclose(v2_pred, raw, atol=1e-6)
+        # norm_params mean 1, std 1; the variance column goes through softplus
+        y = labels[f"labels.jets.{targets[0]}"][:, None] - 1.0
+        mean, var = raw[:, :1], torch.log1p(torch.exp(raw[:, 1:]))
+        nll = 0.5 * (torch.log(var) + (mean - y) ** 2 / var)
+        assert torch.allclose(v2_loss, 0.5 * nll.mean(), atol=1e-6)
 
     def test_gaussian_test_descale_one_array_means_then_stddev(self, norm_paths):
         """TEST forward = RAW [B, 2R]; get_output publishes means ‖ stddevs."""
@@ -526,7 +519,7 @@ class TestRegressionTaskModule:
 
     @pytest.mark.parametrize("weights", [[1.0, 0.5, 2.0, 0.0, 1.5, 0.25], "zero"])
     def test_sample_weight_loss_parity_nonuniform_and_zero(self, norm_paths, weights):
-        """Per-sample-weighted loss parity (nonuniform + all-zero) vs the v1 head."""
+        """Per-sample-weighted MSE (nonuniform + all-zero): mean of w * (pred - target)^2."""
         targets = ("R10TruthLabel_R22v1_TruthJetMass", "R10TruthLabel_R22v1_TruthJetPt")
         w = torch.zeros(B) if weights == "zero" else torch.tensor(weights)
         task = RegressionTaskModule(
@@ -552,15 +545,15 @@ class TestRegressionTaskModule:
         b.set("labels.jets.w", w)
         out = Executor(fit).run(b, debug=True)
         v2_loss = out.get("losses.regression")
-        # reference: the same head called directly, weight label alongside the
-        # targets (v1 task.py:430)
-        pooled = out.get("pooled.global")
-        leaves = {"pooled.global": pooled, **labels, "labels.jets.w": w}
-        ref_loss = task.forward(_bundle(leaves), Mode.FIT)["losses.regression"]
-        assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
+        raw = task.net(out.get("pooled.global"), None)
+        y = torch.stack([labels[f"labels.jets.{t}"] for t in targets], dim=1)
+        scaled = (y - torch.tensor([1.0, 2.0])) / torch.tensor([3.0, 4.0])
+        # one weight per jet, applied to both targets; the mean runs over every element
+        expected = (w[:, None] * (raw - scaled) ** 2).mean()
+        assert torch.allclose(v2_loss, expected, atol=1e-6)
 
     def test_nan_target_masking_loss_parity(self, norm_paths):
-        """NaN targets are masked (→0) and reduced with nanmean; parity vs v1."""
+        """NaN targets are zeroed in scaled space, then the MSE is averaged over every jet."""
         targets = ("HadronConeExclTruthLabelPt",)
         task = RegressionTaskModule(
             stream="jets",
@@ -588,10 +581,10 @@ class TestRegressionTaskModule:
         out = Executor(fit).run(b, debug=True)
         v2_loss = out.get("losses.regression")
         assert torch.isfinite(v2_loss)  # NaN targets did not poison the loss
-        pooled = out.get("pooled.global")
-        leaves = {"pooled.global": pooled, f"labels.jets.{targets[0]}": poisoned}
-        ref_loss = task.forward(_bundle(leaves), Mode.FIT)["losses.regression"]
-        assert torch.allclose(v2_loss, ref_loss, atol=1e-6)
+        raw = task.net(out.get("pooled.global"), None)
+        # norm_params mean 1, std 1
+        y = torch.where(torch.isnan(poisoned), 0.0, poisoned - 1.0)[:, None]
+        assert torch.allclose(v2_loss, ((raw - y) ** 2).mean(), atol=1e-6)
 
     def test_declare_and_bind_are_file_free(self, monkeypatch):
         """The no-I/O guard holds for the regression module too."""
