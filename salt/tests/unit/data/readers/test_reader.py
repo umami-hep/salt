@@ -180,6 +180,62 @@ def test_datamodule_wildcard_source_serves_the_same_bytes_as_a_direct_file(data)
 
 
 # --------------------------------------------------------------------------- #
+# H5StructuredReader file handle: open flags, periodic reopen, chunk cache
+# --------------------------------------------------------------------------- #
+
+
+def _bound_jets_reader(data, **kwargs) -> H5StructuredReader:
+    reader = H5StructuredReader(
+        groups={"jets": {"global_object": True}}, filename=data["h5"], **kwargs
+    )
+    reader.bind(WorkerCtx(mode=Mode.FIT, read_fields={"jets": {"pt_btagJes": "test"}}, seed=0))
+    return reader
+
+
+def _read_jets(reader: H5StructuredReader) -> np.ndarray:
+    return np.concatenate([
+        reader.read(slice(i, i + 10), Mode.FIT)["raw.jets"].copy() for i in range(0, 60, 10)
+    ])
+
+
+def test_reader_opens_alongside_a_plain_handle_on_the_same_file(data) -> None:
+    """The reader handle opens without SWMR, so it coexists with plain opens in one process."""
+    with h5py.File(data["h5"], "r") as f:
+        reader = _bound_jets_reader(data)
+        assert len(reader) == len(f["jets"])
+
+
+def test_reader_periodic_reopen_replaces_the_handle_and_serves_the_same_rows(data) -> None:
+    """Reopening every 2 reads closes the old handle and leaves the served rows unchanged."""
+    reader = _bound_jets_reader(data, h5_reopen_every=2)
+    first_handle = reader._h5
+    served = _read_jets(reader)
+    assert reader._h5 is not first_handle
+    assert not first_handle.id.valid
+    np.testing.assert_array_equal(served, _read_jets(_bound_jets_reader(data, h5_reopen_every=0)))
+
+
+def test_reader_reopen_disabled_keeps_the_handle(data) -> None:
+    """``h5_reopen_every=0`` never replaces the handle."""
+    reader = _bound_jets_reader(data, h5_reopen_every=0)
+    handle = reader._h5
+    _read_jets(reader)
+    assert reader._h5 is handle
+    assert handle.id.valid
+
+
+def test_reader_h5_settings_reach_the_handle_through_with_source(data) -> None:
+    """`with_source` clones keep the reopen interval and open with the configured chunk cache."""
+    proto = H5StructuredReader(
+        groups={"jets": {"global_object": True}}, h5_reopen_every=7, h5_rdcc_nbytes=4 * 1024**2
+    )
+    clone = proto.with_source(filename=data["h5"])
+    clone.bind(WorkerCtx(mode=Mode.FIT, read_fields={"jets": {"pt_btagJes": "test"}}, seed=0))
+    assert clone.h5_reopen_every == 7
+    assert clone._h5.id.get_access_plist().get_cache()[2] == 4 * 1024**2
+
+
+# --------------------------------------------------------------------------- #
 # H5StructuredReader per_split row cuts — eventNumber % 10 train/val/test split
 # --------------------------------------------------------------------------- #
 

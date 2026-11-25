@@ -1,11 +1,12 @@
 """`H5StructuredReader` — the throughput-preserving H5 reader.
 
-Contiguous slab reads into reusable per-worker buffers, lazy SWMR handles,
+Contiguous slab reads into reusable per-worker buffers, lazy file handles,
 demand-narrowed columns; produces ``raw.<stream>``, ``masks.<stream>``, ``meta.rows``.
 """
 
 from __future__ import annotations
 
+import ctypes
 import inspect
 import os
 import time
@@ -31,6 +32,15 @@ if TYPE_CHECKING:
     from salt.data.readers.cuts import GlobalObjectCuts
 
 __all__ = ["GroupConfig", "H5StructuredReader"]
+
+# Disable HDF5 file locking (lock errors on Lustre/GPFS) before any h5py open.
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
+
+def _malloc_trim() -> None:
+    """Return heap pages freed by closing HDF5 handles to the OS (glibc only, best-effort)."""
+    with suppress(OSError, AttributeError):
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
 def _has_wildcard(path: Path | str) -> bool:
@@ -212,6 +222,13 @@ class H5StructuredReader(Reader):
         Explicit VDS output path for a wildcard `filename`. One path per
         reader (clones share it), so set it only when a single stage is a
         wildcard; unset, each pattern gets its own sibling ``<name>_vds/vds.h5``.
+    h5_reopen_every : int, optional
+        Reopen the file handle (and return freed memory to the OS) every this
+        many reads per worker, bounding the memory that VDS source caches
+        accumulate over a long run. ``0`` disables it. By default 100.
+    h5_rdcc_nbytes : int | None, optional
+        HDF5 raw-data chunk-cache size in bytes per dataset; ``None`` uses the
+        h5py default.
 
     Raises
     ------
@@ -233,6 +250,8 @@ class H5StructuredReader(Reader):
         stage: str | None = None,
         transforms: Sequence[Callable] | None = None,
         vds_path: str | Path | None = None,
+        h5_reopen_every: int = 100,
+        h5_rdcc_nbytes: int | None = None,
     ) -> None:
         super().__init__()
         if not groups:
@@ -243,6 +262,8 @@ class H5StructuredReader(Reader):
         self.cuts = cuts
         self.stage = stage
         self.vds_path = Path(vds_path) if vds_path is not None else None
+        self.h5_reopen_every = h5_reopen_every
+        self.h5_rdcc_nbytes = h5_rdcc_nbytes
         self.groups: dict[str, GroupConfig] = {
             stream: self._parse_group(stream, cfg) for stream, cfg in groups.items()
         }
@@ -262,6 +283,7 @@ class H5StructuredReader(Reader):
         self._kept: np.ndarray | None = None  # sample-axis kept file-rows; None = identity
         self._h5: h5py.File | None = None
         self._pid: int | None = None
+        self._read_count = 0
         self._dss: dict[str, h5py.Dataset] = {}
         self._buffers: dict[str, np.ndarray] = {}
         self._rng: np.random.Generator | None = None
@@ -357,7 +379,7 @@ class H5StructuredReader(Reader):
         stage: str | None = None,
     ) -> H5StructuredReader:
         """Clone onto another source file (config-only: schema, group configs, row
-        cuts, transforms and `vds_path` are shared).
+        cuts, transforms, `vds_path` and the H5 handle settings are shared).
         """
         stage = stage if stage is not None else self.stage
         clone = H5StructuredReader(
@@ -369,6 +391,8 @@ class H5StructuredReader(Reader):
             stage,
             self.transforms,
             self.vds_path,
+            self.h5_reopen_every,
+            self.h5_rdcc_nbytes,
         )
         clone.name = self.name
         return clone
@@ -484,7 +508,9 @@ class H5StructuredReader(Reader):
             if self._h5 is not None and self._h5.id.valid:
                 self._h5.close()
             assert self._resolved is not None
-            self._h5 = h5py.File(self._resolved, "r", swmr=True, libver="latest")
+            self._h5 = h5py.File(
+                self._resolved, "r", libver="latest", rdcc_nbytes=self.h5_rdcc_nbytes
+            )
             self._pid = pid
 
     def bind(self, ctx: WorkerCtx) -> None:
@@ -529,6 +555,15 @@ class H5StructuredReader(Reader):
         and ``raw.*`` may alias the reusable buffers; with cuts the served rows map
         through the kept-index and the filtered read returns fresh (non-aliasing) arrays.
         """
+        # closing a handle frees its VDS source caches to glibc only; trim returns them to the OS
+        every = self.h5_reopen_every
+        if every and self._read_count and self._read_count % every == 0:
+            self._pid = None  # forces `_ensure_open` to close and reopen
+            self._ensure_open()
+            assert self._h5 is not None
+            self._dss = {stream: self._h5[cfg.dataset] for stream, cfg in self.groups.items()}
+            _malloc_trim()
+        self._read_count += 1
         out: dict[str, np.ndarray] = {}
         file_rows = None if self._kept is None else self._kept[rows]
         for stream, cfg in self.groups.items():
