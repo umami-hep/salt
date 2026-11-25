@@ -94,6 +94,9 @@ class TransformerEncoder(SaltModelModule):
         edge_embed_dim: int = 0,
         update_edges: bool = False,
         featurewise: Sequence[dict[str, Any]] | None = None,
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
+        drop_path_schedule: str = "uniform",
     ) -> None:
         """Build the composed v1 `Transformer` from config.
 
@@ -139,6 +142,14 @@ class TransformerEncoder(SaltModelModule):
             Whether the encoder updates the edge tensor each layer. Requires
             `edges` set. The updated edges stay INTERNAL to the encoder — only
             ``encoded.seq`` is published. By default False.
+        ls_init : float | None, optional
+            Initial LayerScale value on every residual block, by default None (no LayerScale).
+        drop_path : float, optional
+            Drop-path (stochastic depth) rate on every residual block, by default 0.0.
+        drop_path_schedule : str, optional
+            How `drop_path` is spread over the layers: ``"uniform"`` (same rate everywhere,
+            the default) or ``"linear"`` (ramps from ``drop_path / 2`` at the first layer to
+            ``drop_path`` at the last).
 
         Raises
         ------
@@ -202,6 +213,9 @@ class TransformerEncoder(SaltModelModule):
             dense_kwargs=dict(dense) if dense is not None else None,
             norm_type=norm_type,
             mup=self.mup,
+            drop_path=drop_path,
+            drop_path_schedule=drop_path_schedule,
+            ls_init=ls_init,
         )
         if self.mup:
             # MuReadout.forward/width_mult() assert infshape is set. Set base shapes

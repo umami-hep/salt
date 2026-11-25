@@ -19,7 +19,7 @@ from salt.model.modules import (
     TransformerEncoder,
 )
 from salt.model.nn.attention import Attention, EdgeAttention
-from salt.model.nn.transformer import Transformer
+from salt.model.nn.transformer import DropPath, NormResidual, Transformer
 from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 
@@ -264,3 +264,226 @@ class TestSetBackend:
             tf.set_backend("torch-math")
         assert tf.attn_type == "torch-math"
         assert all(type(layer.attn.fn) is Attention for layer in tf.layers)
+
+
+def _edge_inputs(bs, seq_len, dim, edge_dim, frac_pad=0.0):
+    """Random tokens, pad mask (True = padded, first token always valid) and edges."""
+    torch.manual_seed(0)
+    x = torch.randn(bs, seq_len, dim)
+    mask = torch.rand(bs, seq_len) < frac_pad
+    mask[:, 0] = False
+    return x, mask, torch.randn(bs, seq_len, seq_len, edge_dim)
+
+
+class TestEdgeAttentionOptions:
+    """``talking_heads`` and ``edge_gate`` on `EdgeAttention`."""
+
+    @pytest.mark.parametrize("talking_heads", [True, False])
+    @pytest.mark.parametrize("edge_gate", [True, False])
+    @pytest.mark.parametrize("mup", [True, False])
+    def test_talking_heads_gate(self, talking_heads, edge_gate, mup):
+        attn = EdgeAttention(
+            embed_dim=16,
+            edge_embed_dim=8,
+            num_heads=4,
+            talking_heads=talking_heads,
+            edge_gate=edge_gate,
+            mup=mup,
+        )
+        # the gate/talking-heads submodules only exist when requested
+        assert (attn.linear_g is not None) == edge_gate
+        assert hasattr(attn, "talking_1") == talking_heads
+        assert hasattr(attn, "talking_2") == talking_heads
+
+        x, mask, edge_x = _edge_inputs(2, 10, 16, 8, 0.5)
+        out, edge_out = attn(x, edge_x=edge_x, mask=mask)
+        assert out.shape == (2, 10, 16)
+        assert edge_out.shape == (2, 10, 10, 8)
+        assert not out.isnan().any()
+        assert not edge_out.isnan().any()
+
+    def test_talking_heads_changes_output(self):
+        x, mask, edge_x = _edge_inputs(2, 8, 16, 8, 0.5)
+        torch.manual_seed(0)
+        plain = EdgeAttention(16, 8, num_heads=4, edge_gate=False)
+        torch.manual_seed(0)
+        talk = EdgeAttention(16, 8, num_heads=4, edge_gate=False, talking_heads=True)
+        # share the projections so only the talking-heads mixing differs
+        talk.load_state_dict(plain.state_dict(), strict=False)
+        out_plain, _ = plain(x, edge_x=edge_x, mask=mask)
+        out_talk, _ = talk(x, edge_x=edge_x, mask=mask)
+        assert not torch.allclose(out_plain, out_talk)
+
+    def test_edge_gate_off_is_additive_bias_only(self):
+        x, mask, edge_x = _edge_inputs(2, 8, 16, 8, 0.5)
+        gated = EdgeAttention(16, 8, num_heads=4)
+        plain = EdgeAttention(16, 8, num_heads=4, edge_gate=False)
+        plain.load_state_dict({k: v for k, v in gated.state_dict().items() if "linear_g" not in k})
+        # a gate of sigmoid(+inf) = 1 everywhere reproduces the ungated attention
+        with torch.no_grad():
+            gated.linear_g.weight.zero_()
+            gated.linear_g.bias.fill_(float("inf"))
+        torch.testing.assert_close(gated(x, edge_x, mask=mask)[0], plain(x, edge_x, mask=mask)[0])
+
+
+class TestLayerScaleDropPath:
+    """``ls_init``, ``drop_path`` and ``drop_path_schedule`` on the transformer stack."""
+
+    @pytest.mark.parametrize("ls_init", [None, 0.1])
+    @pytest.mark.parametrize("drop_path", [0.0, 0.9])
+    @pytest.mark.parametrize("norm_type", ["pre", "post", "none"])
+    def test_norm_residual(self, ls_init, drop_path, norm_type):
+        x = torch.randn(10, 20, 16)
+        block = nn.Linear(16, 16)
+        nr = NormResidual(
+            block, ls_init=ls_init, drop_path=drop_path, embed_dim=16, norm_type=norm_type
+        )
+        y = nr(x)
+        assert y.shape == x.shape
+        assert not y.isnan().any()
+
+    def test_edge_norm_residual_layer_scale(self):
+        attn = EdgeAttention(embed_dim=32, edge_embed_dim=33, num_heads=2)
+        nr = NormResidual(attn, ls_init=0.1, embed_dim=32)
+        x, mask, edge_x = _edge_inputs(2, 5, 32, 33, 0.5)
+        out, edge_out = nr(x, edge_x=edge_x, mask=mask)
+        assert out.shape == (2, 5, 32)
+        assert not out.isnan().any()
+        assert torch.equal(edge_x, edge_out)
+
+    def test_layer_scale_scales_the_branch(self):
+        torch.manual_seed(0)
+        nr = NormResidual(nn.Linear(16, 16), ls_init=1e-3, embed_dim=16)
+        x = torch.randn(4, 16)
+        torch.testing.assert_close(nr(x) - x, 1e-3 * nr.fn(nr.norm(x)))
+
+    def test_drop_path_is_identity_in_eval(self):
+        drop = DropPath(0.9)
+        x = torch.randn(64, 5, 16)
+        assert torch.equal(drop.eval()(x), x)
+        # in training, whole samples are either dropped or rescaled by 1 / keep_prob
+        y = drop.train()(x)
+        per_sample = (y / x).flatten(1)
+        assert set(per_sample[:, 0].round(decimals=4).tolist()) <= {0.0, 10.0}
+        assert torch.allclose(per_sample, per_sample[:, :1])
+
+    @pytest.mark.parametrize("schedule", ["uniform", "linear"])
+    def test_drop_path_schedule(self, schedule):
+        num_layers, drop_path = 4, 0.2
+        trans = Transformer(
+            num_layers=num_layers,
+            embed_dim=32,
+            dense_kwargs={"activation": "SiLU"},
+            attn_kwargs={"num_heads": 2},
+            drop_path=drop_path,
+            drop_path_schedule=schedule,
+        )
+        rates = [layer.attn.drop_path.drop_prob for layer in trans.layers]
+        if schedule == "uniform":
+            assert all(r == drop_path for r in rates)
+        else:
+            expected = [drop_path * 0.5 * (1 + d / (num_layers - 1)) for d in range(num_layers)]
+            assert rates == pytest.approx(expected)
+        x, mask, _ = _edge_inputs(5, 10, 32, 1, 0.5)
+        out, _ = trans(x, pad_mask=mask)
+        assert not out.isnan().any()
+
+    def test_unknown_drop_path_schedule_rejected(self):
+        with pytest.raises(AssertionError, match="drop_path_schedule"):
+            Transformer(
+                num_layers=2,
+                embed_dim=16,
+                attn_kwargs={"num_heads": 2},
+                drop_path_schedule="cosine",
+            )
+
+    def test_depart_style_transformer(self):
+        x = torch.rand(2, 6, 16)
+        edge_x = torch.rand(2, 6, 6, 16)
+        # additive-bias attention (no gate) + talking heads + gated FFN + LayerScale
+        # + linear drop-path, composed through the Transformer
+        net = Transformer(
+            embed_dim=16,
+            edge_embed_dim=16,
+            num_layers=3,
+            attn_kwargs={"num_heads": 2, "talking_heads": True, "edge_gate": False},
+            dense_kwargs={"activation": "ReLU", "gated": True},
+            ls_init=1e-5,
+            drop_path=0.1,
+            drop_path_schedule="linear",
+            num_registers=2,
+        )
+        mask = torch.rand(2, 6) < 0.5
+        out = net(x, edge_x=edge_x, pad_mask=mask)[0]
+        assert out.shape == (2, 8, 16)
+        assert not out.isnan().any()
+        # fully padded jets must still be NaN-free (registers guard the softmax)
+        out, _ = net(x, edge_x=edge_x, pad_mask=torch.ones(2, 6, dtype=torch.bool))
+        assert not out.isnan().any()
+
+    def test_options_reach_layers_from_encoder_config(self):
+        enc = TransformerEncoder(
+            dim=16,
+            num_layers=3,
+            attention={"num_heads": 2, "talking_heads": True, "edge_gate": False},
+            edges="edges.tracks_emb",
+            edge_embed_dim=8,
+            ls_init=1e-5,
+            drop_path=0.2,
+            drop_path_schedule="linear",
+        )
+        layers = enc.encoder.layers
+        rates = [layer.attn.drop_path.drop_prob for layer in layers]
+        assert rates == pytest.approx([0.1, 0.15, 0.2])
+        for layer in layers:
+            for res in (layer.attn, layer.dense):
+                torch.testing.assert_close(res.ls.gamma, torch.full((16,), 1e-5))
+            assert layer.attn.fn.talking_heads
+            assert layer.attn.fn.linear_g is None
+
+
+class TestDefaultsUnchanged:
+    """With every DeParT option off, the encoder's parameters are exactly as before."""
+
+    _LAYER_KEYS = [
+        "attn.fn.in_proj_bias",
+        "attn.fn.in_proj_weight",
+        "attn.fn.out_proj.bias",
+        "attn.fn.out_proj.weight",
+        "dense.fn.in_proj.bias",
+        "dense.fn.in_proj.weight",
+        "dense.fn.out_proj.bias",
+        "dense.fn.out_proj.weight",
+    ]
+    _EDGE_KEYS = [
+        "attn.fn.linear_e.bias",
+        "attn.fn.linear_e.weight",
+        "attn.fn.linear_g.bias",
+        "attn.fn.linear_g.weight",
+    ]
+
+    @staticmethod
+    def _layer_keys(encoder):
+        keys = {k.split(".", 3)[3] for k in encoder.state_dict() if k.startswith("encoder.layers.")}
+        return sorted(keys)
+
+    def test_gn2v2_encoder_state_dict_keys(self, gn2v2):
+        modules, _, _ = gn2v2
+        enc = modules["encoder"]
+        assert self._layer_keys(enc) == self._LAYER_KEYS
+        assert sorted(k for k in enc.state_dict() if not k.startswith("encoder.layers.")) == [
+            "encoder.out_proj.bias",
+            "encoder.out_proj.weight",
+            "encoder.register_mask",
+            "encoder.registers",
+        ]
+
+    def test_edge_encoder_state_dict_keys(self):
+        enc = TransformerEncoder(
+            dim=16,
+            num_layers=2,
+            attention={"num_heads": 2},
+            edges="edges.tracks_emb",
+            edge_embed_dim=8,
+        )
+        assert self._layer_keys(enc) == sorted(self._LAYER_KEYS + self._EDGE_KEYS)

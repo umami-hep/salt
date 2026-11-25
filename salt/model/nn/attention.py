@@ -290,8 +290,11 @@ class EdgeAttention(nn.Module):
     """Multihead attention with edge features biasing the scores and gating the output.
 
     No pluggable backend (always raw torch attention — see `set_backend`).
-    ``update_edges`` also emits updated edge features. ``mup=True`` rescales
-    the dot-product scale and init (https://arxiv.org/abs/2203.03466).
+    ``update_edges`` also emits updated edge features. ``talking_heads`` mixes the
+    scores across heads before and after the softmax (https://arxiv.org/abs/2003.02436);
+    ``edge_gate=False`` drops the sigmoid edge gate on the attention weights, leaving
+    the additive edge bias only. ``mup=True`` rescales the dot-product scale and init
+    (https://arxiv.org/abs/2203.03466).
     """
 
     def __init__(
@@ -304,6 +307,8 @@ class EdgeAttention(nn.Module):
         do_qk_norm: bool = False,
         do_v_norm: bool = False,
         update_edges: bool = False,
+        talking_heads: bool = False,
+        edge_gate: bool = True,
         mup: bool = False,
     ) -> None:
         super().__init__()
@@ -311,10 +316,18 @@ class EdgeAttention(nn.Module):
         self.edge_embed_dim = edge_embed_dim
         self.edge_head_dim = edge_embed_dim // num_heads
         self.update_edges = update_edges
+        self.talking_heads = talking_heads
+        self.edge_gate = edge_gate
         _init_packed_mha(self, embed_dim, num_heads, dropout, bias, do_qk_norm, do_v_norm, mup)
 
         self.linear_e = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
-        self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
+        if self.edge_gate:
+            self.linear_g = nn.Linear(self.edge_embed_dim, self.num_heads, bias=bias)
+        else:
+            self.register_buffer("linear_g", None)
+        if self.talking_heads:
+            self.talking_1 = nn.Linear(self.num_heads, self.num_heads, bias=False)
+            self.talking_2 = nn.Linear(self.num_heads, self.num_heads, bias=False)
         if self.update_edges:
             self.linear_e_out = nn.Linear(self.num_heads, self.edge_embed_dim, bias=bias)
         else:
@@ -332,15 +345,17 @@ class EdgeAttention(nn.Module):
     def reset_parameters(self) -> None:
         """Initialize the parameters (muP keeps the ``out_proj`` weight at its default init)."""
         _reset_in_proj(self)
-        layers = [self.linear_e, self.linear_g, self.out_proj]
-        if self.update_edges:
-            layers.append(self.linear_e_out)
+        layers = [self.linear_e, self.linear_g, self.out_proj, self.linear_e_out]
+        if self.talking_heads:
+            layers += [self.talking_1, self.talking_2]
         for layer in layers:
+            if layer is None:
+                continue
             if not self.mup:
                 layer.reset_parameters()
             elif layer is not self.out_proj:
                 nn.init.normal_(layer.weight, std=(1.0 / layer.in_features) ** 0.5)
-            if self.bias:
+            if layer.bias is not None:
                 nn.init.constant_(layer.bias, 0.0)
 
     def forward(
@@ -359,9 +374,12 @@ class EdgeAttention(nn.Module):
         b, s, d = x.shape
         q, k, v, merged = _qkv_heads(self, x, b, kv, mask, kv_mask, attn_mask)
         e = self.linear_e(edge_x)  # (B, L_q, L_kv, num_heads)
-        g = functional.sigmoid(self.linear_g(edge_x))  # (B, L_q, L_kv, num_heads)
+        if self.edge_gate:
+            g = functional.sigmoid(self.linear_g(edge_x))  # (B, L_q, L_kv, num_heads)
 
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, num_heads, L_q, L_kv)
+        if self.talking_heads:  # mix across heads before adding the edge bias
+            attn_scores = self.talking_1(attn_scores.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         attn_scores = attn_scores + e.permute(0, 3, 1, 2)  # add edge embeddings
 
         if self.dropout > 0.0 and self.training:
@@ -380,7 +398,10 @@ class EdgeAttention(nn.Module):
         )
         attn_weights = torch.softmax(masked_scores, dim=-1)  # (B, num_heads, L_q, L_kv)
 
-        attn_weights = attn_weights * g.permute(0, 3, 1, 2)  # apply gating
+        if self.talking_heads:  # mix across heads after softmax (bias-free keeps padding at zero)
+            attn_weights = self.talking_2(attn_weights.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        if self.edge_gate:
+            attn_weights = attn_weights * g.permute(0, 3, 1, 2)  # apply gating
 
         a_out = torch.matmul(attn_weights, v)  # (B, num_heads, L_q, head_dim)
 
