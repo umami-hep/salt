@@ -416,7 +416,7 @@ class H5OutputSink(RuntimeSink):
             source_path = Path(reader.source_path)
             # reader-matching open flags (HDF5 rejects mixed SWMR flags on one file
             # within a process)
-            with h5py.File(source_path, "r", swmr=True, libver="latest") as f:
+            with h5py.File(source_path, "r", libver="latest") as f:
                 self._seq_lengths = {
                     stream: int(f[group_datasets[stream]].shape[1]) for stream in sequence_streams
                 }

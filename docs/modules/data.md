@@ -367,6 +367,8 @@ data:
 | `stage` | `str \| None` | `None` |
 | `transforms` | `Sequence[Callable] \| None` | `None` |
 | `vds_path` | `str \| Path \| None` | `None` |
+| `h5_reopen_every` | `int` | `100` |
+| `h5_rdcc_nbytes` | `int \| None` | `None` |
 
 Requires nothing (`requires={}`, it is the source node). Produces
 `raw.<stream>` (`("B",)` for a `global_object` group, else `("B", T)`),
@@ -381,6 +383,13 @@ Each entry in `groups` is a `GroupConfig` (`dataset`, `pad_max`,
 dataset, `pad_max` caps a jagged stream to N rows (padding shorter rows,
 truncating longer ones), and `global_object` declares a `[B, F]` stream with
 no pad mask.
+
+Files are opened without SWMR and without HDF5 file locking
+(`HDF5_USE_FILE_LOCKING=FALSE` unless already set in the environment). Each
+worker reopens its file handle every `h5_reopen_every` reads (`0` disables it)
+and returns the freed memory to the OS, which bounds memory growth over long
+trainings on a wildcard (VDS) source. `h5_rdcc_nbytes` sets the HDF5 chunk-cache size in
+bytes per dataset (`None` keeps the h5py default).
 
 ```yaml
 data:
