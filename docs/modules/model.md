@@ -503,7 +503,9 @@ scaling methods; passing none leaves targets raw. `sequence` is inferred
 when omitted (`:156`). `gaussian: true` doubles the output width to
 `2 * len(targets)` (means then stddevs) and switches the default loss from
 `torch.nn.MSELoss` to `torch.nn.GaussianNLLLoss` (`:24-25`, selected
-`:147-148`). When `publish_targets: true` the module produces
+`:147-148`). `salt.model.nn.losses.BetaNLLLoss` is an alternative
+gaussian loss, see [`model:`](../configuration.md#model). When
+`publish_targets: true` the module produces
 `targets.<stream>.<name>` instead of its loss key, because a
 `MaskFormerMatchedLoss` then owns `losses.regression` for it.
 

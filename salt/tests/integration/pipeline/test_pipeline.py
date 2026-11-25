@@ -410,6 +410,7 @@ FEEDS: dict[str, Feed] = {
     "ttbar_vs_hh4b_event_tagger": ("root", "readers/easyjet_events"),
     "readers/easyjet_flavour": ("root", None),
     "regression/regression": ("dummy", "regression"),
+    "regression/regression_betaNLL": ("dummy", "regression"),
     "regression/regression_gaussian": ("dummy", "regression"),
     "regression/regression_weighted": ("dummy", "regression"),
     "regression/nan_regression": ("dummy", "default"),
