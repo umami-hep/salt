@@ -26,52 +26,22 @@ import pytest
 import torch
 from lightning import Callback, Trainer
 
-from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
+from salt.data import SaltDataModule
 from salt.graph.errors import ConfigError
 from salt.model.modules.losses import LossSum
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.model.saltmodule import SaltModule
-from salt.schema import dump_schema, save_schema
-from salt.tests._fixtures.dummy_h5 import dummy_h5
-from salt.tests._fixtures.gn2v2_fixture import (
-    JET_VARIABLES,
-    TRACK_VARIABLES,
-    build_gn2v2_modules,
-    write_parity_norm_dict,
-)
+from salt.tests._fixtures.gn2v2_fixture import JET_VARIABLES, build_gn2v2_modules
+from salt.tests.integration.multistage_training.conftest import build_datamodule
 
-pytestmark = pytest.mark.integration
+# every Trainer here is CPU-only, so the integration GPU skip must not apply
+pytestmark = pytest.mark.cpu_always
 
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 RETAINED = {  # the params-bearing gn2v2 modules present in every ckpt
     "norm", "track_embed", "encoder", "pool",
     "jets_classification", "track_origin", "track_vertexing",
 }
-
-
-@pytest.fixture(scope="module")
-def data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("init_from")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_parity_norm_dict(nd_path, cd_path)
-    h5_path, _, _ = dummy_h5(base)
-    schema_path = base / "schema.yaml"
-    save_schema(dump_schema(h5_path), schema_path)
-    return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
-
-
-def build_datamodule(data) -> SaltDataModule:
-    modules = {
-        "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
-        "features": Features(
-            variables={"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
-        ),
-        "labels": Labels(),
-    }
-    return SaltDataModule(
-        modules, batch_size=100, num_workers=0,
-        train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
-    )
 
 
 def build_model(modules) -> SaltModule:

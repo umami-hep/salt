@@ -947,15 +947,7 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     (``_expand_train_args``/``run_row``), so a finetune template's compile
     leg genuinely needs its base already fit — this is correct, not
     accidental: the template cannot compile without the base config it warms
-    up.
-
-    NOTE: ``--mode`` (``salt/cli.py``) is a plain, non-``append`` argparse
-    flag — passing it four times, as the old Tier A did, leaves
-    ``mode=onnx`` (the last value wins), not all four. Ported byte-for-byte
-    rather than "fixed": this item's scope is completeness + the two named
-    bugs (§8), and validating fit/val/test for the first time on ~30 configs
-    that have never been checked in those modes is a change with unknown
-    blast radius, not something to slip in unannounced here.
+    up. ``graph validate`` gets no ``--mode``: its default validates every mode.
     """
     ctx = _feed_context(row, tmp_path_factory)
     config_argv, _ = _expand_train_args(row, ctx, tmp_path_factory)
@@ -966,8 +958,6 @@ def run_compile_plot(row: Row, tmp_path_factory, tmp_path: Path) -> None:
     cfg_path = str(CONFIG_DIR / f"{row.config}.yaml")
     stack_argv = _stack_argv(row, "-c")
     argv = ["graph", "validate", *stack_argv, *config_argv, "-c", cfg_path]
-    for mode in ("fit", "val", "test", "onnx"):
-        argv += ["--mode", mode]
     _salt_main(row.test_name, "validate", [*argv, *sets])
 
     plot_path = tmp_path / f"{row.test_name}.dot"

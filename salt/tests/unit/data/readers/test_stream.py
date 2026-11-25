@@ -43,9 +43,6 @@ def test_stage_file_same_path_is_identity(tmp_path: Path) -> None:
     assert not p.with_suffix(".bin.done").exists()
 
 
-ak = pytest.importorskip("awkward")
-
-
 # --------------------------------------------------------------------------- #
 # 1. StreamConfig validation
 # --------------------------------------------------------------------------- #
@@ -75,6 +72,8 @@ def test_pad_fill_by_dtype_kind() -> None:
 
 def _jagged_cols(counts: list[int], seed: int = 0) -> tuple[dict, list[str], GroupSchema]:
     """Build deterministic jagged float-pt + int-label awkward columns."""
+    import awkward as ak
+
     rng = np.random.default_rng(seed)
     pt = ak.Array([list(rng.normal(size=c).astype(np.float32)) for c in counts])
     label = ak.Array([list(rng.integers(0, 5, size=c).astype(np.int32)) for c in counts])
@@ -98,6 +97,8 @@ def _manual_contiguous(
     cols: dict, fields: list[str], t: int, gschema: GroupSchema, b: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """A hand-rolled contiguous truncate+pad+valid build."""
+    import awkward as ak
+
     first = cols[fields[0]]
     counts = np.asarray(ak.num(first, axis=1)) if b > 0 else np.zeros(0, dtype=np.int64)
     valid = np.arange(t)[None, :] < np.minimum(counts, t)[:, None]
@@ -120,6 +121,7 @@ def _manual_contiguous(
 
 
 def test_no_cuts_no_sort_is_byte_identical_to_contiguous_path() -> None:
+    pytest.importorskip("awkward")
     counts = [0, 1, 3, 8, 5, 12]
     cols, fields, gschema = _jagged_cols(counts, seed=42)
     b = len(counts)
@@ -139,6 +141,7 @@ def test_no_cuts_no_sort_is_byte_identical_to_contiguous_path() -> None:
 
 
 def test_no_cuts_no_sort_dtype_sentinels_on_padded_positions() -> None:
+    pytest.importorskip("awkward")
     counts = [2, 5, 0, 7]
     cols, fields, gschema = _jagged_cols(counts, seed=7)
     b, t = len(counts), 6

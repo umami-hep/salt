@@ -8,11 +8,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from salt.data import UprootGroupConfig, UprootReader
 from salt.data.base import Reader, WorkerCtx
 from salt.data.readers.multisample_reader import MultiSampleReader, SampleConfig
 from salt.graph.errors import ConfigError, SchemaError
 from salt.graph.spec import IO, Mode, TensorSpec, unflatten_spec
 from salt.schema import GroupSchema, Schema
+from salt.tests._fixtures.easyjet_minitree import build_fixture_arrays, write_minitree
 
 
 # --------------------------------------------------------------------------- #
@@ -605,15 +607,6 @@ def test_demand_narrowing_strips_injected_label_field() -> None:
 # Bonus: wrap two UprootReaders on the synthetic ROOT fixtures (skips w/o deps)
 # --------------------------------------------------------------------------- #
 
-uproot = pytest.importorskip("uproot")
-awkward = pytest.importorskip("awkward")
-
-from salt.data import UprootGroupConfig, UprootReader  # noqa: E402
-from salt.tests._fixtures.easyjet_minitree import (  # noqa: E402
-    build_fixture_arrays,
-    write_minitree,
-)
-
 _EJ_JET_BRANCHES = {
     "pt": "recojet_antikt4PFlow_pt_NOSYS",
     "eta": "recojet_antikt4PFlow_eta",
@@ -634,6 +627,8 @@ def _ej_reader(**kw):
 
 @pytest.fixture
 def two_easyjet_files(tmp_path: Path) -> tuple[Path, Path]:
+    pytest.importorskip("uproot")
+    pytest.importorskip("awkward")
     sig = write_minitree(tmp_path / "sig.root", build_fixture_arrays(seed=1))
     bkg = write_minitree(tmp_path / "bkg.root", build_fixture_arrays(seed=2))
     return sig, bkg

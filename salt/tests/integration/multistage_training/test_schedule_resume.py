@@ -81,23 +81,21 @@ from pathlib import Path
 
 import pytest
 import torch
-from lightning import Callback, Trainer, seed_everything
+from lightning import Callback, seed_everything
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from salt.callbacks.schedule import TrainingScheduleCallback
-from salt.data import Features, SaltDataModule, H5StructuredReader, Labels
 from salt.graph.errors import ConfigError
 from salt.model.saltmodule import CKPT_KEY, SaltModule
-from salt.schema import dump_schema, save_schema
-from salt.tests._fixtures.dummy_h5 import dummy_h5
-from salt.tests._fixtures.gn2v2_fixture import (
-    JET_VARIABLES,
-    TRACK_VARIABLES,
-    build_gn2v2_modules,
-    write_parity_norm_dict,
+from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
+from salt.tests.integration.multistage_training.conftest import (
+    _module_param_ids,
+    build_dm,
+    make_trainer,
 )
 
-pytestmark = pytest.mark.integration
+# every Trainer here is CPU-only, so the integration GPU skip must not apply
+pytestmark = pytest.mark.cpu_always
 
 SEED = 1234
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.25}
@@ -120,61 +118,11 @@ SAMPLE_STAGE = {
 # --- fixtures / builders -----------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("resume")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_parity_norm_dict(nd_path, cd_path)
-    h5_path, _, _ = dummy_h5(base)
-    schema_path = base / "schema.yaml"
-    save_schema(dump_schema(h5_path), schema_path)
-    return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
-
-
-class _DeterministicDataModule(SaltDataModule):
-    """A SaltDataModule whose train loader does NOT shuffle — so epoch e yields
-    the same batches every run (resume-equivalence needs a deterministic loader).
-    """
-
-    def train_dataloader(self):  # noqa: D102 - see class docstring
-        return self.get_dataloader(dataset=self.train_dset, stage="fit", shuffle=False)
-
-
-def build_dm(data) -> _DeterministicDataModule:
-    modules = {
-        "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
-        "features": Features(
-            variables={"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
-        ),
-        "labels": Labels(),
-    }
-    return _DeterministicDataModule(
-        modules, batch_size=100, num_workers=0,
-        train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
-    )
-
-
 def build_model(data, *, schedule=None, optimizer="AdamW") -> SaltModule:
     # the fixture model is dropout-free (build_gn2v2_modules default dropout=0),
     # a precondition of the determinism contract in the module docstring.
     kwargs = {} if schedule is None else {"training_schedule": schedule}
     return SaltModule(build_gn2v2_modules(data["nd"]), lrs=LRS, optimizer=optimizer, **kwargs)
-
-
-def make_trainer(*, max_epochs: int, callbacks: list, enable_checkpointing: bool = False,
-                 **kwargs) -> Trainer:
-    # 5 train steps/epoch (1000 jets / batch 100 = 10, limited to 5).
-    # enable_checkpointing must be True on the leg that carries a ModelCheckpoint.
-    return Trainer(
-        accelerator="cpu", devices=1, logger=False, max_epochs=max_epochs,
-        limit_train_batches=5, limit_val_batches=1, num_sanity_val_steps=0,
-        enable_checkpointing=enable_checkpointing, enable_progress_bar=False,
-        enable_model_summary=False, log_every_n_steps=1, callbacks=callbacks, **kwargs,
-    )
-
-
-def _module_param_ids(model: SaltModule, name: str) -> set[int]:
-    return {id(p) for p in model.net[name].parameters()}
 
 
 # =====================================================================
@@ -770,7 +718,8 @@ class TestStageZeroEarlyStop:
         }
     }
 
-    def _run(self, data) -> tuple[SaltModule, StageRecorder]:
+    @pytest.fixture(scope="class")
+    def fitted(self, data) -> tuple[SaltModule, StageRecorder]:
         seed_everything(SEED, workers=True)
         model = build_model(data, schedule=self.SCHEDULE)
         rec = StageRecorder()
@@ -781,8 +730,8 @@ class TestStageZeroEarlyStop:
         ).fit(model, build_dm(data))
         return model, rec
 
-    def test_transition_fires_before_cap(self, data):
-        model, rec = self._run(data)
+    def test_transition_fires_before_cap(self, fitted):
+        model, rec = fitted
         stage0 = [t for t in rec.trace if t["stage"] == 0]
         stage1 = [t for t in rec.trace if t["stage"] == 1]
         # stage 0 = epochs 0,1,2 (15 steps) — stopped at epoch 3 START, well before
@@ -791,8 +740,8 @@ class TestStageZeroEarlyStop:
         assert len(stage0) == 15
         assert min(t["epoch"] for t in stage1) == 3
 
-    def test_boundary_record_reason_is_early_stop(self, data):
-        model, _ = self._run(data)
+    def test_boundary_record_reason_is_early_stop(self, fitted):
+        model, _ = fitted
         records = model.training_controller.boundary_records
         assert len(records) == 1
         assert records[0]["reason"] == "early_stop"
@@ -800,16 +749,16 @@ class TestStageZeroEarlyStop:
         assert records[0]["epoch"] == 3
         assert records[0]["global_step"] == 15
 
-    def test_stage0_onecycle_envelope_truncated(self, data):
-        _model, rec = self._run(data)
+    def test_stage0_onecycle_envelope_truncated(self, fitted):
+        _model, rec = fitted
         stage0 = [t for t in rec.trace if t["stage"] == 0]
         # the stage-0 OneCycle was sized for its 6-epoch cap (30 steps) but only 15
         # steps were taken — the envelope is truncated mid-curve (D-ES).
         assert stage0[0]["total_steps"] == 30
         assert len(stage0) == 15
 
-    def test_stage1_optimizer_owns_unfrozen_encoder(self, data):
-        model, _ = self._run(data)
+    def test_stage1_optimizer_owns_unfrozen_encoder(self, fitted):
+        model, _ = fitted
         assert model.training_controller.current_stage_index == 1
         opt_ids = {
             id(p) for group in model.trainer.optimizers[0].param_groups for p in group["params"]
@@ -817,8 +766,8 @@ class TestStageZeroEarlyStop:
         # encoder was frozen in stage 0, unfrozen in stage 1 → in the optimizer now
         assert _module_param_ids(model, FROZEN) <= opt_ids
 
-    def test_non_final_early_stop_never_sets_should_stop(self, data):
-        _model, rec = self._run(data)
+    def test_non_final_early_stop_never_sets_should_stop(self, fitted):
+        _model, rec = fitted
         # a non-final early-stop advances the stage; it must never end the fit.
         assert not any(t["should_stop"] for t in rec.trace)
         # the fit ran to max_epochs (stage 1 has no early_stop)

@@ -103,7 +103,6 @@ from salt.data import (
     ContainerOneHot,
     Features,
     FtagLabeller,
-    H5StructuredReader,
     Labels,
     SaltDataModule,
 )
@@ -117,22 +116,22 @@ from salt.model.multistage_training import TrainingController
 from salt.model.saltmodule import CKPT_KEY, SaltModule
 from salt.optim import HybridMuonAdamW
 from salt.schedule import TrainingSchedule, boundary_record
-from salt.schema import dump_schema, save_schema
-from salt.tests._fixtures.dummy_h5 import dummy_h5
-from salt.tests._fixtures.gn2v2_fixture import (
-    JET_VARIABLES,
-    TRACK_VARIABLES,
-    build_gn2v2_modules,
-    write_parity_norm_dict,
-)
+from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules
 from salt.tests._fixtures.joint_ftag1lite_corpus import (
     build_joint_corpus,
     make_reader,
     side_config,
 )
+from salt.tests.integration.multistage_training.conftest import (
+    _module_param_ids,
+    build_datamodule,
+    build_dm,
+    make_trainer,
+)
 from salt.utils.config_utils import expand_includes
 
-pytestmark = pytest.mark.integration
+# every Trainer here is CPU-only, so the integration GPU skip must not apply
+pytestmark = pytest.mark.cpu_always
 
 SEED = 1234
 LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.25}
@@ -141,46 +140,8 @@ LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.25}
 FREEZE_LRS = {"initial": 1e-3, "max": 5e-3, "end": 1e-4, "pct_start": 0.1}
 
 
-@pytest.fixture(scope="module")
-def data(tmp_path_factory) -> dict[str, Path]:
-    base = tmp_path_factory.mktemp("schedule")
-    nd_path, cd_path = base / "norm_dict.yaml", base / "class_dict.yaml"
-    write_parity_norm_dict(nd_path, cd_path)
-    h5_path, _, _ = dummy_h5(base)
-    schema_path = base / "schema.yaml"
-    save_schema(dump_schema(h5_path), schema_path)
-    return {"dir": base, "h5": h5_path, "nd": nd_path, "schema": schema_path}
-
-
-def build_datamodule(data) -> SaltDataModule:
-    modules = {
-        "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
-        "features": Features(
-            variables={"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
-        ),
-        "labels": Labels(),
-    }
-    return SaltDataModule(
-        modules, batch_size=100, num_workers=0,
-        train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
-    )
-
-
 def build_model(data, **kwargs) -> SaltModule:
     return SaltModule(build_gn2v2_modules(data["nd"]), lrs=LRS, **kwargs)
-
-
-def make_trainer(*, max_epochs: int, callbacks: list, enable_checkpointing: bool = False,
-                 **kwargs) -> Trainer:
-    # 5 train steps/epoch (1000 jets / batch 100 = 10, limited to 5) so a 4-epoch
-    # fit has estimated_stepping_batches == 20 (a 2-stage split of [10, 10]); a
-    # per-stage OneCycle needs >~8 steps or its warmup phase degenerates.
-    return Trainer(
-        accelerator="cpu", devices=1, logger=False, max_epochs=max_epochs,
-        limit_train_batches=5, limit_val_batches=1, num_sanity_val_steps=0,
-        enable_checkpointing=enable_checkpointing, enable_progress_bar=False,
-        enable_model_summary=False, log_every_n_steps=1, callbacks=callbacks, **kwargs,
-    )
 
 
 def _param_ids(params) -> set[int]:
@@ -189,10 +150,6 @@ def _param_ids(params) -> set[int]:
 
 def _optimizer_param_ids(opt) -> set[int]:
     return {id(p) for group in opt.param_groups for p in group["params"]}
-
-
-def _module_param_ids(model: SaltModule, name: str) -> set[int]:
-    return {id(p) for p in model.net[name].parameters()}
 
 
 # =====================================================================
@@ -985,25 +942,6 @@ COSINE = "torch.optim.lr_scheduler.CosineAnnealingLR"
 PLATEAU = "torch.optim.lr_scheduler.ReduceLROnPlateau"
 
 
-class _DeterministicDataModule(SaltDataModule):
-    def train_dataloader(self):  # noqa: D102 - shuffle=False for resume determinism
-        return self.get_dataloader(dataset=self.train_dset, stage="fit", shuffle=False)
-
-
-def build_dm(data) -> _DeterministicDataModule:
-    modules = {
-        "reader": H5StructuredReader(groups={"jets": {}, "tracks": {}}, schema=data["schema"]),
-        "features": Features(
-            variables={"jets": list(JET_VARIABLES), "tracks": list(TRACK_VARIABLES)}
-        ),
-        "labels": Labels(),
-    }
-    return _DeterministicDataModule(
-        modules, batch_size=100, num_workers=0,
-        train_file=data["h5"], val_file=data["h5"], test_file=data["h5"],
-    )
-
-
 class _SchedRecorder(Callback):
     """Per-train-batch trace of (stage index, active scheduler class name, LR)."""
 
@@ -1056,7 +994,8 @@ class TestTwoStageSchedulers:
         }
     }
 
-    def _run(self, data):
+    @pytest.fixture(scope="class")
+    def fitted(self, data):
         seed_everything(SEED, workers=True)
         model = build_model(data, training_schedule=self.SCHEDULE)
         rec = _SchedRecorder()
@@ -1065,15 +1004,15 @@ class TestTwoStageSchedulers:
         ).fit(model, build_dm(data))
         return model, rec
 
-    def test_correct_scheduler_class_active_per_stage(self, data):
-        _model, rec = self._run(data)
+    def test_correct_scheduler_class_active_per_stage(self, fitted):
+        _model, rec = fitted
         stage0 = {t["sched"] for t in rec.trace if t["stage"] == 0}
         stage1 = {t["sched"] for t in rec.trace if t["stage"] == 1}
         assert stage0 == {"CosineAnnealingLR"}  # warmup scheduler
         assert stage1 == {"ReduceLROnPlateau"}  # finetune scheduler (rebuilt at boundary)
 
-    def test_stage1_optimizer_owns_trainable_set(self, data):
-        model, _ = self._run(data)
+    def test_stage1_optimizer_owns_trainable_set(self, fitted):
+        model, _ = fitted
         assert model.training_controller.current_stage_index == 1
         opt_ids = {
             id(p) for group in model.trainer.optimizers[0].param_groups for p in group["params"]
@@ -1216,7 +1155,8 @@ class TestStageScopedCallbacks:
         }
     }
 
-    def _run(self, data) -> HookProbe:
+    @pytest.fixture(scope="class")
+    def global_probe(self, data) -> HookProbe:
         HOOK_LOG.clear()
         seed_everything(SEED, workers=True)
         model = SaltModule(build_gn2v2_modules(data["nd"]), lrs=LRS, training_schedule=self.SCHEDULE)
@@ -1229,8 +1169,7 @@ class TestStageScopedCallbacks:
         ).fit(model, build_datamodule(data))
         return global_probe
 
-    def test_stage_scoped_callbacks_only_fire_within_their_stage(self, data):
-        self._run(data)
+    def test_stage_scoped_callbacks_only_fire_within_their_stage(self, global_probe):
         a_hook_stages = {s for (t, h, s) in HOOK_LOG if t == "A" and h in {"epoch_start", "batch_end"}}
         b_hook_stages = {s for (t, h, s) in HOOK_LOG if t == "B" and h in {"epoch_start", "batch_end"}}
         assert a_hook_stages == {0}  # stage-A delegate only active in stage 0
@@ -1239,21 +1178,18 @@ class TestStageScopedCallbacks:
         assert sum(1 for (t, h, _) in HOOK_LOG if t == "A" and h == "epoch_start") == 2
         assert sum(1 for (t, h, _) in HOOK_LOG if t == "B" and h == "epoch_start") == 2
 
-    def test_scoped_callbacks_are_set_up_and_torn_down(self, data):
-        self._run(data)
+    def test_scoped_callbacks_are_set_up_and_torn_down(self, global_probe):
         assert ("A", "setup", 0) in HOOK_LOG  # A set up on entering stage 0
         assert any(t == "A" and h == "teardown" for (t, h, _) in HOOK_LOG)  # A torn down at exit
         assert ("B", "setup", 1) in HOOK_LOG  # B set up on entering stage 1
         assert any(t == "B" and h == "teardown" for (t, h, _) in HOOK_LOG)  # B torn down at fit end
 
-    def test_global_callback_persists_across_all_stages(self, data):
-        global_probe = self._run(data)
+    def test_global_callback_persists_across_all_stages(self, global_probe):
         global_stages = {s for (t, h, s) in HOOK_LOG if t == "GLOBAL" and h == "epoch_start"}
         assert global_stages == {0, 1}  # global fires in BOTH stages (persistent)
         assert global_probe.epoch_starts == 4  # one instance, accumulated all epochs
 
-    def test_scoped_delegate_is_a_fresh_instance_per_stage(self, data):
-        self._run(data)
+    def test_scoped_delegate_is_a_fresh_instance_per_stage(self, global_probe):
         # A and B are distinct freshly-instantiated delegates (their setups carry
         # different tags at different stages — no shared/re-used instance).
         setups = [(t, s) for (t, h, s) in HOOK_LOG if h == "setup" and t in {"A", "B"}]
