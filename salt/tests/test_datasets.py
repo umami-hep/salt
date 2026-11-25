@@ -1068,3 +1068,57 @@ def test_salt_dataset_h5_knobs_env_override(monkeypatch):
     dataset = SaltDataset(f, norm_dict, variables, "train", h5_reopen_every=100)
     assert dataset._reopen_every == 5
     assert dataset._rdcc_nbytes == 0
+
+
+def test_sign_flip_augmentation():
+    f = get_mock_file()[0]
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0", "dphi"]}
+    labels = {"jets": ["flavour_label"]}
+    flip = {"prob": 1.0, "variables": {"tracks": ["dphi"]}, "labels": {"flavour_label": {0: 1}}}
+    base_in, _, base_lab = SaltDataset(f, {}, variables, "train", labels=labels)[0:50]
+    ds = SaltDataset(f, {}, variables, "train", labels=labels, sign_flip_augmentation=flip)
+    inputs, _, lab = ds[0:50]
+    torch.testing.assert_close(inputs["tracks"][..., 0], base_in["tracks"][..., 0])
+    torch.testing.assert_close(inputs["tracks"][..., 1], -base_in["tracks"][..., 1])
+    old, new = base_lab["jets"]["flavour_label"], lab["jets"]["flavour_label"]
+    assert (new[old == 0] == 1).all()
+    assert (new[old == 1] == 0).all()
+    assert (new[old > 1] == old[old > 1]).all()
+
+
+def test_sign_flip_augmentation_prob_zero_is_noop():
+    f = get_mock_file()[0]
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0", "dphi"]}
+    labels = {"jets": ["flavour_label"]}
+    flip = {"prob": 0.0, "variables": {"tracks": ["dphi"]}, "labels": {"flavour_label": {0: 1}}}
+    base_in, _, base_lab = SaltDataset(f, {}, variables, "train", labels=labels)[0:50]
+    inputs, _, lab = SaltDataset(
+        f, {}, variables, "train", labels=labels, sign_flip_augmentation=flip
+    )[0:50]
+    torch.testing.assert_close(inputs["tracks"], base_in["tracks"])
+    assert torch.equal(lab["jets"]["flavour_label"], base_lab["jets"]["flavour_label"])
+
+
+def test_sign_flip_augmentation_input_before_global():
+    f = get_mock_file()[0]
+    variables = {"tracks": ["d0", "dphi"], "jets": ["pt", "eta"]}
+    flip = {"prob": 1.0, "variables": {"tracks": ["dphi"]}}
+    base_in = SaltDataset(f, {}, variables, "train")[0:50][0]
+    inputs = SaltDataset(f, {}, variables, "train", sign_flip_augmentation=flip)[0:50][0]
+    torch.testing.assert_close(inputs["tracks"][..., 1], -base_in["tracks"][..., 1])
+
+
+@pytest.mark.parametrize(
+    "flip",
+    [
+        {"variables": {"tracks": ["dphi"]}},
+        {"prob": 0.5},
+        {"prob": 0.5, "variables": {"track": ["dphi"]}},
+        {"prob": 0.5, "variables": {"tracks": ["dphi"]}, "label": {}},
+    ],
+)
+def test_sign_flip_augmentation_malformed_raises(flip):
+    f = get_mock_file()[0]
+    variables = {"jets": ["pt", "eta"], "tracks": ["d0", "dphi"]}
+    with pytest.raises(ValueError, match="sign_flip_augmentation"):
+        SaltDataset(f, {}, variables, "train", sign_flip_augmentation=flip)

@@ -214,6 +214,35 @@ transforms:
 
 This will add noise with mean 0 and standard deviation 0.1 to the `pt_btagJes` jet feature and separately add noise with mean 0.1 and standard deviation 0.05 to the `d0` track feature.
 
+`sign_flip_augmentation` mirrors jets of the training set only: per jet with probability `prob`, it negates the listed fields and swaps the listed label values.
+`prob` and `variables` are required and `labels` is optional. Unknown keys or input groups raise an error.
+Example from the GNTau tau tagger, 11-class head with τ+ in classes 1-5 and τ− in 6-10:
+
+```yaml
+data:
+  sign_flip_augmentation:
+    prob: 0.5
+    variables:
+      tracks:
+      - TauTracks_charge
+      - TauTracks_dPhi
+      - TauTracks_dPhiJetSeedAxis
+      - TauTracks_d0TJVA
+      - TauTracks_d0SigTJVA
+      cells:
+      - TauClusters_cls_dPhi
+      pfoneutrals:
+      - pfo_neutral_dPhi
+      - pfo_neutral_cellBased_DPHI
+    labels:
+      GNTauChargeLabel:
+        1: 6
+        2: 7
+        3: 8
+        4: 9
+        5: 10
+```
+
 #### Having multiple targets
 
 You can set up your config so alternative labels are used during training. For example, if you would like to use a $\tau$-specific truth $p_T$ for $\tau$ jets and the standard `pt_btagJes` for all other jets, you can set up a `multi_target` config block in data to swap the target based on a condition:

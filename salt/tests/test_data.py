@@ -101,3 +101,26 @@ def test_salt_datamodule_setup_and_batch():
     assert inputs["tracks"].shape[0] == 10
     assert "tracks" in pad_masks
     assert isinstance(labels, dict)
+
+
+def test_salt_datamodule_sign_flip_augmentation_train_only():
+    fname, f = get_mock_file()
+    f.close()
+    flip = {"prob": 1.0, "variables": {"tracks": ["d0"]}}
+    dm = SaltDataModule(
+        train_file=fname,
+        val_file=fname,
+        batch_size=10,
+        num_workers=0,
+        num_train=50,
+        num_val=20,
+        num_test=0,
+        pin_memory=False,
+        norm_dict={},
+        variables={"jets": ["pt", "eta"], "tracks": ["d0"]},
+        sign_flip_augmentation=flip,
+    )
+    dm.trainer = SimpleNamespace(is_global_zero=True, fast_dev_run=False)
+    dm.setup("fit")
+    assert dm.train_dset.sign_flip_augmentation == flip
+    assert not dm.val_dset.sign_flip_augmentation
