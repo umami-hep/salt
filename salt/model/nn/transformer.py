@@ -22,11 +22,45 @@ except ImportError:
     _MuReadout = None
 
 
+class LayerScale(nn.Module):
+    """Applies the LayerScale operation from CaiT (stabilizes deep transformers).
+
+    Reference: https://arxiv.org/abs/2103.17239
+    """
+
+    def __init__(self, dim: int, init_value: float = 1e-3) -> None:
+        super().__init__()
+        self.gamma = nn.Parameter(init_value * torch.ones(dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Scale the input by a learnable vector ``gamma``."""
+        return x * self.gamma
+
+
+class DropPath(nn.Module):
+    """Stochastic depth / drop-path regularization."""
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Randomly drop residual paths (no-op outside training)."""
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()  # binarize
+        return x.div(keep_prob) * random_tensor
+
+
 class NormResidual(nn.Module):
     """Residual wrapper around ``fn`` (PreNorm/PostNorm/NoNorm by ``norm_type``).
 
-    ``pre``: ``x + fn(norm(x))``; ``post``: ``norm(x + fn(x))``; anything else (``none``):
-    ``x + fn(x)``. ``embed_dim=0`` falls back to ``fn.embed_dim``; forwards edge features
+    ``pre``: ``x + drop(scale * fn(norm(x)))``; ``post``: ``norm(x + drop(scale * fn(x)))``;
+    anything else (``none``): ``x + drop(scale * fn(x))``. ``ls_init=None`` disables
+    LayerScale; ``embed_dim=0`` falls back to ``fn.embed_dim``; forwards edge features
     through for `EdgeAttention`.
     """
 
@@ -34,6 +68,8 @@ class NormResidual(nn.Module):
         self,
         fn: GLU | Attention | EdgeAttention,
         norm: str = "LayerNorm",
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
         embed_dim: int = 0,
         norm_type: str = "pre",
     ) -> None:
@@ -44,13 +80,15 @@ class NormResidual(nn.Module):
         self.fn = fn
         if self.norm_type != "none":
             self.norm = _LAYERNORMS[norm](dim)
+        self.ls = LayerScale(dim, ls_init) if ls_init is not None else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path else nn.Identity()
         self.edges = isinstance(fn, EdgeAttention)
 
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, Tensor]:
         """Apply the residual wrapper; returns ``(out, edge_out)`` for an `EdgeAttention` ``fn``."""
         out = self.fn(self.norm(x) if self.norm_type == "pre" else x, *args, **kwargs)
         fn_out, edge_out = out if self.edges else (out, None)
-        res = x + fn_out
+        res = x + self.drop_path(self.ls(fn_out))
         if self.norm_type == "post":
             res = self.norm(res)
         return (res, edge_out) if self.edges else res
@@ -61,13 +99,16 @@ class EncoderLayer(nn.Module):
     """Transformer encoder layer: self-attention + feed-forward.
 
     ``edge_embed_dim > 0`` swaps `Attention` for `EdgeAttention`;
-    ``norm_type="hybrid"`` forces qk/v norm and a pre-FFN norm.
+    ``norm_type="hybrid"`` forces qk/v norm and a pre-FFN norm; ``ls_init`` and
+    ``drop_path`` set the LayerScale and drop-path of both residual blocks.
     """
 
     def __init__(
         self,
         embed_dim: int,
         norm: str = "LayerNorm",
+        ls_init: float | None = None,
+        drop_path: float = 0.0,
         depth: int = 1,
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
@@ -101,7 +142,13 @@ class EncoderLayer(nn.Module):
             if self.update_edges:
                 self.edge_postnorm = _LAYERNORMS[norm](edge_embed_dim)
 
-        residual = partial(NormResidual, norm=norm, norm_type=residual_norm_type)
+        residual = partial(
+            NormResidual,
+            norm=norm,
+            ls_init=ls_init,
+            drop_path=drop_path,
+            norm_type=residual_norm_type,
+        )
         self.attn = residual(attn_class(embed_dim, **attn_kwargs))
         self.dense = residual(GLU(embed_dim, **dense_kwargs))
 
@@ -157,8 +204,15 @@ class Transformer(nn.Module):
         If ``True``, edge features are updated after attention. The default is ``False``
     mup: bool, optional
         Whether to use μP parameterization. The default is ``False``.
+    drop_path : float, optional
+        Drop-path (stochastic depth) rate. The default is ``0.0``.
+    drop_path_schedule : str, optional
+        How ``drop_path`` is distributed across layers, one of ``{"uniform", "linear"}``.
+        ``"uniform"`` applies the same rate to every layer; ``"linear"`` ramps from
+        ``drop_path / 2`` at the first layer to ``drop_path`` at the last. The default
+        is ``"uniform"``.
     **kwargs : Any
-        Extra keyword arguments forwarded to :class:`EncoderLayer`.
+        Extra keyword arguments forwarded to :class:`EncoderLayer` (e.g. ``ls_init``).
 
     Raises
     ------
@@ -179,6 +233,8 @@ class Transformer(nn.Module):
         edge_embed_dim: int = 0,
         update_edges: bool = False,
         mup: bool = False,
+        drop_path: float = 0.0,
+        drop_path_schedule: str = "uniform",
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -201,7 +257,10 @@ class Transformer(nn.Module):
         self.edge_embed_dim = edge_embed_dim
         self.update_edges = update_edges
         self.mup = mup
+        self.drop_path = drop_path
+        self.drop_path_schedule = drop_path_schedule
 
+        assert drop_path_schedule in {"uniform", "linear"}, "Invalid drop_path_schedule!"
         if self.update_edges:
             assert edge_embed_dim > 0, "Cannot update edges with edge_embed_dim=0"
         if self.mup:
@@ -221,6 +280,7 @@ class Transformer(nn.Module):
                 embed_dim=embed_dim,
                 norm=norm,
                 depth=depth,
+                drop_path=self._layer_drop_path(depth, num_layers),
                 edge_embed_dim=edge_embed_dim,
                 update_edges=update_edges,
                 **kwargs,
@@ -246,6 +306,12 @@ class Transformer(nn.Module):
         )
         self.register_buffer("register_mask", torch.zeros(num_registers, dtype=torch.bool))
         self.featurewise = nn.ModuleList()
+
+    def _layer_drop_path(self, depth: int, num_layers: int) -> float:
+        """Drop-path rate of layer ``depth`` under ``drop_path_schedule``."""
+        if self.drop_path_schedule == "linear" and num_layers > 1:
+            return self.drop_path * 0.5 * (1 + depth / (num_layers - 1))
+        return self.drop_path
 
     def set_backend(self, attn_type: str) -> None:
         """Set the attention backend for all layers."""

@@ -756,12 +756,36 @@ produce gives the dim table nothing concrete to bind directly).
 | `edge_embed_dim` | `int` | `0` |
 | `update_edges` | `bool` | `False` |
 | `featurewise` | `Sequence[dict[str, Any]] \| None` | `None` |
+| `ls_init` | `float \| None` | `None` |
+| `drop_path` | `float` | `0.0` |
+| `drop_path_schedule` | `str` | `"uniform"` |
 
 `attention` is a plain mapping that must contain `num_heads`; the config key
 is `attention: {num_heads: N}`, never `n_head`
 (`transformer_encoder.py:148-152`). `attn_type` is an optional key inside
 `attention` (default `"torch-math"`); every other key besides `num_heads`
 and `attn_type` is forwarded as `attn_kwargs`.
+
+With `edges` set, two more `attention` keys shape the `EdgeAttention`:
+`talking_heads: true` mixes the attention scores across heads before and
+after the softmax, and `edge_gate: false` drops the sigmoid edge gate on the
+attention weights, leaving only the additive edge bias. Both default to the
+plain gated attention (`talking_heads: false`, `edge_gate: true`).
+
+`ls_init` turns on LayerScale (a learnable per-channel scale on each residual
+branch, initialised to `ls_init`) in every attention and feed-forward block.
+`drop_path` is the stochastic-depth rate of those blocks during training (it
+is a no-op in evaluation and export); `drop_path_schedule: linear` ramps it
+from `drop_path / 2` at the first layer to `drop_path` at the last, while
+`uniform` uses the same rate everywhere. All three are off by default, and
+leave the parameters and outputs unchanged when off.
+
+```yaml
+attention: {num_heads: 8, talking_heads: true, edge_gate: false}
+ls_init: 1.0e-5
+drop_path: 0.1
+drop_path_schedule: linear
+```
 
 Requires `seq.x` `("B", T, dim)` and `seq.mask`, plus the `edges` key when
 `edges` is set, plus `inputs.parameters` under a FiLM config. Produces
