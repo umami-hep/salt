@@ -114,4 +114,4 @@ class MaskformerConfusionMatrix(Callback):
             return
         n_classes = len(self.class_names) if self.class_names is not None else self._num_classes
         labels = self.class_names or [str(i) for i in range(n_classes)]
-        _flush_epoch(self, trainer, n_classes, labels, as_lists=True)
+        _flush_epoch(self, trainer, n_classes, labels)

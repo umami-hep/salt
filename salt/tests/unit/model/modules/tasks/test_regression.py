@@ -73,6 +73,12 @@ class TestRegressionTaskModule:
         with pytest.raises(ConfigError, match="mean.*std|norm_params"):
             RegressionTaskModule(stream="jets", targets="x", norm_params={"mean": 1.0})
 
+    def test_norm_params_mistyped_key_is_config_error(self):
+        with pytest.raises(ConfigError, match="norm_params"):
+            RegressionTaskModule(
+                stream="jets", targets="x", norm_params={"mean": 1.0, "sdt": 1.0}
+            )
+
     def test_sequence_inference(self):
         seq = RegressionTaskModule(stream="tracks", targets="x")
         glob = RegressionTaskModule(stream="jets", targets="x", input="pooled.global")

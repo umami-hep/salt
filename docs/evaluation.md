@@ -25,8 +25,9 @@ path and naming.
 ??? info "Only one GPU is supported for the test loop"
 
     Multi-device test writing is out of scope: the framework forces
-    `--trainer.devices=1` and logs `salt test: forcing --trainer.devices=1
-    (single-device eval)` if you ask for more than one device.
+    `--trainer.devices=1` and `--trainer.num_nodes=1`, and logs e.g.
+    `salt test: forcing --trainer.devices=1 (single-device eval)` if you ask
+    for more than one device or node.
 
 ??? warning "Output files are overwritten by default"
 
