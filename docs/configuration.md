@@ -242,6 +242,12 @@ Set `loss:` to override this: either a bare `torch.nn` class name (`loss: MSELos
 loss: {class_path: torch.nn.SmoothL1Loss, init_args: {beta: 0.5}}
 ```
 
+A `gaussian: true` regression head can use `salt.model.nn.losses.BetaNLLLoss` ([Seitzer et al. (2022)](https://arxiv.org/abs/2203.09168)) instead of `torch.nn.GaussianNLLLoss`. It weights the Gaussian NLL by `var ** beta` (detached from the gradient) so that low-variance predictions do not dominate the gradient: `beta: 0` is the plain Gaussian NLL, with the variance clamped at `1e-6`, and `beta: 1` removes the `1 / var` down-weighting of the squared error. `beta` must lie in `[0, 1]`, and a non-finite loss value raises. `salt/configs/regression/regression_betaNLL.yaml` is a complete example:
+
+```yaml
+loss: {class_path: salt.model.nn.losses.BetaNLLLoss, init_args: {beta: 0.5, reduction: none}}
+```
+
 ### `outputs:`
 
 A dict of named output sinks and writers controlling what `salt test` writes to the eval H5 and what `salt export` puts in the ONNX graph. This is fully documented at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section); this page does not restate it.
