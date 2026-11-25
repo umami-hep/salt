@@ -269,3 +269,27 @@ def test_per_split_without_stage_serves_every_row(tmp_path: Path) -> None:
     assert len(reader) == N_EVENTS
     assert reader._kept is None  # no cut applies to stage=None -> identity read path
     np.testing.assert_array_equal(_served_event_numbers(reader), event_numbers)
+
+
+def test_config_fingerprint_tracks_cuts_but_not_the_source(tmp_path: Path) -> None:
+    """No file is opened: the fingerprint is config-only."""
+    base = _split_reader(tmp_path / "a.h5", "train").config_fingerprint()
+    assert base
+    assert _split_reader(tmp_path / "a.h5", "train").config_fingerprint() == base
+    assert _split_reader(tmp_path / "b.h5", "train").config_fingerprint() == base
+    assert _split_reader(tmp_path / "a.h5", "val").config_fingerprint() != base
+    cut = H5StructuredReader(
+        groups={"jets": {"global_object": True}},
+        cuts=GlobalObjectCuts(global_cuts=("pt > 1.5",)),
+    )
+    assert cut.config_fingerprint() != H5StructuredReader(groups=cut.groups).config_fingerprint()
+
+
+def test_config_fingerprint_tracks_groups() -> None:
+    def fingerprint(pad_max: int) -> dict:
+        groups = {"jets": {"global_object": True}, "tracks": {"global_object": False}}
+        groups["tracks"]["pad_max"] = pad_max
+        return H5StructuredReader(groups=groups).config_fingerprint()
+
+    assert fingerprint(40) == fingerprint(40)
+    assert fingerprint(40) != fingerprint(20)

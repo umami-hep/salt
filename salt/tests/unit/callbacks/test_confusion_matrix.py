@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
+from lightning.pytorch.loggers.comet import CometLogger
 
 from salt.callbacks import ConfusionMatrix
 from salt.graph.bundle import Bundle
@@ -44,14 +46,14 @@ def stub_pl_module() -> SimpleNamespace:
     )
 
 
-def run_v2(task_name: str, bundles: list[Bundle], **kwargs) -> ConfusionMatrix:
+def run_v2(task_name: str, bundles: list[Bundle], logger=None, **kwargs) -> ConfusionMatrix:
     """Drive the v2 callback over `bundles` through the Lightning hook surface."""
     callback = ConfusionMatrix(task_name=task_name, **kwargs)
     pl_module = stub_pl_module()
     callback.setup(None, pl_module, stage="fit")
     for i, bundle in enumerate(bundles):
         callback.on_validation_batch_end(None, pl_module, {"bundle": bundle}, None, i)
-    callback.on_validation_epoch_end(SimpleNamespace(logger=None, current_epoch=0), pl_module)
+    callback.on_validation_epoch_end(SimpleNamespace(logger=logger, current_epoch=0), pl_module)
     return callback
 
 
@@ -95,6 +97,17 @@ class TestConfusionMatrixValues:
             int(v2.last_matrix.sum()) + n_padded
             == bundles[0].get("labels.tracks.ftagTruthOriginLabel").numel()
         )
+
+    def test_comet_gets_flat_unpadded_track_labels(self):
+        bundle = make_bundle(7)
+        logger = MagicMock(spec=CometLogger)
+        run_v2("track_origin", [bundle], logger=logger)
+        kwargs = logger.experiment.log_confusion_matrix.call_args.kwargs
+        truth = bundle.get("labels.tracks.ftagTruthOriginLabel")
+        real = truth != -1
+        preds = torch.argmax(bundle.get("preds.tracks.track_origin"), dim=-1)
+        assert kwargs["y_true"] == truth[real].tolist()
+        assert kwargs["y_predicted"] == preds[real].tolist()
 
 
 class TestConfusionMatrixSurface:

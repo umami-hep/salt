@@ -11,7 +11,7 @@ import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -372,6 +372,16 @@ class H5StructuredReader(Reader):
         )
         clone.name = self.name
         return clone
+
+    def config_fingerprint(self) -> dict[str, Any]:
+        """Keys on the cuts effective for `stage`, not on `stage` itself."""
+        cuts = self.cuts.for_split(self.stage) if self.cuts is not None else ()
+        return {
+            "reader": f"{type(self).__module__}.{type(self).__qualname__}",
+            "num": self.num,
+            "cuts": [cut.expr for cut in cuts],
+            "groups": {stream: asdict(cfg) for stream, cfg in self.groups.items()},
+        }
 
     def declare_io(self, mode: Mode) -> IO:
         """Declare ``raw.<stream>``/``masks.<stream>``/``meta.rows`` (source node,

@@ -150,7 +150,8 @@ class ConfusionMatrix(Callback):
         Rows are truth classes, columns predicted classes. Entries whose
         truth value lies outside ``[0, num_classes)`` — e.g. the ``-1``
         padding of per-track labels — are dropped and counted in the second
-        return value.
+        return value. A `ValueError` propagates when the flattened truth/pred
+        shapes differ.
 
         Parameters
         ----------
@@ -166,41 +167,45 @@ class ConfusionMatrix(Callback):
         tuple[Tensor, int]
             The ``[C, C]`` int64 counts matrix and the number of dropped
             (out-of-range truth) entries.
-
-        Raises
-        ------
-        ValueError
-            When the flattened truth/pred shapes differ.
         """
-        if len(truth) == 0:
-            return torch.zeros(num_classes, num_classes, dtype=torch.int64), 0
-        t = torch.cat([torch.as_tensor(x).flatten() for x in truth]).long()
-        p = torch.cat([torch.as_tensor(x).flatten() for x in preds]).long()
-        if t.shape != p.shape:
-            raise ValueError(f"truth/pred shapes differ after flattening: {t.shape} vs {p.shape}")
-        valid = (t >= 0) & (t < num_classes) & (p >= 0) & (p < num_classes)
-        matrix = torch.bincount(
-            t[valid] * num_classes + p[valid], minlength=num_classes * num_classes
-        ).reshape(num_classes, num_classes)
-        return matrix, int((~valid).sum())
+        t, p, dropped = _in_range_entries(truth, preds, num_classes)
+        matrix = torch.bincount(t * num_classes + p, minlength=num_classes * num_classes)
+        return matrix.reshape(num_classes, num_classes), dropped
 
 
-def _flush_epoch(
-    cb: Any, trainer: Trainer, num_classes: int, labels: list[str], as_lists: bool = False
-) -> int:
-    """Shared epoch end of both confusion-matrix callbacks: stash ``last_*``, log to Comet,
-    reset accumulators; returns the dropped (out-of-range) entry count.
+def _in_range_entries(
+    truth: list[Tensor] | Tensor, preds: list[Tensor] | Tensor, num_classes: int
+) -> tuple[Tensor, Tensor, int]:
+    """Flattened truth/pred entries with both in ``[0, num_classes)``, plus the dropped
+    count (e.g. the ``-1`` padding of per-token labels).
+    """
+    if len(truth) == 0:
+        empty = torch.zeros(0, dtype=torch.int64)
+        return empty, empty, 0
+    t = torch.cat([torch.as_tensor(x).flatten() for x in truth]).long()
+    p = torch.cat([torch.as_tensor(x).flatten() for x in preds]).long()
+    if t.shape != p.shape:
+        raise ValueError(f"truth/pred shapes differ after flattening: {t.shape} vs {p.shape}")
+    valid = (t >= 0) & (t < num_classes) & (p >= 0) & (p < num_classes)
+    return t[valid], p[valid], int((~valid).sum())
+
+
+def _flush_epoch(cb: Any, trainer: Trainer, num_classes: int, labels: list[str]) -> int:
+    """Shared epoch end of both confusion-matrix callbacks: stash ``last_*``, log the
+    entries the counts matrix keeps to Comet (flattened, so per-token padding never
+    reaches it), reset accumulators; returns the dropped (out-of-range) entry count.
     """
     cb.last_truth_labels, cb.last_pred_labels = cb.truth_labels, cb.pred_labels
     cb.last_matrix, ignored = ConfusionMatrix.confusion_counts(
         cb.truth_labels, cb.pred_labels, num_classes
     )
     if isinstance(trainer.logger, CometLogger):
-        y_true, y_predicted = cb.truth_labels, cb.pred_labels
-        if as_lists:
-            y_true, y_predicted = torch.cat(y_true).tolist(), torch.cat(y_predicted).tolist()
+        y_true, y_predicted, _ = _in_range_entries(cb.truth_labels, cb.pred_labels, num_classes)
         trainer.logger.experiment.log_confusion_matrix(
-            y_true=y_true, y_predicted=y_predicted, labels=labels, epoch=trainer.current_epoch
+            y_true=y_true.tolist(),
+            y_predicted=y_predicted.tolist(),
+            labels=labels,
+            epoch=trainer.current_epoch,
         )
     cb.truth_labels, cb.pred_labels = [], []
     return ignored

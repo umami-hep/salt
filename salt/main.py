@@ -116,7 +116,7 @@ def _best_checkpoint(config_path: Path) -> str:
         (float(found[0]), str(ckpt))
         for ckpt_dir in ckpt_dirs
         for ckpt in sorted(ckpt_dir.glob("*.ckpt"))
-        if (found := re.findall(r"(?<=loss=)(?:\d+(?:\.\d*)?|\.\d+)", ckpt.name))
+        if (found := re.findall(r"(?<=loss=)-?(?:\d+(?:\.\d*)?|\.\d+)", ckpt.name))
     ]
     if not scored:
         raise ConfigError(
@@ -127,6 +127,22 @@ def _best_checkpoint(config_path: Path) -> str:
     best = min(scored)[1]
     console(f"salt test: using checkpoint {best}")
     return best
+
+
+def _limit_trainer_field_to_one(trainer: Any, name: str) -> None:
+    """Force ``trainer.<name>`` (``devices``/``num_nodes``) to 1 for ``salt test``;
+    ``"auto"`` is kept, an explicit list of more than one raises `ConfigError`.
+    """
+    value = getattr(trainer, name)
+    if isinstance(value, str | int):
+        count: int | None = None  # "auto" — single-device eval contract
+        with contextlib.suppress(ValueError):
+            count = int(value)
+        if count is not None and count > 1:
+            _LOG.info(f"salt test: forcing --trainer.{name}=1 (single-device eval)")
+            setattr(trainer, name, 1)  # an int: Trainer rejects num_nodes="1"
+    elif isinstance(value, list) and len(value) > 1:
+        raise ConfigError(f"salt test requires --trainer.{name}=1 (single-device eval)")
 
 
 _INIT_FROM_ARG = "init_from"
@@ -939,7 +955,7 @@ class SaltCLI(LightningCLI):
         (``--auto_resume``/``--log_suffix`` are fit-only and ignored) and wires
         the experiment logger as on fit. On ``test``: disables the config dump + logger, globs
         the best checkpoint when ``--ckpt_path`` is unset, forces
-        single-device eval, and refuses a sink-less config (TEST predictions
+        single-device, single-node eval, and refuses a sink-less config (TEST predictions
         would never be persisted). Raises `ConfigError` on ``--init_from``
         combined with ``--ckpt_path`` or a resolved auto-resume checkpoint,
         a sink-less test config, an ambiguous config list without
@@ -1032,16 +1048,8 @@ class SaltCLI(LightningCLI):
                     "v1 contract (utils/cli.py:323-325)"
                 )
             cfg.ckpt_path = _best_checkpoint(Path(str(configs[0])))
-        devices = cfg.trainer.devices
-        if isinstance(devices, str | int):
-            n_devices: int | None = None  # "auto" — single-device eval contract
-            with contextlib.suppress(ValueError):
-                n_devices = int(devices)
-            if n_devices is not None and n_devices > 1:
-                _LOG.info("salt test: forcing --trainer.devices=1 (single-device eval)")
-                cfg.trainer.devices = "1"
-        elif isinstance(devices, list) and len(devices) > 1:
-            raise ConfigError("salt test requires a single device (v1 cli.py:330)")
+        _limit_trainer_field_to_one(cfg.trainer, "devices")
+        _limit_trainer_field_to_one(cfg.trainer, "num_nodes")
 
     @staticmethod
     def _wire_experiment_logger(cfg: Any) -> None:

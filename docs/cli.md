@@ -199,8 +199,9 @@ salt test --config <run_dir>/config.yaml \
 The saved run `config.yaml` from the training directory is the recommended
 single base for `salt test`: further `--config` override files and CLI
 flags stack on top of it exactly as they do for `fit`. One test file per
-call, the experiment logger is disabled, and only a single device is
-used, forcing `--trainer.devices=1` with a logged notice if you pass more.
+call, the experiment logger is disabled, and only a single device on a
+single node is used, forcing `--trainer.devices=1` and
+`--trainer.num_nodes=1` with a logged notice if you pass more.
 A config with no `outputs:` section (and no explicit callback-based
 persistence sink) is rejected with a `ConfigError`, because `salt test`
 would then have nowhere to write its predictions.

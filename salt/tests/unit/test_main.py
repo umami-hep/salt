@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 import torch
 import yaml
+from jsonargparse import Namespace
 from lightning.pytorch import Callback
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, ModelSummary
 from lightning.pytorch.loggers import CometLogger
@@ -587,6 +588,15 @@ class TestBestCheckpointFallback:
         (tmp_path / "ckpts" / "epoch=000-loss=1.5.ckpt").touch()
         assert _best_checkpoint(config).endswith("epoch=000-loss=1.5.ckpt")
 
+    def test_negative_loss_is_picked_as_best(self, tmp_path):
+        """A negative loss (e.g. Gaussian NLL) keeps its sign when ranking."""
+        config = self._config(tmp_path)
+        (tmp_path / "ckpts").mkdir()
+        (tmp_path / "ckpts" / "epoch=000-loss=0.5.ckpt").touch()
+        (tmp_path / "ckpts" / "epoch=001-loss=-1.25.ckpt").touch()
+        (tmp_path / "ckpts" / "epoch=002-loss=-0.75.ckpt").touch()
+        assert _best_checkpoint(config).endswith("epoch=001-loss=-1.25.ckpt")
+
     def test_no_loss_named_checkpoints_raises_config_error(self, tmp_path):
         """No loss=-named checkpoint anywhere -> loud ConfigError naming --ckpt_path."""
         config = self._config(tmp_path)
@@ -599,6 +609,38 @@ class TestBestCheckpointFallback:
         """A config with no ckpts/checkpoints sibling dirs at all -> same error."""
         with pytest.raises(ConfigError, match="loss="):
             _best_checkpoint(self._config(tmp_path))
+
+
+class TestTestSubcommandSingleDevice:
+    """``salt test`` evaluates on one device of one node."""
+
+    @staticmethod
+    def _patch(**trainer) -> Namespace:
+        cli = SimpleNamespace(
+            config=Namespace(
+                subcommand="test",
+                test=Namespace(
+                    trainer=Namespace(logger=None, **trainer),
+                    outputs={"jets": {}},
+                    ckpt_path="best.ckpt",
+                    callbacks=None,
+                ),
+            )
+        )
+        SaltCLI.before_instantiate_classes(cli)
+        return cli.config.test.trainer
+
+    def test_devices_and_num_nodes_are_forced_to_one(self):
+        trainer = self._patch(devices=4, num_nodes=2)
+        assert (trainer.devices, trainer.num_nodes) == (1, 1)
+
+    def test_auto_and_single_values_are_kept(self):
+        trainer = self._patch(devices="auto", num_nodes=1)
+        assert (trainer.devices, trainer.num_nodes) == ("auto", 1)
+
+    def test_multi_device_list_is_a_config_error(self):
+        with pytest.raises(ConfigError, match="salt test requires"):
+            self._patch(devices=[0, 1], num_nodes=1)
 
 
 # graph/schema dispatch (the tooling keeps working through salt)

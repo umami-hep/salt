@@ -232,7 +232,7 @@ class RegressionTaskModule(_TaskModuleBase):
         """
         if norm_params is None:
             return None
-        if set(norm_params) < {"mean", "std"}:
+        if not {"mean", "std"} <= set(norm_params):
             raise ConfigError(
                 f"RegressionTaskModule: norm_params must carry 'mean' and 'std', got "
                 f"{sorted(norm_params)} (v1 task.py:349-351)"
