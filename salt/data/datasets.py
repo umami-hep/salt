@@ -239,6 +239,9 @@ class SaltDataset(Dataset):
     h5_rdcc_nbytes : int | None, optional
         Raw-data chunk-cache size per dataset passed to :func:`h5py.File`. ``None`` uses
         the h5py default. Overridden by the ``SALT_H5_RDCC_NBYTES`` env var. By default None.
+    sign_flip_augmentation : dict | None, optional
+        ``{prob, variables: {input: [field]}, labels: {label: {a: b}}}``: per jet with probability
+        ``prob``, negate the listed fields and swap label values a <-> b. By default None.
 
     Raises
     ------
@@ -247,7 +250,8 @@ class SaltDataset(Dataset):
     PermissionError
         If no permission are given to create the VDS file
     ValueError
-        if use_labeller is set to true but the classes for relabelling are not supplied.
+        if use_labeller is set to true but the classes for relabelling are not supplied,
+        or if sign_flip_augmentation has missing or unknown keys or input groups.
     """
 
     def __init__(
@@ -273,6 +277,7 @@ class SaltDataset(Dataset):
         multi_target: list[dict] | None = None,
         h5_reopen_every: int = 100,
         h5_rdcc_nbytes: int | None = None,
+        sign_flip_augmentation: dict | None = None,
     ):
         super().__init__()
         # check labels have been configured
@@ -346,6 +351,16 @@ class SaltDataset(Dataset):
         self.selections = selections
         self.selectors = {}
         self.transforms = transforms
+        self.sign_flip_augmentation = sign_flip_augmentation or {}
+        if flip_cfg := self.sign_flip_augmentation:
+            if bad := set(flip_cfg) - {"prob", "variables", "labels"}:
+                raise ValueError(f"Unknown sign_flip_augmentation keys {bad}")
+            if bad := {"prob", "variables"} - set(flip_cfg):
+                raise ValueError(f"sign_flip_augmentation is missing {bad}")
+            if bad := set(flip_cfg["variables"]) - set(variables):
+                raise ValueError(f"Unknown sign_flip_augmentation input groups {bad}")
+        # drawn per worker process, so workers do not share a stream
+        self._flip_rng: np.random.Generator | None = None
         if self.selections:
             for key, value in self.selections.items():
                 self.selectors[key] = TrackSelector(Cuts.from_list(value))
@@ -566,6 +581,22 @@ class SaltDataset(Dataset):
 
         self._is_setup = True
 
+    def _swap_flip_labels(self, batch: np.ndarray, flip: np.ndarray) -> None:
+        """Swap the label values of the flipped jets in place.
+
+        Parameters
+        ----------
+        batch : np.ndarray
+            Global object of the batch.
+        flip : np.ndarray
+            Boolean mask of the flipped jets.
+        """
+        for label, pairs in self.sign_flip_augmentation.get("labels", {}).items():
+            orig = batch[label].copy()
+            for a, b in pairs.items():
+                batch[label][flip & (orig == int(a))] = int(b)
+                batch[label][flip & (orig == int(b))] = int(a)
+
     def __len__(self):
         """Return the number of samples in the dataset.
 
@@ -642,12 +673,20 @@ class SaltDataset(Dataset):
         self._read_count += 1
 
         # loop over input types
+        flip = None
+        if self.sign_flip_augmentation:
+            if self._flip_rng is None:
+                self._flip_rng = np.random.default_rng()
+            n_jets = object_idx.stop - object_idx.start
+            flip = self._flip_rng.random(n_jets) < self.sign_flip_augmentation["prob"]
         for input_name in self.input_map:
             # load data (inputs + labels) for this input type
             batch = self.arrays[input_name]
             shape = (object_idx.stop - object_idx.start, *self.dss[input_name].shape[1:])
             batch.resize(shape, refcheck=False)
             self.dss[input_name].read_direct(batch, object_idx)
+            if input_name == self.global_object and flip is not None:
+                self._swap_flip_labels(batch, flip)
 
             # MaskFormer per-jet object selection (cuts, sort, PV-pin, truncate)
             if (
@@ -703,6 +742,12 @@ class SaltDataset(Dataset):
                 if self.transforms:
                     for transform in self.transforms:
                         struct_array = transform(struct_array, input_name)
+                if flip is not None and (
+                    fv := self.sign_flip_augmentation["variables"].get(input_name)
+                ):
+                    struct_array = struct_array.copy()
+                    for var in fv:
+                        struct_array[var][flip] *= -1
 
                 flat_array = s2u(struct_array, dtype=np.float32)
 

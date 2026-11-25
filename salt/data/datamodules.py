@@ -75,6 +75,9 @@ class SaltDataModule(lightning.LightningDataModule):
         Some parameters for the S3 access, by default None
     edge_constructors : list[dict] | None, optional
         Edge constructors configuration. By default None
+    sign_flip_augmentation : dict | None, optional
+        Mirror augmentation of the training set only, see
+        [`salt.data.SaltDataset`][salt.data.SaltDataset].
     **kwargs
         Keyword arguments for [`salt.data.SaltDataset`][salt.data.SaltDataset]
     """
@@ -101,6 +104,7 @@ class SaltDataModule(lightning.LightningDataModule):
         multiprocessing_context: str | None = None,
         config_s3: dict | None = None,
         edge_constructors: list[dict] | None = None,
+        sign_flip_augmentation: dict | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -124,6 +128,7 @@ class SaltDataModule(lightning.LightningDataModule):
         self.multiprocessing_context = multiprocessing_context
         self.config_s3 = config_s3
         self.edge_constructors = edge_constructors
+        self.sign_flip_augmentation = sign_flip_augmentation
         self.kwargs = kwargs
 
     @staticmethod
@@ -223,6 +228,7 @@ class SaltDataModule(lightning.LightningDataModule):
                 num=self.num_train,
                 stage=stage,
                 vds_path=self.train_vds_path,
+                sign_flip_augmentation=self.sign_flip_augmentation,
                 **self.kwargs,
             )
             self.val_dset = SaltDataset(
