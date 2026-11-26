@@ -54,7 +54,7 @@ WORKDIR /salt
 
 # graphviz: the dot binary salt fit's graph render + salt graph plot need
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git openssh-client ca-certificates h5utils wget curl vim nano build-essential jq krb5-user \
+    git openssh-client ca-certificates h5utils hdf5-tools wget curl vim nano build-essential jq krb5-user \
     graphviz \
     && rm -rf /var/lib/apt/lists/*
 
@@ -77,7 +77,9 @@ COPY pyproject.toml README.md ./
 COPY salt/__init__.py salt/__init__.py
 
 # Install torch (+torchvision) from the CUDA wheel index FIRST, so the later
-# resolves see torch already satisfied and flash-attn can import it. The torch
+# resolves see torch already satisfied and flash-attn can import it. salt does not
+# use torchvision, but the muP extra's `mup` requires it, and PyPI's cp314 wheel is
+# a cu130 build that breaks `import salt` against a cu126 torch. The torch
 # VERSION is deliberately identical across variants — only the wheel channel
 # differs — so salt's pins are unaffected by the choice of image. cp314 wheels
 # for 2.12.1/0.27.1 are published on both the cu126 and cu130 indices (verified
