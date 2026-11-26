@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import torch
@@ -67,6 +67,21 @@ class OnnxExportLeaf:
         return tuple(self.names) if self.names is not None else (str(self.name),)
 
 
+@dataclass(frozen=True)
+class _FlatOutput:
+    """One flat ONNX output: its suffix (after ``rename:``) and where its value comes from.
+
+    `source` is the output's index in the leaves' suffix order, or the
+    `ExportCombine` that computes it.
+    """
+
+    suffix: str
+    dtype: str
+    nan_ok: bool
+    dyn_axis: str | None
+    source: int | ExportCombine
+
+
 class OnnxExportSink(Node):
     """The ONNX sink: a declare-only terminal node naming the conversion leaves.
 
@@ -107,10 +122,13 @@ class OnnxExportSink(Node):
         Athena-side track selection used in the default metadata input names,
         by default ``r22default``.
     rename : Mapping[str, str] | None, optional
-        Manifest suffix renames ``old -> new``, recorded in the ``gnn_config``
-        metadata, by default None.
+        Suffix renames ``old -> new`` of the leading global outputs (those of
+        the first manifest group with any output, i.e. the task scores),
+        applied before `combine`, by default None.
     combine : Sequence[ExportCombine | Mapping[str, Any]] | None, optional
-        Combined outputs (``sum(scale * output(suffix))``), by default None.
+        Combined outputs (``sum(scale * output(suffix))``), placed right after
+        the leading global outputs; each reads only those (renamed) and the
+        combines before it, by default None.
     modes : Sequence[str] | None, optional
         Which planner modes to run in. `allowed_modes` is ``[onnx]``, so
         ``[onnx]`` (or its writer-vocabulary spelling ``[export]``) is the
@@ -128,8 +146,9 @@ class OnnxExportSink(Node):
     ------
     ConfigError
         For any truthy ``outputs`` value (the retired explicit-leaf surface),
-        or (at resolution) an empty collected tuple, a duplicate leaf key, or
-        a duplicate flat Athena suffix.
+        or (at resolution) an empty collected tuple, a duplicate leaf key, a
+        duplicate flat Athena suffix, or a `rename`/`combine` source that is
+        not available to it.
     """
 
     name = "onnx_export"
@@ -160,6 +179,7 @@ class OnnxExportSink(Node):
                 "(fnmatch patterns over the leaf key) to narrow what this sink takes."
             )
         self._leaves: tuple[OnnxExportLeaf, ...] = ()
+        self._n_leading = 0
         self._leaves_resolved = False
         self.model_name = model_name
         # the export-only half of the contract, coerced from dataclasses OR plain
@@ -260,7 +280,10 @@ class OnnxExportSink(Node):
         leaves: list[OnnxExportLeaf] = []
         for group_fields in per_group:
             group_leaves = self._leaves_from_fields([f for f in group_fields if f[0] in kept])
-            leaves.extend(leaf for leaf in group_leaves if not leaf.per_token)
+            globals_ = [leaf for leaf in group_leaves if not leaf.per_token]
+            if not leaves:  # rename:/combine: act on the first non-empty group's globals
+                self._n_leading = len(globals_)
+            leaves.extend(globals_)
             leaves.extend(leaf for leaf in group_leaves if leaf.per_token)
         if not leaves:
             raise ConfigError(
@@ -359,19 +382,65 @@ class OnnxExportSink(Node):
             )
         return self.model_name
 
+    def _flat_outputs(self) -> list[_FlatOutput]:
+        """The flat outputs in tuple order, after ``rename:`` and ``combine:``.
+
+        Renames apply in order to the leading global outputs; the combines
+        follow those, each reading only the leading (renamed) outputs and the
+        combines before it. Raises `ConfigError` on a rename/combine source
+        outside that set, or a flat name used twice.
+        """
+        leaves = self._ensure_leaves()
+        flat = [(leaf, suffix) for leaf in leaves for suffix in leaf.suffixes]
+        rows = [
+            _FlatOutput(
+                suffix, leaf.dtype, leaf.nan_ok, f"n_{leaf.stream}" if leaf.per_token else None, i
+            )
+            for i, (leaf, suffix) in enumerate(flat)
+        ]
+        n_leading = sum(len(leaf.suffixes) for leaf in leaves[: self._n_leading])
+        leading = rows[:n_leading]
+        for old, new in self.rename.items():
+            suffixes = [row.suffix for row in leading]
+            if old not in suffixes:
+                raise ConfigError(
+                    f"OnnxExportSink: rename source {old!r} is not one of the leading global "
+                    f"outputs {suffixes}"
+                )
+            i = suffixes.index(old)
+            leading[i] = replace(leading[i], suffix=new)
+        for entry in self.combine:
+            suffixes = [row.suffix for row in leading]
+            if missing := [suffix for suffix in entry.inputs if suffix not in suffixes]:
+                raise ConfigError(
+                    f"OnnxExportSink: combine source {missing[0]!r} of {entry.name!r} is not one "
+                    f"of the leading global outputs (after rename:) or an earlier combine "
+                    f"{suffixes}"
+                )
+            leading.append(_FlatOutput(entry.name, "float32", False, None, entry))
+        rows = leading + rows[n_leading:]
+        names = [row.suffix for row in rows]
+        if duplicate := next((name for name in names if names.count(name) > 1), None):
+            raise ConfigError(
+                f"OnnxExportSink: duplicate flat ONNX output name {duplicate!r} after rename:/"
+                "combine: — the Athena output namespace is flat"
+            )
+        return rows
+
     def output_names(self) -> list[str]:
         """The flat ONNX output names, in resolved tuple order (``{model_name}_{suffix}``).
 
         The order is the manifest-source order (section writers, then model
         modules, each in declaration order), independent of executor topo
-        order. It is not a contract — Athena consumes the outputs by name.
+        order, with the ``combine:`` outputs after the leading globals. It is
+        not a contract — Athena consumes the outputs by name.
         """
         prefix = self.resolved_model_name()
-        return [f"{prefix}_{suffix}" for leaf in self._ensure_leaves() for suffix in leaf.suffixes]
+        return [f"{prefix}_{row.suffix}" for row in self._flat_outputs()]
 
     def output_dtypes(self) -> list[str]:
         """Per-output dtypes, aligned 1:1 with `output_names`."""
-        return [leaf.dtype for leaf in self._ensure_leaves() for _ in leaf.suffixes]
+        return [row.dtype for row in self._flat_outputs()]
 
     def nan_ok_outputs(self) -> frozenset[str]:
         """The flat Athena output names whose NaN is a declared semantic.
@@ -384,12 +453,7 @@ class OnnxExportSink(Node):
             with ``equal_nan`` instead of refusing NaN.
         """
         prefix = self.resolved_model_name()
-        return frozenset(
-            f"{prefix}_{suffix}"
-            for leaf in self._ensure_leaves()
-            if leaf.nan_ok
-            for suffix in leaf.suffixes
-        )
+        return frozenset(f"{prefix}_{row.suffix}" for row in self._flat_outputs() if row.nan_ok)
 
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
         """Dynamic-axes mapping for the per-token outputs (``{name: {0: "n_<stream>"}}``).
@@ -399,35 +463,47 @@ class OnnxExportSink(Node):
         """
         prefix = self.resolved_model_name()
         return {
-            f"{prefix}_{leaf.suffixes[0]}": {0: f"n_{leaf.stream}"}
-            for leaf in self._ensure_leaves()
-            if leaf.per_token
+            f"{prefix}_{row.suffix}": {0: row.dyn_axis}
+            for row in self._flat_outputs()
+            if row.dyn_axis is not None
         }
 
     def named_outputs(self, bundle: Bundle) -> dict[str, Tensor]:
         """Flatten the executed bundle's conversion leaves into named Athena tensors.
 
         The declare-only sink's ONE realisation step: no conversion math
-        (that ran in the trace) — only the ``split_scalars`` naming split.
-        For a plural-``names`` leaf the converted prob vector is split into
-        per-class scalars (``torch.split(probs, 1, -1)`` + squeeze);
-        single-name leaves (the int8 index leaf, a combination scalar) pass
-        through under their Athena name. The
+        (that ran in the trace) — only the ``split_scalars`` naming split and
+        the ``combine:`` sums. For a plural-``names`` leaf the converted prob
+        vector is split into per-class scalars (``torch.split(probs, 1, -1)``
+        + squeeze); single-name leaves (the int8 index leaf, a combination
+        scalar) pass through under their Athena name (after ``rename:``); a
+        ``combine:`` output is ``sum(scale * output)`` over its sources. Keys
+        follow `output_names` order. The
         `OnnxAdapter` calls this to source the folded outputs from the
         bundle instead of running a ``reduce.fn`` loop. A split leaf whose
         last dim contradicts its names count fails the strict ``zip`` (a
         ValueError in eager eval).
         """
         prefix = self.resolved_model_name()
-        named: dict[str, Tensor] = {}
+        values: list[Tensor] = []
         for leaf in self._ensure_leaves():
             value = bundle.get(leaf.key)
             if leaf.names is not None:
                 # the strict zip is the split-count check (a ValueError in eager eval)
-                for suffix, part in zip(leaf.names, torch.split(value, 1, -1), strict=True):
-                    named[f"{prefix}_{suffix}"] = part.squeeze()
+                parts = zip(leaf.names, torch.split(value, 1, -1), strict=True)
+                values.extend(part.squeeze() for _, part in parts)
             else:
-                named[f"{prefix}_{leaf.name}"] = value
+                values.append(value)
+        named: dict[str, Tensor] = {}
+        for row in self._flat_outputs():
+            if isinstance(row.source, ExportCombine):
+                value = sum(
+                    scale * named[f"{prefix}_{suffix}"]
+                    for suffix, scale in row.source.inputs.items()
+                )
+            else:
+                value = values[row.source]
+            named[f"{prefix}_{row.suffix}"] = value
         return named
 
     # -- static demand (consumed by SaltModule for the static onnx plan) --------

@@ -259,7 +259,7 @@ outputs:
         - {port: inputs.tracks, name: tracks_features, sequence: true, dyn_axis: n_tracks}
         - {port: inputs.flows, name: flows_features, sequence: true, dyn_axis: n_flows}
         - {port: inputs.electrons, name: electrons_features, sequence: true, dyn_axis: n_electrons}
-        - {port: inputs.calo, name: calo_features, sequence: true, dyn_axis: n_calo}
+        - {port: inputs.calo, name: cluster_features, sequence: true, dyn_axis: n_clusters}
 ```
 
 Every edit here is either a clean add or a full restatement of a list:
@@ -286,7 +286,10 @@ Every edit here is either a clean add or a full restatement of a list:
   changes where `tracks` sits in the list would break it. Appending new
   streams at the end keeps every existing stream's position fixed.
 - **`onnx_export.inputs`** is a list too, so it is restated with the base's
-  four entries verbatim plus a fifth `inputs.calo` port.
+  four entries verbatim plus a fifth `inputs.calo` port. Athena reads calo
+  clusters as `clusters`, so that input is named `cluster_features` with the
+  axis `n_clusters` (the defaults for a calo stream), and its metadata name is
+  `clusters_r22default`.
 - The p7085 sample's own `norm_dict_260331.yaml` would work equally well as
   `norm_calo`'s dict: its `calo:` group is byte-identical to the shipped
   `norm_dicts/norm_dict_p7085_calo.yaml` (your copy: `configs/norm_dicts/norm_dict_p7085_calo.yaml`,

@@ -166,9 +166,9 @@ Each `inputs:` entry describes one tensor:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `port` | — | the bundle key it feeds, `inputs.<stream>` |
-| `name` | `<stream without trailing 's'>_features` | the ONNX graph input name |
+| `name` | `<stream without trailing 's'>_features`, `cluster_features` for a calo stream | the ONNX graph input name |
 | `sequence` | `false` | variable-length `[L, F]` rather than global `[1, F]` |
-| `dyn_axis` | `n_<stream>` | name of the dynamic length axis |
+| `dyn_axis` | `n_<stream>`, `n_clusters` for a calo stream | name of the dynamic length axis |
 | `athena_name` | derived | the `gnn_config` metadata name |
 | `alias` | — | feed this port from another entry's tensor |
 
@@ -237,6 +237,14 @@ Other options worth knowing: `-n/--name` overrides `model_name`,
 `--set outputs.onnx_export.init_args.model_name=GN2v2`), and `-o/--overwrite`
 replaces an existing file.
 
+Export refuses to run when the salt checkout has uncommitted changes, so that
+every deployed model traces back to a commit. `-f/--force` exports anyway and
+records `forced_export: true` in the metadata.
+
+The exported graph has every Softmax written out as max, exp, sum and divide,
+because the onnxruntime Softmax gives slightly different results on different
+CPUs.
+
 **Programmatic surface**, for tests that need to export without a checkpoint:
 `salt.outputs.sinks.onnx.export_graph(modules, export_cfg, variables, path)`
 derives the output set from the folded `OnnxExportSink` in `modules`. Pair it with
@@ -283,6 +291,7 @@ salt writes a `gnn_config` JSON blob into the ONNX metadata:
 | `inputs` | the same, for global (non-sequence) inputs |
 | `output_names` | what each output tensor means |
 | `onnx_model_version` | which metadata schema Athena should parse |
+| `forced_export` | whether the export ran with uncommitted changes (`-f/--force`) |
 
 **The ordered variable list is what tells a consumer which column is which.**
 Read it from the file; do not hardcode it.
@@ -320,9 +329,9 @@ print(cfg["output_names"])
 
 ### Renaming and combining outputs
 
-`rename:` maps manifest suffixes to new ones. `combine:` builds a *new* output
-as a weighted sum of existing global float outputs, computed inside the traced
-graph:
+`rename:` gives the leading global outputs (the task scores, e.g. `pb`) new
+suffixes. `combine:` adds a *new* output, a weighted sum of those outputs
+computed inside the traced graph, placed right after them:
 
 ```yaml
 outputs:
@@ -332,10 +341,14 @@ outputs:
       rename: {poldnamebjet: pb, poldnamecjet: pc}
       combine:
         - {name: plight, inputs: {pquark: 1.0, pgluon: 1.0}}
-        - {name: pquark, inputs: {pud: 0.5, pgluon: 1.5}}
+        - {name: pnotb, inputs: {pc: 1.0, plight: 1.0}}
 ```
 
-`rename:` is applied first, so `combine:` refers to the new names.
+`rename:` is applied first, so `combine:` refers to the new names, and a
+combine can read the combines listed before it. An unknown source or a name
+used twice is an error. Both are recorded in the metadata
+(`rename_outputs`, `combine_outputs`); `salt export --manifest` shows the
+resulting names.
 
 ## Validate the exported model
 

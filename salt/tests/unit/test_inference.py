@@ -298,6 +298,24 @@ class TestExportSelectionSink:
         ]
 
 
+    def test_column_plan_reads_renamed_onnx_outputs(self, tmp_path):
+        """A ``rename:`` on the export sink moves the ONNX name each column is read from."""
+        section = _section(tmp_path)
+        sink = build_inference_sink(section)
+        export_sink = OnnxExportSink(rename={"pb": "pbjet"})
+        export_sink.bind_output_section(section)
+        export_sink.model_name = "M"
+        sink._resolve_columns("M")  # noqa: SLF001 - resolve before the plan is built
+        plan, _ = _column_plan(sink, export_sink)
+        assert [name for _, name, _ in plan] == [
+            "M_pbjet",
+            "M_pc",
+            "M_pu",
+            "M_TrackOrigin",
+            "M_VertexIndex",
+        ]
+        assert {name for _, name, _ in plan} <= set(export_sink.output_names())
+
 class TestInferenceCoreLoop:
     """The command core driven without Lightning: real adapter + dataset + sink.
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import onnx
 import pytest
 import torch
 import yaml
@@ -26,6 +27,7 @@ from salt.model.modules import (
 )
 from salt.model.modules.tasks import ClassificationTaskModule
 from salt.outputs.sinks.onnx import (
+    ExportCombine,
     ExportConfig,
     ExportInput,
     check_onnx,
@@ -153,6 +155,7 @@ class TestExportedModel:
             "config.yaml",
             "metadata.yaml",
             "salt_export_hash",
+            "forced_export",
             "onnx_model_version",
             "output_names",
             "model_name",
@@ -162,6 +165,7 @@ class TestExportedModel:
             "rename_outputs",
             "plan_hash",  # the single ADDITIVE v2 key, after the full v1 set
         ]
+        assert info["forced_export"] is False
         assert info["onnx_model_version"] == "v1"
         assert info["model_name"] == "GN2v2"
         assert info["output_names"] == exported.result.adapter.output_names
@@ -182,6 +186,13 @@ class TestExportedModel:
         assert info["rename_outputs"] == {}
         assert info["plan_hash"] == exported.result.plan.plan_hash
 
+    def test_exported_graph_has_no_softmax(self, exported):
+        # Softmax is written out in basic ops so the result does not depend on the CPU
+        graph = onnx.load(str(exported.result.onnx_path)).graph
+        ops = {node.op_type for node in graph.node}
+        assert "Softmax" not in ops
+        assert {"ReduceMax", "Exp", "ReduceSum", "Div"} <= ops
+
     def test_overwrite_in_place_export(self, exported):
         # exporting again over the same path is the caller's choice — the
         # programmatic core overwrites; the CLI guards with --overwrite
@@ -193,6 +204,57 @@ class TestExportedModel:
             run_name="GN2_v2",
         )
         assert again.plan.plan_hash == exported.result.plan.plan_hash
+
+
+@pytest.fixture(scope="module")
+def exported_renamed(tmp_path_factory):
+    """The GN2 fixture exported with one rename and one combine of the renamed output."""
+    tmp = tmp_path_factory.mktemp("onnx_export_renamed")
+    write_parity_norm_dict(tmp / "norm_dict.yaml", tmp / "class_dict.yaml")
+    torch.manual_seed(42)
+    modules = gn2_folded_modules(tmp)
+    export_cfg = gn2_export_cfg(
+        rename={"pb": "pbjet"},
+        combine=[ExportCombine(name="pbplusc", inputs={"pbjet": 1.0, "pc": 0.5})],
+    )
+    plan = compile_onnx_plan(modules, resolve_export_config(export_cfg, "GN2_v2"), VARIABLES)
+    bind_all(modules, resolve_bind_schema([plan, compile_gn2v2(modules, Mode.TEST)]))
+    modules["norm"].materialise()
+    return export_graph(modules, export_cfg, VARIABLES, tmp / "network.onnx", run_name="GN2_v2")
+
+
+class TestRenameAndCombine:
+    def test_output_names_are_renamed_then_combined(self, exported_renamed):
+        names = ["GN2v2_pbjet", "GN2v2_pc", "GN2v2_pu", "GN2v2_pbplusc"]
+        graph = onnx.load(str(exported_renamed.onnx_path)).graph
+        assert [o.name for o in graph.output] == names
+        assert exported_renamed.gnn_config["output_names"] == names
+
+    def test_combined_value_is_the_weighted_sum(self, exported_renamed):
+        session = make_session(exported_renamed.onnx_path)
+        gen = torch.Generator().manual_seed(3)
+        feed = {
+            "jet_features": torch.rand(1, len(JET_VARIABLES), generator=gen).numpy(),
+            "track_features": torch.rand(7, len(TRACK_VARIABLES), generator=gen).numpy(),
+        }
+        pb, pc, _, combined = session.run(None, feed)
+        np.testing.assert_allclose(combined, pb + 0.5 * pc, rtol=1e-6)
+
+    def test_torch_and_onnx_agree(self, exported_renamed):
+        result = check_onnx(
+            exported_renamed.adapter,
+            exported_renamed.onnx_path,
+            trials=1,
+            float_rtol=1e-6,
+            float_atol=1e-6,
+            lengths_grid=SWEEP,
+        )
+        assert result.passed, result.failures
+
+    def test_metadata_records_rename_and_combine(self, exported_renamed):
+        info = exported_renamed.gnn_config
+        assert info["rename_outputs"] == {"pb": "pbjet"}
+        assert info["combine_outputs"] == [["pbplusc", [[1.0, "pbjet"], [0.5, "pc"]]]]
 
 
 # the two-dynamic-axes Split grid
@@ -536,6 +598,42 @@ class TestSaltSurface:
         err = capsys.readouterr().err
         assert "Found existing file" in err
         assert "-o/--overwrite" in err
+
+    def test_export_refuses_uncommitted_changes(self, cli_run, tmp_path, monkeypatch, capsys):
+        from ftag.git_check import GitError
+
+        from salt.outputs.sinks.onnx import export as export_module
+
+        checked = []
+
+        def refuse(path):
+            checked.append(path)
+            raise GitError("Uncommitted changes detected. Please commit them, or use --force.")
+
+        monkeypatch.setattr(export_module, "check_for_uncommitted_changes", refuse)
+        out_path = tmp_path / "dirty.onnx"
+        rc = export_module.main([
+            "--ckpt_path", str(cli_run.ckpt), "--output", str(out_path), "--no-check"
+        ])
+        assert rc == 1
+        assert "Uncommitted changes detected" in capsys.readouterr().err
+        assert checked == [Path(export_module.__file__).parent]
+        assert not out_path.exists()
+
+    def test_force_skips_the_check_and_is_recorded(self, cli_run, tmp_path, monkeypatch):
+        from salt.outputs.sinks.onnx import export as export_module
+
+        def fail(path):
+            pytest.fail(f"--force must skip the clean-tree check, got a call for {path}")
+
+        monkeypatch.setattr(export_module, "check_for_uncommitted_changes", fail)
+        out_path = tmp_path / "forced.onnx"
+        rc = export_module.main([
+            "--ckpt_path", str(cli_run.ckpt), "--output", str(out_path), "--no-check", "-f"
+        ])
+        assert rc == 0
+        meta = make_session(out_path).get_modelmeta()
+        assert json.loads(meta.custom_metadata_map["gnn_config"])["forced_export"] is True
 
     def test_export_less_config_error_is_actionable(self, cli_run, tmp_path, capsys):
         # a run config trained without ANY export contract (no sink declared)

@@ -43,13 +43,15 @@ class ExportInput:
         The bundle port the tensor feeds, e.g. ``inputs.tracks``. Must be a
         two-component ``inputs.<stream>`` key.
     name : str | None, optional
-        The ONNX graph input name, by default ``<stream minus trailing 's'>_features``.
+        The ONNX graph input name, by default ``<stream minus trailing 's'>_features``
+        (``cluster_features`` for a calo sequence stream).
         Forbidden on ``alias:`` entries (they consume no positional input).
     sequence : bool, optional
         Whether the tensor is a variable-length sequence fed as ``[L, F]`` without a
         batch dim, by default False (a global ``[1, F]`` vector).
     dyn_axis : str | None, optional
-        The ONNX dynamic-axis name of the sequence dim, by default ``n_<stream>``.
+        The ONNX dynamic-axis name of the sequence dim, by default ``n_<stream>``
+        (``n_clusters`` for a calo stream).
         Sequence entries only.
     alias : str | None, optional
         Source port for alias entries (one Athena tensor feeding multiple bundle
@@ -74,16 +76,16 @@ class ExportCombine:
 
     The combined value is ``sum(scale * output(suffix))`` over `inputs`, computed
     INSIDE the traced graph from the already-reduced outputs; the combined output is
-    float32, global, no dynamic axis.
+    float32, global, no dynamic axis, placed after the leading global outputs.
 
     Parameters
     ----------
     name : str
         The new output's suffix (full name ``{model_name}_{name}``).
     inputs : dict[str, float]
-        Source suffix -> scale, in combination order. Every source must be an
-        existing GLOBAL float manifest suffix (``split_scalars`` entries, after
-        ``rename:``).
+        Source suffix -> scale, in combination order. Every source must be one of
+        the leading global outputs (the first manifest group's, after
+        ``rename:``) or an earlier combine.
     """
 
     name: str
@@ -111,10 +113,10 @@ class ExportConfig:
     inputs : list[ExportInput], optional
         ONNX graph inputs, in positional order.
     rename : dict[str, str], optional
-        Manifest suffix renames ``old -> new``, applied BEFORE `combine`.
+        Suffix renames ``old -> new`` of the leading global outputs (the first
+        manifest group's), applied BEFORE `combine`.
     combine : list[ExportCombine], optional
-        Combined outputs, inserted after the global entries and BEFORE the first
-        per-token aux entry.
+        Combined outputs, inserted right after the leading global outputs.
     """
 
     model_name: str | None = None
@@ -175,9 +177,10 @@ def default_athena_name(stream: str, sequence: bool, track_selection: str) -> st
     """Derive the Athena ``gnn_config`` metadata input name for a stream.
 
     Globals map to ``<stream minus 's'>_var``; ``tracks``/``flows`` substreams to
-    ``<base>_<track_selection>_sd0sort``; ``electrons`` to ``<stream>_r22default``;
-    the literal ``flow`` back-compat stream to ``flows_<track_selection>_sd0sort``;
-    any other sequence to ``<stream>_var``.
+    ``<base>_<track_selection>_sd0sort``; ``electrons``/``muons`` to
+    ``<stream>_r22default``; calo streams (``calo*``/``clusters*``) to
+    ``clusters_r22default``; the literal ``flow`` back-compat stream to
+    ``flows_<track_selection>_sd0sort``; any other sequence to ``<stream>_var``.
     """
     if not sequence:
         return f"{stream.removesuffix('s')}_var"
@@ -186,9 +189,16 @@ def default_athena_name(stream: str, sequence: bool, track_selection: str) -> st
     if "tracks" in stream or "flows" in stream:
         base = stream.split("_", maxsplit=1)[0]
         return f"{base}_{track_selection}_sd0sort"
-    if "electrons" in stream:
+    if "electrons" in stream or "muons" in stream:
         return f"{stream}_r22default"
+    if _is_calo_stream(stream):
+        return "clusters_r22default"
     return f"{stream}_var"
+
+
+def _is_calo_stream(stream: str) -> bool:
+    """Whether a sequence stream holds calo topo-clusters, which Athena names ``clusters``."""
+    return "calo" in stream or "clusters" in stream
 
 
 def resolve_export_config(export: ExportConfig, run_name: str) -> ExportConfig:
@@ -272,10 +282,13 @@ def _resolve_input(entry: ExportInput, track_selection: str) -> ExportInput:
             f"export input {entry.port!r} sets dyn_axis={entry.dyn_axis!r} but is not a "
             "sequence — dynamic axes apply to sequence inputs only (v1 to_onnx.py:319-323)"
         )
+    calo = entry.sequence and _is_calo_stream(stream)
+    default_name = "cluster_features" if calo else f"{stream.removesuffix('s')}_features"
+    default_axis = "n_clusters" if calo else f"n_{stream}"
     return replace(
         entry,
-        name=entry.name or f"{stream.removesuffix('s')}_features",
-        dyn_axis=(entry.dyn_axis or f"n_{stream}") if entry.sequence else None,
+        name=entry.name or default_name,
+        dyn_axis=(entry.dyn_axis or default_axis) if entry.sequence else None,
         athena_name=entry.athena_name
         or default_athena_name(stream, entry.sequence, track_selection),
     )
