@@ -46,6 +46,12 @@ def test_apt_line_installs_graphviz():
     )
 
 
+def test_apt_line_installs_h5ls():
+    """``h5ls`` comes from ``hdf5-tools``, not ``h5utils``."""
+    tokens = _apt_install_tokens(DOCKERFILE.read_text())
+    assert "hdf5-tools" in tokens
+
+
 def test_helper_joins_continuation_lines():
     dockerfile_text = "RUN apt-get update && apt-get install -y \\\n    foo bar \\\n    && rm -rf x"
     tokens = _apt_install_tokens(dockerfile_text)
