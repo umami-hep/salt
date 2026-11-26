@@ -65,12 +65,13 @@ outputs:
   onnx_export:
     init_args:
       # Lists replace on merge -- the base's four entries are restated verbatim, then the new one appended.
+      # Athena reads calo clusters as `clusters`: input `cluster_features`, axis `n_clusters`.
       inputs:
         - {port: inputs.jets, name: jets_features}
         - {port: inputs.tracks, name: tracks_features, sequence: true, dyn_axis: n_tracks}
         - {port: inputs.flows, name: flows_features, sequence: true, dyn_axis: n_flows}
         - {port: inputs.electrons, name: electrons_features, sequence: true, dyn_axis: n_electrons}
-        - {port: inputs.calo, name: calo_features, sequence: true, dyn_axis: n_calo}
+        - {port: inputs.calo, name: cluster_features, sequence: true, dyn_axis: n_clusters}
 
 training_schedule:
   stages:

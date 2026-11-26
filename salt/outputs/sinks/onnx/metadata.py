@@ -28,6 +28,7 @@ def build_gnn_config(
     run_metadata: Mapping[str, Any],
     ckpt_path: str | Path | None,
     plan_hash: str | None,
+    forced_export: bool = False,
 ) -> dict[str, Any]:
     """Build the ``gnn_config`` payload in the v1 key set/order.
 
@@ -50,6 +51,9 @@ def build_gnn_config(
     plan_hash : str | None
         The ONNX plan hash, recorded under the ADDITIVE trailing
         ``plan_hash`` key.
+    forced_export : bool, optional
+        Whether the export skipped the clean-working-tree check, by default
+        False.
 
     Returns
     -------
@@ -65,6 +69,7 @@ def build_gnn_config(
     metadata["config.yaml"] = dict(config)
     metadata["metadata.yaml"] = dict(run_metadata)
     metadata["salt_export_hash"] = _export_hash()
+    metadata["forced_export"] = forced_export
     metadata["onnx_model_version"] = ONNX_MODEL_VERSION
     metadata["output_names"] = list(output_names)
     metadata["model_name"] = export.model_name
@@ -98,13 +103,16 @@ def build_gnn_config(
 def write_metadata(onnx_path: str | Path, gnn_config: Mapping[str, Any], model_name: str) -> None:
     """Validate the graph and store ``gnn_config`` + the doc string.
 
-    Loads the model, runs ``onnx.checker.check_model``, JSON-encodes the
-    payload under the single ``gnn_config`` metadata key, sets
-    ``doc_string = model_name``, and saves in place.
+    Loads the model, decomposes its Softmax nodes (`decompose_softmax`), runs
+    ``onnx.checker.check_model``, JSON-encodes the payload under the single
+    ``gnn_config`` metadata key, sets ``doc_string = model_name``, and saves in
+    place.
     """
     import onnx
 
-    onnx_model = onnx.load(str(onnx_path))
+    from salt.outputs.sinks.onnx.softmax import decompose_softmax
+
+    onnx_model = decompose_softmax(onnx.load(str(onnx_path)))
     onnx.checker.check_model(onnx_model)
     meta = onnx_model.metadata_props.add()
     meta.key = "gnn_config"

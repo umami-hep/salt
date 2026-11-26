@@ -170,7 +170,8 @@ def _column_plan(sink: Any, export_sink: Any) -> tuple[list[tuple[Any, str, bool
                 f"export leaves are {sorted(leaves)} (the H5 selection IS the export "
                 "selection)"
             )
-        plan.append((col, f"{prefix}_{leaf.suffixes[0]}", bool(leaf.per_token)))
+        suffix = export_sink.rename.get(leaf.suffixes[0], leaf.suffixes[0])
+        plan.append((col, f"{prefix}_{suffix}", bool(leaf.per_token)))
     return plan, copy_columns
 
 

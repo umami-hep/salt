@@ -268,3 +268,76 @@ def test_sink_rejects_duplicate_flat_suffix():
     })
     with pytest.raises(ConfigError, match="duplicate flat ONNX output name"):
         sink.output_names()
+
+
+# rename: / combine: on the flat tuple
+
+
+def test_rename_then_combine_names_follow_the_leading_globals():
+    """Renames act first; combines follow the leading globals, before the per-token leaf."""
+    sink = _sink(
+        rename={"pb": "pbjet"}, combine=[{"name": "psum", "inputs": {"pbjet": 1.0, "pc": 0.5}}]
+    )
+    assert sink.output_names() == [
+        "GN2v2_pbjet",
+        "GN2v2_pc",
+        "GN2v2_pu",
+        "GN2v2_pbc",
+        "GN2v2_psum",
+        "GN2v2_TrackOrigin",
+    ]
+    assert sink.output_dtypes() == ["float32"] * 5 + ["int8"]
+    assert sink.dynamic_axes() == {"GN2v2_TrackOrigin": {0: "n_tracks"}}
+
+
+def test_combine_follows_the_section_globals_not_the_model_globals():
+    """With a section and a model group, combines sit after the section's global outputs."""
+    sink = OnnxExportSink(model_name="M", combine=[{"name": "psum", "inputs": {"pb": 1.0}}])
+    sink.bind_output_section({"jet_probs": _StubProducer((_JET, _global("pb")))})
+    sink.bind_model_modules({
+        "trk": _StubProducer((_TRK, _per_token("TrackOrigin"))),
+        "lead": _StubProducer(("outputs.objects.lead", _global("leading_pt"))),
+    })
+    assert sink.output_names() == ["M_pb", "M_psum", "M_leading_pt", "M_TrackOrigin"]
+
+
+def test_named_outputs_compute_the_combination_in_output_order():
+    """The combined value is ``sum(scale * output)`` over the renamed outputs."""
+    sink = _sink(
+        rename={"pb": "pbjet"}, combine=[{"name": "psum", "inputs": {"pbjet": 1.0, "pc": 0.5}}]
+    )
+    probs = torch.rand(1, 3)
+    bundle = Bundle({
+        "outputs": {
+            "jets": {"jets_classification": probs, "pbc": torch.rand(1)},
+            "tracks": {"track_origin": torch.arange(5, dtype=torch.int8)},
+        }
+    })
+    named = sink.named_outputs(bundle)
+    assert list(named) == sink.output_names()
+    torch.testing.assert_close(named["GN2v2_pbjet"], probs[0, 0], rtol=0, atol=0)
+    torch.testing.assert_close(
+        named["GN2v2_psum"], probs[0, 0] + 0.5 * probs[0, 1], rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"rename": {"missing": "new"}}, "rename source 'missing'"),
+        ({"rename": {"TrackOrigin": "TO"}}, "rename source 'TrackOrigin'"),
+        ({"combine": [{"name": "psum", "inputs": {"missing": 1.0}}]}, "combine source 'missing'"),
+        ({"combine": [{"name": "psum", "inputs": {"TrackOrigin": 1.0}}]}, "combine source"),
+        # rename acts first, so the old name is gone by the time combine reads it
+        (
+            {"rename": {"pb": "pbjet"}, "combine": [{"name": "s", "inputs": {"pb": 1.0}}]},
+            "combine source 'pb'",
+        ),
+        ({"rename": {"pb": "pc"}}, "duplicate flat ONNX output name 'pc'"),
+        ({"combine": [{"name": "pu", "inputs": {"pb": 1.0}}]}, "duplicate flat ONNX output"),
+    ],
+)
+def test_bad_rename_or_combine_is_a_config_error(kwargs, match):
+    """Unknown sources, non-global sources and name collisions fail loudly."""
+    with pytest.raises(ConfigError, match=match):
+        _sink(**kwargs).output_names()

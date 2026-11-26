@@ -16,6 +16,7 @@ from typing import Any
 
 import torch
 import yaml
+from ftag.git_check import GitError, check_for_uncommitted_changes
 
 from salt.graph.errors import ConfigError, GraphError, ShapeError
 from salt.graph.planner import Plan, compile_plan
@@ -199,6 +200,7 @@ def export_graph(
     run_metadata: Mapping[str, Any] | None = None,
     ckpt_path: str | Path | None = None,
     seed: int = 42,
+    forced_export: bool = False,
 ) -> ExportResult:
     """Export a bound, weight-loaded module dict to ONNX (the programmatic core).
 
@@ -230,6 +232,9 @@ def export_graph(
         Recorded in the metadata, by default None (fixture exports).
     seed : int, optional
         Seed for the example-input draw, by default 42.
+    forced_export : bool, optional
+        Recorded in the metadata: whether the export skipped the
+        clean-working-tree check, by default False.
 
     Returns
     -------
@@ -268,6 +273,7 @@ def export_graph(
         run_metadata or {},
         ckpt_path,
         plan.plan_hash,
+        forced_export,
     )
     write_metadata(onnx_path, gnn_config, str(resolved.model_name))
     # the authoritative rendering of the graph Athena will run (the static
@@ -326,6 +332,13 @@ def _parse_args(args: Sequence[str] | None) -> argparse.Namespace:
         "(v1 contract, to_onnx.py:708-709)",
     )
     add("-o", "--overwrite", action="store_true", help="overwrite an existing ONNX file")
+    add(
+        "-f",
+        "--force",
+        action="store_true",
+        help="export with uncommitted changes in the salt checkout (recorded as "
+        "forced_export in the metadata)",
+    )
     add(
         "--set",
         dest="set_overrides",
@@ -505,8 +518,9 @@ def main(args: Sequence[str] | None = None) -> int:
     -------
     int
         0 on success, 1 on a config/graph error, an existing output without
-        ``--overwrite`` (printed as one actionable line instead of a traceback),
-        or a failed check.
+        ``--overwrite``, uncommitted changes in the salt checkout without
+        ``-f/--force`` (each printed as one actionable line instead of a
+        traceback), or a failed check.
     """
     parsed = _parse_args(args)
     if not parsed.manifest and parsed.ckpt_path is None:
@@ -515,7 +529,12 @@ def main(args: Sequence[str] | None = None) -> int:
     try:
         if parsed.manifest:
             return _print_manifest_from_cli(parsed)
+        if not parsed.force:
+            check_for_uncommitted_changes(Path(__file__).parent)
         result, adapter = _export_from_cli(parsed)
+    except GitError as err:
+        console(str(err), file=sys.stderr)
+        return 1
     except GraphError as err:
         console(f"salt.graph.{type(err).__name__}: {err}", file=sys.stderr)
         return 1
@@ -644,6 +663,7 @@ def _export_from_cli(parsed: argparse.Namespace) -> tuple[ExportResult, OnnxAdap
         config=config_payload,
         run_metadata=load_run_metadata(config_path),
         ckpt_path=ckpt_path,
+        forced_export=parsed.force,
     )
     return result, result.adapter
 

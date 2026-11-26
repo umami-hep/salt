@@ -564,6 +564,9 @@ lengths, compares eager torch against onnxruntime, and is what actually
 certifies the exported graph is correct). `--output`/`-o` controls where
 the `.onnx` file is written; the default path sits next to the config that
 was inferred or passed with `-c`.
+Export refuses to run from a salt checkout with uncommitted changes;
+`-f/--force` exports anyway and records `forced_export: true` in the
+metadata.
 
 Everything else about `salt export`, the two-part manifest model, the
 `rename`/`combine` post-processing keys, the aliasing mechanism, and how

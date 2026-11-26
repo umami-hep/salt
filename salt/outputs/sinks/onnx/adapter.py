@@ -115,6 +115,9 @@ class OnnxAdapter(nn.Module):
         self._export_sink = _onnx_export_sink({step.name: step.module for step in plan.steps})
         if self._export_sink.model_name is None:
             self._export_sink.model_name = self.model_name
+        # the resolved contract's rename:/combine: shape the sink's flat tuple
+        self._export_sink.rename = dict(export.rename)
+        self._export_sink.combine = list(export.combine)
         # every module recursively receives set_export_mode() — e.g. the encoder's
         # attention switch to torch-math — required for Athena agreement
         self.set_export_mode()

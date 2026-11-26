@@ -364,9 +364,9 @@ class TestCaloOverlay:
         assert overlay_inputs[:4] == base_inputs
         assert overlay_inputs[4] == {
             "port": "inputs.calo",
-            "name": "calo_features",
+            "name": "cluster_features",
             "sequence": True,
-            "dyn_axis": "n_calo",
+            "dyn_axis": "n_clusters",
         }
 
     def test_raw_static_partition_11_2_0(self):

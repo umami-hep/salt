@@ -163,7 +163,24 @@ class TestResolveInputs:
         assert default_athena_name("flows", True, "r22default") == "flows_r22default_sd0sort"
         assert default_athena_name("flow", True, "r22default") == "flows_r22default_sd0sort"
         assert default_athena_name("electrons", True, "r22default") == "electrons_r22default"
-        assert default_athena_name("muons", True, "r22default") == "muons_var"
+        assert default_athena_name("muons", True, "r22loose") == "muons_r22default"
+        assert default_athena_name("calo", True, "r22loose") == "clusters_r22default"
+        assert default_athena_name("clusters", True, "r22default") == "clusters_r22default"
+        assert default_athena_name("hits", True, "r22default") == "hits_var"
+
+    def test_calo_defaults_to_athena_cluster_names(self):
+        cfg = ExportConfig(
+            model_name="M",
+            inputs=[
+                ExportInput(port="inputs.jets"),
+                ExportInput(port="inputs.calo", sequence=True),
+            ],
+            track_selection="r22loose",
+        )
+        calo = resolve_export_config(cfg, "m").inputs[1]
+        assert calo.name == "cluster_features"
+        assert calo.dyn_axis == "n_clusters"
+        assert calo.athena_name == "clusters_r22default"
 
     def test_bad_port_namespace(self):
         cfg = gn2_export_cfg()

@@ -145,7 +145,9 @@ outputs:
 ```
 
 which produces metadata node names of the form `tracks_r22loose_sd0sort`,
-`flows_r22loose_sd0sort` and `electrons_r22default`.
+`flows_r22loose_sd0sort`, `electrons_r22default` and `muons_r22default`. A calo
+stream (a name containing `calo` or `clusters`) becomes `clusters_r22default`,
+the name Athena reads calo topo-clusters by.
 
 !!! warning "An unparseable node name is a hard failure at configuration time"
 
