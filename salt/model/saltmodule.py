@@ -134,6 +134,11 @@ class SaltModule(lightning.LightningModule):
         (per-parameter reference, kept for equivalence checks), or
         ``"HybridMuonAdamW"``. With `mup` configured the optimizer is swapped
         to ``mup.optim.MuAdamW`` regardless of this name.
+    optimizer_kwargs : dict | None, optional
+        Extra keyword arguments for the optimizer constructor, e.g.
+        ``{"fused": true}`` for the fused CUDA AdamW kernel. They win over the
+        ``lr``/``weight_decay`` from `lrs` and apply to every training stage's
+        optimizer. By default None.
     mup : Mapping[str, Any], optional
         muP routing config; ``None`` = no muP. ``apply_to`` (required) lists
         module instance names carrying ``mup: true`` (each must exist and
@@ -171,6 +176,7 @@ class SaltModule(lightning.LightningModule):
         modules: dict[str, SaltModelModule | None],
         lrs: Mapping[str, float],
         optimizer: str = "AdamW",
+        optimizer_kwargs: dict | None = None,
         mup: Mapping[str, Any] | None = None,
         # BARE `dict` (not Mapping[str, Any]): a subscripted type makes jsonargparse
         # eagerly instantiate nested {class_path, init_args} specs — impossible for
@@ -227,6 +233,7 @@ class SaltModule(lightning.LightningModule):
         self.name = name
         self.lrs = dict(lrs)
         self.optimizer = optimizer
+        self.optimizer_kwargs = optimizer_kwargs
         self.debug = debug
         self.net = nn.ModuleDict(modules)  # ckpt keys: net.<name>.* (dict order, not topo)
         # not an nn.Module: owns no params, so this adds no checkpoint keys
@@ -943,7 +950,7 @@ class SaltModule(lightning.LightningModule):
         named_trainable = trainable_named_params(
             self.named_parameters(), controller.frozen_module_names
         )
-        opt = build_optimizer(optimizer_class, named_trainable, lrs)
+        opt = build_optimizer(optimizer_class, named_trainable, lrs, self.optimizer_kwargs)
         stage = controller.schedule.stages[controller.current_stage_index]
         if stage.lr_scheduler is not None:
             return [opt], [build_stage_lr_scheduler(opt, stage.lr_scheduler)]

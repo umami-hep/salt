@@ -257,6 +257,28 @@ class TestRenameAndCombine:
         assert info["combine_outputs"] == [["pbplusc", [[1.0, "pbjet"], [0.5, "pc"]]]]
 
 
+def test_clamped_normaliser_is_clamped_in_the_export(tmp_path):
+    """The exported graph carries the clamp: two jets beyond it give the same scores."""
+    nd = tmp_path / "norm_dict.yaml"
+    write_parity_norm_dict(nd, tmp_path / "class_dict.yaml")
+    modules = gn2_folded_modules(tmp_path)
+    modules["norm"] = Normaliser(nd, streams=["jets", "tracks"], global_object="jets", clamp=5)
+    modules["norm"].name = "norm"
+    plan = compile_onnx_plan(modules, gn2_resolved(), VARIABLES)
+    bind_all(modules, resolve_bind_schema([plan, compile_gn2v2(modules, Mode.TEST)]))
+    modules["norm"].materialise()
+    path = tmp_path / "network.onnx"
+    result = export_graph(modules, gn2_export_cfg(), VARIABLES, path, run_name="GN2_v2")
+    assert "Clip" in {node.op_type for node in onnx.load(str(result.onnx_path)).graph.node}
+    session = make_session(result.onnx_path)
+    tracks = np.zeros((5, len(TRACK_VARIABLES)), dtype=np.float32)
+    scores = []
+    for outlier in (20.0, 200.0):
+        jets = np.full((1, len(JET_VARIABLES)), outlier, dtype=np.float32)
+        scores.append(session.run(None, {"jet_features": jets, "track_features": tracks})[:3])
+    np.testing.assert_array_equal(scores[0], scores[1])
+
+
 # the two-dynamic-axes Split grid
 
 

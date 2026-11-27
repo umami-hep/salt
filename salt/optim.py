@@ -491,17 +491,24 @@ def build_optimizer(
     optimizer_class: type[Optimizer],
     named_trainable: list[tuple[str, Any]],
     lrs: Mapping[str, float],
+    optimizer_kwargs: Mapping[str, Any] | None = None,
 ) -> Optimizer:
     """Construct `optimizer_class` over `named_trainable` params using `lrs`.
 
+    `optimizer_kwargs` are passed to the constructor on top of the ``lr`` and
+    ``weight_decay`` taken from `lrs`, and win over them.
     `HybridMuonAdamW` receives the named pairs (it partitions Muon vs AdamW
     by name internally); every other optimizer receives the bare parameter
     list.
     """
-    optimizer_kwargs = {"lr": lrs["initial"], "weight_decay": lrs.get("weight_decay", 1e-5)}
+    kwargs = {
+        "lr": lrs["initial"],
+        "weight_decay": lrs.get("weight_decay", 1e-5),
+        **(optimizer_kwargs or {}),
+    }
     hybrid = optimizer_class is HybridMuonAdamW
     params: Any = named_trainable if hybrid else [p for _, p in named_trainable]
-    return optimizer_class(params, **optimizer_kwargs)
+    return optimizer_class(params, **kwargs)
 
 
 def build_onecycle_scheduler(

@@ -470,7 +470,12 @@ from an `init_arg`: `pred_key = preds.<stream>.<name>`
 `input is None` (`:124`). `weight_source: {from_class_dict: <path>}`
 allocates the cross-entropy `weight` buffer at `bind` and fills it at
 `materialise`, the only file-touching hook this class defines
-(`:238-271`). Default loss is `torch.nn.CrossEntropyLoss` (`:28`).
+(`:238-271`). The class dict holds the label's weights either as a list in
+class-index order, or as a `{label value: weight}` mapping. A mapping is
+ordered via `label_map` if set, so labels like `HadronGhostTruthLabelID` work
+too; label values mapped to one class combine their weights as
+`1 / sum(1 / weight)`, and mapped values missing from the class dict are
+skipped. Default loss is `torch.nn.CrossEntropyLoss` (`:28`).
 `sample_weight` names one `labels.<stream>.<key>` column or a list of them; several keys multiply per row (e.g. a `KinematicWeight` times a `ClassWeight`) and need `loss.init_args.reduction: none`.
 
 #### `salt.model.modules.RegressionTaskModule`
@@ -615,6 +620,7 @@ repeatedly gotten them wrong:
 | `norm_dict` | `str \| Path` | required |
 | `streams` | `Sequence[str]` | required |
 | `global_object` | `str \| None` | `None` |
+| `clamp` | `float \| None` | `None` |
 
 Requires `inputs.<stream>` for every configured stream. Produces
 `normed.<stream>` for every stream (`norm.py:93-99`). The `global_object`
@@ -624,7 +630,9 @@ stream is declared `("B", F)`; every other stream in `streams:` is declared
 Defines `bind` (`norm.py:101-113`, allocates `means_<stream>` and
 `stds_<stream>` buffers) and `materialise` (`norm.py:189-239`, reads the
 `norm_dict` YAML; this is the module's only file-touching hook). Does not
-define `derived_widths`.
+define `derived_widths`. A positive `clamp` bounds the normalised inputs to
+`[-clamp, clamp]`, also in the exported ONNX model (see
+[Clamping normalised inputs](../configuration.md#clamping-normalised-inputs)).
 
 ### `salt.model.modules.MaskedInputNormaliser`
 
@@ -636,6 +644,7 @@ define `derived_widths`.
 | `global_object` | `str \| None` | `None` |
 | `momentum` | `float \| None` | `0.1` |
 | `eps` | `float` | `1e-5` |
+| `clamp` | `float \| None` | `None` |
 
 This class takes **no** `norm_dict` and defines **no** `materialise`: it
 learns its statistics online from valid, non-padded objects instead of

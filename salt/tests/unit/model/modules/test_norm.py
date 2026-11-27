@@ -131,6 +131,35 @@ class TestNormaliser:
         with pytest.raises(ConfigError, match="d0"):
             modules["norm"].materialise()
 
+    def test_clamp_bounds_the_normed_inputs(self, norm_paths):
+        modules = build_gn2v2_modules(norm_paths[0])
+        schema = resolve_bind_schema(compile_gn2v2(modules, Mode.FIT))
+        norm = Normaliser(norm_paths[0], streams=["jets", "tracks"], global_object="jets", clamp=5)
+        norm.name = "norm"
+        norm.bind(schema)
+        norm.materialise()
+        b, expected = _outlier_bundle()
+        out = norm(b, Mode.FIT)
+        unclamped = (expected - norm.means_tracks) / norm.stds_tracks
+        assert torch.equal(out["normed.tracks"], unclamped.clamp(-5, 5))
+        assert out["normed.tracks"].max() == 5 and out["normed.tracks"].min() == -5
+
+
+def _outlier_bundle() -> tuple[Bundle, torch.Tensor]:
+    """A FIT bundle whose first track holds a +1e6 and a -1e6 input, and its tracks tensor."""
+    b = fit_bundle()
+    tracks = b.get("inputs.tracks")
+    tracks[0, 0, :2] = torch.tensor([1e6, -1e6])
+    return b, tracks.clone()
+
+
+@pytest.mark.parametrize("clamp", [0.0, -1.0])
+def test_clamp_must_be_positive(clamp):
+    with pytest.raises(ConfigError, match="clamp must be positive"):
+        Normaliser(norm_dict="x.yaml", streams=["a"], clamp=clamp)
+    with pytest.raises(ConfigError, match="clamp must be positive"):
+        MaskedInputNormaliser(streams=["a"], clamp=clamp)
+
 
 class TestMaskedInputNormaliser:
     """Self-normalising MaskedInputNormaliser: online masked running stats."""
@@ -363,3 +392,13 @@ class TestMaskedInputNormaliser:
         norm.eval()
         b = fit_bundle()
         assert torch.equal(fresh(b, Mode.TEST)["normed.tracks"], norm(b, Mode.TEST)["normed.tracks"])
+
+    def test_clamp_bounds_the_normed_inputs(self):
+        norm = self._bound_norm(["jets", "tracks"], global_object="jets", clamp=5)
+        norm.eval()
+        b, expected = _outlier_bundle()
+        out = norm(b, Mode.TEST)
+        denom = torch.sqrt(norm.running_var_tracks + norm.eps)
+        unclamped = (expected - norm.running_mean_tracks) / denom
+        assert torch.equal(out["normed.tracks"], unclamped.clamp(-5, 5))
+        assert out["normed.tracks"].max() == 5 and out["normed.tracks"].min() == -5
