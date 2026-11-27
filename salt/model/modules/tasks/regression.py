@@ -314,6 +314,11 @@ class RegressionTaskModule(_TaskModuleBase):
         """
         return f"targets.{self.stream}.{self.name}"
 
+    @property
+    def _pred_width(self) -> int:
+        """Head output width: ``len(targets)``, doubled for a gaussian head."""
+        return (2 if self.gaussian else 1) * len(self.targets)
+
     def declare_io(self, mode: Mode) -> IO:
         """Denominator dep is mode-split: labels in FIT|VAL|TEST, the raw ``inputs.<stream>``
         Feature in ONNX. Targets/sample-weight/loss are TRAINING-gated; a gaussian head
@@ -342,7 +347,7 @@ class RegressionTaskModule(_TaskModuleBase):
         )
         return self._head_io(
             label_specs=dict.fromkeys(self.target_label_keys, label),
-            pred_shape=(*tokens, (2 if self.gaussian else 1) * len(self.targets)),
+            pred_shape=(*tokens, self._pred_width),
             extra_requires=extra,
             extra_produces={self.targets_key: targets} if self.publish_targets else None,
         )
@@ -376,7 +381,7 @@ class RegressionTaskModule(_TaskModuleBase):
             )
         self.net = Dense(
             input_size=schema.width(self.input_key),
-            output_size=(2 if self.gaussian else 1) * len(self.targets),
+            output_size=self._pred_width,
             **({"context_size": schema.width(self.context)} if self.context else {}),
             **self.dense_cfg,
         )
@@ -449,14 +454,7 @@ class RegressionTaskModule(_TaskModuleBase):
         # bundle's RAW preds.* leaf and double-de-scale on any later read
         preds = b.get(self.pred_key).float().clone()
         mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None
-        denoms: list[Tensor] = []
-        if self.target_denominators is not None and mode & Mode.ONNX:
-            columns = b.get(self.input_feature_key)
-            index = {name: i for i, name in enumerate(self._input_fields)}
-            by_name = {d: columns[..., index[d]] for d in self.target_denominators}
-            denoms = [by_name[d] for d in self.target_denominators]
-        elif self.target_denominators is not None:
-            denoms = [b.get(key) for key in self.denom_label_keys]
+        denoms = self._denominators(b, mode)
         if not self.gaussian:
             preds = preds.float()
         norm = self.norm_params
@@ -486,6 +484,18 @@ class RegressionTaskModule(_TaskModuleBase):
             preds = torch.masked_fill(preds, mask.unsqueeze(-1), torch.nan)
         return preds
 
+    def _denominators(self, b: Bundle, mode: Mode) -> list[Tensor]:
+        """The per-target ratio denominators (empty without `target_denominators`): from the
+        label group in TEST, gathered by name from the raw input Feature tensor in ONNX.
+        """
+        if self.target_denominators is None:
+            return []
+        if mode & Mode.ONNX:
+            columns = b.get(self.input_feature_key)
+            index = {name: i for i, name in enumerate(self._input_fields)}
+            return [columns[..., index[d]] for d in self.target_denominators]
+        return [b.get(key) for key in self.denom_label_keys]
+
     # -- output rendering ---------------------------------------------------
 
     def output_time_requires(self, mode: Mode) -> list[str]:
@@ -500,7 +510,7 @@ class RegressionTaskModule(_TaskModuleBase):
         return self._output_deps(mode, self.target_label_keys, pre=source)
 
     def _output_values(self, b: Bundle, mode: Mode) -> list[Tensor]:
-        """One ``f4`` value per `output_suffixes` column, de-scaled via `_descaled_preds`.
+        """One ``f4`` value per `_descaled_preds` column (the `output_suffixes` columns).
         H5 modes keep the per-column ``[B]``/``[B, L]`` value; ONNX squeezes the size-1
         batch dim to a rank-0 scalar (global) or ``[L]`` vector (per-token). TEST target
         columns are the raw labels, NaN at padded positions like the predictions.
@@ -508,7 +518,7 @@ class RegressionTaskModule(_TaskModuleBase):
         preds = self._descaled_preds(b, mode)
         values = [
             preds[..., i].squeeze() if mode & Mode.ONNX else preds[..., i]
-            for i in range(len(self.output_suffixes))
+            for i in range(preds.shape[-1])
         ]
         if self._emit_targets(mode):
             mask = b.get(f"masks.{self.stream}") if self.has_pad_mask else None

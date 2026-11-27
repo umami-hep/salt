@@ -258,6 +258,20 @@ A `gaussian: true` regression head can use `salt.model.nn.losses.BetaNLLLoss` ([
 loss: {class_path: salt.model.nn.losses.BetaNLLLoss, init_args: {beta: 0.5, reduction: none}}
 ```
 
+For a target with several likely values, where a single Gaussian regresses towards the prior mean with a large variance, `salt.model.modules.tasks.MixtureDensityTaskModule` models one target with a mixture of `n_components` Gaussians. It takes no `loss:` key: it trains with the mixture negative log-likelihood (`salt.model.nn.losses.MixtureGaussianNLLLoss`), and needs `norm_params` or `target_denominators`. The outputs describe the component with the largest weight: its mean as `<target>` and its weight as `<target>_modeweight`. In the H5 output `<target>_stddev` is that component's own sigma, and in the ONNX output it is the spread of the whole mixture around that mean, `sigma_fair = sqrt(Var[y] + (mean_mix - mean_dom)^2)`, which also counts the rival modes. The H5 output also has the mixture mean `<target>_mubar`, `<target>_sigmix = sqrt(Var[y])`, `<target>_sigfair`, and every component in raw order as `<target>_mu{k}`, `<target>_sigma{k}` and `<target>_pi{k}`. `salt/configs/regression/regression_mdn.yaml` is a complete example:
+
+```yaml
+mdn_regression:
+  class_path: salt.model.modules.tasks.MixtureDensityTaskModule
+  init_args:
+    stream: jets
+    input: pooled.global
+    n_components: 4
+    targets: HadronConeExclTruthLabelPt
+    norm_params: {mean: 1.0, std: 1.0}
+    dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+```
+
 ### `outputs:`
 
 A dict of named output sinks and writers controlling what `salt test` writes to the eval H5 and what `salt export` puts in the ONNX graph. This is fully documented at [Declaring outputs](outputs.md#declaring-outputs-the-outputs-section); this page does not restate it.

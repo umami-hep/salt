@@ -1,6 +1,8 @@
-"""Standalone regression losses, selected through a task's ``loss:`` config."""
+"""Standalone regression losses, selected through a task's ``loss:`` config or built by the task."""
 
 from __future__ import annotations
+
+import math
 
 import torch
 from torch import Tensor, nn
@@ -67,3 +69,34 @@ class BetaNLLLoss(nn.Module):
         if self.reduction == "sum":
             return loss.sum()
         return loss
+
+
+class MixtureGaussianNLLLoss(nn.Module):
+    """Negative log-likelihood of a 1D K-component Gaussian mixture.
+
+    ``NLL = -logsumexp_k[log pi_k - 0.5 * (log(2 pi var_k) + (y - mu_k)^2 / var_k)]``, with
+    ``var = softplus(raw_var) + eps`` and ``pi = softmax(logits)``. The output is per sample.
+
+    Parameters
+    ----------
+    eps : float, optional
+        Added to the softplus variance for numerical stability, by default 1e-6.
+    """
+
+    def __init__(self, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+        self.reduction = "none"
+
+    def forward(self, means: Tensor, raw_vars: Tensor, logits: Tensor, targets: Tensor) -> Tensor:
+        """Per-sample mixture NLL of shape ``[..., 1]``.
+
+        ``means``, ``raw_vars`` (pre-softplus) and ``logits`` have shape ``[..., K]``,
+        ``targets`` has shape ``[..., 1]`` and broadcasts against the components.
+        """
+        var = nn.functional.softplus(raw_vars) + self.eps
+        log_pi = nn.functional.log_softmax(logits, dim=-1)
+        log_comp = -0.5 * (
+            math.log(2 * math.pi) + torch.log(var) + (targets - means).square() / var
+        )
+        return -torch.logsumexp(log_pi + log_comp, dim=-1, keepdim=True)

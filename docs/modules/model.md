@@ -514,6 +514,22 @@ gaussian loss, see [`model:`](../configuration.md#model). When
 `targets.<stream>.<name>` instead of its loss key, because a
 `MaskFormerMatchedLoss` then owns `losses.regression` for it.
 
+#### `salt.model.modules.MixtureDensityTaskModule`
+
+`salt/model/modules/tasks/mixture_density.py`, a `RegressionTaskModule`
+subclass for one target. It takes `n_components` (required, at least 1) and
+`eps` (default `1e-6`, added to the softplus variance) in place of
+`gaussian`, `scaler`, `publish_targets` and `loss`; the other `init_args`
+are as above, and one of `norm_params` or `target_denominators` is
+required. The head is `3 * n_components` wide (means, raw variances,
+mixture-weight logits) and trains with
+`salt.model.nn.losses.MixtureGaussianNLLLoss`. It publishes
+`<target>`, `<target>_stddev` and `<target>_modeweight` for the component
+with the largest weight. `_stddev` is that component's own sigma in the H5
+output and the spread of the whole mixture around its mean (`sigma_fair`) in
+the ONNX output; the H5 output adds the mixture summaries and every
+component, see [`model:`](../configuration.md#model).
+
 #### `salt.model.modules.VertexingTaskModule`
 
 `salt/model/modules/tasks/edge.py:27`, `__init__` `edge.py:43-57`
