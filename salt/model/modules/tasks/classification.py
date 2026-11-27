@@ -213,13 +213,19 @@ class ClassificationTaskModule(_TaskModuleBase):
     def materialise(self) -> None:
         """Resolve ``weight_source`` from the class dict (the ONLY file I/O).
 
+        The class dict holds the label's weights either as a list ordered by class
+        index, or as a ``{label value: weight}`` mapping. A mapping is ordered via
+        `label_map` if set, otherwise the label values are the class indices.
+        Label values mapped to one class combine as ``1 / sum(1 / weight)``;
+        mapped values missing from the class dict are skipped.
+
         Raises
         ------
         RuntimeError
             If called before `bind`.
         ValueError
-            If the class dict lacks the stream/label or the weight count
-            does not match ``class_names``.
+            If the class dict lacks the stream/label, a mapping leaves a class
+            without entries, or the weight count does not match ``class_names``.
         """
         if self.weight_source is None:
             return
@@ -237,6 +243,20 @@ class ClassificationTaskModule(_TaskModuleBase):
                 f"not found in class dict {path} — drop weight_source and specify class "
                 f"weights manually (cli.py:483-488 semantics)"
             ) from None
+        if isinstance(values, Mapping):
+            label_map = self.label_map or {label: label for label in values}
+            # weights scale as 1 / count, so labels merged into one class sum their inverses
+            inverse: dict[int, float] = {}
+            for label, idx in label_map.items():
+                if int(label) in values:
+                    inverse[int(idx)] = inverse.get(int(idx), 0.0) + 1 / values[int(label)]
+            num_classes = max(int(idx) for idx in label_map.values()) + 1
+            if missing := [i for i in range(num_classes) if i not in inverse]:
+                raise ValueError(
+                    f"No class_dict entries for class indices {missing} of {self.label} in "
+                    f"{path} — map the label values to class indices with label_map"
+                )
+            values = [1 / inverse[i] for i in range(num_classes)]
         if len(values) != len(self.class_names):
             raise ValueError(
                 f"class dict {path} has {len(values)} weights for {self.stream}.{self.label} "

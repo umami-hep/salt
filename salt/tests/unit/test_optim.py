@@ -15,6 +15,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau, StepLR
 
 from salt.graph.errors import ConfigError
+from salt.graph.spec import Mode
+from salt.model.modules import bind_all, resolve_bind_schema
 from salt.model.saltmodule import SaltModule
 from salt.optim import (
     HybridMuonAdamW,
@@ -31,7 +33,11 @@ from salt.optim import (
     safe_pct_start,
 )
 from salt.schedule import TrainingSchedule
-from salt.tests._fixtures.gn2v2_fixture import build_gn2v2_modules, write_parity_norm_dict
+from salt.tests._fixtures.gn2v2_fixture import (
+    build_gn2v2_modules,
+    compile_gn2v2,
+    write_parity_norm_dict,
+)
 
 
 class TinyModel(nn.Module):
@@ -732,6 +738,37 @@ class TestBuildOptimizer:
         named = list(net.named_parameters())
         opt = build_optimizer(HybridMuonAdamW, named, {"initial": 1e-4})
         assert isinstance(opt, HybridMuonAdamW)
+
+    def test_optimizer_kwargs_are_forwarded_over_the_lrs_values(self) -> None:
+        net = LionNet()
+        kwargs = {"amsgrad": True, "weight_decay": 0.1}
+        opt = build_optimizer(AdamW, list(net.named_parameters()), {"initial": 1e-4}, kwargs)
+        assert opt.param_groups[0]["amsgrad"] is True
+        assert opt.param_groups[0]["weight_decay"] == pytest.approx(0.1)
+
+    def test_hybrid_muon_adamw_receives_optimizer_kwargs(self) -> None:
+        net = LionNet()
+        named = list(net.named_parameters())
+        opt = build_optimizer(HybridMuonAdamW, named, {"initial": 1e-4}, {"momentum": 0.9})
+        assert isinstance(opt, HybridMuonAdamW)
+        assert opt.muon.param_groups[0]["momentum"] == pytest.approx(0.9)
+
+
+def test_saltmodule_optimizer_kwargs_reach_every_stage(_norm_dict: Any) -> None:
+    stages = {"warmup": {"epochs": 1, "frozen": ["encoder"]}, "full": {}}
+    model: Any = _salt_module(
+        _norm_dict,
+        lrs={"initial": 1e-4, "max": 1e-3, "end": 1e-5, "pct_start": 0.1},
+        optimizer_kwargs={"amsgrad": True},
+        training_schedule={"stages": stages},
+    )
+    modules = dict(model.net.items())
+    bind_all(modules, resolve_bind_schema(compile_gn2v2(modules, Mode.FIT)))
+    model._trainer = SimpleNamespace(max_epochs=2, estimated_stepping_batches=100)  # noqa: SLF001
+    for stage_index in (0, 1):
+        model.training_controller.current_stage_index = stage_index
+        [opt], _ = model.configure_optimizers()
+        assert opt.param_groups[0]["amsgrad"] is True
 
 
 class TestBuildOnecycleScheduler:

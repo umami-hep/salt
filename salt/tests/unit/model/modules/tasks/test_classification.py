@@ -6,6 +6,7 @@ import math
 
 import pytest
 import torch
+import yaml
 
 from salt.graph.bundle import Bundle
 from salt.graph.errors import ConfigError
@@ -104,6 +105,48 @@ class TestClassificationTaskModule:
         task.bind(ResolvedSchema(widths={"pooled.global": 16}))
         with pytest.raises(ValueError, match="3 class_names"):
             task.materialise()
+
+    @staticmethod
+    def _class_dict_weights(tmp_path, weights, label_map=None) -> list[float]:
+        """The CE weights a 3-class head materialises from a class dict of `weights`."""
+        path = tmp_path / "class_dict.yaml"
+        path.write_text(yaml.dump({"jets": {"label": weights}}))
+        task = ClassificationTaskModule(
+            stream="jets",
+            label="label",
+            class_names=["a", "b", "c"],
+            input="pooled.global",
+            label_map=label_map,
+            weight_source={"from_class_dict": str(path)},
+        )
+        task.name = "jets_classification"
+        task.bind(ResolvedSchema(widths={"pooled.global": 16}))
+        task.materialise()
+        return task.loss.weight.tolist()
+
+    def test_class_dict_list(self, tmp_path):
+        assert self._class_dict_weights(tmp_path, [1.0, 4.0, 2.0]) == [1.0, 4.0, 2.0]
+
+    def test_class_dict_mapping(self, tmp_path):
+        weights = self._class_dict_weights(tmp_path, {0: 1.0, 1: 4.0, 2: 2.0})
+        assert weights == pytest.approx([1.0, 4.0, 2.0])
+
+    def test_class_dict_mapping_label_map(self, tmp_path):
+        # charge-style task: several PDG IDs per class, 5554 is mapped but not in the class dict
+        weights = self._class_dict_weights(
+            tmp_path,
+            {-5122: 8.0, -511: 2.0, -15: 4.0, 0: 1.0, 15: 4.0, 511: 2.0, 5122: 8.0},
+            label_map={511: 1, -511: 0, 5122: 0, -5122: 1, 5554: 0, 0: 2, 15: 2, -15: 2},
+        )
+        assert weights == pytest.approx([1.6, 1.6, 2 / 3])
+
+    def test_class_dict_mapping_missing_class(self, tmp_path):
+        with pytest.raises(ValueError, match="No class_dict entries"):
+            self._class_dict_weights(tmp_path, {0: 1.0, 2: 2.0})
+
+    def test_class_dict_mapping_label_map_missing_class(self, tmp_path):
+        with pytest.raises(ValueError, match="No class_dict entries"):
+            self._class_dict_weights(tmp_path, {0: 1.0, 4: 4.0}, label_map={0: 0, 4: 1, 5: 2})
 
     @staticmethod
     def _origin_bundle(head: ClassificationTaskModule, labels: torch.Tensor) -> Bundle:

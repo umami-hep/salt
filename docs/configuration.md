@@ -226,6 +226,16 @@ optimizer 'adam' is not supported — choose from ['AdamW', 'lion', 'lion-pytorc
 
 (`salt/model/saltmodule.py:258-260`.)
 
+`optimizer_kwargs:` passes extra keyword arguments to the optimizer constructor, for example the fused CUDA kernel of AdamW:
+
+```yaml
+model:
+  init_args:
+    optimizer_kwargs: {fused: true}
+```
+
+They win over the `lr` and `weight_decay` taken from `lrs`, and apply to the optimizer of every training stage, so a stage that switches `optimizer` must use one that accepts them. By default none are passed.
+
 `optimizer:` is not the last word when `mup:` is also configured: with `mup` set, the optimizer is swapped to `mup.optim.MuAdamW` regardless of whatever name `optimizer:` names (`salt/model/saltmodule.py:189-190`). See [muP](#mup) below for the rest of that mechanism.
 
 A task's `loss:` key is optional. Each task family falls back to its own default when `loss:` is unset:
@@ -331,6 +341,21 @@ data:
     `variables:` and specify it as a task's `label` instead.
 
 The number of variables listed for a stream sets the `[B, T, F]` (or `[B, F]` for a `global_object` stream) width the planner resolves for `inputs.<stream>`. A downstream module's own output width, such as `StreamEmbed`'s `out_dim`, is a separate, independently-configured number; the planner infers and checks the input width at `bind` time from the resolved schema, it is not something you set to match `variables:` by hand. Heterogeneous models with more than one input type are covered at [More than one input stream](#more-than-one-input-stream) below.
+
+### Clamping normalised inputs
+
+Rare extreme outliers can destabilise the training even after normalisation. Both normalisers, `Normaliser` and `MaskedInputNormaliser`, can clamp the normalised inputs to `[-clamp, clamp]`:
+
+```yaml
+model:
+  init_args:
+    modules:
+      norm:
+        init_args:
+          clamp: 50
+```
+
+The clamp is part of the model, so it is also applied in the exported ONNX model. By default no clamp is applied.
 
 ### Naming streams and groups
 

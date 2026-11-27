@@ -601,6 +601,8 @@ your normalisation parameters are finite. If a run still produces NaNs, try:
 - Ensure you don't have unexpected non-finite labels.
 - Try lowering your max learning rate (`lrs.max`, either the top-level
   `lrs:` block or a stage override under `training_schedule.stages.<name>.lrs`).
+- If single inputs have extreme outliers after normalisation, clamp them (see
+  [Clamping normalised inputs](configuration.md#clamping-normalised-inputs)).
 - If you apply very large loss weights in your task configs, these might
   contribute to large gradients, so you can try removing any loss weights
   provided to your task modules (`salt.model.modules.tasks`).

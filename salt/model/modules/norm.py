@@ -58,6 +58,18 @@ def _normed_fields(
     return {f"normed.{s}": fields[f"inputs.{s}"] for s in streams if f"inputs.{s}" in fields}
 
 
+def _checked_clamp(clamp: float | None, who: str) -> float | None:
+    """`clamp` unchanged; `ConfigError` ``"<who>: ..."`` when it is not positive."""
+    if clamp is not None and clamp <= 0:
+        raise ConfigError(f"{who}: clamp must be positive, got {clamp}")
+    return clamp
+
+
+def _clamped(x: Tensor, clamp: float | None) -> Tensor:
+    """`x` clamped to ``[-clamp, clamp]``, or `x` itself when `clamp` is None."""
+    return x if clamp is None else x.clamp(-clamp, clamp)
+
+
 def _via(stream: str, key: str) -> str:
     """``" (stream '<stream>')"`` when the dataset key differs from the stream, else ``""``."""
     return f" (stream {stream!r})" if key != stream else ""
@@ -121,6 +133,7 @@ class Normaliser(SaltModelModule):
         norm_dict: str | Path,
         streams: Sequence[str],
         global_object: str | None = None,
+        clamp: float | None = None,
     ) -> None:
         """Capture config only (no file I/O here).
 
@@ -133,12 +146,15 @@ class Normaliser(SaltModelModule):
         global_object : str | None, optional
             The stream that is a per-object vector (``[B, F]``) rather than
             a padded sequence (``[B, T, F]``), by default None.
+        clamp : float | None, optional
+            If set, clamp the normalised inputs to ``[-clamp, clamp]`` to bound
+            outliers, also in the exported ONNX model, by default None.
 
         Raises
         ------
         ConfigError
             If `streams` is empty, contains duplicates, or `global_object`
-            is not one of them.
+            is not one of them, or `clamp` is not positive.
         """
         super().__init__()
         self.streams = _checked_streams(streams, "Normaliser")
@@ -148,6 +164,7 @@ class Normaliser(SaltModelModule):
             )
         self.norm_dict_path = Path(norm_dict)
         self.global_object = global_object
+        self.clamp = _checked_clamp(clamp, "Normaliser")
         self._fields: dict[str, tuple[str, ...]] = {}
         self._datasets: dict[str, str] = {}
         self._bound = False
@@ -273,7 +290,9 @@ class Normaliser(SaltModelModule):
         self._materialised_flag = True
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """``normed.<stream> = (inputs.<stream> - means) / stds``; raises if never materialised."""
+        """``normed.<stream> = (inputs.<stream> - means) / stds``, clamped if `clamp` is set;
+        raises if never materialised.
+        """
         del mode
         # skip under tracing: the tensor->bool read would emit a spurious
         # TracerWarning on every export. Tracing is still guarded —
@@ -286,8 +305,10 @@ class Normaliser(SaltModelModule):
                 "call materialise(); on checkpoint load the state_dict provides the values"
             )
         return {
-            f"normed.{s}": (b.get(f"inputs.{s}") - getattr(self, f"means_{s}"))
-            / getattr(self, f"stds_{s}")
+            f"normed.{s}": _clamped(
+                (b.get(f"inputs.{s}") - getattr(self, f"means_{s}")) / getattr(self, f"stds_{s}"),
+                self.clamp,
+            )
             for s in self.streams
         }
 
@@ -309,10 +330,12 @@ class MaskedInputNormaliser(SaltModelModule):
         global_object: str | None = None,
         momentum: float | None = 0.1,
         eps: float = 1e-5,
+        clamp: float | None = None,
     ) -> None:
         """Capture config only (no file I/O here).
 
-        ``momentum=None`` gives a cumulative moving average instead of an EMA.
+        ``momentum=None`` gives a cumulative moving average instead of an EMA. A
+        `clamp` bounds the normalised inputs to ``[-clamp, clamp]``, as in `Normaliser`.
         """
         super().__init__()
         self.streams = _checked_streams(streams, "MaskedInputNormaliser")
@@ -330,6 +353,7 @@ class MaskedInputNormaliser(SaltModelModule):
         self.global_object = global_object
         self.momentum = None if momentum is None else float(momentum)
         self.eps = float(eps)
+        self.clamp = _checked_clamp(clamp, "MaskedInputNormaliser")
         self._bound = False
 
     def declare_io(self, mode: Mode) -> IO:
@@ -408,7 +432,9 @@ class MaskedInputNormaliser(SaltModelModule):
             running_var.mul_(1 - self.momentum).add_(batch_var, alpha=self.momentum)
 
     def forward(self, b: Bundle, mode: Mode) -> dict[str, Tensor]:
-        """Apply frozen running-stat normalisation; updates stats only when training (untraced)."""
+        """Apply frozen running-stat normalisation (clamped if `clamp` is set); updates stats
+        only when training (untraced).
+        """
         if self.training and bool(mode & Mode.TRAINING) and not torch.jit.is_tracing():
             for stream in self.streams:
                 # the global object and a mask-less stream (optional port with
@@ -419,7 +445,10 @@ class MaskedInputNormaliser(SaltModelModule):
                 valid = None if no_mask else ~b.get(mask_key)
                 self._update_running_stats(stream, b.get(f"inputs.{stream}"), valid)
         return {
-            f"normed.{s}": (b.get(f"inputs.{s}") - getattr(self, f"running_mean_{s}"))
-            / torch.sqrt(getattr(self, f"running_var_{s}") + self.eps)
+            f"normed.{s}": _clamped(
+                (b.get(f"inputs.{s}") - getattr(self, f"running_mean_{s}"))
+                / torch.sqrt(getattr(self, f"running_var_{s}") + self.eps),
+                self.clamp,
+            )
             for s in self.streams
         }
