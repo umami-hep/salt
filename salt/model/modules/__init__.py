@@ -23,7 +23,7 @@ from salt.model.modules.maskdecoder import MaskDecoder
 from salt.model.modules.maskformer_matched_loss import MaskFormerMatchedLoss
 from salt.model.modules.norm import MaskedInputNormaliser, Normaliser
 from salt.model.modules.plumbing import Concat, SelectFields, Split, VectorConcat
-from salt.model.modules.pooling import GlobalAttentionPooling
+from salt.model.modules.pooling import ClassAttentionPooling, GlobalAttentionPooling
 from salt.model.modules.stream_embed import StreamEmbed
 from salt.model.modules.tasks import (
     ClassificationTaskModule,
@@ -36,6 +36,7 @@ from salt.model.nn.posenc import PositionalEncoder
 
 __all__ = [
     "BindError",
+    "ClassAttentionPooling",
     "ClassWeight",
     "ClassificationTaskModule",
     "Concat",

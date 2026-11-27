@@ -34,6 +34,7 @@ nav:
   - Preprocessing: preprocessing.md
   - Command line: cli.md
   - Configuration: configuration.md
+  - Architectures: architectures.md
   - Training: training.md
   - Fine-tuning: finetuning.md
   - Evaluation: evaluation.md

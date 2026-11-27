@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from salt.graph.executor import Executor
 from salt.graph.planner import compile_plan
 from salt.graph.spec import Mode, flatten_spec
 from salt.model.modules import (
+    ClassAttentionPooling,
     Concat,
     GlobalAttentionPooling,
     LossSum,
     Normaliser,
+    ResolvedSchema,
     StreamEmbed,
     bind_all,
     materialise_all,
@@ -21,6 +24,8 @@ from salt.model.modules.tasks import (
     ClassificationTaskModule,
 )
 from salt.tests._fixtures.gn2v2_fixture import (
+    build_gn2v2_modules,
+    compile_gn2v2,
     gn2v2_sources,
 )
 from salt.tests.unit.model.conftest import B, T, fit_bundle
@@ -125,3 +130,62 @@ class TestEncoderlessPooling:
             {"seq": captured["seq.x"]}, pad_mask={"seq": captured["seq.mask"]}
         )
         assert torch.equal(v2_pooled, direct)
+
+
+# class attention pooling (ParT / DeParT)
+
+
+def _bound_class_pool(dim: int, **kwargs) -> ClassAttentionPooling:
+    pool = ClassAttentionPooling(**kwargs)
+    pool.name = "pool"
+    pool.bind(ResolvedSchema(widths={"encoded.seq": dim}))
+    return pool
+
+
+class TestClassAttentionPooling:
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    @pytest.mark.parametrize("gated", [True, False])
+    def test_pooled_shape_and_finite(self, num_layers, gated):
+        batch_size, seq_len, dim = 3, 8, 16
+        pool = _bound_class_pool(
+            dim,
+            num_layers=num_layers,
+            dense={"activation": "GELU", "gated": gated},
+            attention={"num_heads": 2},
+        )
+        torch.manual_seed(0)
+        x = torch.randn(batch_size, seq_len, dim)
+        mask = torch.rand(batch_size, seq_len) < 0.5
+        out = pool.pool(x, mask)
+        assert out.shape == (batch_size, dim)
+        assert not torch.isnan(out).any()
+
+    def test_fully_padded_jet_is_finite(self):
+        """The class token is always a valid key, so a fully padded jet stays NaN-free."""
+        batch_size, seq_len, dim = 2, 6, 16
+        pool = _bound_class_pool(dim, num_layers=2, attention={"num_heads": 4})
+        x = torch.randn(batch_size, seq_len, dim)
+        out = pool.pool(x, torch.ones(batch_size, seq_len, dtype=torch.bool))
+        assert out.shape == (batch_size, dim)
+        assert not torch.isnan(out).any()
+
+    def test_blocks_are_cross_attention_only(self):
+        pool = _bound_class_pool(16, num_layers=2, attention={"num_heads": 2})
+        assert pool.class_token.shape == (1, 16)
+        assert len(pool.layers) == 2
+        assert all(not hasattr(layer, "self_attn") for layer in pool.layers)
+
+    def test_forward_in_gn2v2_plan(self, norm_paths):
+        """Drop-in for GlobalAttentionPooling; the register rows are attended to as well."""
+        modules = build_gn2v2_modules(norm_paths[0])
+        modules["pool"] = ClassAttentionPooling(attention={"num_heads": 2})
+        modules["pool"].name = "pool"
+        plan = compile_gn2v2(modules, Mode.FIT)
+        bind_all(modules, resolve_bind_schema(plan))
+        materialise_all(modules)
+        b = Executor(plan).run(fit_bundle(), debug=True)
+        assert b.get("pooled.global").shape == (B, 16)
+        assert torch.isfinite(b.get("loss.total"))
+        mask = torch.cat([b.get("seq.mask"), b.get("masks.registers")], dim=1)
+        direct = modules["pool"].pool(b.get("encoded.seq"), mask)
+        assert torch.equal(b.get("pooled.global"), direct)

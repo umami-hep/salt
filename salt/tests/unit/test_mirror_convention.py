@@ -68,7 +68,6 @@ COVERED_ELSEWHERE: dict[str, tuple[str, ...]] = {
         "salt/tests/integration/pipeline/test_pipeline.py",
     ),
     "salt/data/processors/multi_target.py": ("salt/tests/integration/pipeline/test_pipeline.py",),
-    "salt/model/modules/edge_embed.py": ("salt/tests/unit/model/test_compile_regression.py",),
     "salt/model/modules/maskformer_matched_loss.py": (
         "salt/tests/unit/model/test_maskformer_test_bind.py",
     ),

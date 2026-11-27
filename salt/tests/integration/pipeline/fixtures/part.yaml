@@ -1,0 +1,31 @@
+config: ParticleTransformer/ParT.yaml
+fit:
+  args:
+    # the config trains on 4 nodes x 4 GPUs in bf16
+    - "--trainer.devices=1"
+    - "--trainer.num_nodes=1"
+    - "--trainer.precision=32-true"
+eval:
+  expected_outputs:
+    jets:
+      - ParT_pb
+      - ParT_pc
+      - ParT_ps
+      - ParT_pud
+      - ParT_pg
+      - ParT_ptau
+      - target_jets_classification
+    # ParT.yaml's reader aliases the tracks stream to the
+    # tracks_ghost file dataset (`groups.tracks.dataset: tracks_ghost`).
+    tracks_ghost:
+      - ParT_pPileup
+      - ParT_pFake
+      - ParT_pPrimary
+      - ParT_pFromB
+      - ParT_pFromBC
+      - ParT_pFromC
+      - ParT_pFromTau
+      - ParT_pOtherSecondary
+      - target_track_origin
+      - VertexIndex
+      - target_track_vertexing

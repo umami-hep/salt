@@ -521,9 +521,9 @@ model:
 
 `salt.model.modules.EdgeFeatures` builds pairwise edge features between constituents on the fly from raw (un-normalised) track variables. Currently implemented:
 
-- `dR` = log(sqrt(deta^2 + dphi^2)), requires `phi`, `eta`
-- `kt` = log(min(pt) * sqrt(deta^2 + dphi^2)), requires `pt`
-- `z` = log(min(pt) / sum(pt)), requires `pt`, `phi`, `eta`
+- `dR` = log(sqrt(deta^2 + dphi^2)), requires `eta`, `phi`, or the jet-relative `deta`, `dphi` when those are not inputs (pairwise differences do not depend on the reference axis)
+- `kt` = log(min(pt) * sqrt(deta^2 + dphi^2)), requires `pt` and the same angular pair as `dR`
+- `z` = log(min(pt) / sum(pt)), requires `pt`
 - `isSelfLoop`: 1 if the edge is a self-connection, 0 otherwise
 - `subjetIndex`: 1 if both tracks are in the same subjet, 0 otherwise; requires `subjetIndex`
 - `mass`: the pairwise invariant mass; requires `pt`, `eta`, `phi`, `energy`

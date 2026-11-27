@@ -827,6 +827,42 @@ on an encoder-less wiring). Produces `out` (`pooling.py:49-72`).
 Defines `bind` (`:74-76`, builds `nn.Linear(schema.width(input), 1)` for the
 attention gate).
 
+### `salt.model.modules.ClassAttentionPooling`
+
+`salt/model/modules/pooling.py:111`, `__init__` `pooling.py:124`
+
+| `init_arg` | Type | Default |
+|---|---|---|
+| `input` | `str` | `"encoded.seq"` |
+| `out` | `str` | `"pooled.global"` |
+| `num_layers` | `int` | `1` |
+| `ls_init` | `float \| None` | `1e-3` |
+| `dense` | `dict[str, Any] \| None` | `None` |
+| `attention` | `dict[str, Any] \| None` | `None` |
+| `norm` | `str` | `"LayerNorm"` |
+
+The ParT/DeParT pooling head: a learned class token cross-attends to the
+encoded sequence through `num_layers` cross-attention-only blocks (no
+self-attention), and the token is the pooled vector. The class token is also
+a key of every block, so a jet with no valid constituents still pools to a
+finite vector. `dense` and `attention` configure each block's feed-forward and
+attention (`attention: {num_heads: N}`), and `ls_init: null` turns LayerScale
+off. The register rows are attended to like any constituent; set
+`drop_registers: true` on the encoder to pool over the constituents only.
+
+```yaml
+pool:
+  class_path: salt.model.modules.ClassAttentionPooling
+  init_args:
+    num_layers: 2
+    ls_init: null
+    dense: {activation: GELU, gated: false}
+    attention: {num_heads: 8}
+```
+
+Same ports as `GlobalAttentionPooling`. Defines `bind` (`:169-183`, builds the
+class token and the blocks at the resolved `input` width).
+
 ### `salt.model.modules.LossSum`
 
 `salt/model/modules/losses.py:23`, `__init__` `losses.py:36-40`
@@ -857,7 +893,7 @@ Defines no `bind`, `materialise` or `derived_widths`.
 | `salt.model.modules.KinematicWeight` | `kinematic_weight.py` | `task_name='kinematic_prior'`; `mode: nn\|binned` (required); `stream='jets'`; `label='flavour_label'`; `weight_field=None` (-> `<mode>_kinematic_weight`); `q_f` XOR `n_classes` (`binned` and the `harmonic*` targets need the accumulate form); `variables` (`{name: {edges, scale, abs} \| {categories}}`, in both modes: `nn` publishes them only, `binned` requires them as its axes); `onehot='container_onehot'` (the `inputs.<onehot>` key whose `fields` are `<variable>_<category>`; categorical codes are decoded by argmax over that block in spec order, validated at `bind`); `balanced_prior=False` (`nn` only; the prior was trained class-balanced, so `P(f\|x) = q_f P_bal/sum_g q_g P_bal` is recovered before the `p_floor` clamp); `target='inclusive'` (`inclusive \| mean \| harmonic \| harmonic_equal`, all `w_f = t/p_f` from the full posterior with `pi = q_f`: `pi_f/P(f\|x)`, `pi_f/(K P(f\|x)) sum_g P(g\|x)/pi_g`, `pi_f/(Z P(f\|x) sum_g alpha_g pi_g/P(g\|x))` with `alpha = pi` resp. `1` and `Z` frozen at the stage boundary); `p_floor=1e-4`; `w_max=50.0`; `min_cell_count=100` (sparse-cell warning at freeze); `eta=1.0` (shrinkage exponent on the own factor, inside the `w_max` clamp); `chain`/`chain_exponents` (earlier weight fields multiplied in after the clamp, re-clamped) | TRAINING-only: requires `labels.<stream>.<label>` + (`nn`) `preds.<stream>.<task_name>` + `labels.<stream>.<v>` for every CONTINUOUS spec variable + `inputs.<onehot>` when a categorical variable exists; produces `labels.<stream>.<weight_field>` detached float32, clipped to `w_max`, and the published keys `labels.<stream>.<weight_field>_<var>` (float32 after `scale`/`abs`; int64 codes) consumed by `salt.callbacks.KinematicReweightPlotter`, which demands only the label + the published keys and writes, per figure and class, unit-sum before/after, the ratios to the class mean, the per-bin mean weight `⟨w⟩` (`mean_w`, `bin_sum_w`, drawn in its own panel under the main histogram), and the selected `n`, `sum_w`, `sum_w2` and per-bin `bin_n` counts, plus the per-bin `bin_sum_w2` (Σw²) and the ±1σ own-class statistical errors `before_err` / `after_err` (and `ratio_before_err` / `ratio_after_err` on continuous figures) drawn as shaded step bands (error bars on categorical bars) and stated per plot in `error_note`: `±1σ statistical, own-class only: before sqrt(bin_n)/n_in_range; after sqrt(bin_sum_w2)/sum_w_in_range; ratio = err/mean over classes (denominator and normalisation not propagated); empty bins carry 0`; `binned` accumulates per-cell class counts (N-dim `bucketize`/code -> flat cell, `scatter_add`) over stage-1 FIT batches and freezes them, with `q_f` and `Z`, in `freeze_accumulators`, called by the training schedule at every stage boundary |
 | `salt.model.modules.IterativeReweighting` | `iterative_reweighting.py` | `n_iterations: int` (required); `prior: dict`, `weight: dict` (raw `ClassificationTaskModule` / `KinematicWeight` init_args); `eta=1.0`; `avg_last=1`; `prior_name='kinematic_prior'`; `weight_name='kinematic_weight'` | a `ModuleGroup`, not a graph node: `SaltModule` expands it into N (prior, weight) pairs — the last keeps the configured names and field `nn_kinematic_weight`, earlier ones are `<prior_name>_k` / `<weight_name>_k` / `<field>_iter_k`; head k trains on the detached cumulative weight of heads < k; the last weight is the geometric mean of the last `avg_last` cumulative weights; N=1 is exactly the plain `kinematic_prior` + `kinematic_weight` pair; targets `inclusive`/`mean` for N>1 |
 | `salt.model.modules.LossGLS` | `losses.py:139`, `__init__` `:157` | same signature as `LossSum` | subclasses `LossSum`, sharing `declare_io` and the `losses.**` wildcard; rejects any per-loss `weights` entry other than `1.0`, since the geometric mean is only meaningful when no task is pre-scaled |
-| `salt.model.modules.EdgeFeatures` | `edge_embed.py:146`, `__init__` `:162-183` | `stream: str` (required); `features: Sequence[str]` (required); `out: str \| None = None`; `input: str \| None = None` | requires `input` (default `inputs.<stream>`) and `masks.<stream>`; produces `out` (default `edges.<stream>`, shape `("B", T, T, E)`); `bind` yes (`:227-231`) |
+| `salt.model.modules.EdgeFeatures` | `edge_embed.py:146`, `__init__` `:162-183` | `stream: str` (required); `features: Sequence[str]` (required); `out: str \| None = None`; `input: str \| None = None` | requires `input` (default `inputs.<stream>`) and `masks.<stream>`; produces `out` (default `edges.<stream>`, shape `("B", T, T, E)`); `dR`/`kt` read `eta`/`phi`, or the jet-relative `deta`/`dphi` when those are absent; `bind` yes (`:227-231`) |
 | `salt.model.modules.EdgeEmbed` | `edge_embed.py:242`, `__init__` `:257-264` | `stream: str` (required); `out_dim: int` (required); `dense: dict \| None = None`; `input: str \| None = None`; `out: str \| None = None` | requires `input` (default `edges.<stream>`); produces `out` (default `edges.<stream>_emb`); `bind` yes (`:311-315`) |
 | `salt.model.modules.MaskDecoder` | `maskdecoder.py:50`, `__init__` `:61-71` | `embed_dim: int` (required); `num_queries: int` (required); `num_layers: int` (required); `class_net: Mapping[str, Any]` (required); `md: Mapping \| None = None`; `mask_net: Mapping \| None = None`; `input: str = "encoded.seq"`; `out_stream: str = "objects"` | produces `<out_stream>.{embed,class_logits,class_probs,masks}` (`:163-189`); `bind` yes (`:191-199`) |
 | `salt.model.modules.MaskFormerMatchedLoss` | `maskformer_matched_loss.py:33`, `__init__` `:76-84` | `num_classes: int` (required); `num_queries: int` (required); `loss_weights: Mapping[str, float]` (required); `matcher_weights: Mapping \| None = None`; `null_class_weight: float = 0.5`; `class_weights: list[float] \| None = None`; `input_stream: str = "objects"` | TRAINING-only `declare_io` (`:165-229`) |
