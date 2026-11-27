@@ -16,6 +16,12 @@ from salt.model.modules.tasks.base import _parse_expose as _parse_expose
 from salt.model.modules.tasks.base import _TaskModuleBase as _TaskModuleBase
 from salt.model.modules.tasks.classification import ClassificationTaskModule
 from salt.model.modules.tasks.edge import VertexingTaskModule
+from salt.model.modules.tasks.mixture_density import MixtureDensityTaskModule
 from salt.model.modules.tasks.regression import RegressionTaskModule
 
-__all__ = ["ClassificationTaskModule", "RegressionTaskModule", "VertexingTaskModule"]
+__all__ = [
+    "ClassificationTaskModule",
+    "MixtureDensityTaskModule",
+    "RegressionTaskModule",
+    "VertexingTaskModule",
+]

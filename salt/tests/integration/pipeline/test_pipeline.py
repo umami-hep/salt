@@ -412,6 +412,7 @@ FEEDS: dict[str, Feed] = {
     "regression/regression": ("dummy", "regression"),
     "regression/regression_betaNLL": ("dummy", "regression"),
     "regression/regression_gaussian": ("dummy", "regression"),
+    "regression/regression_mdn": ("dummy", "regression"),
     "regression/regression_weighted": ("dummy", "regression"),
     "regression/nan_regression": ("dummy", "default"),
     "regression/regression_multi_target": ("dummy", "default"),

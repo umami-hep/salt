@@ -1,0 +1,45 @@
+config: regression/regression_mdn.yaml
+eval:
+  expected_outputs:
+    jets:
+      - regression_mdn_HadronConeExclTruthLabelPt
+      - regression_mdn_HadronConeExclTruthLabelPt_stddev
+      - regression_mdn_HadronConeExclTruthLabelPt_modeweight
+      - regression_mdn_HadronConeExclTruthLabelPt_mubar
+      - regression_mdn_HadronConeExclTruthLabelPt_sigmix
+      - regression_mdn_HadronConeExclTruthLabelPt_sigfair
+      - regression_mdn_HadronConeExclTruthLabelPt_mu0
+      - regression_mdn_HadronConeExclTruthLabelPt_mu1
+      - regression_mdn_HadronConeExclTruthLabelPt_mu2
+      - regression_mdn_HadronConeExclTruthLabelPt_mu3
+      - regression_mdn_HadronConeExclTruthLabelPt_sigma0
+      - regression_mdn_HadronConeExclTruthLabelPt_sigma1
+      - regression_mdn_HadronConeExclTruthLabelPt_sigma2
+      - regression_mdn_HadronConeExclTruthLabelPt_sigma3
+      - regression_mdn_HadronConeExclTruthLabelPt_pi0
+      - regression_mdn_HadronConeExclTruthLabelPt_pi1
+      - regression_mdn_HadronConeExclTruthLabelPt_pi2
+      - regression_mdn_HadronConeExclTruthLabelPt_pi3
+      - target_mdn_regression_HadronConeExclTruthLabelPt
+    tracks:
+      - regression_mdn_dummyOutput_dPhi
+      - regression_mdn_dummyOutput_dPhi_stddev
+      - regression_mdn_dummyOutput_dPhi_modeweight
+      - regression_mdn_dummyOutput_dPhi_mubar
+      - regression_mdn_dummyOutput_dPhi_sigmix
+      - regression_mdn_dummyOutput_dPhi_sigfair
+      - regression_mdn_dummyOutput_dPhi_mu0
+      - regression_mdn_dummyOutput_dPhi_mu1
+      - regression_mdn_dummyOutput_dPhi_sigma0
+      - regression_mdn_dummyOutput_dPhi_sigma1
+      - regression_mdn_dummyOutput_dPhi_pi0
+      - regression_mdn_dummyOutput_dPhi_pi1
+      - target_mdn_regression_no_global_object_dphi
+onnx:
+  expected_outputs:
+    - regressionMDN_HadronConeExclTruthLabelPt
+    - regressionMDN_HadronConeExclTruthLabelPt_stddev
+    - regressionMDN_HadronConeExclTruthLabelPt_modeweight
+    - regressionMDN_dummyOutput_dPhi
+    - regressionMDN_dummyOutput_dPhi_stddev
+    - regressionMDN_dummyOutput_dPhi_modeweight

@@ -27,6 +27,7 @@ from salt.model.modules.pooling import ClassAttentionPooling, GlobalAttentionPoo
 from salt.model.modules.stream_embed import StreamEmbed
 from salt.model.modules.tasks import (
     ClassificationTaskModule,
+    MixtureDensityTaskModule,
     RegressionTaskModule,
     VertexingTaskModule,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "MaskDecoder",
     "MaskFormerMatchedLoss",
     "MaskedInputNormaliser",
+    "MixtureDensityTaskModule",
     "Normaliser",
     "PositionalEncoder",
     "RegressionTaskModule",

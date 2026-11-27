@@ -1,0 +1,121 @@
+# MixtureDensityTaskModule: an encoder-less DiPS body feeding two mixture density
+# regression heads (K Gaussian components, mixture NLL built by the task) — one
+# pooled global head, one per-token sequence head over tracks. Each publishes the
+# dominant component's mean, sigma and weight (ONNX: sigma_fair as _stddev); the
+# H5 output adds the mixture summaries and every component.
+
+name: regression_mdn
+
+data:
+  batch_size: 100
+  num_workers: 0
+  modules:
+    reader:
+      class_path: salt.data.H5StructuredReader
+      init_args:
+        groups:
+          jets: {global_object: true}
+          tracks: {global_object: false}
+    features:
+      class_path: salt.data.Features
+      init_args:
+        variables:
+          jets: [pt_btagJes, eta_btagJes]
+          tracks:
+            [
+              d0,
+              z0SinTheta,
+              dphi,
+              deta,
+              qOverP,
+              IP3D_signed_d0_significance,
+              IP3D_signed_z0_significance,
+              phiUncertainty,
+              thetaUncertainty,
+              qOverPUncertainty,
+              numberOfPixelHits,
+              numberOfSCTHits,
+              numberOfInnermostPixelLayerHits,
+              numberOfNextToInnermostPixelLayerHits,
+              numberOfInnermostPixelLayerSharedHits,
+              numberOfInnermostPixelLayerSplitHits,
+              numberOfPixelSharedHits,
+              numberOfPixelSplitHits,
+              numberOfSCTSharedHits,
+            ]
+    labels:
+      class_path: salt.data.Labels
+      init_args: {dtype_policy: int64-for-int}
+
+model:
+  class_path: salt.model.SaltModule
+  init_args:
+    lrs: {initial: 1.0e-7, max: 1.0e-3, end: 1.0e-5, pct_start: 0.01}
+    optimizer: AdamW
+    modules:
+      norm:
+        class_path: salt.model.modules.Normaliser
+        init_args:
+          # norm_dict must be supplied via CLI/override at fit time.
+          streams: [jets, tracks]
+          global_object: jets
+      track_embed:
+        class_path: salt.model.modules.StreamEmbed
+        init_args:
+          stream: tracks
+          context: [normed.jets]
+          out_dim: 128
+          dense: {hidden_layers: [256], activation: SiLU}
+      concat:
+        class_path: salt.model.modules.Concat # one stream -> seq.x/seq.mask (no encoder)
+        init_args: {streams: [tracks]}
+      pool:
+        class_path: salt.model.modules.GlobalAttentionPooling
+        init_args:
+          input: seq.x # the Concat output (encoder-less: no encoded.seq)
+          out: pooled.global
+      mdn_regression:
+        class_path: salt.model.modules.tasks.MixtureDensityTaskModule
+        init_args:
+          stream: jets
+          input: pooled.global
+          n_components: 4 # head output_size == 3 * n_components
+          targets: HadronConeExclTruthLabelPt
+          norm_params: {mean: 1.0, std: 1.0}
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      mdn_regression_no_global_object:
+        class_path: salt.model.modules.tasks.MixtureDensityTaskModule
+        init_args:
+          stream: tracks # per-token sequence regression (reads seq.x)
+          input: seq.x
+          sequence: true
+          n_components: 2
+          targets: dphi
+          custom_output_names: dummyOutput_dPhi
+          norm_params: {mean: 1.0, std: 1.0}
+          dense: {hidden_layers: [128, 64, 32], activation: SiLU}
+      loss:
+        class_path: salt.model.modules.LossSum
+
+outputs:
+  inputs_copy:
+    class_path: salt.outputs.InputCopyWriter
+    init_args:
+      streams: [jets, tracks]
+  run_tasks:
+    class_path: salt.outputs.RunTaskOutput
+    init_args:
+      tasks: [mdn_regression, mdn_regression_no_global_object]
+  pad_mask:
+    class_path: salt.outputs.PadMaskWriter
+    init_args: {streams: [tracks]}
+  onnx_export:
+    class_path: salt.outputs.OnnxExportSink
+    init_args:
+      model_name: regressionMDN # Athena name: no '_'/'-'
+      inputs:
+        - {port: inputs.jets, name: jet_features}
+        - {port: inputs.tracks, name: track_features, sequence: true, dyn_axis: n_tracks}
+
+trainer:
+  max_epochs: 2
