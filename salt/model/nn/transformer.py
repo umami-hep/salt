@@ -1,4 +1,4 @@
-"""Transformer/EncoderLayer and residual wrappers."""
+"""Transformer/EncoderLayer/DecoderLayer and residual wrappers."""
 
 from __future__ import annotations
 
@@ -164,6 +164,52 @@ class EncoderLayer(nn.Module):
                 edge_x = edge_x + self.edge_postnorm(edge_x)
         x = self.dense(self.norm(x) if self.norm_type == "hybrid" else x)
         return x if edge_x is None else (x, edge_x)
+
+
+class DecoderLayer(nn.Module):
+    """Transformer decoder layer: self-attention, cross-attention to ``kv``, feed-forward.
+
+    ``self_attn=False`` drops the self-attention step (cross-attention only, as in
+    ParT/CaiT class attention).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        norm: str = "LayerNorm",
+        ls_init: float | None = 1e-3,
+        drop_path: float = 0.0,
+        dense_kwargs: dict | None = None,
+        attn_kwargs: dict | None = None,
+        norm_type: str = "pre",
+        self_attn: bool = True,
+    ) -> None:
+        super().__init__()
+        attn_kwargs = dict(attn_kwargs or {})
+        dense_kwargs = dict(dense_kwargs or {})
+        self.embed_dim = embed_dim
+        self.use_self_attn = self_attn
+        residual = partial(
+            NormResidual, norm=norm, ls_init=ls_init, drop_path=drop_path, norm_type=norm_type
+        )
+        if self.use_self_attn:
+            self.self_attn = residual(Attention(embed_dim=embed_dim, **attn_kwargs))
+        self.cross_attn = residual(Attention(embed_dim=embed_dim, **attn_kwargs))
+        self.dense = residual(GLU(embed_dim, **dense_kwargs))
+
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        kv: Tensor,
+        mask: BoolTensor | None = None,
+        kv_mask: BoolTensor | None = None,
+    ) -> Tensor:
+        """Decode ``x`` ``[B, L, D]`` against ``kv`` ``[B, L_kv, D]`` (masks: ``True`` = padded)."""
+        if self.use_self_attn:
+            x = self.self_attn(x, mask=mask)
+        x = self.cross_attn(x, kv=kv, kv_mask=kv_mask)
+        return self.dense(x)
 
 
 def _append_registers(

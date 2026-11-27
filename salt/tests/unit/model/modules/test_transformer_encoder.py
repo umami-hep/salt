@@ -19,7 +19,7 @@ from salt.model.modules import (
     TransformerEncoder,
 )
 from salt.model.nn.attention import Attention, EdgeAttention
-from salt.model.nn.transformer import DropPath, NormResidual, Transformer
+from salt.model.nn.transformer import DecoderLayer, DropPath, NormResidual, Transformer
 from salt.tests.unit.model.conftest import B, T, fit_bundle
 
 
@@ -487,3 +487,25 @@ class TestDefaultsUnchanged:
             edge_embed_dim=8,
         )
         assert self._layer_keys(enc) == sorted(self._LAYER_KEYS + self._EDGE_KEYS)
+
+
+class TestDecoderLayer:
+    @pytest.mark.parametrize("self_attn", [True, False])
+    def test_self_attn_option(self, self_attn):
+        layer = DecoderLayer(embed_dim=16, attn_kwargs={"num_heads": 2}, self_attn=self_attn)
+        assert hasattr(layer, "self_attn") == self_attn
+        x, kv = torch.randn(B, 3, 16), torch.randn(B, T, 16)
+        kv_mask = torch.zeros(B, T, dtype=torch.bool)
+        assert layer(x, kv=kv, kv_mask=kv_mask).shape == (B, 3, 16)
+
+    def test_self_attn_ignores_padded_queries(self):
+        torch.manual_seed(0)
+        layer = DecoderLayer(embed_dim=16, attn_kwargs={"num_heads": 2}).eval()
+        x, kv = torch.randn(B, 4, 16), torch.randn(B, T, 16)
+        mask = torch.tensor([[False, False, True, True]]).expand(B, -1)  # True = padded
+        kv_mask = torch.zeros(B, T, dtype=torch.bool)
+        x2 = x.clone()
+        x2[mask] = torch.randn_like(x2[mask])
+        out = layer(x, kv=kv, mask=mask, kv_mask=kv_mask)
+        out2 = layer(x2, kv=kv, mask=mask, kv_mask=kv_mask)
+        torch.testing.assert_close(out[~mask], out2[~mask])

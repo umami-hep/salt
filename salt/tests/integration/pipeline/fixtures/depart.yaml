@@ -1,0 +1,31 @@
+config: ParticleTransformer/DeParT.yaml
+fit:
+  args:
+    # the config trains on 4 nodes x 4 GPUs in bf16
+    - "--trainer.devices=1"
+    - "--trainer.num_nodes=1"
+    - "--trainer.precision=32-true"
+eval:
+  expected_outputs:
+    jets:
+      - DeParT_pb
+      - DeParT_pc
+      - DeParT_ps
+      - DeParT_pud
+      - DeParT_pg
+      - DeParT_ptau
+      - target_jets_classification
+    # DeParT.yaml's reader aliases the tracks stream to the
+    # tracks_ghost file dataset (`groups.tracks.dataset: tracks_ghost`).
+    tracks_ghost:
+      - DeParT_pPileup
+      - DeParT_pFake
+      - DeParT_pPrimary
+      - DeParT_pFromB
+      - DeParT_pFromBC
+      - DeParT_pFromC
+      - DeParT_pFromTau
+      - DeParT_pOtherSecondary
+      - target_track_origin
+      - VertexIndex
+      - target_track_vertexing

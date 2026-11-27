@@ -29,15 +29,19 @@ from salt.model.modules.stream_embed import _stream_len
 from salt.model.nn.dense import Dense, _reject_width_keys
 
 _EDGE_FEATURES: dict[str, tuple[str, ...]] = {
-    "dR": ("eta", "phi"),
+    "dR": (),
     "z": ("pt",),
-    "kt": ("eta", "phi", "pt"),
+    "kt": ("pt",),
     "subjetIndex": ("subjetIndex",),
     "isSelfLoop": (),
     "mass": ("pt", "eta", "phi", "energy"),
 }
-"""Recognised edge-feature names -> the input variables each needs. EdgeFeatures
-rejects anything outside this set at config time."""
+"""Recognised edge-feature names -> the input variables each needs (besides the angular
+pair of `_ANGULAR_FEATURES`). EdgeFeatures rejects anything outside this set at config time."""
+
+_ANGULAR_FEATURES = frozenset({"dR", "kt"})
+"""Features built from pairwise eta/phi differences: from ``eta``/``phi``, or from the
+jet-relative ``deta``/``dphi`` when those are absent (the jet-axis offset cancels)."""
 
 
 def check_edge_config(
@@ -48,10 +52,16 @@ def check_edge_config(
     for variable in edge_features:
         if variable not in _EDGE_FEATURES:
             raise ValueError(f"Edge feature {variable} not recognized")
-    missing = {v for f in edge_features for v in _EDGE_FEATURES[f]} - set(available_vars)
+    available = set(available_vars)
+    missing = {v for f in edge_features for v in _EDGE_FEATURES[f]} - available
     if missing:
         raise ValueError(
             f"Indices of {missing} required for edge features calculation were not specified."
+        )
+    angular = not _ANGULAR_FEATURES.isdisjoint(edge_features)
+    if angular and not ({"eta", "phi"} <= available or {"deta", "dphi"} <= available):
+        raise ValueError(
+            "Edge features 'dR'/'kt' require either 'eta'+'phi' or 'deta'+'dphi' to be specified."
         )
 
 
@@ -78,9 +88,12 @@ def calculate_edge_features(
 
     # intermediate quantities
     if "dR" in variables or "kt" in variables:
-        dphi = row(var("phi")) - col(var("phi"))
+        # pairwise differences are reference-invariant: jet-relative deta/dphi give the same result
+        eta_key = "eta" if "eta" in indices_map else "deta"
+        phi_key = "phi" if "phi" in indices_map else "dphi"
+        dphi = row(var(phi_key)) - col(var(phi_key))
         dphi -= (dphi > math.pi).type_as(dphi) * 2 * math.pi
-        deta = row(var("eta")) - col(var("eta"))
+        deta = row(var(eta_key)) - col(var(eta_key))
     if "kt" in variables or "z" in variables:
         pt_min = torch.minimum(row(var("pt")), col(var("pt")))
     if "mass" in variables:
@@ -152,7 +165,8 @@ class EdgeFeatures(SaltModelModule):
             Edge feature names, in produced column order — any of
             ``{"dR", "z", "kt", "subjetIndex", "isSelfLoop", "mass"}``.
             Required input variables are checked at `bind` against the
-            resolved fields.
+            resolved fields; ``dR``/``kt`` use ``eta``/``phi``, or the
+            jet-relative ``deta``/``dphi`` when those are absent.
         out : str | None, optional
             Produced edge key, by default ``edges.<stream>``.
         input : str | None, optional

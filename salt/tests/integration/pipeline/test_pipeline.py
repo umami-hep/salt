@@ -416,6 +416,8 @@ FEEDS: dict[str, Feed] = {
     "regression/nan_regression": ("dummy", "default"),
     "regression/regression_multi_target": ("dummy", "default"),
     "GN3/GN3V00": ("dummy", "gn3"),
+    "ParticleTransformer/ParT": ("dummy", "gn3"),
+    "ParticleTransformer/DeParT": ("dummy", "gn3"),
     # completeness rows (§2) — configs not listed above take the plain
     # 3-class "default" fixture (compile+plot never reads the file, only the
     # norm_dict path, so a schema mismatch on a fit=False row is harmless).
